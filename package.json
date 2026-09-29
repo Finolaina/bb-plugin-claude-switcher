@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-claude-switcher",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "description": "See every Claude Code account's usage windows in bb and switch a project to another account when a turn hits a subscription limit.",
   "license": "MIT",
@@ -35,7 +35,7 @@
     "name": "Claude Switcher",
     "description": "See every Claude Code account in one usage panel and move a project to a free account when a turn hits a subscription limit.",
     "branding": {
-      "icon": "Repeat"
+      "icon": "./assets/icon.svg"
     },
     "server": "./server.ts",
     "app": "./app.tsx"

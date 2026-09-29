@@ -1,110 +1,152 @@
-# Claude Switcher for bb
+<div align="center">
+
+<img src="docs/logo.svg" width="96" height="96" alt="Claude Switcher logo">
+
+# Claude Switcher
+
+### Keep working when one Claude Code account hits its limit.
+
+Every Claude Code account on your machine in bb's usage panel.<br>
+When a turn hits a subscription limit, the project moves to a free account and the turn runs again.
 
 [![check](https://github.com/Finolaina/bb-plugin-claude-switcher/actions/workflows/check.yml/badge.svg)](https://github.com/Finolaina/bb-plugin-claude-switcher/actions/workflows/check.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![bb](https://img.shields.io/badge/bb-%E2%89%A5%200.44-black.svg)](https://github.com/get-bb/bb)
-[![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)](#requirements)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![bb ≥ 0.44](https://img.shields.io/badge/bb-%E2%89%A5%200.44-0d9488)](https://github.com/get-bb/bb)
+[![Plugin SDK ≥ 0.5.29](https://img.shields.io/badge/plugin%20sdk-%E2%89%A5%200.5.29-2563eb)](https://www.npmjs.com/package/@get-bb/plugin-sdk)
+[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-lightgrey)](#install)
+[![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=white)](tsconfig.json)
 
-A [bb](https://github.com/get-bb/bb) plugin for people who run Claude Code
-with more than one subscription. It shows every Claude Code account it
-finds (`~/.claude` plus the extra account directories) in bb's **Provider
-usage** panel and, when a turn fails on a subscription limit, moves the
-project to another account and retries the turn there, so a limit stops
-you less often.
+[Features](#features) · [Install](#install) · [Accounts](#setting-up-extra-accounts) · [How it works](#how-it-works) · [Safety](#safe-by-default) · [CLI](#cli) · [Settings](#settings) · [Design doc](docs/DESIGN.md)
 
-![Every Claude Code account in bb's Provider usage panel](docs/screenshots/provider-usage.png)
+<br>
 
-## Contents
+<img src="docs/screenshots/settings.png" alt="The Claude Switcher section in Settings: usage per account and the account each project runs on" width="900">
 
-- [Features](#features)
-- [How it works](#how-it-works)
-- [How it integrates with bb](#how-it-integrates-with-bb)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Setting up extra accounts](#setting-up-extra-accounts)
-- [Configuration](#configuration)
-- [The switch policy](#the-switch-policy)
-- [CLI](#cli)
-- [Update and uninstall](#update-and-uninstall)
-- [Troubleshooting](#troubleshooting)
-- [Privacy and security](#privacy-and-security)
-- [Disclaimer](#disclaimer)
-- [Contributing](#contributing)
-- [License](#license)
+</div>
+
+<br>
+
+## The problem
+
+You pay for more than one Claude Code subscription so that a limit doesn't
+stop you. Then a turn fails with a 5-hour or weekly limit in the middle of
+the work.
+
+bb shows the usage of the account it runs on and retries at the reset. It
+doesn't know about your other accounts, so you log in to another one by
+hand, or wait hours for a reset while the other subscription sits idle.
+
+**Claude Switcher measures every account and moves the project** to the
+best free one the moment a turn fails on a subscription limit, then runs
+the turn again there. When none is free, it waits for the one that frees
+first.
+
+|                                                | Without Claude Switcher |    With Claude Switcher     |
+| ---------------------------------------------- | :---------------------: | :-------------------------: |
+| See every account's session and weekly windows |           ❌            |    ✅ in Provider usage     |
+| Keep working when one account hits its limit   |           ❌            |     ✅ switch and retry     |
+| Wait for the account that frees first          |           ❌            | ✅ within your maximum wait |
+| Stick to a model, like Fable                   |            n/a            |     ✅ preferred model      |
+| Choose the account of each project by hand     |           ❌            |      ✅ picker and CLI      |
+| Touches a `CLAUDE_CONFIG_DIR` it didn't set    |            n/a            |          ❌ never           |
+| Shares or pools accounts between people        |            n/a            |          ❌ never           |
 
 ## Features
 
-- **Every account in one panel.** The 5-hour session, the weekly and the
-  per-model weekly windows of each account appear in Provider usage, next
-  to the usage bb already shows. Refreshed in the background and on demand.
-- **Automatic switch and retry.** When a turn fails on a
-  `subscription-window` rate limit, the plugin moves the project to the
-  best other account and retries the failed turn there.
-- **Waits instead of giving up.** When no account is free, the project
-  moves to the account that frees first and the retry is queued for that
-  reset, within a maximum wait you choose.
-- **A preferred model.** Name one (for example `Fable`) and only accounts
-  that can still run it are chosen.
-- **Manual control.** A **Claude Switcher** section in Settings with a
-  per-project account picker and a refresh button, and a
-  `bb claude-switcher` CLI.
-- **Plays well with bb.** It cooperates with bb's bundled provider-retry
-  plugin and never touches a `CLAUDE_CONFIG_DIR` it did not set.
+<table>
+<tr>
+<td width="50%" valign="top">
 
-![The Claude Switcher section in Settings: usage per account, the account each project runs on, and the last automatic switch](docs/screenshots/settings.png)
+### 📊 Every account in one panel
 
-## How it works
+The 5-hour session, the weekly and the per-model weekly windows of each
+account appear in **Provider usage**, next to the usage bb already shows.
+Refreshed in the background and on demand.
 
-One account is one Claude Code config directory (`CLAUDE_CONFIG_DIR`).
-The plugin measures every account in the background. When a turn fails,
-it decides between three outcomes:
+</td>
+<td width="50%" valign="top">
 
-```mermaid
-flowchart TD
-  A[A Claude Code turn fails] --> B{Subscription-window<br/>rate limit on Claude Code?}
-  B -- no --> Z[Do nothing: bb and its other plugins handle it]
-  B -- yes --> C[Refresh the usage of every account]
-  C --> X{"CLAUDE_CONFIG_DIR set<br/>outside the plugin?"}
-  X -- yes --> H
-  X -- no --> D{Another account can run<br/>the turn now?}
-  D -- yes --> E["Point the project at that account<br/>(the default account means no variable)<br/>and retry now"]
-  D -- no --> F{Some account frees within<br/>the maximum wait?}
-  F -- yes --> G["Wait for the account that frees first,<br/>moving the project there if it is another one,<br/>and queue the retry for that reset"]
-  F -- no --> H[Decline: leave the turn as it failed]
+### 🔁 Automatic switch and retry
+
+When a turn fails on a **subscription-window** rate limit, the project
+moves to the best other account and the failed turn runs again there.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### ⏳ Waits instead of giving up
+
+When no account is free, the project moves to the account that frees
+first and the retry is queued for that reset, within a maximum wait you
+choose.
+
+</td>
+<td valign="top">
+
+### 🎯 A preferred model
+
+Name one (for example `Fable`) and only accounts that can still run it are
+chosen. The three Claude Code limits are never treated as interchangeable.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### 🎛️ Manual control
+
+A **Claude Switcher** section in Settings with the account cards, a
+per-project account picker, a refresh button and the last automatic
+switch, plus a `bb claude-switcher` CLI.
+
+</td>
+<td valign="top">
+
+### 🤝 Plays well with bb
+
+It cooperates with bb's bundled **provider-retry** plugin, uses only
+public SDK surfaces, and never touches a `CLAUDE_CONFIG_DIR` it did not set.
+
+</td>
+</tr>
+</table>
+
+<div align="center">
+<table>
+<tr>
+<td align="center"><img src="docs/screenshots/provider-usage.png" alt="Every Claude Code account in bb's Provider usage panel" width="440"><br><sub><b>Every account in Provider usage</b></sub></td>
+<td align="center"><img src="docs/screenshots/settings.png" alt="The Claude Switcher section in Settings" width="440"><br><sub><b>The account each project runs on</b></sub></td>
+</tr>
+</table>
+</div>
+
+## Install
+
+```sh
+bb plugin install git:https://github.com/Finolaina/bb-plugin-claude-switcher@^0.2.0
 ```
 
-A retry keeps the thread's model: the plugin changes which account runs a
-thread, never which model it runs. After five attempts on the same turn it
-stops.
+Then open **Settings → Claude Switcher** (or run
+`bb plugin config claude-switcher`), point it at your accounts directory
+and set up the extra accounts as described [below](#setting-up-extra-accounts).
+Once the plugin is listed in bb's catalog you can also install it from
+**Plugins → Browse plugins**, or with `bb plugin install claude-switcher`.
 
-## How it integrates with bb
+<details>
+<summary><b>Install from a local clone</b></summary>
 
-The plugin uses only public surfaces of the bb plugin SDK:
+```sh
+git clone https://github.com/Finolaina/bb-plugin-claude-switcher.git
+cd bb-plugin-claude-switcher
+npm install          # dependencies the settings section imports
+bb plugin install .  # bb builds the plugin at install time
+```
 
-| bb surface                                                       | What the plugin does with it                                                               |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| Provider usage source (the panel's RPC contract)                 | Publishes one resource per account, with its session, weekly and per-model windows.        |
-| `turn.failed` event                                              | Detects subscription-window rate limits of the Claude Code provider.                       |
-| Project machine environment variables                            | Sets `CLAUDE_CONFIG_DIR` on the project, with a note naming the account.                   |
-| `threads.retry` and queued messages                              | Retries the failed turn now, or at a reset, and reuses the retry provider-retry queued.    |
-| Settings and a settings section                                  | The six settings below, plus the per-project picker and the account cards.                 |
-| CLI registration                                                 | `bb claude-switcher list`, `refresh`, `use` and `release`.                                 |
-| Background service, key-value storage, realtime signals, logging | Periodic usage refresh, the last automatic switch, live updates of the section, and a log. |
+</details>
 
-Every switch, wait and decline is written to `bb plugin logs claude-switcher`.
-
-### Interaction with bb's provider-retry
-
-bb's bundled **provider-retry** plugin also listens to `turn.failed` and
-queues one retry at the reset the provider reported; bb keeps a single
-retry per turn. This plugin cooperates with it: after switching, it sends
-the retry provider-retry already queued (the project is on the new account
-by then) instead of queueing a second one, and when it has to wait it
-replaces that retry with its own timed one. Keep provider-retry enabled:
-disabling it is global and would also drop its retries for overloads and
-for other providers.
-
-## Requirements
+**Requirements**
 
 - **bb 0.44 or later** (plugin SDK 0.5.29 or later) running on the machine
   that holds the Claude Code logins: macOS (keychain) or Linux
@@ -114,30 +156,6 @@ for other providers.
   executed on another host does not see the switch.
 - **More than one Claude Code login**, each in its own config directory,
   set up as described in [Setting up extra accounts](#setting-up-extra-accounts).
-
-## Installation
-
-From the bb plugin catalog, once listed: open **Plugins → Browse
-plugins**, find **Claude Switcher** and install it, or run
-`bb plugin install claude-switcher`.
-
-From this repository:
-
-```sh
-bb plugin install git:https://github.com/Finolaina/bb-plugin-claude-switcher@^0.2.0
-```
-
-From a checkout:
-
-```sh
-git clone https://github.com/Finolaina/bb-plugin-claude-switcher.git
-cd bb-plugin-claude-switcher
-npm install          # dependencies the settings section imports
-bb plugin install .  # bb builds the plugin at install time
-```
-
-Then open **Settings → Claude Switcher** (or run
-`bb plugin config claude-switcher`).
 
 ## Setting up extra accounts
 
@@ -190,18 +208,55 @@ conversation found", no thread can move between accounts in either
 direction, and a thread that starts on a fresh account runs without your
 settings, hooks and `CLAUDE.md`.
 
-## Configuration
+## Where to find it
 
-| Setting              | Default              | Meaning                                                                                                                                                   |
-| -------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `accountsDir`        | `~/.claude-accounts` | Where the extra config directories live.                                                                                                                  |
-| `defaultAccountName` | `default`            | Name shown for `~/.claude`. A subdirectory with the same name is skipped, with a warning in the log.                                                      |
-| `preferredModel`     | _(empty = any)_      | Model display name as the usage API reports it (e.g. `Fable`, case-insensitive). Only accounts that can still run it are chosen; else wait for its reset. |
-| `autoSwitch`         | `true`               | Switch and retry on subscription limits. Off = the panel and the picker only.                                                                             |
-| `maximumWaitHours`   | `6`                  | Queue a retry for a reset only if it is closer than this (0 = no limit).                                                                                  |
-| `refreshMinutes`     | `5`                  | Background usage refresh interval (never below 1).                                                                                                        |
+| Where                                                | What                                                                                                                                                       |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Settings → Claude Switcher**                       | The six settings, a card per account with its windows, the account each project runs on (with a picker), **Refresh usage**, and the last automatic switch. |
+| **Settings → Provider usage** (and its sidebar card) | Pick **Claude accounts** in the source menu to see every account's session, weekly and per-model windows.                                                  |
+| **A thread's retry reason**                          | `Switched to account <name>`, `Waiting for <name>` or `Retrying on account <name>`, wherever bb shows why a turn was retried.                              |
+| **`bb plugin logs claude-switcher`**                 | Every switch, wait and decline, with its reason.                                                                                                           |
+| **`bb claude-switcher`**                             | The CLI: `list`, `refresh`, `use`, `release`.                                                                                                              |
 
-## The switch policy
+## How it works
+
+One account is one Claude Code config directory (`CLAUDE_CONFIG_DIR`).
+The plugin measures every account in the background. When a turn fails,
+it decides between three outcomes:
+
+```mermaid
+flowchart TD
+  A[A Claude Code turn fails] --> B{Subscription-window<br/>rate limit on Claude Code?}
+  B -- no --> Z[Do nothing: bb and its other plugins handle it]
+  B -- yes --> C[Refresh the usage of every account]
+  C --> X{"CLAUDE_CONFIG_DIR set<br/>outside the plugin?"}
+  X -- yes --> H
+  X -- no --> D{Another account can run<br/>the turn now?}
+  D -- yes --> E["Point the project at that account<br/>(the default account means no variable)<br/>and retry now"]
+  D -- no --> F{Some account frees within<br/>the maximum wait?}
+  F -- yes --> G["Wait for the account that frees first,<br/>moving the project there if it is another one,<br/>and queue the retry for that reset"]
+  F -- no --> H[Decline: leave the turn as it failed]
+```
+
+- **Per project, not per thread.** The switch sets `CLAUDE_CONFIG_DIR` on
+  the thread's project, so the project's next turns run on the new account
+  too. A retry keeps the thread's model: the plugin changes which account
+  runs a thread, never which model it runs.
+- **One retry per turn.** bb's bundled **provider-retry** plugin also
+  queues a retry at the reset the provider reported, and bb keeps a single
+  retry per turn. After switching, this plugin sends the retry
+  provider-retry already queued (the project is on the new account by
+  then) instead of queueing a second one; when it has to wait, it replaces
+  that retry with its own timed one. Keep provider-retry enabled: disabling
+  it is global and would also drop its retries for overloads and for other
+  providers.
+- **Stops after five attempts** on the same turn, like provider-retry.
+
+The design, the reasons behind each rule and the measured behaviour are in
+**[docs/DESIGN.md](docs/DESIGN.md)**.
+
+<details>
+<summary><b>The switch policy in full</b></summary>
 
 The three Claude Code limits reset on their own clocks and are **not**
 interchangeable. An account is usable while its session and weekly
@@ -249,58 +304,49 @@ pick one" until the next switch or pick replaces it. Accounts without a
 login are listed in the picker as "(not logged in)"; pinning one is
 allowed, and the project then runs on it as soon as you log in there.
 
-## CLI
+</details>
 
-```sh
-bb claude-switcher list [--json]          # windows per account, account per project
-bb claude-switcher refresh [--json]       # query the usage endpoint now
-bb claude-switcher use <project> <account | default>   # project id, or its name when unique
-bb claude-switcher release                # remove every CLAUDE_CONFIG_DIR this plugin set
-```
+<details>
+<summary><b>The bb surfaces it uses</b></summary>
 
-`default` means the default account unless a subdirectory is actually
-named `default`; the default account's own name always works.
+The plugin uses only public surfaces of the bb plugin SDK:
 
-## Update and uninstall
+| bb surface                                                       | What the plugin does with it                                                               |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Provider usage source (the panel's RPC contract)                 | Publishes one resource per account, with its session, weekly and per-model windows.        |
+| `turn.failed` event                                              | Detects subscription-window rate limits of the Claude Code provider.                       |
+| Project machine environment variables                            | Sets `CLAUDE_CONFIG_DIR` on the project, with a note naming the account.                   |
+| `threads.retry` and queued messages                              | Retries the failed turn now, or at a reset, and reuses the retry provider-retry queued.    |
+| Settings and a settings section                                  | The six settings, plus the per-project picker and the account cards.                       |
+| CLI registration                                                 | `bb claude-switcher list`, `refresh`, `use` and `release`.                                 |
+| Background service, key-value storage, realtime signals, logging | Periodic usage refresh, the last automatic switch, live updates of the section, and a log. |
 
-`bb plugin update claude-switcher` installs the newest release the range
-you installed with allows (`bb plugin outdated` previews it); `^0.2.0`
-stays below 0.3.0. bb refuses to reinstall an installed plugin with
-another source, so moving to 0.3 or later means noting your settings,
-running `bb plugin remove claude-switcher` (which deletes them) and
-installing again with `@^0.2.0`. The project variables it set stay in
-place and the reinstalled plugin recognises them by their note.
+</details>
 
-Removing or disabling the plugin does not remove the `CLAUDE_CONFIG_DIR`
-variables it set on projects: they keep pointing at the account
-directories. Turn `autoSwitch` off (or the next limit would set one
-again), run `bb claude-switcher release` (projects return to the default
-account; external variables are left alone; a project it could not
-release is reported and the command exits 1), then
-`bb plugin remove claude-switcher`. Any left behind can be found by the
-note `Claude Code account "<name>" (set by the Claude Switcher plugin)` in
-a project's machine environment.
+## Safe by default
 
-## Troubleshooting
+- 🔒 **Only its own variables.** It changes a `CLAUDE_CONFIG_DIR` only if
+  it wrote it (recognised by its note). One set by hand or inherited is
+  shown as external and never touched.
+- 🏠 **Nothing leaves your machine** except calls to Anthropic's own
+  endpoints: the usage endpoint behind `claude`'s `/usage` and, when a
+  token has expired, the OAuth refresh the CLI itself uses. No telemetry,
+  no third-party services.
+- 🔑 **Logins stay where they are.** A rotated token is written back where
+  the CLI keeps it and verified by reading it again; if the store rejects
+  it, it is kept in memory, reported in the panel and written as soon as
+  the store works again.
+- 👤 **Never shares accounts.** It moves projects between logins that
+  already exist on the machine; it never logs anyone in and never shares
+  or pools accounts between people.
+- 🛑 **Knows when to stop.** Limits that are not Claude Code
+  subscription-window limits are left to bb, a turn is tried at most five
+  times, and a wait longer than your maximum is declined.
+- 📝 **Everything is logged.** Every switch, wait and decline is written to
+  `bb plugin logs claude-switcher` with its reason.
 
-- **The retry fails with "No conversation found with session ID".** The
-  account directory does not share `projects/` with `~/.claude`. Run the
-  block in [Setting up extra accounts](#setting-up-extra-accounts).
-- **An account shows "Not logged in".** Log in once with
-  `CLAUDE_CONFIG_DIR=<exact path> claude`, using the same path the
-  _accounts directory_ setting produces, without a trailing slash.
-- **A project's picker is disabled.** Its `CLAUDE_CONFIG_DIR` was set by
-  hand or inherited from the global environment. The plugin never changes
-  it; remove it where it was set (the project's machine environment, or
-  the global one) to let the plugin manage the project.
-- **Nothing happens when a limit is hit.** Check that `autoSwitch` is on,
-  that the thread runs on the same machine as bb's server, and read
-  `bb plugin logs claude-switcher`: every declined switch is logged with
-  its reason. Limits that are not Claude Code subscription-window limits
-  and turns already on their fifth attempt are logged at debug level
-  only, and nothing is logged while `autoSwitch` is off.
-
-## Privacy and security
+<details>
+<summary><b>Privacy and security in detail</b></summary>
 
 - The plugin reads the OAuth token Claude Code stored for each login on
   the machine: the macOS keychain (`Claude Code-credentials` for
@@ -326,6 +372,96 @@ a project's machine environment.
 - Like every bb plugin, it is full-trust code running in bb's server
   process. See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
+</details>
+
+## CLI
+
+`bb claude-switcher <command>`:
+
+```sh
+bb claude-switcher list [--json]          # windows per account, account per project
+bb claude-switcher refresh [--json]       # query the usage endpoint now
+bb claude-switcher use <project> <account | default>   # project id, or its name when unique
+bb claude-switcher release                # remove every CLAUDE_CONFIG_DIR this plugin set
+```
+
+`default` means the default account unless a subdirectory is actually
+named `default`; the default account's own name always works.
+
+## Settings
+
+`bb plugin config claude-switcher`, or **Settings → Claude Switcher**.
+
+<details>
+<summary><b>All settings</b></summary>
+
+| Setting              | Default              | Meaning                                                                                                                                                   |
+| -------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `accountsDir`        | `~/.claude-accounts` | Where the extra config directories live.                                                                                                                  |
+| `defaultAccountName` | `default`            | Name shown for `~/.claude`. A subdirectory with the same name is skipped, with a warning in the log.                                                      |
+| `preferredModel`     | _(empty = any)_      | Model display name as the usage API reports it (e.g. `Fable`, case-insensitive). Only accounts that can still run it are chosen; else wait for its reset. |
+| `autoSwitch`         | `true`               | Switch and retry on subscription limits. Off = the panel and the picker only.                                                                             |
+| `maximumWaitHours`   | `6`                  | Queue a retry for a reset only if it is closer than this (0 = no limit).                                                                                  |
+| `refreshMinutes`     | `5`                  | Background usage refresh interval (never below 1).                                                                                                        |
+
+After changing `accountsDir`, run `bb claude-switcher refresh` before
+`use`: the list of accounts is read again on the next refresh.
+
+</details>
+
+<details>
+<summary><b>Update, turn off and uninstall</b></summary>
+
+`bb plugin update claude-switcher` installs the newest release the range
+you installed with allows (`bb plugin outdated` previews it); `^0.2.0`
+stays below 0.3.0. bb refuses to reinstall an installed plugin with
+another source, so moving to 0.3 or later means noting your settings,
+running `bb plugin remove claude-switcher` (which deletes them) and
+installing again with the new range. The project variables it set stay in
+place and the reinstalled plugin recognises them by their note.
+
+```sh
+bb plugin config claude-switcher set autoSwitch false   # keep the panel, stop switching
+bb plugin disable claude-switcher                       # stop the plugin; keeps its settings
+bb plugin enable claude-switcher
+```
+
+Removing or disabling the plugin does not remove the `CLAUDE_CONFIG_DIR`
+variables it set on projects: they keep pointing at the account
+directories. Turn `autoSwitch` off (or the next limit would set one
+again), run `bb claude-switcher release` (projects return to the default
+account; external variables are left alone; a project it could not
+release is reported and the command exits 1), then
+`bb plugin remove claude-switcher`. Any left behind can be found by the
+note `Claude Code account "<name>" (set by the Claude Switcher plugin)` in
+a project's machine environment.
+
+Coming from `claude-accounts` 0.1.x? See the upgrade note in
+[CHANGELOG.md](CHANGELOG.md).
+
+</details>
+
+## Troubleshooting
+
+- **The retry fails with "No conversation found with session ID".** The
+  account directory does not share `projects/` with `~/.claude`. Run the
+  block in [Setting up extra accounts](#setting-up-extra-accounts).
+- **An account shows "Not logged in".** Log in once with
+  `CLAUDE_CONFIG_DIR=<exact path> claude`, using the same path the
+  _accounts directory_ setting produces, without a trailing slash.
+- **A project's picker is disabled.** Its `CLAUDE_CONFIG_DIR` was set by
+  hand or inherited from the global environment. The plugin never changes
+  it; remove it where it was set (the project's machine environment, or
+  the global one) to let the plugin manage the project.
+- **`use` says "unknown account" right after changing `accountsDir`.** Run
+  `bb claude-switcher refresh` first.
+- **Nothing happens when a limit is hit.** Check that `autoSwitch` is on,
+  that the thread runs on the same machine as bb's server, and read
+  `bb plugin logs claude-switcher`: every declined switch is logged with
+  its reason. Limits that are not Claude Code subscription-window limits
+  and turns already on their fifth attempt are logged at debug level
+  only, and nothing is logged while `autoSwitch` is off.
+
 ## Disclaimer
 
 This is an independent, community project. It is not affiliated with,
@@ -349,11 +485,33 @@ The plugin itself is free software under the [MIT License](LICENSE): anyone
 may use, copy, modify and redistribute it, for any purpose. It is provided
 "as is", without warranty of any kind.
 
-## Contributing
+## Development
 
-Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md)
-for the development setup and the checks a change must pass, and
+```sh
+npm install
+npm run check                    # typecheck, lint and tests
+bb plugin build                  # dist/server.js, dist/app.js
+bb plugin install . --yes
+bb plugin logs claude-switcher
+```
+
+```
+server.ts        wires the plugin to bb: settings, usage source, turn.failed, CLI, RPC
+app.tsx          the Claude Switcher section in Settings
+src/             discovery, credentials, usage, the collector, the policy and the switch
+components/ lib/ the small UI kit the settings section uses
+assets/icon.svg  the plugin icon; docs/logo.svg is the README logo
+docs/            DESIGN.md and screenshots
+```
+
+Issues and pull requests are welcome. Tests live next to the code they
+cover and run the server through the SDK's fake plugin host. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+full layout and the checks a change must pass, and
 [CHANGELOG.md](CHANGELOG.md) for the release history.
+`PLUGIN_OVERVIEW.md` is the catalog listing; keep it in step with
+`bb.description` in `package.json`.
+
+The icon glyph is Lucide's `repeat` ([ISC License](https://lucide.dev/license)).
 
 ## License
 

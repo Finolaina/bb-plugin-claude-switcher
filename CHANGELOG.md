@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] - 2026-09-29
+
+### Added
+
+- A logo for the README and the plugin's own icon in bb, instead of a
+  generic one (the glyph is Lucide's `repeat`, ISC License).
+- A README in a new layout: the problem, a before/after table, where to
+  find each surface in bb, and what the plugin never does. Every setting,
+  caveat and the disclaimer are unchanged.
+- `docs/DESIGN.md`: how the plugin measures, chooses, waits and declines,
+  why, its known limits and the decisions not taken.
+
 ## [0.2.0] - 2026-09-29
 
 ### Changed
@@ -43,5 +55,6 @@ First public release.
 - macOS keychain and Linux credentials-file support; rotated OAuth tokens
   are written back and verified by reading them again.
 
+[0.2.1]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.1
 [0.2.0]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.1.0
