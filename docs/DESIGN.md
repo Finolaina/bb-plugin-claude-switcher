@@ -86,31 +86,40 @@ so both tools pick the same account.
 A project bb created after the plugin was installed starts on the default
 account, and so would fail its first turn whenever that account is out.
 When a thread is created (`thread.created`), `decidePlacement` looks at the
-measurements already in hand, without querying anyone unless nothing was
-ever measured:
+measurements already in hand; it queries the accounts only when none has a
+usable measurement, and if none can be measured the project is left alone
+(and still counts as new for its next thread):
 
-1. **A new project** goes to the best account under the policy above. The
-   plugin remembers every project it has seen (plugin storage, key
-   `known-projects`); the projects that existed when it first ran are
-   known from the start, so it never moves them for being "new".
+1. **A new project** goes to the best account under the policy above. A
+   project is new when bb created it after the plugin first ran (plugin
+   storage, key `installed-at`, compared with the project's `createdAt`)
+   and it was never placed, kept, pinned in the picker or with `use`, or
+   given a thread while `autoSwitch` was off (key `handled-projects`). A
+   project that already carries a variable this plugin set is never new.
 2. **A known project** moves only when its account is **measured** unable
-   to run: blocked, over 100 % in a window, or out of the preferred model.
-   A project pinned by hand stays put while its account works, even when
-   another account ranks better.
-3. **Nothing happens** when the account was never measured, when no other
-   account can run, for a hidden thread, a thread another plugin opened, a
-   thread of another provider, or a project whose `CLAUDE_CONFIG_DIR` the
-   plugin did not set.
+   to run: a lock the provider reported, a window at 100 %, or the
+   preferred model used up. A usage answer that lacks the session or the
+   weekly window is unknown, not out, and moves nothing. A project pinned
+   by hand stays put while its account works, even when another account
+   ranks better.
+3. **Nothing happens** for a hidden thread, a thread another plugin
+   opened, a thread of another provider, a project whose
+   `CLAUDE_CONFIG_DIR` the plugin did not set, or when no other account
+   can run. If the project's account changes while the plugin decides (a
+   pick in Settings), the plugin leaves it.
 
 A move is recorded as the last switch and opens the same 60-second grace
 window as a switch after a failure, so the project's threads still running
-on the old account follow it. If the list of known projects cannot be read,
-no project is moved for being new; the measured-block rule still applies.
+on the old account follow it. If the install time cannot be read or
+stored, no project is moved for being new; the measured-block rule still
+applies.
 
 This check races the thread's first turn on purpose: holding the turn until
 it finishes would need bb's experimental dispatch hook, which fails the
 turn when a plugin is slow. When the turn starts first, it runs where the
-project was, and a failure is handled as below.
+project was; if it fails there, it is retried once on the new account (the
+placing thread gets the grace retry too, because no failure caused the
+move), and a second failure is judged as below.
 
 ## Deciding on a failed turn
 
@@ -124,7 +133,8 @@ queries every account. The plugin acts only when all of these hold:
 
 It also leaves alone any project whose `CLAUDE_CONFIG_DIR` it did not set
 (recognised by the note it writes next to the variable), and any failure of
-a hidden thread or of a thread another plugin opened: moving the whole
+a hidden thread or of a thread another plugin opened (the provider is
+judged from the failure's own rate-limit report, not from the thread row): moving the whole
 project for another plugin's worker would surprise the user, and the plugin
 that owns the worker decides what to do with it.
 
@@ -208,7 +218,13 @@ The refresh token rotates on every refresh, so the plugin:
   cannot resume its session.
 - **Placement can lose the race.** A thread whose first turn starts before
   the plugin has moved its project runs that turn on the old account; if
-  it fails, the failure path moves the project and retries it.
+  it fails, it is retried once on the new account.
+- **Projects created while the plugin was disabled** count as new when it
+  comes back, and move to the best account at their next thread unless
+  they were pinned. Turning only `autoSwitch` off does not do this.
+- **A hand-pinned project on an account out of the preferred model** is
+  moved when a thread is created, even if that thread will run another
+  model: bb does not tell the plugin a thread's model at creation.
 
 ## Measured in real use
 

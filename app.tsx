@@ -223,7 +223,7 @@ function AccountsSection() {
           {state.accounts.length} account
           {state.accounts.length === 1 ? "" : "s"}
           {state.autoSwitch
-            ? " · automatic switch on subscription limits is on"
+            ? " · automatic account choice is on"
             : " · automatic switch is off"}
           {state.preferredModel === ""
             ? ""

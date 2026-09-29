@@ -8,23 +8,29 @@ project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- New projects start on the best account. When the first thread of a
-  project created after the plugin was installed is opened, the project
-  moves to the account the switch policy would choose (the preferred model
-  included), instead of running its first turn on the default account.
-- A project whose account is already measured unable to run (blocked, or
-  out of the preferred model) moves to the best other account when a new
-  thread is created, instead of failing the thread's first turn. A project
-  pinned by hand stays put while its account works.
+- New projects go to the best account. When a thread of a project created
+  after the plugin was installed is created, the project moves to the
+  account the switch policy would choose (the preferred model included)
+  instead of staying on the default account. A project the user already
+  pinned, the default account included, is left alone.
+- A project whose account is already measured unable to run (a reported
+  lock, a window at 100 %, or the preferred model used up) moves to the
+  best other account when a thread is created. A usage answer with a
+  missing window is not taken as proof. A project pinned by hand stays put
+  while its account works.
+- Both race the thread's first turn: if that turn starts first on the old
+  account and fails, it is retried once on the new account instead of
+  being judged against it.
 
 ### Fixed
 
 - A failed turn of a hidden thread, or of a thread another plugin opened
   (for example a summary worker), no longer moves the whole project to
   another account.
-- After changing the accounts directory, `bb claude-switcher use` and the
-  project picker accept the new directory's accounts at once, without a
-  refresh first.
+- `bb claude-switcher use` and the project picker read the accounts again,
+  so a changed accounts directory or a new account directory needs no
+  refresh first, and a measurement of an account that is gone is never
+  used.
 
 ### Changed
 

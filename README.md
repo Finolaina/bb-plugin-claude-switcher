@@ -45,7 +45,7 @@ first.
 | ---------------------------------------------- | :---------------------: | :-------------------------: |
 | See every account's session and weekly windows |           ❌            |    ✅ in Provider usage     |
 | Keep working when one account hits its limit   |           ❌            |     ✅ switch and retry     |
-| Start a new project on an account that works   |           ❌            |   ✅ before its first turn   |
+| Start a new project on an account that works   |           ❌            |  ✅ when its thread opens   |
 | Wait for the account that frees first          |           ❌            | ✅ within your maximum wait |
 | Stick to a model, like Fable                   |            n/a            |     ✅ preferred model      |
 | Choose the account of each project by hand     |           ❌            |      ✅ picker and CLI      |
@@ -239,10 +239,12 @@ flowchart TD
   F -- no --> H[Decline: leave the turn as it failed]
 ```
 
-- **Before a new thread's first turn.** A project created after the plugin
-  was installed goes straight to the best account, and a project whose
-  account is already measured out moves before the turn instead of failing
-  it. A project you pinned by hand stays put while its account works.
+- **When a thread is created.** A project created after the plugin was
+  installed goes to the best account, and a project whose account is
+  already measured out moves to another one. This races the thread's first
+  turn: if the turn starts first on the old account and fails, it is
+  retried once on the new account. A project you pinned by hand (the
+  default account included) stays put while its account works.
 - **Per project, not per thread.** The switch sets `CLAUDE_CONFIG_DIR` on
   the thread's project, so the project's next turns run on the new account
   too. A retry keeps the thread's model: the plugin changes which account
@@ -288,7 +290,10 @@ goes by name) and retries with `sendAt` at that reset, plus a 15 s buffer
 and up to 30 s of jitter, like bb's own provider-retry plugin; both stop
 after 5 attempts. The reasons this plugin writes are
 `Switched to account <name>[ (<model>)]`, `Waiting for [<model> on ]<name>`
-and `Retrying on account <name>`. Every one goes to
+and `Retrying on account <name>`, plus two for moves made when a thread is
+created: `New project placed on account <name>[ (<model>)]` and
+`Moved to account <name> before the turn: <old> cannot run <model>` (or
+`is out of usage` without a preferred model). Every one goes to
 `bb plugin logs claude-switcher`; the one that moved the project is also
 in **Settings → Claude Switcher** ("Last automatic switch"); the reason
 stored with a retry this plugin created is shown wherever bb shows a
@@ -320,11 +325,12 @@ The plugin uses only public surfaces of the bb plugin SDK:
 | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
 | Provider usage source (the panel's RPC contract)                 | Publishes one resource per account, with its session, weekly and per-model windows.        |
 | `turn.failed` event                                              | Detects subscription-window rate limits of the Claude Code provider.                       |
+| `thread.created` event and `projects.get`                        | Places a project when one of its threads is created (a new project by its creation date).  |
 | Project machine environment variables                            | Sets `CLAUDE_CONFIG_DIR` on the project, with a note naming the account.                   |
 | `threads.retry` and queued messages                              | Retries the failed turn now, or at a reset, and reuses the retry provider-retry queued.    |
 | Settings and a settings section                                  | The six settings, plus the per-project picker and the account cards.                       |
 | CLI registration                                                 | `bb claude-switcher list`, `refresh`, `use` and `release`.                                 |
-| Background service, key-value storage, realtime signals, logging | Periodic usage refresh, the last automatic switch, live updates of the section, and a log. |
+| Background service, key-value storage, realtime signals, logging | Periodic usage refresh, the last automatic switch, the install time and the new projects already handled, live updates of the section, and a log. |
 
 </details>
 
@@ -405,12 +411,14 @@ named `default`; the default account's own name always works.
 | `accountsDir`        | `~/.claude-accounts` | Where the extra config directories live.                                                                                                                  |
 | `defaultAccountName` | `default`            | Name shown for `~/.claude`. A subdirectory with the same name is skipped, with a warning in the log.                                                      |
 | `preferredModel`     | _(empty = any)_      | Model display name as the usage API reports it (e.g. `Fable`, case-insensitive). Only accounts that can still run it are chosen; else wait for its reset. |
-| `autoSwitch`         | `true`               | Switch and retry on subscription limits. Off = the panel and the picker only.                                                                             |
+| `autoSwitch`         | `true`               | Place projects when a thread is created, and switch and retry on subscription limits. Off = the panel and the picker only.                               |
 | `maximumWaitHours`   | `6`                  | Queue a retry for a reset only if it is closer than this (0 = no limit).                                                                                  |
 | `refreshMinutes`     | `5`                  | Background usage refresh interval (never below 1).                                                                                                        |
 
-After changing `accountsDir`, run `bb claude-switcher refresh` before
-`use`: the list of accounts is read again on the next refresh.
+The accounts are read again whenever you pick one (`use`, the picker) and
+when a thread is created, so a new account directory or a changed
+`accountsDir` needs no refresh first; the usage windows of a new account
+appear at the next refresh.
 
 </details>
 
@@ -433,8 +441,8 @@ bb plugin enable claude-switcher
 
 Removing or disabling the plugin does not remove the `CLAUDE_CONFIG_DIR`
 variables it set on projects: they keep pointing at the account
-directories. Turn `autoSwitch` off (or the next limit would set one
-again), run `bb claude-switcher release` (projects return to the default
+directories. Turn `autoSwitch` off (or the next limit or new thread
+would set one again), run `bb claude-switcher release` (projects return to the default
 account; external variables are left alone; a project it could not
 release is reported and the command exits 1), then
 `bb plugin remove claude-switcher`. Any left behind can be found by the
@@ -458,8 +466,9 @@ Coming from `claude-accounts` 0.1.x? See the upgrade note in
   hand or inherited from the global environment. The plugin never changes
   it; remove it where it was set (the project's machine environment, or
   the global one) to let the plugin manage the project.
-- **`use` says "unknown account" right after changing `accountsDir`.** Run
-  `bb claude-switcher refresh` first.
+- **`use` says "unknown account".** The name must be a subdirectory of the
+  accounts directory that holds a `.claude.json` (or the default account's
+  name); `bb claude-switcher list` shows the names it found.
 - **Nothing happens when a limit is hit.** Check that `autoSwitch` is on,
   that the thread runs on the same machine as bb's server, and read
   `bb plugin logs claude-switcher`: every declined switch is logged with
@@ -501,7 +510,7 @@ bb plugin logs claude-switcher
 ```
 
 ```
-server.ts        wires the plugin to bb: settings, usage source, turn.failed, CLI, RPC
+server.ts        wires the plugin to bb: settings, usage source, thread.created, turn.failed, CLI, RPC
 app.tsx          the Claude Switcher section in Settings
 src/             discovery, credentials, usage, the collector, the policy and the switch
 components/ lib/ the small UI kit the settings section uses

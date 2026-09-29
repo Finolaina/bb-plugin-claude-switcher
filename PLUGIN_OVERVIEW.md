@@ -13,10 +13,11 @@ turn fails on a subscription limit.
   limit, the plugin picks the best other account and retries the turn at
   once. When no account is free, it moves the project to the account that
   frees first and queues the retry for that reset (up to a wait you set).
-- **A good start for new projects.** A project created after the plugin was
-  installed starts on the best account instead of the default one, and a
-  project whose account is already out moves before its next thread's first
-  turn instead of failing it.
+- **A good start for new projects.** When a thread is created, a project
+  created after the plugin was installed moves to the best account instead
+  of the default one, and a project whose account is already out moves to
+  another. If the thread's first turn wins the race and fails on the old
+  account, it is retried once on the new one.
 - **A picker per project.** In Settings, choose which account each project
   runs with, or let the plugin manage it. The CLI does the same:
   `bb claude-switcher use PROJECT ACCOUNT`.
