@@ -311,8 +311,10 @@ stored with a retry this plugin created is shown wherever bb shows a
 retry's reason.
 
 A turn that started on the project's old account (the plugin notes the
-account when a thread turns active) is retried on the new one whenever it
-fails, even long after the move: a long tool call can outlast any window.
+account when a thread turns active) is retried once on the new one
+whenever it fails, even long after the move: a long tool call can outlast
+any window. Not when the new account has no login or is measured out: then
+the failure is judged like any other.
 For a minute after a switch or a wait, other turns of the same project
 that were still running keep failing; each of those is retried once as it
 is, on the new account (or queued for the same reset, after a wait),
@@ -563,4 +565,5 @@ The icon glyph is Lucide's `repeat` ([ISC License](https://lucide.dev/license)).
 
 [MIT](LICENSE) © Aitor Mariscal. Free to use, modify and redistribute,
 for any purpose. The UI components in `components/` and `lib/` come from
-bb's component registry ([get-bb/bb](https://github.com/get-bb/bb), MIT).
+bb's component registry ([get-bb/bb](https://github.com/get-bb/bb), MIT);
+their license notice is in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -173,6 +173,17 @@ queued for the same reset after a wait. Once per thread: a second failure
 of the same thread inside the window means the new account fails too, and
 it is judged from scratch.
 
+A hand pick (thread header, Settings or the CLI's `use`) opens the same
+window, unless the picked account has no login or is measured out: then a
+leftover's failure is judged, so it can move to an account that works.
+
+A long turn can outlast the window. So the plugin also notes, on each
+`thread.active`, the account a turn of the user's Claude Code threads
+starts on. When that turn fails later on an account the project has since
+left, it is retried once on the project's account, whatever the time,
+unless that account has no login or is measured out. The note is used
+once: the retry's own failure is judged.
+
 ## Cooperating with provider-retry
 
 bb's bundled provider-retry plugin also listens to `turn.failed` and queues

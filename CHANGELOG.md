@@ -10,7 +10,7 @@ project uses [Semantic Versioning](https://semver.org/).
 
 - The project's account in every Claude Code thread's header, with a dot
   for how it stands for the preferred model (room, running low at 80 %,
-  out, or not measured) and a menu: switch now to the account the switch
+  out, not measured, or no login) and a menu: switch now to the account the switch
   policy would pick, or pick any account. The change applies to every
   thread of the project from its next turn. Uses bb's experimental thread
   header slot, registered only when the host offers it. Its menu uses the
@@ -27,7 +27,8 @@ project uses [Semantic Versioning](https://semver.org/).
   the pick waits for it and lands last.
 - A turn that started on the project's old account and fails more than
   a minute after the move (a long tool call) is retried on the new
-  account, instead of being judged as the new account's failure (which
+  account (unless that account has no login or is measured out),
+  instead of being judged as the new account's failure (which
   moved the project again or waited hours for the old account's reset).
 - Settings shows 0 % for a window whose reset has passed.
 
