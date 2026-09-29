@@ -114,6 +114,14 @@ describe("headerStatus", () => {
     expect(headerStatus(failed(usage(10, 10, 10)), "p-default", NOW)?.tone).toBe("ok");
   });
 
+  it("offers no switch when an older server sends no best account", () => {
+    const { bestAccount: _, ...older } = base;
+    expect(headerStatus(older as typeof base, "p-default", NOW)).toMatchObject({
+      best: null,
+      canSwitch: false,
+    });
+  });
+
   it("ignores a model window with no name when no model is preferred, like the plugin", () => {
     const blank = { ...usage(10, 10, 0), models: { "": win(100) } };
     expect(tone(blank, "")).toBe("ok");

@@ -19,24 +19,36 @@ describe("app.tsx", () => {
 // predates (or drops) an experimental slot simply lacks that member.
 async function register(slotNames: string[]) {
   const { default: definition } = await import("./app.tsx");
-  const registered: string[] = [];
+  const registered: { slot: string; id: string; title: string; component: unknown }[] = [];
   const slots = Object.fromEntries(
-    slotNames.map((name) => [name, (r: { id: string }) => registered.push(`${name}:${r.id}`)]),
+    slotNames.map((name) => [
+      name,
+      (r: { id: string; title: string; component: unknown }) =>
+        registered.push({
+          slot: name,
+          id: r.id,
+          title: r.title,
+          // The component by name: app.tsx exports only the plugin definition.
+          component: (r.component as { name?: string }).name,
+        }),
+    ]),
   );
   const setup = (definition as unknown as { setup: (app: unknown) => void }).setup;
   setup({ slots });
-  return registered;
+  return { registered };
 }
 
 describe("the plugin's frontend registration", () => {
   it("registers the Settings section and the thread header control", async () => {
-    expect(await register(["settingsSection", "experimental_threadHeaderAction"])).toEqual([
-      "settingsSection:claude-switcher",
-      "experimental_threadHeaderAction:claude-account",
+    const { registered } = await register(["settingsSection", "experimental_threadHeaderAction"]);
+    expect(registered).toEqual([
+      { slot: "settingsSection", id: "claude-switcher", title: "Claude Switcher", component: "AccountsSection" },
+      { slot: "experimental_threadHeaderAction", id: "claude-account", title: "Claude account", component: "ThreadAccount" },
     ]);
   });
 
   it("keeps the Settings section on a host without the experimental thread header slot", async () => {
-    expect(await register(["settingsSection"])).toEqual(["settingsSection:claude-switcher"]);
+    const { registered } = await register(["settingsSection"]);
+    expect(registered.map((r) => `${r.slot}:${r.id}`)).toEqual(["settingsSection:claude-switcher"]);
   });
 });
