@@ -98,14 +98,13 @@ export function headerStatus(
         : used.some((u) => u >= TIGHT_PERCENT)
           ? "tight"
           : "ok";
+  // `?? null`: a server older than the header (during an update) sends none.
+  const best = state.bestAccount ?? null;
   return {
     account,
     tone,
-    best: state.bestAccount,
-    canSwitch:
-      !project.external &&
-      state.bestAccount !== null &&
-      state.bestAccount !== account,
+    best,
+    canSwitch: !project.external && best !== null && best !== account,
     external: project.external,
   };
 }

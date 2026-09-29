@@ -48,7 +48,7 @@ first.
 | Start a new project on an account that works   |           ❌            |  ✅ when its thread opens   |
 | Wait for the account that frees first          |           ❌            | ✅ within your maximum wait |
 | Stick to a model, like Fable                   |            n/a            |     ✅ preferred model      |
-| Choose the account of each project by hand     |           ❌            |      ✅ picker and CLI      |
+| Choose the account of each project by hand     |           ❌            | ✅ thread header, picker and CLI |
 | Touches a `CLAUDE_CONFIG_DIR` it didn't set    |            n/a            |          ❌ never           |
 | Shares or pools accounts between people        |            n/a            |          ❌ never           |
 
@@ -559,4 +559,5 @@ The icon glyph is Lucide's `repeat` ([ISC License](https://lucide.dev/license)).
 ## License
 
 [MIT](LICENSE) © Aitor Mariscal. Free to use, modify and redistribute,
-for any purpose.
+for any purpose. The UI components in `components/` and `lib/` come from
+bb's component registry ([get-bb/bb](https://github.com/get-bb/bb), MIT).

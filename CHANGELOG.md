@@ -13,7 +13,8 @@ project uses [Semantic Versioning](https://semver.org/).
   out, or not measured) and a menu: switch now to the account the switch
   policy would pick, or pick any account. The change applies to every
   thread of the project from its next turn. Uses bb's experimental thread
-  header slot, registered only when the host offers it.
+  header slot, registered only when the host offers it. Its menu uses the
+  dropdown menu of bb's component registry (Radix, provided by the host).
 
 ### Fixed
 
