@@ -398,10 +398,15 @@ function usageLine(
   now: number,
 ): string {
   if (account.problem?.kind === "unauthenticated") return "not logged in";
+  if (account.problem?.kind === "error") return "last measurement failed";
   if (account.usage === null) return "not measured yet";
   if (account.usage.unknown === true) return "not measured (incomplete answer)";
-  const pct = (w: { usedPercent: number; resetsAt: number | null }) =>
-    `${Math.round(windowPercent(w, now))}%`;
+  if (account.usage.blocked) return "locked by the provider";
+  // Never "100%" for an account that still has a little room.
+  const pct = (w: { usedPercent: number; resetsAt: number | null }) => {
+    const used = windowPercent(w, now);
+    return `${used < 100 ? Math.min(99, Math.round(used)) : Math.round(used)}%`;
+  };
   const parts = [
     `session ${pct(account.usage.session)}`,
     `weekly ${pct(account.usage.weekly)}`,
@@ -527,7 +532,7 @@ function ThreadAccountMenu({
         ) : (
           // Plain items marked as radios: the registry's radio group renders
           // nothing in the compact drawer, which would leave nothing to pick.
-          <DropdownMenuGroup>
+          <DropdownMenuGroup aria-label="Accounts">
             {state.accounts.map((account) => (
               <DropdownMenuItem
                 key={account.name}
@@ -540,9 +545,9 @@ function ThreadAccountMenu({
                 }}
               >
                 {account.name === status.account ? (
-                  <Icon name="Check" className="size-3.5 shrink-0" />
+                  <Icon name="Check" className="size-4 shrink-0" />
                 ) : (
-                  <span aria-hidden className="size-3.5 shrink-0" />
+                  <span aria-hidden className="size-4 shrink-0" />
                 )}
                 <span className="flex min-w-0 flex-col">
                   <span className="truncate">

@@ -95,7 +95,7 @@ usable measurement, and if none can be measured the project is left alone
 1. **A new project** goes to the best account under the policy above. A
    project is new when bb created it after the plugin first ran (plugin
    storage, key `installed-at`, compared with the project's `createdAt`)
-   and it was never placed, kept, pinned in the picker or with `use`, or
+   and it was never placed, kept, pinned (thread header, Settings or `use`), or
    given a thread while `autoSwitch` was off (key `handled-projects`). A
    project that already carries a variable this plugin set is never new.
 2. **A known project** moves only when its account is **measured** unable
@@ -107,9 +107,8 @@ usable measurement, and if none can be measured the project is left alone
 3. **Nothing happens** for a hidden thread (whoever opened it), a thread
    of another provider, a project whose
    `CLAUDE_CONFIG_DIR` the plugin did not set, or when no other account
-   can run. If the project's account changes while the plugin measures (a
-   pick in Settings), the plugin usually leaves it; a pick that lands while
-   the plugin is writing can still lose.
+   can run. A pick by hand waits in the project's queue for a placement or
+   a switch in progress and lands after it, so the pick wins.
 
 A move is recorded as the last switch and opens the same 60-second grace
 window as a switch after a failure, so the project's threads still running

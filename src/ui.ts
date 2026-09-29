@@ -31,6 +31,8 @@ interface HeaderInput {
   bestAccount: string | null;
   accounts: ReadonlyArray<{
     name: string;
+    /** "error" = the last measurement failed: `usage` is an older one. */
+    problem?: { kind: string } | null;
     usage: {
       blocked: boolean;
       /** A window was missing from the answer: `blocked` means "unknown", not "out". */
@@ -75,8 +77,10 @@ export function headerStatus(
     project.external || project.owned
       ? project.account
       : state.defaultAccountName;
+  const entry = state.accounts.find((a) => a.name === account);
+  // A failed measurement leaves an older one behind: not shown as current.
   const usage =
-    state.accounts.find((a) => a.name === account)?.usage ?? null;
+    entry?.problem?.kind === "error" ? null : (entry?.usage ?? null);
   const model = Object.entries(usage?.models ?? {}).find(
     ([name]) => name.toLowerCase() === state.preferredModel.toLowerCase(),
   )?.[1];

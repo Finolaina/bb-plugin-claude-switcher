@@ -94,6 +94,16 @@ describe("headerStatus", () => {
     expect(tone({ ...usage(0, 100, 0, true), unknown: true })).toBe("unknown");
   });
 
+  it("shows an account whose last measurement failed as not measured, not by its old numbers", () => {
+    const failed = {
+      ...base,
+      accounts: [{ name: "main", usage: usage(10, 10, 10), problem: { kind: "error" } }],
+    };
+    expect(headerStatus(failed, "p-default", NOW)?.tone).toBe("unknown");
+    const fine = { ...base, accounts: [{ name: "main", usage: usage(10, 10, 10), problem: null }] };
+    expect(headerStatus(fine, "p-default", NOW)?.tone).toBe("ok");
+  });
+
   it("counts a window whose reset has passed as free, like the switch does", () => {
     const reset = {
       ...usage(0, 0, 0),
