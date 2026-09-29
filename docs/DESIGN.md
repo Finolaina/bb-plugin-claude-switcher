@@ -107,8 +107,9 @@ usable measurement, and if none can be measured the project is left alone
 3. **Nothing happens** for a hidden thread (whoever opened it), a thread
    of another provider, a project whose
    `CLAUDE_CONFIG_DIR` the plugin did not set, or when no other account
-   can run. If the project's account changes while the plugin decides (a
-   pick in Settings), the plugin leaves it.
+   can run. If the project's account changes while the plugin measures (a
+   pick in Settings), the plugin usually leaves it; a pick that lands while
+   the plugin is writing can still lose.
 
 A move is recorded as the last switch and opens the same 60-second grace
 window as a switch after a failure, so the project's threads still running
@@ -214,13 +215,16 @@ The refresh token rotates on every refresh, so the plugin:
   or bb stops while a rotated login is only in memory, that account needs
   `/login` again.
 - **Same machine only.** The variable is a path on bb's machine, set on
-  the project's machine environment, and bb applies it on whichever host
-  runs the thread. The plugin does not check the host, so a project whose
-  threads run on another host would get a path that does not exist there,
-  now at its first thread rather than only after a limit.
-- **`bb plugin remove` keeps the plugin's storage.** A reinstall reads the
-  old install time, so projects created while the plugin was removed count
-  as new at their next thread.
+  the project's machine environment. The plugin does not check which host
+  runs a thread, so a thread on another host may get a path that does not
+  exist there, now at its first thread rather than only after a limit
+  (bb 0.44 resolves the machine environment per host; not tested with a
+  remote host).
+- **Plugin storage may outlive `bb plugin remove`.** In bb 0.44 removing a
+  plugin deletes its settings but not, as far as its source shows, its
+  key-value storage. A reinstall then reads the old install time, so
+  projects created while the plugin was removed count as new at their next
+  thread.
 - **Shared transcripts are required.** A switch changes the whole config
   directory, so an account directory must share `projects/` (and normally
   settings, hooks and `CLAUDE.md`) with `~/.claude`, or the retried thread

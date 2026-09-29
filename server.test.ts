@@ -2196,4 +2196,29 @@ describe("placement: the cases the third review found", () => {
     ]);
     expect(h.envSet).toEqual([]);
   });
+
+  it("still moves a project it already kept once its account is measured out", async () => {
+    let mainFable = 0;
+    const h = await host(
+      {
+        main: () => Response.json(payload(1, 10, mainFable)),
+        spare: () => Response.json(payload(10, 60, 20)),
+        work: () => Response.json(payload(5, 20, 30)),
+      },
+      FABLE,
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("thread.created", {
+      thread: thread({ id: "thr-1", projectId: "proj-1" }),
+    });
+    expect(h.envSet).toEqual([]);
+    mainFable = 100;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent("thread.created", {
+      thread: thread({ id: "thr-2", projectId: "proj-1" }),
+    });
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-1", `${ACCOUNTS}/work`],
+    ]);
+  });
 });

@@ -153,10 +153,10 @@ bb plugin install .  # bb builds the plugin at install time
   that holds the Claude Code logins: macOS (keychain) or Linux
   (credentials file). The plugin runs inside bb's server process.
 - **Threads that run on that same machine.** `CLAUDE_CONFIG_DIR` is set as
-  a project **machine** environment variable, a path on bb's machine. bb
-  applies it on whatever host runs the thread, so a project whose threads
-  run on another host would get a path that does not exist there: keep
-  such projects out of the plugin (turn `autoSwitch` off).
+  a project **machine** environment variable holding a path on bb's
+  machine. A thread that runs on another host may get that path, which
+  does not exist there; if you run threads on other hosts, turn
+  `autoSwitch` off (it is global: there is no per-project opt-out).
 - **More than one Claude Code login**, each in its own config directory,
   set up as described in [Setting up extra accounts](#setting-up-extra-accounts).
 
