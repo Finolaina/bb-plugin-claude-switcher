@@ -330,8 +330,11 @@ allowed, and the project then runs on it as soon as you log in there.
 <details>
 <summary><b>The bb surfaces it uses</b></summary>
 
-The plugin uses only public surfaces of the bb plugin SDK, one of them
-marked experimental:
+The plugin uses only public surfaces of the bb plugin SDK. Four are marked
+experimental and may change: the thread header slot, the `experimental_Icon`
+component, and the `experimental_discoverable` and `experimental_description`
+options of the Provider usage source. The thread header control is registered only when
+the host offers that slot, so a bb without it keeps the Settings section.
 
 | bb surface                                                       | What the plugin does with it                                                               |
 | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
@@ -532,7 +535,7 @@ bb plugin logs claude-switcher
 
 ```
 server.ts        wires the plugin to bb: settings, usage source, thread.created, turn.failed, CLI, RPC
-app.tsx          the Claude Switcher section in Settings
+app.tsx          the Claude Switcher section in Settings and the thread header control
 src/             discovery, credentials, usage, the collector, the policy and the switch
 components/ lib/ the small UI kit the settings section and the thread
                  header use (from bb's own component registry)

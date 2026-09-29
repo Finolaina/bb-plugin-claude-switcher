@@ -13,7 +13,7 @@ project uses [Semantic Versioning](https://semver.org/).
   out, or not measured) and a menu: switch now to the account the switch
   policy would pick, or pick any account. The change applies to every
   thread of the project from its next turn. Uses bb's experimental thread
-  header slot.
+  header slot, registered only when the host offers it.
 
 ## [0.2.2] - 2026-09-29
 
@@ -105,6 +105,8 @@ First public release.
 - macOS keychain and Linux credentials-file support; rotated OAuth tokens
   are written back and verified by reading them again.
 
+[0.2.3]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.3
+[0.2.2]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.2
 [0.2.1]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.1
 [0.2.0]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.1.0

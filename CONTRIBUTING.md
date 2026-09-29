@@ -28,7 +28,7 @@ bb plugin reload claude-switcher   # after each rebuild
 | Path                 | What lives there                                                       |
 | -------------------- | ---------------------------------------------------------------------- |
 | `server.ts`          | Plugin entry: settings, usage source, thread and failure handlers, CLI, RPC. |
-| `app.tsx`            | The **Claude Switcher** section in Settings.                           |
+| `app.tsx`            | The **Claude Switcher** section in Settings and the thread header control. |
 | `src/accounts.ts`    | Account discovery from the config directories.                         |
 | `src/credentials.ts` | Reading and refreshing each login's OAuth token.                       |
 | `src/usage.ts`       | Parsing the usage endpoint's response.                                 |

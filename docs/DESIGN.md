@@ -37,7 +37,7 @@ created (below).
 | `src/policy.ts`      | Pure ranking: which usable account to choose.                                                                                                                           |
 | `src/switch.ts`      | Pure decisions: where a project runs before a new thread's first turn, and what to do with one failed turn (switch, wait or decline).                                   |
 | `server.ts`          | Wires it to bb: settings, the Provider usage source, `thread.created`, `turn.failed`, project variables, retries, CLI, realtime updates.                                 |
-| `app.tsx`            | The Claude Switcher section in Settings.                                                                                                                                |
+| `app.tsx`            | The Claude Switcher section in Settings, and the account control in a Claude Code thread's header.                                                                      |
 
 The policy and the decision are pure functions of their inputs (usage,
 the failure, `now`, a random number), so every rule below has a unit test

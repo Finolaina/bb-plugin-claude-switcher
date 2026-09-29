@@ -1,9 +1,11 @@
 // Claude Switcher — bb plugin frontend.
 //
-// One Settings section: every Claude Code account with its usage windows,
+// A Settings section: every Claude Code account with its usage windows,
 // which account each project runs on (with a picker to change it), and the
 // last automatic switch. The windows themselves are ALSO published to bb's
 // Provider usage panel through server.ts; this section is where you act.
+// And, in a Claude Code thread's header, the project's account with a menu
+// to change it (an experimental bb slot, registered only when the host has it).
 import { useCallback, useEffect, useState } from "react";
 import {
   definePluginApp,
@@ -369,13 +371,14 @@ function AccountsSection() {
   );
 }
 
-const TONE_DOT: Record<string, string> = {
+type Tone = NonNullable<ReturnType<typeof headerStatus>>["tone"];
+const TONE_DOT: Record<Tone, string> = {
   ok: "bg-success",
   tight: "bg-warning",
   out: "bg-destructive",
   unknown: "bg-muted-foreground",
 };
-const TONE_TEXT: Record<string, string> = {
+const TONE_TEXT: Record<Tone, string> = {
   ok: "has room",
   tight: "running low",
   out: "out of usage",
@@ -464,8 +467,10 @@ function ThreadAccountMenu({
           variant="ghost"
           size="sm"
           className="h-7 gap-1.5 px-2 text-xs"
-          disabled={busy}
-          aria-label={`Claude account: ${name}, ${TONE_TEXT[status.tone]}`}
+          aria-busy={busy}
+          aria-label={`Claude account: ${name}, ${TONE_TEXT[status.tone]}${
+            error === null ? "" : ", the last change failed"
+          }`}
         >
           <span
             aria-hidden
@@ -474,9 +479,23 @@ function ThreadAccountMenu({
           {isCompactViewport ? null : (
             <span className="max-w-32 truncate">{name}</span>
           )}
+          {error === null ? null : (
+            <span aria-hidden className="font-semibold text-destructive">
+              !
+            </span>
+          )}
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-72">
+      {error === null ? null : (
+        <span role="alert" className="sr-only">
+          {error}
+        </span>
+      )}
+      <DropdownMenuContent
+        align="start"
+        className="w-72"
+        mobileTitle="Claude account"
+      >
         <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
           Claude account for this project, used by all its threads from their
           next turn
@@ -500,9 +519,10 @@ function ThreadAccountMenu({
         ) : (
           <DropdownMenuRadioGroup
             value={status.account ?? ""}
-            onValueChange={(account) =>
-              setProjectAccount(projectId, toValue(account))
-            }
+            onValueChange={(account) => {
+              if (!busy && account !== status.account)
+                setProjectAccount(projectId, toValue(account));
+            }}
           >
             {state.accounts.map((account) => (
               <DropdownMenuRadioItem
@@ -534,11 +554,6 @@ function ThreadAccountMenu({
 }
 
 export default definePluginApp((app) => {
-  app.slots.experimental_threadHeaderAction({
-    id: "claude-account",
-    title: "Claude account",
-    component: ThreadAccount,
-  });
   app.slots.settingsSection({
     id: "claude-switcher",
     title: "Claude Switcher",
@@ -546,4 +561,12 @@ export default definePluginApp((app) => {
       "Every Claude Code account on this machine, its usage windows, and which account each project uses.",
     component: AccountsSection,
   });
+  // Experimental in bb: a host without it (older, or once it is renamed)
+  // keeps the Settings section instead of failing the whole frontend.
+  if (typeof app.slots.experimental_threadHeaderAction === "function")
+    app.slots.experimental_threadHeaderAction({
+      id: "claude-account",
+      title: "Claude account",
+      component: ThreadAccount,
+    });
 });

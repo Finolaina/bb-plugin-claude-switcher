@@ -14,3 +14,29 @@ describe("app.tsx", () => {
     expect(source).toContain("noLoginFound(state.accounts)");
   });
 });
+
+// The host hands setup() an `app` whose slots are functions; a host that
+// predates (or drops) an experimental slot simply lacks that member.
+async function register(slotNames: string[]) {
+  const { default: definition } = await import("./app.tsx");
+  const registered: string[] = [];
+  const slots = Object.fromEntries(
+    slotNames.map((name) => [name, (r: { id: string }) => registered.push(`${name}:${r.id}`)]),
+  );
+  const setup = (definition as unknown as { setup: (app: unknown) => void }).setup;
+  setup({ slots });
+  return registered;
+}
+
+describe("the plugin's frontend registration", () => {
+  it("registers the Settings section and the thread header control", async () => {
+    expect(await register(["settingsSection", "experimental_threadHeaderAction"])).toEqual([
+      "settingsSection:claude-switcher",
+      "experimental_threadHeaderAction:claude-account",
+    ]);
+  });
+
+  it("keeps the Settings section on a host without the experimental thread header slot", async () => {
+    expect(await register(["settingsSection"])).toEqual(["settingsSection:claude-switcher"]);
+  });
+});
