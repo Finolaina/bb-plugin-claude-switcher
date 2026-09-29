@@ -217,6 +217,7 @@ starts on a fresh account runs without your settings, hooks and
 
 | Where                                                | What                                                                                                                                                       |
 | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **A Claude Code thread's header**                    | The project's account with a dot (green: room, amber: running low, red: out, grey: not measured), and a menu to switch now to the best account or pick any other. |
 | **Settings → Claude Switcher**                       | The six settings, a card per account with its windows, the account each project runs on (with a picker), **Refresh usage**, and the last automatic switch. |
 | **Settings → Provider usage** (and its sidebar card) | Pick **Claude accounts** in the source menu to see every account's session, weekly and per-model windows.                                                  |
 | **A thread's retry reason**                          | `Switched to account <name>`, `Waiting for <name>` or `Retrying on account <name>`, wherever bb shows why a turn was retried.                              |
@@ -329,7 +330,8 @@ allowed, and the project then runs on it as soon as you log in there.
 <details>
 <summary><b>The bb surfaces it uses</b></summary>
 
-The plugin uses only public surfaces of the bb plugin SDK:
+The plugin uses only public surfaces of the bb plugin SDK, one of them
+marked experimental:
 
 | bb surface                                                       | What the plugin does with it                                                               |
 | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
@@ -339,6 +341,7 @@ The plugin uses only public surfaces of the bb plugin SDK:
 | Project machine environment variables                            | Sets `CLAUDE_CONFIG_DIR` on the project, with a note naming the account.                   |
 | `threads.retry` and queued messages                              | Retries the failed turn now, or at a reset, and reuses the retry provider-retry queued.    |
 | Settings and a settings section                                  | The six settings, plus the per-project picker and the account cards.                       |
+| `experimental_threadHeaderAction` slot and `threads.get`         | The account control in a Claude Code thread's header. Experimental in bb: it may change.   |
 | CLI registration                                                 | `bb claude-switcher list`, `refresh`, `use` and `release`.                                 |
 | Background service, key-value storage, realtime signals, logging | Periodic usage refresh, the last automatic switch, the install time and the new projects already handled, live updates of the section, and a log. |
 
@@ -531,7 +534,8 @@ bb plugin logs claude-switcher
 server.ts        wires the plugin to bb: settings, usage source, thread.created, turn.failed, CLI, RPC
 app.tsx          the Claude Switcher section in Settings
 src/             discovery, credentials, usage, the collector, the policy and the switch
-components/ lib/ the small UI kit the settings section uses
+components/ lib/ the small UI kit the settings section and the thread
+                 header use (from bb's own component registry)
 assets/icon.svg  the plugin icon; docs/logo.svg is the README logo
 docs/            DESIGN.md and screenshots
 ```

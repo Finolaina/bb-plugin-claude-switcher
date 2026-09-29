@@ -19,6 +19,9 @@ limit.
   of the default one, and a project whose account is already out moves to
   another. If the thread's first turn wins the race and fails on the old
   account, it is retried once on the new one.
+- **The account in every thread.** A Claude Code thread's header shows
+  the project's account with a coloured dot for how much it has left, and
+  a menu to switch now to the best account or to any other.
 - **A picker per project.** In Settings, choose which account each project
   runs with, or let the plugin manage it. The CLI does the same:
   `bb claude-switcher use PROJECT ACCOUNT`.

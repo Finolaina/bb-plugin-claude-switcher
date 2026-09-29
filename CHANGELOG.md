@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.3] - 2026-09-30
+
+### Added
+
+- The project's account in every Claude Code thread's header, with a dot
+  for how it stands for the preferred model (room, running low at 80 %,
+  out, or not measured) and a menu: switch now to the account the switch
+  policy would pick, or pick any account. The change applies to every
+  thread of the project from its next turn. Uses bb's experimental thread
+  header slot.
+
 ## [0.2.2] - 2026-09-29
 
 ### Added
