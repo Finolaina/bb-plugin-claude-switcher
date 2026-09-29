@@ -217,7 +217,7 @@ starts on a fresh account runs without your settings, hooks and
 
 | Where                                                | What                                                                                                                                                       |
 | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **A Claude Code thread's header**                    | The project's account with a dot (green: room, amber: running low, red: out, grey: not measured), and a menu to switch now to the best account or pick any other. |
+| **A Claude Code thread's header**                    | The project's account with a dot (green: room, amber: running low, red: out or not logged in, grey: not measured), and a menu to switch now to the best account or pick any other. |
 | **Settings → Claude Switcher**                       | The six settings, a card per account with its windows, the account each project runs on (with a picker), **Refresh usage**, and the last automatic switch. |
 | **Settings → Provider usage** (and its sidebar card) | Pick **Claude accounts** in the source menu to see every account's session, weekly and per-model windows.                                                  |
 | **A thread's retry reason**                          | `Switched to account <name>`, `Waiting for <name>` or `Retrying on account <name>`, wherever bb shows why a turn was retried.                              |
@@ -310,6 +310,9 @@ in **Settings → Claude Switcher** ("Last automatic switch"); the reason
 stored with a retry this plugin created is shown wherever bb shows a
 retry's reason.
 
+A turn that started on the project's old account (the plugin notes the
+account when a thread turns active) is retried on the new one whenever it
+fails, even long after the move: a long tool call can outlast any window.
 For a minute after a switch or a wait, other turns of the same project
 that were still running keep failing; each of those is retried once as it
 is, on the new account (or queued for the same reset, after a wait),

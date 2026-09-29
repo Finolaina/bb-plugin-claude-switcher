@@ -1129,6 +1129,61 @@ describe("claude accounts plugin", () => {
     expect(after.projects[0]?.account).toBe("spare");
   });
 
+  it("retries a turn that started on the old account on the new one, however long after the switch it fails", async () => {
+    let clock = NOW;
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(100, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    // thread-3 starts a long turn on main (the project's account then).
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    // Its turn fails 5 minutes later, still on main: not work's failure.
+    clock = NOW + 5 * 60_000;
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ threadId: "thread-3", requestId: "creq_9" }),
+    );
+    expect(h.retries.map((r) => [r.threadId, r.reason, r.sendAt])).toEqual([
+      ["thread-1", "Switched to account work", undefined],
+      ["thread-3", "Retrying on account work", undefined],
+    ]);
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+  });
+
+  it("judges a turn that started on the project's current account", async () => {
+    let clock = NOW;
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(100, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    // thread-3 starts after the switch, on work.
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    clock = NOW + 5 * 60_000;
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ threadId: "thread-3", requestId: "creq_9" }),
+    );
+    expect(h.retries[1]?.reason).not.toBe("Retrying on account work");
+    expect(h.usageCalls.length).toBe(6);
+  });
+
   it("a second turn of the same project failing right after a switch is retried on the new account, not switched again", async () => {
     let clock = NOW;
     const h = await host(

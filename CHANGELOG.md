@@ -25,6 +25,10 @@ project uses [Semantic Versioning](https://semver.org/).
   (unless the picked account is measured out of usage or has no login).
 - A pick and an automatic move of the same project no longer interleave:
   the pick waits for it and lands last.
+- A turn that started on the project's old account and fails more than
+  a minute after the move (a long tool call) is retried on the new
+  account, instead of being judged as the new account's failure (which
+  moved the project again or waited hours for the old account's reset).
 - Settings shows 0 % for a window whose reset has passed.
 
 ## [0.2.2] - 2026-09-29

@@ -818,6 +818,30 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     );
   }
 
+  /**
+   * The account each thread's turn started on (read when it turned active):
+   * a turn that started before its project moved runs on the old account,
+   * and its failure, however long after the move, is not the new account's.
+   */
+  const startedOn = new Map<string, string>();
+  bb.events.on("thread.active", async ({ thread }) => {
+    if (
+      thread.providerId !== CLAUDE_CODE_PROVIDER ||
+      notTheUsersThread(thread) !== null
+    )
+      return;
+    try {
+      const at = await projectAccount(thread.projectId);
+      if (at.external) startedOn.delete(thread.id);
+      else startedOn.set(thread.id, at.account ?? current.defaultAccountName);
+    } catch {
+      startedOn.delete(thread.id);
+    }
+  });
+  bb.events.on("thread.archived", ({ thread }) => {
+    startedOn.delete(thread.id);
+  });
+
   bb.events.on("thread.created", async ({ thread }) => {
     const skipped =
       notTheUsersThread(thread) ??
@@ -843,6 +867,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   ): Promise<void> {
     const now = deps.now();
     const recent = recentSwitches.get(projectId);
+    const started = startedOn.get(event.threadId);
+    startedOn.delete(event.threadId);
     if (
       recent !== undefined &&
       now - recent.at <= SWITCH_GRACE_MS &&
@@ -861,6 +887,29 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
       await retryTurn(event, reason, recent.sendAt);
       return;
+    }
+    if (started !== undefined) {
+      const at = await projectAccount(projectId);
+      const currentName = at.account ?? current.defaultAccountName;
+      if (!at.external && started !== currentName) {
+        // Started on the old account before the project moved: a leftover
+        // (a long tool call can outlast the grace window), not a failure of
+        // the project's account. It runs again there, or waits for the same
+        // reset when the project's latest move was a wait on that account.
+        const sendAt =
+          recent !== undefined &&
+          recent.to === currentName &&
+          recent.sendAt !== undefined &&
+          recent.sendAt > now
+            ? recent.sendAt
+            : undefined;
+        const reason = `Retrying on account ${currentName}`;
+        bb.log.info(
+          `thread ${event.threadId}: ${reason} (its turn started on ${started})`,
+        );
+        await retryTurn(event, reason, sendAt);
+        return;
+      }
     }
     await refreshAll();
     const from = await projectAccount(projectId);
