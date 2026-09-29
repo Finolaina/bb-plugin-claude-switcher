@@ -2330,6 +2330,22 @@ describe("the account shown in each thread's header", () => {
     expect(h.retries[0]?.reason).toBe("Retrying on account work");
   });
 
+  it("gives no grace to a hand pick of an account without a login, so the leftover is judged", async () => {
+    const h = await host({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => new Response(null, { status: 401 }),
+    });
+    dispose = () => h.harness.dispose();
+    const refreshed = (await h.harness.behavior.callRpc("accounts_refresh", null)) as State;
+    expect(refreshed.accounts.find((a) => a.name === "work")?.problem).toEqual({
+      kind: "unauthenticated",
+    });
+    await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "work" });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.retries[0]?.reason).toBe("Switched to account spare");
+  });
+
   it("gives no grace to a hand pick of an account that is out, so its failure is judged", async () => {
     const h = await host({
       main: () => Response.json(payload(100, 40)),

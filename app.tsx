@@ -398,8 +398,9 @@ function usageLine(
   now: number,
 ): string {
   if (account.problem?.kind === "unauthenticated") return "not logged in";
-  if (account.problem?.kind === "error") return "last measurement failed";
-  if (account.usage === null) return "not measured yet";
+  const failed = account.problem?.kind === "error";
+  if (account.usage === null)
+    return failed ? "last measurement failed" : "not measured yet";
   if (account.usage.unknown === true) return "not measured (incomplete answer)";
   if (account.usage.blocked) return "locked by the provider";
   // Never "100%" for an account that still has a little room.
@@ -412,11 +413,13 @@ function usageLine(
     `weekly ${pct(account.usage.weekly)}`,
   ];
   const model = Object.entries(account.usage.models).find(
-    ([name]) => name.toLowerCase() === preferredModel.toLowerCase(),
+    ([name]) =>
+      preferredModel !== "" &&
+      name.toLowerCase() === preferredModel.toLowerCase(),
   );
   if (model !== undefined)
     parts.push(`${model[0]} ${pct(model[1])}`);
-  return parts.join(" · ");
+  return parts.join(" · ") + (failed ? " (last query failed)" : "");
 }
 
 /**

@@ -22,7 +22,7 @@ project uses [Semantic Versioning](https://semver.org/).
   turn still running on the old account fails right after it: that turn
   is retried once on the picked account, as after a switch, instead of
   moving the project elsewhere or waiting for the old account's reset
-  (unless the picked account is measured out of usage).
+  (unless the picked account is measured out of usage or has no login).
 - A pick and an automatic move of the same project no longer interleave:
   the pick waits for it and lands last.
 - Settings shows 0 % for a window whose reset has passed.

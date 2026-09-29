@@ -473,14 +473,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       if (toName === fromName) return;
       // A turn already running on the old account fails there after the
       // pick: like after a switch, it runs again once on the picked account.
-      // The pick is the user's, so it holds unless the account is MEASURED
-      // unable to run any model (not measured yet, an incomplete answer, or
-      // no preferred model left all keep it); its own failure is judged.
+      // The pick is the user's, so it holds unless the account has no login
+      // or is MEASURED unable to run any model (not measured yet, an
+      // incomplete answer, or no preferred model left all keep it); its own
+      // failure is judged.
       const known = measuredAccounts().find((a) => a.name === toName);
       const pickOut =
-        known !== undefined &&
-        known.unknown !== true &&
-        bestAccount([known], "", deps.now()) !== toName;
+        collector.get(toName)?.problem?.kind === "unauthenticated" ||
+        (known !== undefined &&
+          known.unknown !== true &&
+          bestAccount([known], "", deps.now()) !== toName);
       if (!pickOut)
         recentSwitches.set(projectId, {
           at: deps.now(),

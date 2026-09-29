@@ -36,7 +36,10 @@ describe("headerStatus", () => {
     weekly: win(weekly),
     models: { Fable: win(fable) },
   });
-  type Usage = ReturnType<typeof usage> & { unknown?: boolean };
+  type Usage = Omit<ReturnType<typeof usage>, "models"> & {
+    models: Record<string, ReturnType<typeof win>>;
+    unknown?: boolean;
+  };
   const account = (name: string, u: Usage | null) => ({ name, usage: u });
   const base = {
     defaultAccountName: "main",
@@ -94,14 +97,18 @@ describe("headerStatus", () => {
     expect(tone({ ...usage(0, 100, 0, true), unknown: true })).toBe("unknown");
   });
 
-  it("shows an account whose last measurement failed as not measured, not by its old numbers", () => {
-    const failed = {
+  it("keeps showing the numbers the plugin acts on when the last query failed", () => {
+    const failed = (u: Usage) => ({
       ...base,
-      accounts: [{ name: "main", usage: usage(10, 10, 10), problem: { kind: "error" } }],
-    };
-    expect(headerStatus(failed, "p-default", NOW)?.tone).toBe("unknown");
-    const fine = { ...base, accounts: [{ name: "main", usage: usage(10, 10, 10), problem: null }] };
-    expect(headerStatus(fine, "p-default", NOW)?.tone).toBe("ok");
+      accounts: [{ name: "main", usage: u, problem: { kind: "error" } }],
+    });
+    expect(headerStatus(failed(usage(100, 10, 10)), "p-default", NOW)?.tone).toBe("out");
+    expect(headerStatus(failed(usage(10, 10, 10)), "p-default", NOW)?.tone).toBe("ok");
+  });
+
+  it("ignores a model window with no name when no model is preferred, like the plugin", () => {
+    const blank = { ...usage(10, 10, 0), models: { "": win(100) } };
+    expect(tone(blank, "")).toBe("ok");
   });
 
   it("counts a window whose reset has passed as free, like the switch does", () => {

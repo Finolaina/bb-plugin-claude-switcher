@@ -317,8 +317,8 @@ without a second switch. A thread that fails again inside that minute is
 judged afresh: the new account fails too. Picking an account by hand (in a
 thread's header, in Settings or with `use`) gives the same minute, so a
 turn still running on the old account follows your pick; only a pick of
-an account measured out of usage gets none, and the next failure is
-judged.
+an account measured out of usage, or without a login, gets none, and the
+next failure is judged.
 
 The plugin only ever changes a `CLAUDE_CONFIG_DIR` it wrote itself. A
 project whose variable was set by hand or inherited from the global
