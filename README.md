@@ -45,6 +45,7 @@ first.
 | ---------------------------------------------- | :---------------------: | :-------------------------: |
 | See every account's session and weekly windows |           ❌            |    ✅ in Provider usage     |
 | Keep working when one account hits its limit   |           ❌            |     ✅ switch and retry     |
+| Start a new project on an account that works   |           ❌            |   ✅ before its first turn   |
 | Wait for the account that frees first          |           ❌            | ✅ within your maximum wait |
 | Stick to a model, like Fable                   |            n/a            |     ✅ preferred model      |
 | Choose the account of each project by hand     |           ❌            |      ✅ picker and CLI      |
@@ -125,7 +126,7 @@ public SDK surfaces, and never touches a `CLAUDE_CONFIG_DIR` it did not set.
 ## Install
 
 ```sh
-bb plugin install git:https://github.com/Finolaina/bb-plugin-claude-switcher@^0.2.0
+bb plugin install git:https://github.com/Finolaina/bb-plugin-claude-switcher@^0.2.2
 ```
 
 Then open **Settings → Claude Switcher** (or run
@@ -238,6 +239,10 @@ flowchart TD
   F -- no --> H[Decline: leave the turn as it failed]
 ```
 
+- **Before a new thread's first turn.** A project created after the plugin
+  was installed goes straight to the best account, and a project whose
+  account is already measured out moves before the turn instead of failing
+  it. A project you pinned by hand stays put while its account works.
 - **Per project, not per thread.** The switch sets `CLAUDE_CONFIG_DIR` on
   the thread's project, so the project's next turns run on the new account
   too. A retry keeps the thread's model: the plugin changes which account

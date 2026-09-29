@@ -4,6 +4,33 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.2] - 2026-09-29
+
+### Added
+
+- New projects start on the best account. When the first thread of a
+  project created after the plugin was installed is opened, the project
+  moves to the account the switch policy would choose (the preferred model
+  included), instead of running its first turn on the default account.
+- A project whose account is already measured unable to run (blocked, or
+  out of the preferred model) moves to the best other account when a new
+  thread is created, instead of failing the thread's first turn. A project
+  pinned by hand stays put while its account works.
+
+### Fixed
+
+- A failed turn of a hidden thread, or of a thread another plugin opened
+  (for example a summary worker), no longer moves the whole project to
+  another account.
+- After changing the accounts directory, `bb claude-switcher use` and the
+  project picker accept the new directory's accounts at once, without a
+  refresh first.
+
+### Changed
+
+- Development dependencies: plugin SDK 0.5.31, better-sqlite3 13, hono
+  4.13.11.
+
 ## [0.2.1] - 2026-09-29
 
 ### Added

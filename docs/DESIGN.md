@@ -33,8 +33,8 @@ waits for the one that frees first.
 | `src/usage.ts`       | Parses the usage endpoint's answer into session, weekly and per-model windows.                                                                                          |
 | `src/collector.ts`   | One cached measurement per account, single-flight queries, the rule for stale measurements.                                                                             |
 | `src/policy.ts`      | Pure ranking: which usable account to choose.                                                                                                                           |
-| `src/switch.ts`      | Pure decision for one failed turn: switch, wait or decline.                                                                                                             |
-| `server.ts`          | Wires it to bb: settings, the Provider usage source, `turn.failed`, project variables, retries, CLI, realtime updates.                                                  |
+| `src/switch.ts`      | Pure decisions: where a project runs before a new thread's first turn, and what to do with one failed turn (switch, wait or decline).                                   |
+| `server.ts`          | Wires it to bb: settings, the Provider usage source, `thread.created`, `turn.failed`, project variables, retries, CLI, realtime updates.                                 |
 | `app.tsx`            | The Claude Switcher section in Settings.                                                                                                                                |
 
 The policy and the decision are pure functions of their inputs (usage,
@@ -81,6 +81,37 @@ so both tools pick the same account.
    they were measured. Spending the account whose week ends soonest first
    wastes the least quota.
 
+## Placing a project before the first turn
+
+A project bb created after the plugin was installed starts on the default
+account, and so would fail its first turn whenever that account is out.
+When a thread is created (`thread.created`), `decidePlacement` looks at the
+measurements already in hand, without querying anyone unless nothing was
+ever measured:
+
+1. **A new project** goes to the best account under the policy above. The
+   plugin remembers every project it has seen (plugin storage, key
+   `known-projects`); the projects that existed when it first ran are
+   known from the start, so it never moves them for being "new".
+2. **A known project** moves only when its account is **measured** unable
+   to run: blocked, over 100 % in a window, or out of the preferred model.
+   A project pinned by hand stays put while its account works, even when
+   another account ranks better.
+3. **Nothing happens** when the account was never measured, when no other
+   account can run, for a hidden thread, a thread another plugin opened, a
+   thread of another provider, or a project whose `CLAUDE_CONFIG_DIR` the
+   plugin did not set.
+
+A move is recorded as the last switch and opens the same 60-second grace
+window as a switch after a failure, so the project's threads still running
+on the old account follow it. If the list of known projects cannot be read,
+no project is moved for being new; the measured-block rule still applies.
+
+This check races the thread's first turn on purpose: holding the turn until
+it finishes would need bb's experimental dispatch hook, which fails the
+turn when a plugin is slow. When the turn starts first, it runs where the
+project was, and a failure is handled as below.
+
 ## Deciding on a failed turn
 
 `declineReason` runs first and is cheap, so another provider's limit never
@@ -92,7 +123,10 @@ queries every account. The plugin acts only when all of these hold:
 - the provider is `claude-code`.
 
 It also leaves alone any project whose `CLAUDE_CONFIG_DIR` it did not set
-(recognised by the note it writes next to the variable).
+(recognised by the note it writes next to the variable), and any failure of
+a hidden thread or of a thread another plugin opened: moving the whole
+project for another plugin's worker would surprise the user, and the plugin
+that owns the worker decides what to do with it.
 
 Then `decideSwitch`:
 
@@ -172,11 +206,9 @@ The refresh token rotates on every refresh, so the plugin:
   directory, so an account directory must share `projects/` (and normally
   settings, hooks and `CLAUDE.md`) with `~/.claude`, or the retried thread
   cannot resume its session.
-- **`use` after changing `accountsDir`.** The CLI's `use` checks the
-  account list of the last discovery, so right after the accounts directory
-  changes it rejects a new account until `bb claude-switcher refresh` (or
-  the next background refresh) runs. To fix in a later release by
-  rediscovering in `use`.
+- **Placement can lose the race.** A thread whose first turn starts before
+  the plugin has moved its project runs that turn on the old account; if
+  it fails, the failure path moves the project and retries it.
 
 ## Measured in real use
 
@@ -193,8 +225,10 @@ retried turn completed there at 01:42:52.
 - **No per-thread accounts.** The environment belongs to the project in bb;
   switching per thread would need a second mechanism and would split one
   project's sessions across directories.
-- **No proactive switching.** The plugin acts on a real failure, not on a
-  forecast of one: a forecast is a guess, and every guess costs a retry.
+- **No switching on a forecast.** The plugin moves a project on a measured
+  block (a failed turn, or an account already measured out before a new
+  thread's first turn), never on a forecast such as "80 % used": a forecast
+  is a guess, and every guess costs a retry or a project the user placed.
 - **No guessing on stale data.** When the only evidence that an account is
   free is the clock and the measurement is old, the plugin declines rather
   than switch.
