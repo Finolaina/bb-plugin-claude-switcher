@@ -2,9 +2,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import {
   createFakePluginHost,
+  makeThreadResponse,
   makeTurnFailedEvent,
 } from "@get-bb/plugin-sdk/testing";
-import type { PluginTurnFailedEvent } from "@get-bb/plugin-sdk";
+import type {
+  PluginThreadEventPayloads,
+  PluginTurnFailedEvent,
+} from "@get-bb/plugin-sdk";
+
+type ThreadResponse = PluginThreadEventPayloads["thread.created"]["thread"];
 import { createPlugin, ENV_VAR, type State } from "./server.js";
 import type { AccountsIo } from "./src/accounts.js";
 import type { CredentialIo } from "./src/credentials.js";
@@ -217,6 +223,10 @@ interface HostOptions {
   deleteRowError?: { message: string; code?: string; status?: number };
   dirs?: () => string[];
   clock?: () => number;
+  /** What threads.get answers per thread, over a visible Claude Code thread of the user. */
+  threads?: Record<string, Partial<ThreadResponse>>;
+  /** Plugin storage answers every read with this error while the plugin loads. */
+  kvReadError?: string;
 }
 
 async function host(
@@ -257,10 +267,12 @@ async function host(
     },
     sdk: {
       threads: {
-        get: async ({ threadId }: { threadId: string }) => ({
-          id: threadId,
-          projectId: threadId === "thr-2" ? "proj-2" : "proj-1",
-        }),
+        get: async ({ threadId }: { threadId: string }) =>
+          thread({
+            id: threadId,
+            projectId: threadId === "thr-2" ? "proj-2" : "proj-1",
+            ...options.threads?.[threadId],
+          }),
         retry: async (args: (typeof retries)[number]) => {
           if (options.retryBehaviour === "conflict") {
             throw new Error(
@@ -365,12 +377,19 @@ async function host(
       },
     },
   });
+  const kvGet = fake.bb.storage.kv.get;
+  if (options.kvReadError !== undefined) {
+    fake.bb.storage.kv.get = async () => {
+      throw new Error(options.kvReadError);
+    };
+  }
   await createPlugin(fake.bb, {
     credentialIo,
     accountsIo,
     now: options.clock ?? (() => NOW),
     random: () => 0,
   });
+  fake.bb.storage.kv.get = kvGet;
   return {
     ...fake,
     env,
@@ -389,6 +408,16 @@ const ALL_FREE = {
   spare: () => Response.json(payload(10, 60)),
   work: () => Response.json(payload(5, 20)),
 };
+
+/** A visible Claude Code thread the user opened, as bb reports it. */
+function thread(overrides: Partial<ThreadResponse> = {}): ThreadResponse {
+  return makeThreadResponse({
+    providerId: "claude-code",
+    visibility: "visible",
+    originPluginId: null,
+    ...overrides,
+  });
+}
 
 function ownNote(name: string) {
   return `Claude Code account "${name}" (set by the Claude Switcher plugin)`;
@@ -1038,10 +1067,9 @@ describe("claude accounts plugin", () => {
     dispose = () => h.harness.dispose();
     // Fable resets at +4 h on main and spare... but work's payload says +4 h too;
     // make spare the earliest by hand.
-    h.harness.sdk.stub("threads.get", async () => ({
-      id: "thread-1",
-      projectId: "proj-1",
-    }));
+    h.harness.sdk.stub("threads.get", async () =>
+      thread({ id: "thread-1", projectId: "proj-1" }),
+    );
     await h.harness.behavior.callRpc("accounts_refresh", null);
     const state = (await h.harness.behavior.callRpc(
       "accounts_list",
@@ -1563,5 +1591,217 @@ describe("claude accounts plugin", () => {
     });
     run.controller.abort();
     await run.done;
+  });
+});
+
+describe("placing a project before a new thread's first turn", () => {
+  /** `main` (the default) is out of Fable; `work` has the lowest session use. */
+  const MAIN_OUT_OF_FABLE = {
+    main: () => Response.json(payload(10, 40, 100)),
+    spare: () => Response.json(payload(10, 60, 20)),
+    work: () => Response.json(payload(5, 20, 30)),
+  };
+  const FABLE = { settings: { preferredModel: "Fable" } };
+
+  function created(overrides: Partial<ThreadResponse>) {
+    return { thread: thread(overrides) };
+  }
+
+  it("puts a project created after install on the best account at its first thread, measuring first when nothing is measured", async () => {
+    const h = await host(MAIN_OUT_OF_FABLE, FABLE);
+    dispose = () => h.harness.dispose();
+    const { errors } = await h.harness.behavior.emitThreadEvent(
+      "thread.created",
+      created({ id: "thr-new", projectId: "proj-3" }),
+    );
+    expect(errors).toEqual([]);
+    expect(h.usageCalls).toEqual(["main", "spare", "work"]);
+    expect(h.envSet).toEqual([
+      {
+        projectId: "proj-3",
+        name: ENV_VAR,
+        value: `${ACCOUNTS}/work`,
+        note: ownNote("work"),
+      },
+    ]);
+    const state = (await h.harness.behavior.callRpc(
+      "accounts_list",
+      null,
+    )) as State;
+    expect(state.lastSwitch).toMatchObject({
+      threadId: "thr-new",
+      projectId: "proj-3",
+      from: "main",
+      to: "work",
+      reason: "New project placed on account work (Fable)",
+    });
+    // Seen once: its next thread leaves it alone while its account works.
+    await h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-3",
+      account: "spare",
+    });
+    await h.harness.behavior.emitThreadEvent(
+      "thread.created",
+      created({ id: "thr-new-2", projectId: "proj-3" }),
+    );
+    expect(h.envSet.map((e) => e.value)).toEqual([
+      `${ACCOUNTS}/work`,
+      `${ACCOUNTS}/spare`,
+    ]);
+  });
+
+  it("leaves a new project on the default account when that is the best one, without writing anything", async () => {
+    const h = await host(
+      {
+        main: () => Response.json(payload(1, 10, 0)),
+        spare: () => Response.json(payload(10, 60, 20)),
+        work: () => Response.json(payload(5, 20, 30)),
+      },
+      FABLE,
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent(
+      "thread.created",
+      created({ id: "thr-new", projectId: "proj-3" }),
+    );
+    expect(h.envSet).toEqual([]);
+    expect(h.envDeleted).toEqual([]);
+  });
+
+  it("never moves a project that existed at install while its account can run, even when another ranks better", async () => {
+    const h = await host(
+      {
+        main: () => Response.json(payload(90, 40, 99)),
+        spare: () => Response.json(payload(10, 60, 20)),
+        work: () => Response.json(payload(0, 20, 0)),
+      },
+      FABLE,
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent(
+      "thread.created",
+      created({ id: "thread-1", projectId: "proj-1" }),
+    );
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("moves an existing project off an account already measured out of the preferred model, so the first turn does not fail", async () => {
+    const h = await host(MAIN_OUT_OF_FABLE, FABLE);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const measured = h.usageCalls.length;
+    await h.harness.behavior.emitThreadEvent(
+      "thread.created",
+      created({ id: "thr-a", projectId: "proj-1" }),
+    );
+    // Decided on the measurement already there: no query in the way of the turn.
+    expect(h.usageCalls.length).toBe(measured);
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-1", `${ACCOUNTS}/work`],
+    ]);
+    const state = (await h.harness.behavior.callRpc(
+      "accounts_list",
+      null,
+    )) as State;
+    expect(state.lastSwitch).toMatchObject({
+      threadId: "thr-a",
+      from: "main",
+      to: "work",
+      reason: "Moved to account work before the turn: main cannot run Fable",
+    });
+    // A turn of another thread still running on `main` fails: it follows the move.
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.retries.map((r) => r.reason)).toEqual(["Retrying on account work"]);
+    expect(h.envSet).toHaveLength(1);
+  });
+
+  it("moves no project for being new when the list of known projects cannot be read, and still moves one off a blocked account", async () => {
+    const h = await host(
+      {
+        main: () => Response.json(payload(1, 10, 0)),
+        spare: () => Response.json(payload(0, 60, 20)),
+        work: () => Response.json(payload(0, 20, 30)),
+      },
+      { ...FABLE, kvReadError: "database is locked" },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent(
+      "thread.created",
+      created({ id: "thr-new", projectId: "proj-3" }),
+    );
+    expect(h.envSet).toEqual([]);
+    const blocked = await host(MAIN_OUT_OF_FABLE, {
+      ...FABLE,
+      kvReadError: "database is locked",
+    });
+    await blocked.harness.behavior.emitThreadEvent(
+      "thread.created",
+      created({ id: "thr-new", projectId: "proj-3" }),
+    );
+    expect(blocked.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    blocked.harness.dispose();
+  });
+
+  it("leaves hidden threads, other plugins' threads, other providers, external variables and autoSwitch off alone", async () => {
+    const cases: Array<[Partial<ThreadResponse>, HostOptions]> = [
+      [{ visibility: "hidden" }, FABLE],
+      [{ originPluginId: "bb-recap" }, FABLE],
+      [{ providerId: "codex" }, FABLE],
+      [{}, { settings: { preferredModel: "Fable", autoSwitch: false } }],
+      [
+        {},
+        {
+          ...FABLE,
+          presetEnv: {
+            "proj-3": [{ name: ENV_VAR, note: "mine", secret: true, value: null }],
+          },
+        },
+      ],
+    ];
+    for (const [overrides, options] of cases) {
+      const h = await host(MAIN_OUT_OF_FABLE, options);
+      const { errors } = await h.harness.behavior.emitThreadEvent(
+        "thread.created",
+        created({ id: "thr-x", projectId: "proj-3", ...overrides }),
+      );
+      expect(errors).toEqual([]);
+      expect(h.envSet).toEqual([]);
+      h.harness.dispose();
+    }
+  });
+});
+
+describe("failures this plugin must not act on", () => {
+  it("ignores a failed turn of a hidden thread or of a thread another plugin opened", async () => {
+    for (const threads of [
+      { "thread-1": { visibility: "hidden" as const } },
+      { "thread-1": { originPluginId: "bb-recap" } },
+    ]) {
+      const h = await host(ALL_FREE, { threads });
+      const { errors } = await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure(),
+      );
+      expect(errors).toEqual([]);
+      expect(h.envSet).toEqual([]);
+      expect(h.retries).toEqual([]);
+      expect(h.usageCalls).toEqual([]);
+      h.harness.dispose();
+    }
+  });
+});
+
+describe("changing the accounts directory", () => {
+  it("lets `use` pick an account of the new directory at once, without a refresh first", async () => {
+    const h = await host(ALL_FREE, {
+      settings: { accountsDir: "/Users/someone/elsewhere" },
+    });
+    dispose = () => h.harness.dispose();
+    const before = await h.harness.behavior.runCli(["list"]);
+    expect(before.stdout).not.toMatch(/spare/);
+    await h.harness.behavior.setSettings({ accountsDir: ACCOUNTS });
+    const out = await h.harness.behavior.runCli(["use", "Website", "spare"]);
+    expect(out.exitCode).toBe(0);
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
   });
 });

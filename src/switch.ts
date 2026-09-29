@@ -7,7 +7,9 @@
 // so a wait scheduled here lands where that plugin would have put it.
 import type { PluginTurnFailedEvent } from "@get-bb/plugin-sdk";
 import {
+  canRunModel,
   chooseAccount,
+  isUsable,
   modelWindow,
   type AccountUsage,
   type UsageWindow,
@@ -154,4 +156,51 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
     sendAt: base + RESET_BUFFER_MS + Math.floor(input.random * RESET_JITTER_MS),
     reason: `Waiting for ${what}${earliest.account}`,
   };
+}
+
+export type PlacementDecision =
+  | { kind: "keep" }
+  | { kind: "move"; account: string; why: "new-project" | "current-blocked" };
+
+export interface PlacementInput {
+  currentAccount: string;
+  /** The project has never been seen by this plugin (created after it was installed). */
+  isNew: boolean;
+  /** Every account with measured usage, the current one included. */
+  accounts: AccountUsage[];
+  /** "" = any model. */
+  preferredModel: string;
+  now: number;
+}
+
+/**
+ * Where a project should run before a new thread's first turn. A new project
+ * goes to the best account (the same choice a switch makes); a known one is
+ * moved only when its account is MEASURED unable to run, so a project the user
+ * pinned by hand stays put while it works. An unmeasured account, or no other
+ * account able to run, keeps the project: the failure path then decides,
+ * exactly as before this check existed.
+ */
+export function decidePlacement(input: PlacementInput): PlacementDecision {
+  const accounts = input.accounts.map((a) => settle(a, input.now));
+  const options = { preferredModel: input.preferredModel };
+  if (input.isNew) {
+    const choice = chooseAccount(accounts, options);
+    return choice === null || choice.account === input.currentAccount
+      ? { kind: "keep" }
+      : { kind: "move", account: choice.account, why: "new-project" };
+  }
+  const current = accounts.find((a) => a.name === input.currentAccount);
+  if (
+    current === undefined ||
+    (isUsable(current) && canRunModel(current, input.preferredModel))
+  )
+    return { kind: "keep" };
+  const choice = chooseAccount(
+    accounts.filter((a) => a.name !== input.currentAccount),
+    options,
+  );
+  return choice === null
+    ? { kind: "keep" }
+    : { kind: "move", account: choice.account, why: "current-blocked" };
 }

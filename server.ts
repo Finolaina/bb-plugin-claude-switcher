@@ -1,18 +1,22 @@
 // Claude Switcher — bb plugin backend.
 //
-// Three jobs:
+// Four jobs:
 //   1. Measure every Claude Code account on this machine (one config dir
 //      each) and publish the windows to bb's Provider usage panel.
-//   2. When a turn fails on a subscription limit, move the thread's project to
+//   2. When a thread is created, put a new project on the best account, and
+//      move a known one off an account already measured unable to run, so
+//      the first turn does not fail.
+//   3. When a turn fails on a subscription limit, move the thread's project to
 //      another account (CLAUDE_CONFIG_DIR as a project machine env var) and
 //      retry the turn; when no account is free, retry at the earliest reset.
-//   3. Let the user pin a project to an account from Settings or the CLI.
+//   4. Let the user pin a project to an account from Settings or the CLI.
 import {
   PluginCliError,
   cliCommand,
   defineCli,
   defineRpcContract,
   type BbPluginApi,
+  type PluginThreadEventPayloads,
   type PluginTurnFailedEvent,
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
@@ -24,7 +28,12 @@ import {
 import { UsageCollector } from "./src/collector.js";
 import type { CredentialIo } from "./src/credentials.js";
 import { nodeAccountsIo, nodeCredentialIo } from "./src/node-io.js";
-import { declineReason, decideSwitch } from "./src/switch.js";
+import {
+  CLAUDE_CODE_PROVIDER,
+  declineReason,
+  decidePlacement,
+  decideSwitch,
+} from "./src/switch.js";
 import {
   usageFetchMethod,
   usageListMethod,
@@ -59,6 +68,23 @@ export function accountFromNote(note: string | null): string | null {
   );
 }
 const KV_LAST_SWITCH = "last-switch";
+/** A thread as bb reports it (the SDK does not export the type by name). */
+type ThreadResponse = PluginThreadEventPayloads["thread.created"]["thread"];
+/** Ids of the projects this plugin has seen; any other project is new. */
+const KV_KNOWN_PROJECTS = "known-projects";
+
+/**
+ * A thread of another plugin (a hidden worker, a summary) or of another
+ * provider: moving the whole project for it would surprise the user.
+ */
+function notTheUsersClaudeThread(thread: ThreadResponse): string | null {
+  if (thread.visibility === "hidden") return "hidden thread";
+  if (thread.originPluginId !== null)
+    return `thread opened by plugin ${thread.originPluginId}`;
+  if (thread.providerId !== CLAUDE_CODE_PROVIDER)
+    return `provider ${thread.providerId}`;
+  return null;
+}
 
 const windowSchema = z.object({
   usedPercent: z.number(),
@@ -177,7 +203,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     autoSwitch: {
       type: "boolean",
       label:
-        "Switch account automatically when a turn hits a subscription limit",
+        "Choose accounts automatically: start new projects on the best one, and switch when a turn hits a subscription limit",
       default: true,
     },
     maximumWaitHours: {
@@ -196,7 +222,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   });
   let current = await settings.get();
   settings.onChange((next) => {
+    const moved =
+      next.accountsDir !== current.accountsDir ||
+      next.defaultAccountName !== current.defaultAccountName;
     current = next;
+    // Found again on next use: an account of the old directory must not be picked.
+    if (moved) accounts = [];
   });
 
   const collector = new UsageCollector({
@@ -218,8 +249,53 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       graced: Set<string>;
     }
   >();
-  /** One turn.failed handler per project at a time: handlers run concurrently. */
+  /** One turn.failed or thread.created handler per project at a time: handlers run concurrently. */
   const projectQueue = new Map<string, Promise<void>>();
+  async function inProjectQueue(
+    projectId: string,
+    work: () => Promise<void>,
+  ): Promise<void> {
+    const previous = projectQueue.get(projectId) ?? Promise.resolve();
+    const run = previous.catch(() => undefined).then(work);
+    projectQueue.set(projectId, run);
+    try {
+      await run;
+    } finally {
+      if (projectQueue.get(projectId) === run) projectQueue.delete(projectId);
+    }
+  }
+
+  /**
+   * The projects that existed when this plugin first ran are known, so only a
+   * project created later counts as new. Null when that list could not be
+   * stored: then every project counts as known and none is moved for being new.
+   */
+  let knownProjects: Set<string> | null = null;
+  try {
+    const stored = await bb.storage.kv.get<string[]>(KV_KNOWN_PROJECTS);
+    if (stored === undefined || stored === null) {
+      const ids = (await bb.sdk.projects.list()).map((p) => p.id);
+      await bb.storage.kv.set(KV_KNOWN_PROJECTS, ids);
+      knownProjects = new Set(ids);
+    } else {
+      knownProjects = new Set(stored);
+    }
+  } catch (error) {
+    bb.log.warn(
+      `could not load the known projects; new projects will not be placed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  async function markKnown(projectId: string): Promise<void> {
+    if (knownProjects === null || knownProjects.has(projectId)) return;
+    knownProjects.add(projectId);
+    try {
+      await bb.storage.kv.set(KV_KNOWN_PROJECTS, [...knownProjects]);
+    } catch (error) {
+      bb.log.warn(
+        `could not record project ${projectId} as known: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
 
   async function discover(): Promise<Account[]> {
     accounts = await discoverAccounts(deps.accountsIo, {
@@ -543,6 +619,85 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
   }
 
+  /** Record a move as the project's latest: shown in Settings, and leftover turns follow it. */
+  async function recordMove(record: SwitchRecord, sendAt?: number) {
+    recentSwitches.set(record.projectId, {
+      at: record.at,
+      to: record.to,
+      threadId: record.threadId,
+      sendAt,
+      graced: new Set(),
+    });
+    try {
+      await bb.storage.kv.set(KV_LAST_SWITCH, record);
+    } catch (error) {
+      bb.log.warn(
+        `could not record the switch: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  // ---- Placement before a new thread's first turn ----------------------
+  /**
+   * Races the thread's first turn, on purpose: nothing here waits on the
+   * network unless no account was ever measured. When the turn starts first,
+   * it runs where the project was and the failure path below catches it.
+   */
+  async function placeProject(thread: ThreadResponse): Promise<void> {
+    const projectId = thread.projectId;
+    const now = deps.now();
+    const maxAgeMs = 2 * Math.max(1, current.refreshMinutes) * 60_000;
+    if (accounts.length === 0) await discover();
+    let measured = collector.usable(maxAgeMs, current.preferredModel);
+    if (measured.length === 0) {
+      await refreshAll();
+      measured = collector.usable(maxAgeMs, current.preferredModel);
+    }
+    const from = await projectAccount(projectId);
+    if (from.external) {
+      await markKnown(projectId);
+      return;
+    }
+    const fromName = from.account ?? current.defaultAccountName;
+    const decision = decidePlacement({
+      currentAccount: fromName,
+      isNew:
+        knownProjects !== null &&
+        !knownProjects.has(projectId) &&
+        !from.owned,
+      accounts: measured,
+      preferredModel: current.preferredModel,
+      now,
+    });
+    await markKnown(projectId);
+    if (decision.kind === "keep") return;
+    await applyAccount(projectId, accountOrDefault(decision.account), from);
+    const model = current.preferredModel === "" ? "" : ` (${current.preferredModel})`;
+    const reason =
+      decision.why === "new-project"
+        ? `New project placed on account ${decision.account}${model}`
+        : `Moved to account ${decision.account} before the turn: ${fromName} cannot run${current.preferredModel === "" ? "" : ` ${current.preferredModel}`}`;
+    bb.log.info(`thread ${thread.id}: ${reason}`);
+    await recordMove({
+      at: now,
+      threadId: thread.id,
+      projectId,
+      from: fromName,
+      to: decision.account,
+      reason,
+    });
+  }
+
+  bb.events.on("thread.created", async ({ thread }) => {
+    if (!current.autoSwitch) return;
+    const skipped = notTheUsersClaudeThread(thread);
+    if (skipped !== null) {
+      bb.log.debug(`thread ${thread.id}: not placed (${skipped})`);
+      return;
+    }
+    await inProjectQueue(thread.projectId, () => placeProject(thread));
+  });
+
   // ---- Automatic switch on subscription limit ---------------------------
   async function handleFailure(
     event: PluginTurnFailedEvent,
@@ -604,35 +759,32 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       decision.kind === "switch"
         ? `Switched to account ${decision.account}${decision.model === null ? "" : ` (${decision.model})`}`
         : decision.reason;
+    const sendAt = decision.kind === "wait" ? decision.sendAt : undefined;
     if (decision.account !== fromName) {
       await applyAccount(projectId, accountOrDefault(decision.account), from);
-      const record = {
+      await recordMove(
+        {
+          at: now,
+          threadId: event.threadId,
+          projectId,
+          from: fromName,
+          to: decision.account,
+          reason,
+        },
+        sendAt,
+      );
+    } else {
+      // A wait on this same account is still the project's latest move: a
+      // leftover thread follows it (waits for the same reset) instead of
+      // being retried at once on an account just found blocked.
+      recentSwitches.set(projectId, {
         at: now,
-        threadId: event.threadId,
-        projectId,
-        from: fromName,
         to: decision.account,
-        reason,
-      } satisfies SwitchRecord;
-      try {
-        await bb.storage.kv.set(KV_LAST_SWITCH, record);
-      } catch (error) {
-        bb.log.warn(
-          `could not record the switch: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
+        threadId: event.threadId,
+        sendAt,
+        graced: new Set(),
+      });
     }
-    // A switch or a wait, on another account or on this one, is the
-    // project's latest move: a leftover thread follows it (retry now, or
-    // wait for the same reset) instead of being retried at once on an
-    // account just found blocked.
-    recentSwitches.set(projectId, {
-      at: now,
-      to: decision.account,
-      threadId: event.threadId,
-      sendAt: decision.kind === "wait" ? decision.sendAt : undefined,
-      graced: new Set(),
-    });
     if (decision.kind === "wait") {
       bb.log.info(
         `thread ${event.threadId}: ${reason} until ${new Date(decision.sendAt).toISOString()}`,
@@ -653,17 +805,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return;
     }
     const thread = await bb.sdk.threads.get({ threadId: event.threadId });
-    const projectId = thread.projectId;
-    const previous = projectQueue.get(projectId) ?? Promise.resolve();
-    const run = previous
-      .catch(() => undefined)
-      .then(() => handleFailure(event, projectId));
-    projectQueue.set(projectId, run);
-    try {
-      await run;
-    } finally {
-      if (projectQueue.get(projectId) === run) projectQueue.delete(projectId);
+    const skipped = notTheUsersClaudeThread(thread);
+    if (skipped !== null) {
+      bb.log.debug(`thread ${event.threadId}: ignored (${skipped})`);
+      return;
     }
+    await inProjectQueue(thread.projectId, () =>
+      handleFailure(event, thread.projectId),
+    );
   });
 
   // ---- Periodic refresh -------------------------------------------------

@@ -4,6 +4,7 @@ import type { PluginTurnFailedEvent } from "@get-bb/plugin-sdk";
 import type { AccountUsage } from "./policy.js";
 import {
   declineReason,
+  decidePlacement,
   decideSwitch,
   settle,
   type SwitchInput,
@@ -340,5 +341,134 @@ describe("decideSwitch", () => {
     );
     expect(declineReason(failure({ attemptNumber: ATTEMPTS - 1 }))).toBeNull();
     expect(declineReason(failure())).toBeNull();
+  });
+});
+
+describe("decidePlacement", () => {
+  const fable = (usedPercent: number) => ({
+    Fable: { usedPercent, resetsAt: NOW + 4 * HOUR },
+  });
+
+  it("puts a new project on the best account for the preferred model, even when the default could still run", () => {
+    const accounts = [
+      account("main", { session: { usedPercent: 30, resetsAt: NOW + HOUR } }),
+      account("spare", { models: fable(100) }),
+      account("work", { session: { usedPercent: 5, resetsAt: NOW + HOUR } }),
+    ];
+    expect(
+      decidePlacement({
+        currentAccount: "main",
+        isNew: true,
+        accounts,
+        preferredModel: "Fable",
+        now: NOW,
+      }),
+    ).toEqual({ kind: "move", account: "work", why: "new-project" });
+  });
+
+  it("leaves a new project where it is when that is already the best account", () => {
+    expect(
+      decidePlacement({
+        currentAccount: "main",
+        isNew: true,
+        accounts: [
+          account("main", { session: { usedPercent: 1, resetsAt: NOW + HOUR } }),
+          account("work"),
+        ],
+        preferredModel: "",
+        now: NOW,
+      }),
+    ).toEqual({ kind: "keep" });
+  });
+
+  it("never moves a known project whose account can still run the preferred model, whatever ranks better", () => {
+    expect(
+      decidePlacement({
+        currentAccount: "main",
+        isNew: false,
+        accounts: [
+          account("main", { session: { usedPercent: 90, resetsAt: NOW + HOUR }, models: fable(99) }),
+          account("work", { session: { usedPercent: 0, resetsAt: NOW + HOUR } }),
+        ],
+        preferredModel: "Fable",
+        now: NOW,
+      }),
+    ).toEqual({ kind: "keep" });
+  });
+
+  it("moves a known project off an account measured unable to run the preferred model, before the turn", () => {
+    expect(
+      decidePlacement({
+        currentAccount: "main",
+        isNew: false,
+        accounts: [
+          account("main", { models: fable(100) }),
+          account("spare", { models: fable(100) }),
+          account("work", { models: fable(40) }),
+        ],
+        preferredModel: "Fable",
+        now: NOW,
+      }),
+    ).toEqual({ kind: "move", account: "work", why: "current-blocked" });
+    expect(
+      decidePlacement({
+        currentAccount: "main",
+        isNew: false,
+        accounts: [
+          account("main", { weekly: { usedPercent: 100, resetsAt: NOW + 3 * 24 * HOUR } }),
+          account("work"),
+        ],
+        preferredModel: "",
+        now: NOW,
+      }),
+    ).toEqual({ kind: "move", account: "work", why: "current-blocked" });
+  });
+
+  it("keeps the project when its block already reset, when its account was never measured, or when no other account can run", () => {
+    const reset = account("main", {
+      session: { usedPercent: 100, resetsAt: NOW - 1 },
+    });
+    expect(
+      decidePlacement({
+        currentAccount: "main",
+        isNew: false,
+        accounts: [reset, account("work")],
+        preferredModel: "",
+        now: NOW,
+      }),
+    ).toEqual({ kind: "keep" });
+    expect(
+      decidePlacement({
+        currentAccount: "main",
+        isNew: false,
+        accounts: [account("work")],
+        preferredModel: "",
+        now: NOW,
+      }),
+    ).toEqual({ kind: "keep" });
+    expect(
+      decidePlacement({
+        currentAccount: "main",
+        isNew: false,
+        accounts: [
+          account("main", { models: fable(100) }),
+          account("work", { models: fable(100) }),
+        ],
+        preferredModel: "Fable",
+        now: NOW,
+      }),
+    ).toEqual({ kind: "keep" });
+    expect(
+      decidePlacement({
+        currentAccount: "main",
+        isNew: true,
+        accounts: [
+          account("main", { models: fable(100) }),
+          account("work", { models: fable(100) }),
+        ],
+        preferredModel: "Fable",
+        now: NOW,
+      }),
+    ).toEqual({ kind: "keep" });
   });
 });
