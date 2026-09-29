@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { rpcContract, State } from "./server";
-import { noLoginFound } from "./src/ui";
+import { noLoginFound, projectLabel } from "./src/ui";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
 import { cn } from "@/lib/utils";
@@ -337,7 +337,9 @@ function AccountsSection() {
       </div>
       {state.lastSwitch === null ? null : (
         <p className="text-xs text-muted-foreground">
-          Last automatic switch: {state.lastSwitch.from} →{" "}
+          Last automatic switch
+          {projectLabel(state.projects, state.lastSwitch.projectId)}:{" "}
+          {state.lastSwitch.from} →{" "}
           {state.lastSwitch.to}, {new Date(state.lastSwitch.at).toLocaleString()}
           . {state.lastSwitch.reason}.
         </p>

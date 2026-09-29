@@ -285,14 +285,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       await bb.storage.kv.set(KV_INSTALLED_AT, deps.now());
       installedAt = deps.now();
     }
-    const list = z
-      .array(z.string())
-      .safeParse(await bb.storage.kv.get<unknown>(KV_HANDLED_PROJECTS));
+    const raw = await bb.storage.kv.get<unknown>(KV_HANDLED_PROJECTS);
+    const list = z.array(z.string()).safeParse(raw);
     if (list.success) for (const id of list.data) handled.add(id);
+    else if (raw !== undefined && raw !== null)
+      bb.log.warn(
+        "the list of projects already placed is unreadable; starting it again",
+      );
   } catch (error) {
     installedAt = null;
     bb.log.warn(
-      `could not read when the plugin was installed; new projects will not be placed: ${error instanceof Error ? error.message : String(error)}`,
+      `could not read the plugin's storage; new projects will not be placed: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
   /** Writes in order, so a slow write never overwrites a later, longer list. */
@@ -381,7 +384,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
 
   async function state(): Promise<State> {
     if (accounts.length === 0) await discover();
-    const projects = await bb.sdk.projects.list();
+    // The personal project too: a variable set there must be visible and releasable.
+    const projects = await bb.sdk.projects.list({ includePersonal: true });
     return {
       accounts: accounts.map((account) => {
         const m = collector.get(account.name);
@@ -683,23 +687,39 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     await discover();
     const from = await projectAccount(projectId);
     if (from.external) {
+      bb.log.info(
+        `thread ${thread.id}: not placed (the project's CLAUDE_CONFIG_DIR was not set by this plugin)`,
+      );
       await markHandled(projectId);
       return;
     }
-    const maxAgeMs = 2 * Math.max(1, current.refreshMinutes) * 60_000;
-    let measured = collector.usable(maxAgeMs, current.preferredModel);
-    if (measured.length === 0) {
-      await refreshAll();
-      measured = collector.usable(maxAgeMs, current.preferredModel);
-    }
-    // Nothing to decide on: the project stays new for its next thread.
-    if (measured.length === 0) return;
-    const now = deps.now();
     let isNew = false;
     if (installedAt !== null && !handled.has(projectId) && !from.owned) {
       const project = await bb.sdk.projects.get({ projectId });
       isNew = project.createdAt > installedAt;
+      bb.log.debug(
+        `thread ${thread.id}: project created at ${project.createdAt}, plugin installed at ${installedAt}: ${isNew ? "new" : "not new"}`,
+      );
     }
+    const maxAgeMs = 2 * Math.max(1, current.refreshMinutes) * 60_000;
+    let measured = collector.usable(maxAgeMs, current.preferredModel);
+    // A new project is placed once: measure every account first, not only
+    // those the startup refresh has reached.
+    if (
+      measured.length === 0 ||
+      (isNew && measured.length < accounts.length)
+    ) {
+      await refreshAll();
+      measured = collector.usable(maxAgeMs, current.preferredModel);
+    }
+    if (measured.length === 0) {
+      // Nothing to decide on: the project stays new for its next thread.
+      bb.log.info(
+        `thread ${thread.id}: not placed (no account could be measured)`,
+      );
+      return;
+    }
+    const now = deps.now();
     const fromName = from.account ?? current.defaultAccountName;
     const decision = decidePlacement({
       currentAccount: fromName,
@@ -709,6 +729,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       now,
     });
     if (decision.kind === "keep") {
+      bb.log.info(
+        `thread ${thread.id}: project left on account ${fromName} (${isNew ? "the best account for a new project" : "its account can run"})`,
+      );
       await markHandled(projectId);
       return;
     }

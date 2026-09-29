@@ -39,6 +39,17 @@ describe("parseUsage", () => {
     const partial = { ...payload, limits: payload.limits.filter((l) => l.kind !== "weekly_all") };
     expect(parseUsage(partial).blocked).toBe(true);
     expect(parseUsage(partial).weekly).toEqual({ usedPercent: 100, resetsAt: null });
+    expect(parseUsage(partial).unknown).toBe(true);
+  });
+
+  it("takes a reported lock as proof even when a window is missing", () => {
+    const lockedPartial = {
+      ...payload,
+      limits: payload.limits.filter((l) => l.kind !== "weekly_all"),
+      five_hour: { ...payload.five_hour, locked_reason: "abuse" },
+    };
+    expect(parseUsage(lockedPartial).blocked).toBe(true);
+    expect(parseUsage(lockedPartial).unknown).toBeUndefined();
   });
 
   it("keeps the fullest window when a model is listed twice (also in another case)", () => {

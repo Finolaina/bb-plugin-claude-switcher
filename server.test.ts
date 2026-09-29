@@ -348,9 +348,13 @@ async function host(
         },
       },
       projects: {
-        list: async () => [
+        // Like bb: the personal project ("Don't work in a project") only on request.
+        list: async (args?: { includePersonal?: boolean }) => [
           { id: "proj-1", name: "Website" },
           { id: "proj-2", name: "Other" },
+          ...(args?.includePersonal === true
+            ? [{ id: "personal", name: "Personal" }]
+            : []),
         ],
         machineEnvironment: async ({ projectId }: { projectId: string }) =>
           envList(projectId),
@@ -504,6 +508,8 @@ describe("claude accounts plugin", () => {
     expect(state.projects).toEqual([
       { id: "proj-1", name: "Website", account: null, owned: false, external: false },
       { id: "proj-2", name: "Other", account: null, owned: false, external: false },
+      // Listed so a variable the plugin sets there can be seen and released.
+      { id: "personal", name: "Personal", account: null, owned: false, external: false },
     ]);
     expect(h.usageCalls).toEqual(["main", "spare", "work"]);
   });
@@ -1293,6 +1299,7 @@ describe("claude accounts plugin", () => {
     expect(state.projects).toEqual([
       { id: "proj-1", name: "Website", account: "spare", owned: true, external: false },
       { id: "proj-2", name: "Other", account: null, owned: false, external: true },
+      { id: "personal", name: "Personal", account: null, owned: false, external: false },
     ]);
     const { errors } = await h.harness.behavior.emitThreadEvent(
       "turn.failed",
@@ -2077,5 +2084,72 @@ describe("accounts added on disk", () => {
       `${ACCOUNTS}/work`,
       `${ACCOUNTS}/default`,
     ]);
+  });
+});
+
+describe("placement: the cases the second review found", () => {
+  const FABLE = { settings: { preferredModel: "Fable" } };
+  const created = (id: string, projectId: string) => ({
+    thread: thread({ id, projectId }),
+  });
+
+  it("measures the accounts it has not measured yet before deciding where a new project goes", async () => {
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, 40, 100)),
+        spare: () => Response.json(payload(10, 60, 20)),
+        work: () => Response.json(payload(5, 20, 30)),
+      },
+      FABLE,
+    );
+    dispose = () => h.harness.dispose();
+    // Only `main` measured (the startup refresh is still going).
+    await h.harness.behavior.callRpc(usageListMethod, {});
+    await h.harness.behavior.callRpc(usageFetchMethod, {
+      resourceId: "main",
+      refresh: true,
+    });
+    await h.harness.behavior.emitThreadEvent("thread.created", created("thr-new", "proj-3"));
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+  });
+
+  it("moves a project once when its thread's creation and first failure arrive together", async () => {
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, 40, 100)),
+        spare: () => Response.json(payload(10, 60, 20)),
+        work: () => Response.json(payload(5, 20, 30)),
+      },
+      { ...FABLE, threads: { "thr-a": { projectId: "proj-3" } } },
+    );
+    dispose = () => h.harness.dispose();
+    await Promise.all([
+      h.harness.behavior.emitThreadEvent("thread.created", created("thr-a", "proj-3")),
+      h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "thr-a" })),
+    ]);
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    expect(h.retries).toEqual([
+      { threadId: "thr-a", turnRequestId: "creq_1", reason: "Retrying on account work" },
+    ]);
+  });
+
+  it("leaves a new project it kept where it is at its next thread, even when another account has become better", async () => {
+    let mainSession = 1;
+    const h = await host(
+      {
+        main: () => Response.json(payload(mainSession, 10, 0)),
+        spare: () => Response.json(payload(10, 60, 20)),
+        work: () => Response.json(payload(5, 20, 30)),
+      },
+      FABLE,
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("thread.created", created("thr-1", "proj-3"));
+    expect(h.envSet).toEqual([]);
+    // `main` is busier now, but it still works: the project stays.
+    mainSession = 50;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent("thread.created", created("thr-2", "proj-3"));
+    expect(h.envSet).toEqual([]);
   });
 });
