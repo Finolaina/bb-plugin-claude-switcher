@@ -70,19 +70,19 @@ export function accountFromNote(note: string | null): string | null {
 const KV_LAST_SWITCH = "last-switch";
 /** A thread as bb reports it (the SDK does not export the type by name). */
 type ThreadResponse = PluginThreadEventPayloads["thread.created"]["thread"];
-/** Ids of the projects this plugin has seen; any other project is new. */
-const KV_KNOWN_PROJECTS = "known-projects";
+/** When this plugin first ran: a project created later is new. */
+const KV_INSTALLED_AT = "installed-at";
+/** New projects already placed, kept, or pinned by the user: no longer new. */
+const KV_HANDLED_PROJECTS = "handled-projects";
 
 /**
- * A thread of another plugin (a hidden worker, a summary) or of another
- * provider: moving the whole project for it would surprise the user.
+ * A thread of another plugin (a hidden worker, a summary): moving the whole
+ * project for it would surprise the user, and its owner decides about it.
  */
-function notTheUsersClaudeThread(thread: ThreadResponse): string | null {
+function notTheUsersThread(thread: ThreadResponse): string | null {
   if (thread.visibility === "hidden") return "hidden thread";
-  if (thread.originPluginId !== null)
+  if (typeof thread.originPluginId === "string")
     return `thread opened by plugin ${thread.originPluginId}`;
-  if (thread.providerId !== CLAUDE_CODE_PROVIDER)
-    return `provider ${thread.providerId}`;
   return null;
 }
 
@@ -226,7 +226,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       next.accountsDir !== current.accountsDir ||
       next.defaultAccountName !== current.defaultAccountName;
     current = next;
-    // Found again on next use: an account of the old directory must not be picked.
+    // Found again (and stale measurements pruned) on next use: an account of
+    // the old directory must not be picked.
     if (moved) accounts = [];
   });
 
@@ -241,8 +242,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     {
       at: number;
       to: string;
-      /** The thread whose failure caused it: its next failure is on the new account. */
-      threadId: string;
+      /**
+       * The thread whose failure caused it: its next failure is on the new
+       * account. Null for a placement: the placing thread's first turn may
+       * have started on the old account, so it gets the grace retry too.
+       */
+      threadId: string | null;
       /** Set when it was a wait: leftovers wait for the same reset. */
       sendAt: number | undefined;
       /** Threads already given their one grace retry. */
@@ -266,35 +271,45 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
 
   /**
-   * The projects that existed when this plugin first ran are known, so only a
-   * project created later counts as new. Null when that list could not be
-   * stored: then every project counts as known and none is moved for being new.
+   * A project is new when bb created it after this plugin first ran and it
+   * was never placed, kept or pinned since. Null when the install time cannot
+   * be read or stored: then no project is moved for being new.
    */
-  let knownProjects: Set<string> | null = null;
+  let installedAt: number | null = null;
+  const handled = new Set<string>();
   try {
-    const stored = await bb.storage.kv.get<string[]>(KV_KNOWN_PROJECTS);
-    if (stored === undefined || stored === null) {
-      const ids = (await bb.sdk.projects.list()).map((p) => p.id);
-      await bb.storage.kv.set(KV_KNOWN_PROJECTS, ids);
-      knownProjects = new Set(ids);
+    const stored = await bb.storage.kv.get<unknown>(KV_INSTALLED_AT);
+    if (typeof stored === "number") {
+      installedAt = stored;
     } else {
-      knownProjects = new Set(stored);
+      await bb.storage.kv.set(KV_INSTALLED_AT, deps.now());
+      installedAt = deps.now();
     }
+    const list = z
+      .array(z.string())
+      .safeParse(await bb.storage.kv.get<unknown>(KV_HANDLED_PROJECTS));
+    if (list.success) for (const id of list.data) handled.add(id);
   } catch (error) {
+    installedAt = null;
     bb.log.warn(
-      `could not load the known projects; new projects will not be placed: ${error instanceof Error ? error.message : String(error)}`,
+      `could not read when the plugin was installed; new projects will not be placed: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  async function markKnown(projectId: string): Promise<void> {
-    if (knownProjects === null || knownProjects.has(projectId)) return;
-    knownProjects.add(projectId);
-    try {
-      await bb.storage.kv.set(KV_KNOWN_PROJECTS, [...knownProjects]);
-    } catch (error) {
-      bb.log.warn(
-        `could not record project ${projectId} as known: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+  /** Writes in order, so a slow write never overwrites a later, longer list. */
+  let handledWrites: Promise<void> = Promise.resolve();
+  function markHandled(projectId: string): Promise<void> {
+    if (handled.has(projectId)) return handledWrites;
+    handled.add(projectId);
+    handledWrites = handledWrites.then(async () => {
+      try {
+        await bb.storage.kv.set(KV_HANDLED_PROJECTS, [...handled]);
+      } catch (error) {
+        bb.log.warn(
+          `could not record project ${projectId} as handled: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    });
+    return handledWrites;
   }
 
   async function discover(): Promise<Account[]> {
@@ -303,12 +318,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       defaultAccountName: current.defaultAccountName,
       warn: (message) => bb.log.warn(message),
     });
+    // A measurement of an account that is gone must never be chosen.
+    collector.prune(accounts);
     return accounts;
   }
 
   async function refreshAll(): Promise<void> {
     const found = await discover();
-    collector.prune(found);
     await collector.collectAll(found);
     bb.realtime.publish(CHANGED, { at: deps.now() });
   }
@@ -449,12 +465,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return state();
     },
     async project_set_account({ projectId, account }) {
-      if (accounts.length === 0) await discover();
+      // Always: an account directory added since the last discovery is pickable.
+      await discover();
       await applyAccount(
         projectId,
         account === null ? null : findAccount(account),
         await projectAccount(projectId),
       );
+      await markHandled(projectId);
       return state();
     },
   });
@@ -619,12 +637,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
   }
 
-  /** Record a move as the project's latest: shown in Settings, and leftover turns follow it. */
-  async function recordMove(record: SwitchRecord, sendAt?: number) {
+  /**
+   * Record a move as the project's latest: shown in Settings, and leftover
+   * turns follow it. `cause` is the thread whose failure caused the move
+   * (null for a placement, which no failure caused).
+   */
+  async function recordMove(
+    record: SwitchRecord,
+    cause: string | null,
+    sendAt?: number,
+  ) {
     recentSwitches.set(record.projectId, {
       at: record.at,
       to: record.to,
-      threadId: record.threadId,
+      threadId: cause,
       sendAt,
       graced: new Set(),
     });
@@ -637,62 +663,96 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
   }
 
+  /** Same variable state: nobody moved the project while we were deciding. */
+  function sameAccount(a: ProjectAccount, b: ProjectAccount): boolean {
+    return (
+      a.account === b.account && a.owned === b.owned && a.external === b.external
+    );
+  }
+
   // ---- Placement before a new thread's first turn ----------------------
   /**
    * Races the thread's first turn, on purpose: nothing here waits on the
-   * network unless no account was ever measured. When the turn starts first,
-   * it runs where the project was and the failure path below catches it.
+   * network unless no account has a usable measurement. When the turn starts
+   * first, it runs where the project was, and its failure gets the grace
+   * retry on the new account (see recordMove).
    */
   async function placeProject(thread: ThreadResponse): Promise<void> {
     const projectId = thread.projectId;
-    const now = deps.now();
+    // Always: picks up a changed accounts directory and prunes its measurements.
+    await discover();
+    const from = await projectAccount(projectId);
+    if (from.external) {
+      await markHandled(projectId);
+      return;
+    }
     const maxAgeMs = 2 * Math.max(1, current.refreshMinutes) * 60_000;
-    if (accounts.length === 0) await discover();
     let measured = collector.usable(maxAgeMs, current.preferredModel);
     if (measured.length === 0) {
       await refreshAll();
       measured = collector.usable(maxAgeMs, current.preferredModel);
     }
-    const from = await projectAccount(projectId);
-    if (from.external) {
-      await markKnown(projectId);
-      return;
+    // Nothing to decide on: the project stays new for its next thread.
+    if (measured.length === 0) return;
+    const now = deps.now();
+    let isNew = false;
+    if (installedAt !== null && !handled.has(projectId) && !from.owned) {
+      const project = await bb.sdk.projects.get({ projectId });
+      isNew = project.createdAt > installedAt;
     }
     const fromName = from.account ?? current.defaultAccountName;
     const decision = decidePlacement({
       currentAccount: fromName,
-      isNew:
-        knownProjects !== null &&
-        !knownProjects.has(projectId) &&
-        !from.owned,
+      isNew,
       accounts: measured,
       preferredModel: current.preferredModel,
       now,
     });
-    await markKnown(projectId);
-    if (decision.kind === "keep") return;
-    await applyAccount(projectId, accountOrDefault(decision.account), from);
-    const model = current.preferredModel === "" ? "" : ` (${current.preferredModel})`;
+    if (decision.kind === "keep") {
+      await markHandled(projectId);
+      return;
+    }
+    const latest = await projectAccount(projectId);
+    if (!sameAccount(from, latest)) {
+      bb.log.info(
+        `thread ${thread.id}: not placed (the project's account changed meanwhile)`,
+      );
+      await markHandled(projectId);
+      return;
+    }
+    await applyAccount(projectId, accountOrDefault(decision.account), latest);
+    await markHandled(projectId);
     const reason =
       decision.why === "new-project"
-        ? `New project placed on account ${decision.account}${model}`
-        : `Moved to account ${decision.account} before the turn: ${fromName} cannot run${current.preferredModel === "" ? "" : ` ${current.preferredModel}`}`;
+        ? `New project placed on account ${decision.account}${current.preferredModel === "" ? "" : ` (${current.preferredModel})`}`
+        : `Moved to account ${decision.account} before the turn: ${fromName} ${current.preferredModel === "" ? "is out of usage" : `cannot run ${current.preferredModel}`}`;
     bb.log.info(`thread ${thread.id}: ${reason}`);
-    await recordMove({
-      at: now,
-      threadId: thread.id,
-      projectId,
-      from: fromName,
-      to: decision.account,
-      reason,
-    });
+    await recordMove(
+      {
+        at: now,
+        threadId: thread.id,
+        projectId,
+        from: fromName,
+        to: decision.account,
+        reason,
+      },
+      null,
+    );
   }
 
   bb.events.on("thread.created", async ({ thread }) => {
-    if (!current.autoSwitch) return;
-    const skipped = notTheUsersClaudeThread(thread);
+    const skipped =
+      notTheUsersThread(thread) ??
+      (thread.providerId === CLAUDE_CODE_PROVIDER
+        ? null
+        : `provider ${thread.providerId}`);
     if (skipped !== null) {
       bb.log.debug(`thread ${thread.id}: not placed (${skipped})`);
+      return;
+    }
+    if (!current.autoSwitch) {
+      // Created while the user manages accounts by hand: not new later on.
+      await markHandled(thread.projectId);
       return;
     }
     await inProjectQueue(thread.projectId, () => placeProject(thread));
@@ -771,6 +831,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           to: decision.account,
           reason,
         },
+        event.threadId,
         sendAt,
       );
     } else {
@@ -805,7 +866,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return;
     }
     const thread = await bb.sdk.threads.get({ threadId: event.threadId });
-    const skipped = notTheUsersClaudeThread(thread);
+    const skipped = notTheUsersThread(thread);
     if (skipped !== null) {
       bb.log.debug(`thread ${event.threadId}: ignored (${skipped})`);
       return;
@@ -901,6 +962,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             },
           ] as const,
           async run({ positionals }) {
+            await discover();
             const s = await state();
             const matches = s.projects.filter(
               (p) =>
@@ -925,6 +987,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
               accountOrDefault(name),
               await projectAccount(project.id),
             );
+            await markHandled(project.id);
             return { exitCode: 0, stdout: `${project.name} → ${name}\n` };
           },
         }),

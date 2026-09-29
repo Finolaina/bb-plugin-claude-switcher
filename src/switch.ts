@@ -177,9 +177,9 @@ export interface PlacementInput {
  * Where a project should run before a new thread's first turn. A new project
  * goes to the best account (the same choice a switch makes); a known one is
  * moved only when its account is MEASURED unable to run, so a project the user
- * pinned by hand stays put while it works. An unmeasured account, or no other
- * account able to run, keeps the project: the failure path then decides,
- * exactly as before this check existed.
+ * pinned by hand stays put while it works. An unmeasured account (or one whose
+ * answer lacked a window), or no other account able to run, keeps the
+ * project: the failure path then decides, exactly as before this check existed.
  */
 export function decidePlacement(input: PlacementInput): PlacementDecision {
   const accounts = input.accounts.map((a) => settle(a, input.now));
@@ -193,6 +193,7 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   const current = accounts.find((a) => a.name === input.currentAccount);
   if (
     current === undefined ||
+    current.unknown === true ||
     (isUsable(current) && canRunModel(current, input.preferredModel))
   )
     return { kind: "keep" };

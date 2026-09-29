@@ -16,6 +16,8 @@ export interface AccountUsage {
   name: string;
   /** The provider reported a lock (locked_reason) or the data is unusable. */
   blocked: boolean;
+  /** Set when a session or weekly window was missing from the answer: `blocked` then means "unknown", not "out". */
+  unknown?: true;
   session: UsageWindow;
   weekly: UsageWindow;
   /** Per-model weekly windows keyed by display name ("Fable", "Opus"...). */

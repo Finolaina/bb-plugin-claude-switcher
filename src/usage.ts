@@ -88,6 +88,7 @@ export function parseUsage(payload: unknown): ParsedUsage {
     (parsed.data.seven_day?.locked_reason ?? null) !== null;
   return {
     blocked: locked || session === null || weekly === null,
+    ...(session === null || weekly === null ? { unknown: true as const } : {}),
     session: session ?? UNKNOWN,
     weekly: weekly ?? UNKNOWN,
     models,

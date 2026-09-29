@@ -424,6 +424,35 @@ describe("decidePlacement", () => {
     ).toEqual({ kind: "move", account: "work", why: "current-blocked" });
   });
 
+  it("keeps a known project whose account answered without a session or weekly window: unknown is not out", () => {
+    expect(
+      decidePlacement({
+        currentAccount: "main",
+        isNew: false,
+        accounts: [
+          account("main", {
+            blocked: true,
+            unknown: true,
+            session: { usedPercent: 100, resetsAt: null },
+          }),
+          account("work"),
+        ],
+        preferredModel: "",
+        now: NOW,
+      }),
+    ).toEqual({ kind: "keep" });
+    // A lock the provider reported is evidence: that one moves.
+    expect(
+      decidePlacement({
+        currentAccount: "main",
+        isNew: false,
+        accounts: [account("main", { blocked: true }), account("work")],
+        preferredModel: "",
+        now: NOW,
+      }),
+    ).toEqual({ kind: "move", account: "work", why: "current-blocked" });
+  });
+
   it("keeps the project when its block already reset, when its account was never measured, or when no other account can run", () => {
     const reset = account("main", {
       session: { usedPercent: 100, resetsAt: NOW - 1 },

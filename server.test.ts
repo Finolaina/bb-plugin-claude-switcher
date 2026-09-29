@@ -227,6 +227,12 @@ interface HostOptions {
   threads?: Record<string, Partial<ThreadResponse>>;
   /** Plugin storage answers every read with this error while the plugin loads. */
   kvReadError?: string;
+  /** Values already in plugin storage when the plugin loads. */
+  kvPreset?: Record<string, unknown>;
+  /** When each project was created; default: proj-1 and proj-2 a day before NOW, any other just after. */
+  projectCreatedAt?: Record<string, number>;
+  /** setMachineEnvironmentVariable throws for these projects. */
+  failSet?: string[];
 }
 
 async function host(
@@ -348,7 +354,19 @@ async function host(
         ],
         machineEnvironment: async ({ projectId }: { projectId: string }) =>
           envList(projectId),
+        get: async ({ projectId }: { projectId: string }) => ({
+          id: projectId,
+          name: projectId,
+          createdAt:
+            options.projectCreatedAt?.[projectId] ??
+            (projectId === "proj-1" || projectId === "proj-2"
+              ? NOW - 24 * HOUR
+              : NOW + 1_000),
+        }),
         setMachineEnvironmentVariable: async (args: EnvCall) => {
+          if (options.failSet?.includes(args.projectId)) {
+            throw new Error(`HTTP 503: could not set on ${args.projectId}`);
+          }
           envSet.push(args);
           env.set(args.projectId, [
             ...(env.get(args.projectId) ?? []).filter(
@@ -377,6 +395,8 @@ async function host(
       },
     },
   });
+  for (const [key, value] of Object.entries(options.kvPreset ?? {}))
+    await fake.bb.storage.kv.set(key, value);
   const kvGet = fake.bb.storage.kv.get;
   if (options.kvReadError !== undefined) {
     fake.bb.storage.kv.get = async () => {
@@ -1803,5 +1823,259 @@ describe("changing the accounts directory", () => {
     const out = await h.harness.behavior.runCli(["use", "Website", "spare"]);
     expect(out.exitCode).toBe(0);
     expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+  });
+});
+
+describe("placement: the cases the first review found", () => {
+  const OUT = {
+    main: () => Response.json(payload(10, 40, 100)),
+    spare: () => Response.json(payload(10, 60, 20)),
+    work: () => Response.json(payload(5, 20, 30)),
+  };
+  const FABLE = { settings: { preferredModel: "Fable" } };
+  const created = (id: string, projectId: string, extra: Partial<ThreadResponse> = {}) => ({
+    thread: thread({ id, projectId, ...extra }),
+  });
+
+  it("retries the placing thread's own first failure on the new account once, instead of judging the new account as the one that failed", async () => {
+    const h = await host(OUT, FABLE);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("thread.created", created("thr-a", "proj-1"));
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    // Its first turn had already started on `main` and fails there.
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ threadId: "thr-a" }),
+    );
+    expect(h.retries).toEqual([
+      { threadId: "thr-a", turnRequestId: "creq_1", reason: "Retrying on account work" },
+    ]);
+    expect(h.envSet).toHaveLength(1);
+  });
+
+  it("does not take a usage answer with a missing window as proof that a project's account is out", async () => {
+    const h = await host(
+      {
+        main: () =>
+          Response.json({
+            limits: [
+              {
+                kind: "weekly_all",
+                percent: 10,
+                resets_at: new Date(NOW + 3 * 24 * HOUR).toISOString(),
+              },
+            ],
+            five_hour: { locked_reason: null },
+            seven_day: { locked_reason: null },
+          }),
+        spare: () => Response.json(payload(10, 60, 20)),
+        work: () => Response.json(payload(5, 20, 30)),
+      },
+      FABLE,
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("thread.created", created("thr-a", "proj-1"));
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("after the accounts directory changes, never places on an account of the old directory", async () => {
+    const h = await host(OUT, FABLE);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.setSettings({ accountsDir: "/Users/someone/elsewhere" });
+    const { errors } = await h.harness.behavior.emitThreadEvent(
+      "thread.created",
+      created("thr-new", "proj-3"),
+    );
+    expect(errors).toEqual([]);
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("keeps a new project new when it could not be placed, and places it at its next thread", async () => {
+    // `main` still works, so only being new can move proj-3.
+    const failSet = ["proj-3"];
+    const failing = await host(
+      {
+        main: () => Response.json(payload(1, 10, 0)),
+        spare: () => Response.json(payload(10, 60, 20)),
+        work: () => Response.json(payload(0, 20, 30)),
+      },
+      { ...FABLE, failSet },
+    );
+    const first = await failing.harness.behavior.emitThreadEvent(
+      "thread.created",
+      created("thr-1", "proj-3"),
+    );
+    expect(first.errors).toHaveLength(1);
+    expect(failing.envSet).toEqual([]);
+    failSet.length = 0;
+    await failing.harness.behavior.emitThreadEvent("thread.created", created("thr-2", "proj-3"));
+    expect(failing.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    failing.harness.dispose();
+
+    let down = true;
+    const h = await host(
+      {
+        main: () => (down ? new Response("down", { status: 503 }) : Response.json(payload(1, 10, 0))),
+        spare: () => (down ? new Response("down", { status: 503 }) : Response.json(payload(10, 60, 20))),
+        work: () => (down ? new Response("down", { status: 503 }) : Response.json(payload(0, 20, 30))),
+      },
+      FABLE,
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("thread.created", created("thr-1", "proj-3"));
+    expect(h.envSet).toEqual([]);
+    down = false;
+    await h.harness.behavior.emitThreadEvent("thread.created", created("thr-2", "proj-3"));
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+  });
+
+  it("never moves a new project the user already pinned by hand, the default account included", async () => {
+    const h = await host(OUT, {
+      settings: { preferredModel: "" },
+      projectCreatedAt: { "proj-1": NOW + 1_000 },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-1",
+      account: null,
+    });
+    await h.harness.behavior.emitThreadEvent("thread.created", created("thr-a", "proj-1"));
+    expect(h.envSet).toEqual([]);
+    const cli = await host(OUT, {
+      settings: { preferredModel: "" },
+      projectCreatedAt: { "proj-1": NOW + 1_000 },
+    });
+    await cli.harness.behavior.runCli(["use", "Website", "default"]);
+    await cli.harness.behavior.emitThreadEvent("thread.created", created("thr-a", "proj-1"));
+    expect(cli.envSet).toEqual([]);
+    cli.harness.dispose();
+  });
+
+  it("does not treat a project that got a thread while automatic switching was off as new once it is on", async () => {
+    const h = await host(
+      {
+        main: () => Response.json(payload(1, 10, 0)),
+        spare: () => Response.json(payload(10, 60, 20)),
+        work: () => Response.json(payload(0, 20, 30)),
+      },
+      { settings: { preferredModel: "Fable", autoSwitch: false } },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("thread.created", created("thr-1", "proj-3"));
+    await h.harness.behavior.setSettings({ autoSwitch: true });
+    await h.harness.behavior.emitThreadEvent("thread.created", created("thr-2", "proj-3"));
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("treats every project created before the plugin was first installed as known, and survives garbage in storage", async () => {
+    const h = await host(OUT, {
+      ...FABLE,
+      kvPreset: { "installed-at": NOW - HOUR, "handled-projects": { "proj-4": true } },
+      projectCreatedAt: { "proj-3": NOW - 2 * HOUR, "proj-4": NOW - 1 },
+    });
+    dispose = () => h.harness.dispose();
+    // Created before install and its account works: stays.
+    await h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-1",
+      account: "spare",
+    });
+    const before = h.envSet.length;
+    await h.harness.behavior.emitThreadEvent("thread.created", created("thr-3", "proj-3", {}));
+    // proj-3 is on main (out of Fable): moved as a blocked known project, not as new.
+    expect(h.envSet.slice(before).map((e) => e.projectId)).toEqual(["proj-3"]);
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.lastSwitch?.reason).toMatch(/before the turn/);
+    // Created after install (NOW - HOUR): new.
+    await h.harness.behavior.emitThreadEvent("thread.created", created("thr-4", "proj-4"));
+    const after = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(after.lastSwitch?.reason).toBe("New project placed on account work (Fable)");
+  });
+
+  it("treats a project already on an account this plugin set as placed, even if the storage forgot it", async () => {
+    const h = await host(
+      {
+        main: () => Response.json(payload(1, 10, 0)),
+        spare: () => Response.json(payload(10, 60, 20)),
+        work: () => Response.json(payload(0, 20, 30)),
+      },
+      {
+        ...FABLE,
+        presetEnv: {
+          "proj-3": [{ name: ENV_VAR, note: ownNote("spare"), secret: true, value: null }],
+        },
+      },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("thread.created", created("thr-new", "proj-3"));
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("does not overwrite an account the user picked while the plugin was deciding", async () => {
+    const h = await host(OUT, FABLE);
+    dispose = () => h.harness.dispose();
+    let reads = 0;
+    h.harness.sdk.stub("projects.machineEnvironment", async () => ({
+      builtInGit: { status: "disabled" as const, statusMessage: "" },
+      inheritedVariables: [],
+      variables:
+        reads++ === 0
+          ? []
+          : [{ name: ENV_VAR, note: ownNote("spare"), secret: true as const, value: null }],
+    }));
+    await h.harness.behavior.emitThreadEvent("thread.created", created("thr-new", "proj-3"));
+    expect(h.envSet).toEqual([]);
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.lastSwitch).toBeNull();
+  });
+
+  it("says why it moved a project when no preferred model is set", async () => {
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      {},
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("thread.created", created("thr-a", "proj-1"));
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.lastSwitch?.reason).toBe(
+      "Moved to account work before the turn: main is out of usage",
+    );
+  });
+
+  it("still acts when bb leaves out a thread's origin, and on a failed turn whatever provider id the thread row carries", async () => {
+    const h = await host(OUT, {
+      ...FABLE,
+      threads: { "thread-1": { providerId: "claude-code-v2", originPluginId: undefined } },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("thread.created", created("thr-a", "proj-3", { originPluginId: undefined }));
+    expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-3"]);
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-3", "proj-1"]);
+  });
+});
+
+describe("accounts added on disk", () => {
+  it("lets `use` and the picker pick an account directory created after the last discovery, without a refresh", async () => {
+    const dirs = ["spare"];
+    const h = await host(ALL_FREE, { dirs: () => dirs });
+    dispose = () => h.harness.dispose();
+    const before = await h.harness.behavior.runCli(["list"]);
+    expect(before.stdout).not.toMatch(/work/);
+    dirs.push("work");
+    expect((await h.harness.behavior.runCli(["use", "Website", "work"])).exitCode).toBe(0);
+    dirs.push("default");
+    await h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-2",
+      account: "default",
+    });
+    expect(h.envSet.map((e) => e.value)).toEqual([
+      `${ACCOUNTS}/work`,
+      `${ACCOUNTS}/default`,
+    ]);
   });
 });
