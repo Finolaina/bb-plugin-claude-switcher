@@ -9,7 +9,8 @@ project uses [Semantic Versioning](https://semver.org/).
 ### Added
 
 - New projects go to the best account. When a thread of a project created
-  after the plugin was installed is created, the project moves to the
+  after the plugin first ran (for an update from 0.2.1, after the first
+  start of 0.2.2) is created, the project moves to the
   account the switch policy would choose (the preferred model included)
   instead of staying on the default account. A project the user already
   pinned, the default account included, is left alone.
@@ -34,8 +35,12 @@ project uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- Development dependencies: plugin SDK 0.5.31, better-sqlite3 13, hono
-  4.13.11.
+- The personal project ("Don't work in a project") is listed in Settings
+  and by `list`, and `release` removes a variable the plugin set there.
+- Every placement decision, including leaving a project where it was, is
+  logged with its reason.
+- Development dependencies: better-sqlite3 13, hono 4.13.11; the plugin
+  SDK stays pinned to bb's own (0.5.29), now checked in CI.
 
 ## [0.2.1] - 2026-09-29
 

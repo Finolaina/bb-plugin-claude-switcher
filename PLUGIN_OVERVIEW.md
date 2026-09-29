@@ -1,8 +1,9 @@
 Run Claude Code in bb with more than one subscription and spend less time
 watching the limits. This plugin treats `~/.claude` and every subdirectory
 of your accounts directory that holds a Claude Code login as an account,
-measures each one, and moves a project to another account the moment a
-turn fails on a subscription limit.
+measures each one, starts new projects on the best one, and moves a
+project to another account the moment a turn fails on a subscription
+limit.
 
 ## What you get
 
@@ -14,7 +15,7 @@ turn fails on a subscription limit.
   once. When no account is free, it moves the project to the account that
   frees first and queues the retry for that reset (up to a wait you set).
 - **A good start for new projects.** When a thread is created, a project
-  created after the plugin was installed moves to the best account instead
+  created after the plugin first ran moves to the best account instead
   of the default one, and a project whose account is already out moves to
   another. If the thread's first turn wins the race and fails on the old
   account, it is retried once on the new one.

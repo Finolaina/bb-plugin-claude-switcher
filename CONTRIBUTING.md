@@ -27,14 +27,14 @@ bb plugin reload claude-switcher   # after each rebuild
 
 | Path                 | What lives there                                                       |
 | -------------------- | ---------------------------------------------------------------------- |
-| `server.ts`          | Plugin entry: settings, usage source, `turn.failed` handler, CLI, RPC. |
+| `server.ts`          | Plugin entry: settings, usage source, thread and failure handlers, CLI, RPC. |
 | `app.tsx`            | The **Claude Switcher** section in Settings.                           |
 | `src/accounts.ts`    | Account discovery from the config directories.                         |
 | `src/credentials.ts` | Reading and refreshing each login's OAuth token.                       |
 | `src/usage.ts`       | Parsing the usage endpoint's response.                                 |
 | `src/collector.ts`   | Background measurements and which accounts the policy may consider.    |
 | `src/policy.ts`      | Account ranking: the pure choice rules.                                |
-| `src/switch.ts`      | Switch, wait or decline for a failed turn.                             |
+| `src/switch.ts`      | Switch, wait or decline for a failed turn; placement at thread creation. |
 | `src/usage-source.ts` | Shapes each account for the Provider usage panel. |
 | `src/usage-source-contract.ts` | The Provider usage panel's RPC contract, copied from bb. |
 | `src/node-io.ts` | Real file system, keychain and network adapters. |

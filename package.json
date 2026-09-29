@@ -2,7 +2,7 @@
   "name": "bb-plugin-claude-switcher",
   "version": "0.2.2",
   "type": "module",
-  "description": "See every Claude Code account's usage windows in bb and switch a project to another account when a turn hits a subscription limit.",
+  "description": "See every Claude Code account's usage windows in bb, start new projects on the best account and switch a project to another account when a turn hits a subscription limit.",
   "license": "MIT",
   "author": {
     "name": "Aitor Mariscal",
@@ -33,7 +33,7 @@
   },
   "bb": {
     "name": "Claude Switcher",
-    "description": "See every Claude Code account in one usage panel and move a project to a free account when a turn hits a subscription limit.",
+    "description": "See every Claude Code account in one usage panel, start new projects on the best account and move a project to a free account when a turn hits a subscription limit.",
     "branding": {
       "icon": "./assets/icon.svg"
     },
@@ -52,7 +52,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@get-bb/plugin-sdk": "0.5.31",
+    "@get-bb/plugin-sdk": "0.5.29",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^26.6.3",
     "@types/react": "^19.3.0",

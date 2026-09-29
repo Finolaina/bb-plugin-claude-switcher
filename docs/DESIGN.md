@@ -22,7 +22,9 @@ the project to an account that could run the turn now.
 The plugin does exactly that, and nothing more: it measures every login
 that already exists on the machine, and when a turn fails on a Claude Code
 subscription window it points the project at a login that can run it, or
-waits for the one that frees first.
+waits for the one that frees first. So that a new project does not start
+on a login that is already out, it also places projects when a thread is
+created (below).
 
 ## Pieces
 
@@ -222,6 +224,15 @@ The refresh token rotates on every refresh, so the plugin:
 - **Projects created while the plugin was disabled** count as new when it
   comes back, and move to the best account at their next thread unless
   they were pinned. Turning only `autoSwitch` off does not do this.
+- **The install time is the first start of a version with placement.**
+  After an update from 0.2.1, projects created before the first start of
+  0.2.2 never count as new; the measured-block rule still applies to them.
+- **A placement that loses the race to a turn that succeeds** moves the
+  thread's next turns to the new account, which needs shared transcripts
+  like any switch.
+- **The personal project** ("Don't work in a project") is placed like any
+  other, and is listed in Settings and by `list` and `release` so its
+  variable can be seen and removed.
 - **A hand-pinned project on an account out of the preferred model** is
   moved when a thread is created, even if that thread will run another
   model: bb does not tell the plugin a thread's model at creation.

@@ -206,8 +206,10 @@ MCP servers added with `claude mcp add -s user` live in each directory's
 again per account, or use a project-level `.mcp.json`. Without shared
 transcripts, the retry of the failed turn itself fails with "No
 conversation found", no thread can move between accounts in either
-direction, and a thread that starts on a fresh account runs without your
-settings, hooks and `CLAUDE.md`.
+direction (a thread whose project is placed on another account right
+after its first turn fails the same way at its second), and a thread that
+starts on a fresh account runs without your settings, hooks and
+`CLAUDE.md`.
 
 ## Where to find it
 
@@ -239,12 +241,18 @@ flowchart TD
   F -- no --> H[Decline: leave the turn as it failed]
 ```
 
-- **When a thread is created.** A project created after the plugin was
-  installed goes to the best account, and a project whose account is
-  already measured out moves to another one. This races the thread's first
-  turn: if the turn starts first on the old account and fails, it is
-  retried once on the new account. A project you pinned by hand (the
-  default account included) stays put while its account works.
+- **When a thread is created.** A project created after the plugin first
+  ran (for an update from 0.2.1, after the first start of 0.2.2) goes to
+  the best account, and a project whose account is already measured out
+  moves to another one. This races the thread's first turn: if the turn
+  starts first on the old account and fails, it is retried once on the
+  new account; if it succeeds there, the thread's next turns run on the
+  new account, which needs the shared transcripts described in
+  [Setting up extra accounts](#setting-up-extra-accounts). A project you
+  pinned by hand (the default account included) stays put while its
+  account works.
+- **Only your own threads.** Hidden threads and threads another plugin
+  opened are left alone, both when they are created and when they fail.
 - **Per project, not per thread.** The switch sets `CLAUDE_CONFIG_DIR` on
   the thread's project, so the project's next turns run on the new account
   too. A retry keeps the thread's model: the plugin changes which account
@@ -353,7 +361,8 @@ The plugin uses only public surfaces of the bb plugin SDK:
 - 🛑 **Knows when to stop.** Limits that are not Claude Code
   subscription-window limits are left to bb, a turn is tried at most five
   times, and a wait longer than your maximum is declined.
-- 📝 **Everything is logged.** Every switch, wait and decline is written to
+- 📝 **Everything is logged.** Every switch, wait and decline, and every
+  placement or reason for leaving a project where it was, is written to
   `bb plugin logs claude-switcher` with its reason.
 
 <details>
@@ -426,8 +435,9 @@ appear at the next refresh.
 <summary><b>Update, turn off and uninstall</b></summary>
 
 `bb plugin update claude-switcher` installs the newest release the range
-you installed with allows (`bb plugin outdated` previews it); `^0.2.0`
-stays below 0.3.0. bb refuses to reinstall an installed plugin with
+you installed with allows (`bb plugin outdated` previews it); `^0.2.2`
+stays below 0.3.0. After an update from 0.2.1, only projects created after
+the first start of 0.2.2 count as new. bb refuses to reinstall an installed plugin with
 another source, so moving to 0.3 or later means noting your settings,
 running `bb plugin remove claude-switcher` (which deletes them) and
 installing again with the new range. The project variables it set stay in
@@ -475,6 +485,12 @@ Coming from `claude-accounts` 0.1.x? See the upgrade note in
   its reason. Limits that are not Claude Code subscription-window limits
   and turns already on their fifth attempt are logged at debug level
   only, and nothing is logged while `autoSwitch` is off.
+- **A new project did not move to the best account.** Read
+  `bb plugin logs claude-switcher`: each thread creation logs where the
+  project was left and why. Projects created before the plugin first ran,
+  pinned in Settings or with `use`, or given a thread while `autoSwitch`
+  was off are not new. Hidden threads, threads opened by another plugin
+  and threads of other providers are logged at debug level only.
 
 ## Disclaimer
 
