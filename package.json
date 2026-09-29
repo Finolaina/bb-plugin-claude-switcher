@@ -1,6 +1,6 @@
 {
-  "name": "bb-plugin-claude-accounts",
-  "version": "0.1.0",
+  "name": "bb-plugin-claude-switcher",
+  "version": "0.2.0",
   "type": "module",
   "description": "See every Claude Code account's usage windows in bb and switch a project to another account when a turn hits a subscription limit.",
   "license": "MIT",
@@ -8,13 +8,13 @@
     "name": "Aitor Mariscal",
     "github": "Finolaina"
   },
-  "homepage": "https://github.com/Finolaina/bb-plugin-claude-accounts#readme",
+  "homepage": "https://github.com/Finolaina/bb-plugin-claude-switcher#readme",
   "bugs": {
-    "url": "https://github.com/Finolaina/bb-plugin-claude-accounts/issues"
+    "url": "https://github.com/Finolaina/bb-plugin-claude-switcher/issues"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/Finolaina/bb-plugin-claude-accounts"
+    "url": "https://github.com/Finolaina/bb-plugin-claude-switcher"
   },
   "keywords": [
     "bb-plugin",
@@ -32,7 +32,7 @@
     "bbPluginSdk": ">=0.5.29"
   },
   "bb": {
-    "name": "Claude accounts",
+    "name": "Claude Switcher",
     "description": "See every Claude Code account in one usage panel and move a project to a free account when a turn hits a subscription limit.",
     "branding": {
       "icon": "Repeat"

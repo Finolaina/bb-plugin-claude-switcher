@@ -1,6 +1,6 @@
-# Claude accounts for bb
+# Claude Switcher for bb
 
-[![check](https://github.com/Finolaina/bb-plugin-claude-accounts/actions/workflows/check.yml/badge.svg)](https://github.com/Finolaina/bb-plugin-claude-accounts/actions/workflows/check.yml)
+[![check](https://github.com/Finolaina/bb-plugin-claude-switcher/actions/workflows/check.yml/badge.svg)](https://github.com/Finolaina/bb-plugin-claude-switcher/actions/workflows/check.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![bb](https://img.shields.io/badge/bb-%E2%89%A5%200.44-black.svg)](https://github.com/get-bb/bb)
 [![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)](#requirements)
@@ -45,13 +45,13 @@ you less often.
   reset, within a maximum wait you choose.
 - **A preferred model.** Name one (for example `Fable`) and only accounts
   that can still run it are chosen.
-- **Manual control.** A **Claude accounts** section in Settings with a
+- **Manual control.** A **Claude Switcher** section in Settings with a
   per-project account picker and a refresh button, and a
-  `bb claude-accounts` CLI.
+  `bb claude-switcher` CLI.
 - **Plays well with bb.** It cooperates with bb's bundled provider-retry
   plugin and never touches a `CLAUDE_CONFIG_DIR` it did not set.
 
-![The Claude accounts section in Settings: usage per account, the account each project runs on, and the last automatic switch](docs/screenshots/settings.png)
+![The Claude Switcher section in Settings: usage per account, the account each project runs on, and the last automatic switch](docs/screenshots/settings.png)
 
 ## How it works
 
@@ -88,10 +88,10 @@ The plugin uses only public surfaces of the bb plugin SDK:
 | Project machine environment variables                            | Sets `CLAUDE_CONFIG_DIR` on the project, with a note naming the account.                   |
 | `threads.retry` and queued messages                              | Retries the failed turn now, or at a reset, and reuses the retry provider-retry queued.    |
 | Settings and a settings section                                  | The six settings below, plus the per-project picker and the account cards.                 |
-| CLI registration                                                 | `bb claude-accounts list`, `refresh`, `use` and `release`.                                 |
+| CLI registration                                                 | `bb claude-switcher list`, `refresh`, `use` and `release`.                                 |
 | Background service, key-value storage, realtime signals, logging | Periodic usage refresh, the last automatic switch, live updates of the section, and a log. |
 
-Every switch, wait and decline is written to `bb plugin logs claude-accounts`.
+Every switch, wait and decline is written to `bb plugin logs claude-switcher`.
 
 ### Interaction with bb's provider-retry
 
@@ -118,26 +118,26 @@ for other providers.
 ## Installation
 
 From the bb plugin catalog, once listed: open **Plugins → Browse
-plugins**, find **Claude accounts** and install it, or run
-`bb plugin install claude-accounts`.
+plugins**, find **Claude Switcher** and install it, or run
+`bb plugin install claude-switcher`.
 
 From this repository:
 
 ```sh
-bb plugin install git:https://github.com/Finolaina/bb-plugin-claude-accounts@^0.1.0
+bb plugin install git:https://github.com/Finolaina/bb-plugin-claude-switcher@^0.2.0
 ```
 
 From a checkout:
 
 ```sh
-git clone https://github.com/Finolaina/bb-plugin-claude-accounts.git
-cd bb-plugin-claude-accounts
+git clone https://github.com/Finolaina/bb-plugin-claude-switcher.git
+cd bb-plugin-claude-switcher
 npm install          # dependencies the settings section imports
 bb plugin install .  # bb builds the plugin at install time
 ```
 
-Then open **Settings → Claude accounts** (or run
-`bb plugin config claude-accounts`).
+Then open **Settings → Claude Switcher** (or run
+`bb plugin config claude-switcher`).
 
 ## Setting up extra accounts
 
@@ -229,8 +229,8 @@ and up to 30 s of jitter, like bb's own provider-retry plugin; both stop
 after 5 attempts. The reasons this plugin writes are
 `Switched to account <name>[ (<model>)]`, `Waiting for [<model> on ]<name>`
 and `Retrying on account <name>`. Every one goes to
-`bb plugin logs claude-accounts`; the one that moved the project is also
-in **Settings → Claude accounts** ("Last automatic switch"); the reason
+`bb plugin logs claude-switcher`; the one that moved the project is also
+in **Settings → Claude Switcher** ("Last automatic switch"); the reason
 stored with a retry this plugin created is shown wherever bb shows a
 retry's reason.
 
@@ -252,10 +252,10 @@ allowed, and the project then runs on it as soon as you log in there.
 ## CLI
 
 ```sh
-bb claude-accounts list [--json]          # windows per account, account per project
-bb claude-accounts refresh [--json]       # query the usage endpoint now
-bb claude-accounts use <project> <account | default>   # project id, or its name when unique
-bb claude-accounts release                # remove every CLAUDE_CONFIG_DIR this plugin set
+bb claude-switcher list [--json]          # windows per account, account per project
+bb claude-switcher refresh [--json]       # query the usage endpoint now
+bb claude-switcher use <project> <account | default>   # project id, or its name when unique
+bb claude-switcher release                # remove every CLAUDE_CONFIG_DIR this plugin set
 ```
 
 `default` means the default account unless a subdirectory is actually
@@ -263,22 +263,22 @@ named `default`; the default account's own name always works.
 
 ## Update and uninstall
 
-`bb plugin update claude-accounts` installs the newest release the range
-you installed with allows (`bb plugin outdated` previews it); `^0.1.0`
-stays below 0.2.0. bb refuses to reinstall an installed plugin with
-another source, so moving to 0.2 or later means noting your settings,
-running `bb plugin remove claude-accounts` (which deletes them) and
+`bb plugin update claude-switcher` installs the newest release the range
+you installed with allows (`bb plugin outdated` previews it); `^0.2.0`
+stays below 0.3.0. bb refuses to reinstall an installed plugin with
+another source, so moving to 0.3 or later means noting your settings,
+running `bb plugin remove claude-switcher` (which deletes them) and
 installing again with `@^0.2.0`. The project variables it set stay in
 place and the reinstalled plugin recognises them by their note.
 
 Removing or disabling the plugin does not remove the `CLAUDE_CONFIG_DIR`
 variables it set on projects: they keep pointing at the account
 directories. Turn `autoSwitch` off (or the next limit would set one
-again), run `bb claude-accounts release` (projects return to the default
+again), run `bb claude-switcher release` (projects return to the default
 account; external variables are left alone; a project it could not
 release is reported and the command exits 1), then
-`bb plugin remove claude-accounts`. Any left behind can be found by the
-note `Claude Code account "<name>" (set by the Claude accounts plugin)` in
+`bb plugin remove claude-switcher`. Any left behind can be found by the
+note `Claude Code account "<name>" (set by the Claude Switcher plugin)` in
 a project's machine environment.
 
 ## Troubleshooting
@@ -295,7 +295,7 @@ a project's machine environment.
   the global one) to let the plugin manage the project.
 - **Nothing happens when a limit is hit.** Check that `autoSwitch` is on,
   that the thread runs on the same machine as bb's server, and read
-  `bb plugin logs claude-accounts`: every declined switch is logged with
+  `bb plugin logs claude-switcher`: every declined switch is logged with
   its reason. Limits that are not Claude Code subscription-window limits
   and turns already on their fifth attempt are logged at debug level
   only, and nothing is logged while `autoSwitch` is off.

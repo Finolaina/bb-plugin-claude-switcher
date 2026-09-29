@@ -1,4 +1,4 @@
-// Claude accounts — bb plugin frontend.
+// Claude Switcher — bb plugin frontend.
 //
 // One Settings section: every Claude Code account with its usage windows,
 // which account each project runs on (with a picker to change it), and the
@@ -348,8 +348,8 @@ function AccountsSection() {
 
 export default definePluginApp((app) => {
   app.slots.settingsSection({
-    id: "claude-accounts",
-    title: "Claude accounts",
+    id: "claude-switcher",
+    title: "Claude Switcher",
     description:
       "Every Claude Code account on this machine, its usage windows, and which account each project uses.",
     component: AccountsSection,

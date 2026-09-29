@@ -26,13 +26,13 @@ body:
     id: logs
     attributes:
       label: Plugin log
-      description: The relevant lines of `bb plugin logs claude-accounts`.
+      description: The relevant lines of `bb plugin logs claude-switcher`.
       render: text
   - type: input
     id: versions
     attributes:
       label: Versions
-      placeholder: "bb 0.44.0, plugin 0.1.0, Claude Code 2.1.x"
+      placeholder: "bb 0.44.0, plugin 0.2.0, Claude Code 2.1.x"
     validations:
       required: true
   - type: dropdown

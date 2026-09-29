@@ -249,7 +249,7 @@ async function host(
     options.dirs ?? (() => ["spare", "work"]),
   );
   const fake = createFakePluginHost({
-    pluginId: "claude-accounts",
+    pluginId: "claude-switcher",
     settings: {
       accountsDir: ACCOUNTS,
       defaultAccountName: "main",
@@ -391,7 +391,7 @@ const ALL_FREE = {
 };
 
 function ownNote(name: string) {
-  return `Claude Code account "${name}" (set by the Claude accounts plugin)`;
+  return `Claude Code account "${name}" (set by the Claude Switcher plugin)`;
 }
 
 let dispose: (() => void) | null = null;
@@ -431,7 +431,7 @@ describe("claude accounts plugin", () => {
     expect(h.harness.registrations.services.map((s) => s.name)).toEqual([
       "usage-refresh",
     ]);
-    expect(h.harness.registrations.cli?.name).toBe("claude-accounts");
+    expect(h.harness.registrations.cli?.name).toBe("claude-switcher");
   });
 
   it("lists every account with its windows after a refresh, and each project's account", async () => {

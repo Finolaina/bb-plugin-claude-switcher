@@ -15,7 +15,7 @@ turn fails on a subscription limit.
   frees first and queues the retry for that reset (up to a wait you set).
 - **A picker per project.** In Settings, choose which account each project
   runs with, or let the plugin manage it. The CLI does the same:
-  `bb claude-accounts use PROJECT ACCOUNT`.
+  `bb claude-switcher use PROJECT ACCOUNT`.
 
 ## How the choice is made
 
@@ -34,7 +34,7 @@ machine environment variable, so threads that run on another host do not
 follow it. Each account directory must share the session transcripts
 (`projects/`, symlinked from `~/.claude`) and normally the settings, hooks
 and `CLAUDE.md` too, or a thread cannot continue on the new account; the
-[README](https://github.com/Finolaina/bb-plugin-claude-accounts#setting-up-extra-accounts)
+[README](https://github.com/Finolaina/bb-plugin-claude-switcher#setting-up-extra-accounts)
 shows the setup.
 
 ## How it works
@@ -65,4 +65,4 @@ tokens, so Anthropic could regard this plugin as outside its terms. It is
 an independent, MIT-licensed project, not affiliated with Anthropic; use it
 at your own risk.
 Full details, setup and troubleshooting are in the
-[README](https://github.com/Finolaina/bb-plugin-claude-accounts#readme).
+[README](https://github.com/Finolaina/bb-plugin-claude-switcher#readme).

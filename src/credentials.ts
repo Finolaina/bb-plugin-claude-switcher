@@ -22,7 +22,7 @@ export const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 export const OAUTH_BETA = "oauth-2025-04-20";
 export const KEYCHAIN_SERVICE = "Claude Code-credentials";
 const CREDENTIALS_FILE = ".credentials.json";
-const USER_AGENT = "bb-plugin-claude-accounts/0.1 (claude-code multi-account)";
+const USER_AGENT = "bb-plugin-claude-switcher/0.2 (claude-code multi-account)";
 const TIMEOUT_MS = 20_000;
 
 export interface CredentialIo {

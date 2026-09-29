@@ -1,4 +1,4 @@
-// Claude accounts — bb plugin backend.
+// Claude Switcher — bb plugin backend.
 //
 // Three jobs:
 //   1. Measure every Claude Code account on this machine (one config dir
@@ -43,7 +43,7 @@ export const CHANGED = "accounts-changed";
 export const SWITCH_GRACE_MS = 60_000;
 /** Note written next to CLAUDE_CONFIG_DIR; the account name is read back from it (values are secret). */
 const NOTE_PREFIX = 'Claude Code account "';
-const NOTE_SUFFIX = '" (set by the Claude accounts plugin)';
+const NOTE_SUFFIX = '" (set by the Claude Switcher plugin)';
 export function noteFor(name: string): string {
   return `${NOTE_PREFIX}${name}${NOTE_SUFFIX}`;
 }
@@ -705,7 +705,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
   bb.cli.register(
     defineCli({
-      name: "claude-accounts",
+      name: "claude-switcher",
       summary:
         "Claude Code accounts: usage windows and which account each project uses",
       commands: {

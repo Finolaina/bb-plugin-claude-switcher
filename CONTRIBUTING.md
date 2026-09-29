@@ -5,7 +5,7 @@ Thanks for helping. Bug reports, fixes and ideas are all welcome.
 ## Before you start
 
 - For a bug, open an issue with the bb version, the plugin version, your
-  platform and the relevant lines of `bb plugin logs claude-accounts`.
+  platform and the relevant lines of `bb plugin logs claude-switcher`.
   Remove emails, account names and paths you do not want to share.
 - For a larger change, open an issue first so we can agree on the approach.
 
@@ -14,13 +14,13 @@ Thanks for helping. Bug reports, fixes and ideas are all welcome.
 You need Node.js 24, npm and the `bb` CLI (bb 0.44 or later).
 
 ```sh
-git clone https://github.com/Finolaina/bb-plugin-claude-accounts.git
-cd bb-plugin-claude-accounts
+git clone https://github.com/Finolaina/bb-plugin-claude-switcher.git
+cd bb-plugin-claude-switcher
 npm install
 npm run check          # typecheck + lint + tests
 npm run build          # bb plugin build → dist/
 bb plugin install .    # load it into the running bb
-bb plugin reload claude-accounts   # after each rebuild
+bb plugin reload claude-switcher   # after each rebuild
 ```
 
 ## Project layout
@@ -28,7 +28,7 @@ bb plugin reload claude-accounts   # after each rebuild
 | Path                 | What lives there                                                       |
 | -------------------- | ---------------------------------------------------------------------- |
 | `server.ts`          | Plugin entry: settings, usage source, `turn.failed` handler, CLI, RPC. |
-| `app.tsx`            | The **Claude accounts** section in Settings.                           |
+| `app.tsx`            | The **Claude Switcher** section in Settings.                           |
 | `src/accounts.ts`    | Account discovery from the config directories.                         |
 | `src/credentials.ts` | Reading and refreshing each login's OAuth token.                       |
 | `src/usage.ts`       | Parsing the usage endpoint's response.                                 |

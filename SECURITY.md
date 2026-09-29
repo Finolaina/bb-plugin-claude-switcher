@@ -8,7 +8,7 @@ Only the latest release receives fixes.
 
 Please do not open a public issue for a security problem. Use GitHub's
 private reporting instead: **Security → Report a vulnerability** on
-[this repository](https://github.com/Finolaina/bb-plugin-claude-accounts/security/advisories/new).
+[this repository](https://github.com/Finolaina/bb-plugin-claude-switcher/security/advisories/new).
 
 Include the plugin and bb versions, your platform, and the steps to
 reproduce. Never include real tokens, credentials files or keychain
