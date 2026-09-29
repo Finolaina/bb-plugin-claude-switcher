@@ -472,15 +472,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       const toName = to?.name ?? current.defaultAccountName;
       if (toName === fromName) return;
       // A turn already running on the old account fails there after the
-      // pick: like after a switch, it runs again once on the picked account,
-      // when that account is measured able to run. Otherwise it is judged.
-      const pickRuns =
-        bestAccount(
-          measuredAccounts().filter((a) => a.name === toName),
-          current.preferredModel,
-          deps.now(),
-        ) === toName;
-      if (pickRuns)
+      // pick: like after a switch, it runs again once on the picked account.
+      // The pick is the user's, so it holds unless the account is MEASURED
+      // unable to run any model (not measured yet, an incomplete answer, or
+      // no preferred model left all keep it); its own failure is judged.
+      const known = measuredAccounts().find((a) => a.name === toName);
+      const pickOut =
+        known !== undefined &&
+        known.unknown !== true &&
+        bestAccount([known], "", deps.now()) !== toName;
+      if (!pickOut)
         recentSwitches.set(projectId, {
           at: deps.now(),
           to: toName,
@@ -1073,7 +1074,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                 lines.push(`${p.name}\tleft alone (external CLAUDE_CONFIG_DIR)`);
               } else if (p.owned) {
                 try {
-                  await applyAccount(p.id, null, await projectAccount(p.id));
+                  await inProjectQueue(p.id, async () => {
+                    await applyAccount(p.id, null, await projectAccount(p.id));
+                    recentSwitches.delete(p.id);
+                  });
                   lines.push(`${p.name}\treleased (was ${p.account ?? "a vanished account"})`);
                 } catch (error) {
                   failed += 1;

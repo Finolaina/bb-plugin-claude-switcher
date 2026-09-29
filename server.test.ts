@@ -1265,6 +1265,8 @@ describe("claude accounts plugin", () => {
       work: () => Response.json(payload(100, 1)),
     });
     dispose = () => h.harness.dispose();
+    // Measured first: a pick of an account measured out gets no grace.
+    await h.harness.behavior.callRpc("accounts_refresh", null);
     await h.harness.behavior.callRpc("project_set_account", {
       projectId: "proj-1",
       account: "spare",
@@ -2286,6 +2288,43 @@ describe("the account shown in each thread's header", () => {
     dispose = () => h.harness.dispose();
     await h.harness.behavior.callRpc("accounts_refresh", null);
     await h.harness.behavior.runCli(["use", "proj-1", "work"]);
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    expect(h.retries[0]?.reason).toBe("Retrying on account work");
+  });
+
+  it("keeps a hand pick of an account not measured yet when a turn left on the old account fails", async () => {
+    const h = await host({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      // An answer without windows: nothing known about work yet.
+      work: () =>
+        Response.json({
+          limits: [],
+          five_hour: { locked_reason: null },
+          seven_day: { locked_reason: null },
+        }),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "work" });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    expect(h.retries[0]?.reason).toBe("Retrying on account work");
+  });
+
+  it("keeps a hand pick of an account that runs, though not the preferred model", async () => {
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 40, 100)),
+        spare: () => Response.json(payload(10, 60, 20)),
+        work: () => Response.json(payload(5, 20, 100)),
+      },
+      { settings: { preferredModel: "Fable" } },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "work" });
     await h.harness.behavior.emitThreadEvent("turn.failed", failure());
     expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
     expect(h.retries[0]?.reason).toBe("Retrying on account work");
