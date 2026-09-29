@@ -2277,6 +2277,20 @@ describe("the account shown in each thread's header", () => {
     expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`, `${ACCOUNTS}/spare`]);
   });
 
+  it("gives the same grace to a pick made with the CLI's use", async () => {
+    const h = await host({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => Response.json(payload(5, 20)),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.runCli(["use", "proj-1", "work"]);
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    expect(h.retries[0]?.reason).toBe("Retrying on account work");
+  });
+
   it("gives no grace to a hand pick of an account that is out, so its failure is judged", async () => {
     const h = await host({
       main: () => Response.json(payload(100, 40)),
