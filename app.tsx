@@ -383,12 +383,14 @@ const TONE_DOT: Record<Tone, string> = {
   tight: "bg-warning",
   out: "bg-destructive",
   unknown: "bg-muted-foreground",
+  nologin: "bg-destructive",
 };
 const TONE_TEXT: Record<Tone, string> = {
   ok: "has room",
   tight: "running low",
   out: "out of usage",
   unknown: "not measured",
+  nologin: "not logged in",
 };
 
 /** "session 10% · weekly 40% · Fable 100%" for the account menu. */

@@ -31,6 +31,7 @@ interface HeaderInput {
   bestAccount: string | null;
   accounts: ReadonlyArray<{
     name: string;
+    problem?: { kind: string } | null;
     usage: {
       blocked: boolean;
       /** A window was missing from the answer: `blocked` means "unknown", not "out". */
@@ -64,7 +65,7 @@ export function headerStatus(
   now: number,
 ): {
   account: string | null;
-  tone: "ok" | "tight" | "out" | "unknown";
+  tone: "ok" | "tight" | "out" | "unknown" | "nologin";
   best: string | null;
   canSwitch: boolean;
   external: boolean;
@@ -76,8 +77,8 @@ export function headerStatus(
       ? project.account
       : state.defaultAccountName;
   // The numbers the plugin acts on, even when a later query failed.
-  const usage =
-    state.accounts.find((a) => a.name === account)?.usage ?? null;
+  const entry = state.accounts.find((a) => a.name === account);
+  const usage = entry?.usage ?? null;
   const model = Object.entries(usage?.models ?? {}).find(
     ([name]) =>
       state.preferredModel !== "" &&
@@ -90,7 +91,9 @@ export function headerStatus(
           (w) => windowPercent(w, now),
         );
   const tone =
-    account === null || usage === null || usage.unknown === true
+    entry?.problem?.kind === "unauthenticated"
+      ? "nologin"
+      : account === null || usage === null || usage.unknown === true
       ? "unknown"
       : usage.blocked || used.some((u) => u >= 100)
         ? "out"

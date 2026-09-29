@@ -97,6 +97,14 @@ describe("headerStatus", () => {
     expect(tone({ ...usage(0, 100, 0, true), unknown: true })).toBe("unknown");
   });
 
+  it("says so when the project's account has no login", () => {
+    const loggedOut = {
+      ...base,
+      accounts: [{ name: "main", usage: null, problem: { kind: "unauthenticated" } }],
+    };
+    expect(headerStatus(loggedOut, "p-default", NOW)?.tone).toBe("nologin");
+  });
+
   it("keeps showing the numbers the plugin acts on when the last query failed", () => {
     const failed = (u: Usage) => ({
       ...base,
