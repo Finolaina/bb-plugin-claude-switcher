@@ -486,14 +486,36 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return state();
     },
     async project_set_account({ projectId, account }) {
-      // Always: an account directory added since the last discovery is pickable.
-      await discover();
-      await applyAccount(
-        projectId,
-        account === null ? null : findAccount(account),
-        await projectAccount(projectId),
-      );
-      await markHandled(projectId);
+      // In the project's queue: never interleaved with a failure or a placement.
+      await inProjectQueue(projectId, async () => {
+        // Always: an account directory added since the last discovery is pickable.
+        await discover();
+        const from = await projectAccount(projectId);
+        const to = account === null ? null : findAccount(account);
+        await applyAccount(projectId, to, from);
+        await markHandled(projectId);
+        const fromName = from.account ?? current.defaultAccountName;
+        const toName = to?.name ?? current.defaultAccountName;
+        if (toName === fromName) return;
+        // A turn already running on the old account fails there after the
+        // pick: like after a switch, it runs again once on the picked account,
+        // when that account is measured able to run. Otherwise it is judged.
+        const pickRuns =
+          bestAccount(
+            measuredAccounts().filter((a) => a.name === toName),
+            current.preferredModel,
+            deps.now(),
+          ) === toName;
+        if (pickRuns)
+          recentSwitches.set(projectId, {
+            at: deps.now(),
+            to: toName,
+            threadId: null,
+            sendAt: undefined,
+            graced: new Set(),
+          });
+        else recentSwitches.delete(projectId);
+      });
       return state();
     },
   });

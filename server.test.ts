@@ -2194,7 +2194,10 @@ describe("placement: the cases the third review found", () => {
         account: null,
       }),
     ]);
-    expect(h.envSet).toEqual([]);
+    // The pick waits for the placement in the project's queue and lands
+    // last: whatever the placement wrote, the pick removes it.
+    expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-3"]);
+    expect(h.envDeleted).toEqual([{ projectId: "proj-3", name: ENV_VAR }]);
   });
 
   it("still moves a project it already kept once its account is measured out", async () => {
@@ -2252,6 +2255,39 @@ describe("the account shown in each thread's header", () => {
     dispose = () => h.harness.dispose();
     const state = (await h.harness.behavior.callRpc("accounts_refresh", null)) as State;
     expect(state.bestAccount).toBeNull();
+  });
+
+  it("keeps a hand pick of a working account when a turn left on the old account fails", async () => {
+    const h = await host({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => Response.json(payload(5, 20)),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "work" });
+    // A turn of the project was already running on main: it fails a moment later.
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    expect(h.retries.map((r) => [r.reason, r.sendAt])).toEqual([
+      ["Retrying on account work", undefined],
+    ]);
+    // Once per thread: its next failure is judged on work.
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure({ requestId: "creq_2" }));
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`, `${ACCOUNTS}/spare`]);
+  });
+
+  it("gives no grace to a hand pick of an account that is out, so its failure is judged", async () => {
+    const h = await host({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(100, 60)),
+      work: () => Response.json(payload(5, 20)),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "spare" });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.retries[0]?.reason).toBe("Switched to account work");
   });
 
   it("tells the header when an answer lacked a window, so it is not shown as out", async () => {
