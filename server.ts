@@ -107,6 +107,8 @@ const accountStateSchema = z.object({
   usage: z
     .object({
       blocked: z.boolean(),
+      /** A window was missing from the answer: `blocked` means "unknown", not "out". */
+      unknown: z.boolean().optional(),
       session: windowSchema,
       weekly: windowSchema,
       models: z.record(z.string(), windowSchema),

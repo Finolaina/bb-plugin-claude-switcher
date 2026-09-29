@@ -2253,4 +2253,31 @@ describe("the account shown in each thread's header", () => {
     const state = (await h.harness.behavior.callRpc("accounts_refresh", null)) as State;
     expect(state.bestAccount).toBeNull();
   });
+
+  it("tells the header when an answer lacked a window, so it is not shown as out", async () => {
+    const h = await host(
+      {
+        main: () =>
+          Response.json({
+            limits: [
+              {
+                kind: "weekly_all",
+                percent: 10,
+                resets_at: new Date(NOW + 3 * 24 * HOUR).toISOString(),
+              },
+            ],
+            five_hour: { locked_reason: null },
+            seven_day: { locked_reason: null },
+          }),
+        spare: () => Response.json(payload(10, 60, 20)),
+        work: () => Response.json(payload(5, 20, 30)),
+      },
+      { settings: { preferredModel: "Fable" } },
+    );
+    dispose = () => h.harness.dispose();
+    const state = (await h.harness.behavior.callRpc("accounts_refresh", null)) as State;
+    const usage = (name: string) => state.accounts.find((a) => a.name === name)?.usage;
+    expect(usage("main")).toMatchObject({ blocked: true, unknown: true });
+    expect(usage("work")?.unknown).toBeUndefined();
+  });
 });

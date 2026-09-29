@@ -12,7 +12,13 @@ import {
   useSdk,
 } from "@get-bb/plugin-sdk/app";
 import type { rpcContract, State } from "./server";
-import { headerStatus, noLoginFound, projectLabel } from "./src/ui";
+import {
+  headerStatus,
+  noLoginFound,
+  projectLabel,
+  windowPercent,
+} from "./src/ui";
+import { CLAUDE_CODE_PROVIDER } from "./src/switch";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -375,20 +381,25 @@ const TONE_TEXT: Record<string, string> = {
   out: "out of usage",
   unknown: "not measured",
 };
-const CLAUDE_CODE = "claude-code";
 
 /** "session 10% · weekly 40% · Fable 100%" for the account menu. */
-function usageLine(account: AccountState, preferredModel: string): string {
+function usageLine(
+  account: AccountState,
+  preferredModel: string,
+  now: number,
+): string {
   if (account.usage === null) return "not measured yet";
+  const pct = (w: { usedPercent: number; resetsAt: number | null }) =>
+    `${Math.round(windowPercent(w, now))}%`;
   const parts = [
-    `session ${Math.round(account.usage.session.usedPercent)}%`,
-    `weekly ${Math.round(account.usage.weekly.usedPercent)}%`,
+    `session ${pct(account.usage.session)}`,
+    `weekly ${pct(account.usage.weekly)}`,
   ];
   const model = Object.entries(account.usage.models).find(
     ([name]) => name.toLowerCase() === preferredModel.toLowerCase(),
   );
   if (model !== undefined)
-    parts.push(`${model[0]} ${Math.round(model[1].usedPercent)}%`);
+    parts.push(`${model[0]} ${pct(model[1])}`);
   return parts.join(" · ");
 }
 
@@ -407,24 +418,41 @@ function ThreadAccount({
   isCompactViewport: boolean;
 }) {
   const sdk = useSdk();
-  const [isClaude, setIsClaude] = useState(false);
+  const [claudeThread, setClaudeThread] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
+    setClaudeThread(null);
     sdk.threads.get({ threadId }).then(
       (thread) => {
-        if (live) setIsClaude(thread.providerId === CLAUDE_CODE);
+        if (live && thread.providerId === CLAUDE_CODE_PROVIDER)
+          setClaudeThread(threadId);
       },
-      () => {
-        if (live) setIsClaude(false);
-      },
+      () => {},
     );
     return () => {
       live = false;
     };
   }, [sdk, threadId]);
+  if (claudeThread !== threadId) return null;
+  return (
+    <ThreadAccountMenu
+      projectId={projectId}
+      isCompactViewport={isCompactViewport}
+    />
+  );
+}
+
+function ThreadAccountMenu({
+  projectId,
+  isCompactViewport,
+}: {
+  projectId: string;
+  isCompactViewport: boolean;
+}) {
   const { state, error, busy, setProjectAccount } = useAccounts();
-  if (!isClaude || state === null) return null;
-  const status = headerStatus(state, projectId);
+  if (state === null) return null;
+  const now = Date.now();
+  const status = headerStatus(state, projectId, now);
   if (status === null) return null;
   const name = status.account ?? "unknown account";
   const toValue = (account: string) =>
@@ -465,7 +493,7 @@ function ThreadAccount({
             <DropdownMenuSeparator />
           </>
         ) : null}
-        {status.account === null && !status.canSwitch ? (
+        {status.external ? (
           <DropdownMenuLabel className="text-xs font-normal">
             Set outside this plugin; change it where it was set.
           </DropdownMenuLabel>
@@ -488,7 +516,7 @@ function ThreadAccount({
                     {account.name === status.best ? " · best now" : ""}
                   </span>
                   <span className="truncate text-xs text-muted-foreground">
-                    {usageLine(account, state.preferredModel)}
+                    {usageLine(account, state.preferredModel, now)}
                   </span>
                 </span>
               </DropdownMenuRadioItem>

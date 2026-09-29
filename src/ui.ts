@@ -16,7 +16,15 @@ export function projectLabel(
   return project === undefined ? "" : ` (${project.name})`;
 }
 
-type Window = { usedPercent: number };
+type Window = { usedPercent: number; resetsAt: number | null };
+
+/** A window's share, 0 once its reset has passed (as the switch policy settles it). */
+export function windowPercent(window: Window, now: number): number {
+  return window.resetsAt !== null && window.resetsAt <= now
+    ? 0
+    : window.usedPercent;
+}
+
 interface HeaderInput {
   defaultAccountName: string;
   preferredModel: string;
@@ -25,6 +33,8 @@ interface HeaderInput {
     name: string;
     usage: {
       blocked: boolean;
+      /** A window was missing from the answer: `blocked` means "unknown", not "out". */
+      unknown?: boolean;
       session: Window;
       weekly: Window;
       models: Record<string, Window>;
@@ -45,16 +55,19 @@ const TIGHT_PERCENT = 80;
  * What a thread's header shows for its project: the account it runs on
  * (null when unknown: set by hand, or an account that is gone), how that
  * account stands for the preferred model, and whether "switch to the best
- * account" is on offer. Null when the project is not listed.
+ * account" is on offer. `external` = set by something else, which this
+ * plugin must not change. Null when the project is not listed.
  */
 export function headerStatus(
   state: HeaderInput,
   projectId: string,
+  now: number,
 ): {
   account: string | null;
   tone: "ok" | "tight" | "out" | "unknown";
   best: string | null;
   canSwitch: boolean;
+  external: boolean;
 } | null {
   const project = state.projects.find((p) => p.id === projectId);
   if (project === undefined) return null;
@@ -71,10 +84,10 @@ export function headerStatus(
     usage === null
       ? []
       : [usage.session, usage.weekly, ...(model ? [model] : [])].map(
-          (w) => w.usedPercent,
+          (w) => windowPercent(w, now),
         );
   const tone =
-    account === null || usage === null
+    account === null || usage === null || usage.unknown === true
       ? "unknown"
       : usage.blocked || used.some((u) => u >= 100)
         ? "out"
@@ -89,5 +102,6 @@ export function headerStatus(
       !project.external &&
       state.bestAccount !== null &&
       state.bestAccount !== account,
+    external: project.external,
   };
 }
