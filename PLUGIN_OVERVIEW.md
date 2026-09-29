@@ -1,0 +1,68 @@
+Run Claude Code in bb with more than one subscription and spend less time
+watching the limits. This plugin treats `~/.claude` and every subdirectory
+of your accounts directory that holds a Claude Code login as an account,
+measures each one, and moves a project to another account the moment a
+turn fails on a subscription limit.
+
+## What you get
+
+- **Every account in Provider usage.** The 5-hour session, the weekly and
+  the per-model weekly windows of each account, next to the usage bb already
+  shows. Refreshed every few minutes and on demand.
+- **Automatic switching.** When a turn fails with a subscription-window rate
+  limit, the plugin picks the best other account and retries the turn at
+  once. When no account is free, it moves the project to the account that
+  frees first and queues the retry for that reset (up to a wait you set).
+- **A picker per project.** In Settings, choose which account each project
+  runs with, or let the plugin manage it. The CLI does the same:
+  `bb claude-accounts use PROJECT ACCOUNT`.
+
+## How the choice is made
+
+The three Claude Code limits are not interchangeable, so an account is only a
+candidate while its session and its weekly window are both under 100 % and
+the provider reports no lock. Candidates are ordered by the closest weekly
+reset, then by the lowest session use. If you name a preferred model, only
+accounts that can still run it are chosen; when none can, the retry waits for
+the first moment an account can run that model again.
+
+## Requirements
+
+bb 0.44 or later, running on the machine that holds your Claude Code logins
+(macOS keychain, or the credentials file on Linux). The switch is a project
+machine environment variable, so threads that run on another host do not
+follow it. Each account directory must share the session transcripts
+(`projects/`, symlinked from `~/.claude`) and normally the settings, hooks
+and `CLAUDE.md` too, or a thread cannot continue on the new account; the
+[README](https://github.com/Finolaina/bb-plugin-claude-accounts#setting-up-extra-accounts)
+shows the setup.
+
+## How it works
+
+One account = one `CLAUDE_CONFIG_DIR`. The plugin reads each directory's
+login from the same place Claude Code keeps it (the macOS keychain, or the
+credentials file elsewhere), queries the usage endpoint Claude Code itself
+uses, and sets `CLAUDE_CONFIG_DIR` as a project machine environment variable
+when it switches. Tokens are sent only to Anthropic's own OAuth and usage
+endpoints, the same ones the Claude Code CLI calls; nothing is sent
+anywhere else.
+
+Make each extra directory once (share `projects/` and the rest first, as the
+README shows), then `CLAUDE_CONFIG_DIR=~/.claude-accounts/work claude` and
+log in; the plugin finds it on the next refresh.
+
+## Privacy and terms
+
+No telemetry and no third-party services: tokens go only to Anthropic's own
+OAuth and usage endpoints, the ones the Claude Code CLI calls. The plugin
+also refreshes an expired token itself, with Claude Code's public OAuth
+client id, and writes it back where the CLI keeps it, even when automatic
+switching is off. Anthropic's
+[legal and compliance page](https://code.claude.com/docs/en/legal-and-compliance)
+says OAuth logins are for ordinary use of Claude Code and that developers
+may not collect, store or intermediate Claude.ai credentials or session
+tokens, so Anthropic could regard this plugin as outside its terms. It is
+an independent, MIT-licensed project, not affiliated with Anthropic; use it
+at your own risk.
+Full details, setup and troubleshooting are in the
+[README](https://github.com/Finolaina/bb-plugin-claude-accounts#readme).
