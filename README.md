@@ -153,8 +153,10 @@ bb plugin install .  # bb builds the plugin at install time
   that holds the Claude Code logins: macOS (keychain) or Linux
   (credentials file). The plugin runs inside bb's server process.
 - **Threads that run on that same machine.** `CLAUDE_CONFIG_DIR` is set as
-  a project **machine** environment variable, a local path; a thread
-  executed on another host does not see the switch.
+  a project **machine** environment variable, a path on bb's machine. bb
+  applies it on whatever host runs the thread, so a project whose threads
+  run on another host would get a path that does not exist there: keep
+  such projects out of the plugin (turn `autoSwitch` off).
 - **More than one Claude Code login**, each in its own config directory,
   set up as described in [Setting up extra accounts](#setting-up-extra-accounts).
 
@@ -251,8 +253,8 @@ flowchart TD
   [Setting up extra accounts](#setting-up-extra-accounts). A project you
   pinned by hand (the default account included) stays put while its
   account works.
-- **Only your own threads.** Hidden threads and threads another plugin
-  opened are left alone, both when they are created and when they fail.
+- **Only visible threads.** Hidden threads (another plugin's workers) are
+  left alone, both when they are created and when they fail.
 - **Per project, not per thread.** The switch sets `CLAUDE_CONFIG_DIR` on
   the thread's project, so the project's next turns run on the new account
   too. A retry keeps the thread's model: the plugin changes which account
@@ -489,8 +491,8 @@ Coming from `claude-accounts` 0.1.x? See the upgrade note in
   `bb plugin logs claude-switcher`: each thread creation logs where the
   project was left and why. Projects created before the plugin first ran,
   pinned in Settings or with `use`, or given a thread while `autoSwitch`
-  was off are not new. Hidden threads, threads opened by another plugin
-  and threads of other providers are logged at debug level only.
+  was off are not new. Hidden threads and threads of other providers are
+  logged at debug level only.
 
 ## Disclaimer
 

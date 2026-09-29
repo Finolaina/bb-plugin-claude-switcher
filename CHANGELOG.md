@@ -25,9 +25,10 @@ project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- A failed turn of a hidden thread, or of a thread another plugin opened
-  (for example a summary worker), no longer moves the whole project to
-  another account.
+- A failed turn of a hidden thread (for example another plugin's summary
+  worker) no longer moves the whole project to another account. Visible
+  threads are the user's work even when a plugin's composer opened them,
+  and are handled as before.
 - `bb claude-switcher use` and the project picker read the accounts again,
   so a changed accounts directory or a new account directory needs no
   refresh first, and a measurement of an account that is gone is never

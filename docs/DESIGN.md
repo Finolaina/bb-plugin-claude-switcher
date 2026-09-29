@@ -104,8 +104,8 @@ usable measurement, and if none can be measured the project is left alone
    weekly window is unknown, not out, and moves nothing. A project pinned
    by hand stays put while its account works, even when another account
    ranks better.
-3. **Nothing happens** for a hidden thread, a thread another plugin
-   opened, a thread of another provider, a project whose
+3. **Nothing happens** for a hidden thread (whoever opened it), a thread
+   of another provider, a project whose
    `CLAUDE_CONFIG_DIR` the plugin did not set, or when no other account
    can run. If the project's account changes while the plugin decides (a
    pick in Settings), the plugin leaves it.
@@ -135,10 +135,11 @@ queries every account. The plugin acts only when all of these hold:
 
 It also leaves alone any project whose `CLAUDE_CONFIG_DIR` it did not set
 (recognised by the note it writes next to the variable), and any failure of
-a hidden thread or of a thread another plugin opened (the provider is
-judged from the failure's own rate-limit report, not from the thread row): moving the whole
-project for another plugin's worker would surprise the user, and the plugin
-that owns the worker decides what to do with it.
+a hidden thread (the provider is judged from the failure's own rate-limit
+report, not from the thread row): moving the whole project for another
+plugin's hidden worker would surprise the user, and the plugin that owns
+the worker decides what to do with it. A visible thread is the user's work
+even when a plugin's composer opened it, and is handled like any other.
 
 Then `decideSwitch`:
 
@@ -212,8 +213,14 @@ The refresh token rotates on every refresh, so the plugin:
   of the same account refreshes between the plugin's read and its write,
   or bb stops while a rotated login is only in memory, that account needs
   `/login` again.
-- **Same machine only.** The variable is a local path set on the project's
-  machine environment; a thread executed on another host does not see it.
+- **Same machine only.** The variable is a path on bb's machine, set on
+  the project's machine environment, and bb applies it on whichever host
+  runs the thread. The plugin does not check the host, so a project whose
+  threads run on another host would get a path that does not exist there,
+  now at its first thread rather than only after a limit.
+- **`bb plugin remove` keeps the plugin's storage.** A reinstall reads the
+  old install time, so projects created while the plugin was removed count
+  as new at their next thread.
 - **Shared transcripts are required.** A switch changes the whole config
   directory, so an account directory must share `projects/` (and normally
   settings, hooks and `CLAUDE.md`) with `~/.claude`, or the retried thread
