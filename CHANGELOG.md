@@ -15,6 +15,16 @@ project uses [Semantic Versioning](https://semver.org/).
   thread of the project from its next turn. Uses bb's experimental thread
   header slot, registered only when the host offers it.
 
+### Fixed
+
+- A hand pick of an account (header, Settings or `use`) is kept when a
+  turn still running on the old account fails right after it: that turn
+  is retried once on the picked account, as after a switch, instead of
+  moving the project elsewhere or waiting for the old account's reset.
+- A pick and an automatic move of the same project no longer interleave:
+  the pick waits for it and lands last.
+- Settings shows 0 % for a window whose reset has passed.
+
 ## [0.2.2] - 2026-09-29
 
 ### Added

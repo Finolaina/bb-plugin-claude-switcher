@@ -25,10 +25,9 @@ import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -45,6 +44,8 @@ function useAccounts() {
   const rpc = useRpc<typeof rpcContract>();
   const [state, setState] = useState<State | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** Only a change the user made (not a refresh) that failed. */
+  const [changeError, setChangeError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const report = useCallback((cause: unknown) => {
     setError(cause instanceof Error ? cause.message : String(cause));
@@ -62,11 +63,14 @@ function useAccounts() {
   const run = useCallback(
     async (work: () => Promise<State>) => {
       setBusy(true);
+      // Cleared first, so a repeated failure is announced again.
+      setChangeError(null);
       try {
         setState(await work());
         setError(null);
       } catch (cause) {
         report(cause);
+        setChangeError(cause instanceof Error ? cause.message : String(cause));
       } finally {
         setBusy(false);
       }
@@ -76,6 +80,7 @@ function useAccounts() {
   return {
     state,
     error,
+    changeError,
     busy,
     refetch,
     refresh: () => run(() => rpc.call("accounts_refresh", null)),
@@ -109,7 +114,8 @@ function barClass(usedPercent: number): string {
 }
 
 function WindowBar({ label, window }: { label: string; window: Window }) {
-  const pct = Math.max(0, Math.min(100, window.usedPercent));
+  const used = windowPercent(window, Date.now());
+  const pct = Math.max(0, Math.min(100, used));
   return (
     <div className="min-w-0">
       <div className="flex items-baseline justify-between gap-2 text-xs">
@@ -117,7 +123,7 @@ function WindowBar({ label, window }: { label: string; window: Window }) {
           {label}
         </span>
         <span className="shrink-0 tabular-nums">
-          {Math.round(window.usedPercent)}%
+          {Math.round(used)}%
           {window.resetsAt === null ? null : (
             <span className="text-muted-foreground">
               {" "}
@@ -132,7 +138,7 @@ function WindowBar({ label, window }: { label: string; window: Window }) {
         aria-label={label}
         aria-valuemin={0}
         aria-valuemax={100}
-        aria-valuenow={Math.round(window.usedPercent)}
+        aria-valuenow={Math.round(used)}
       >
         <div
           className={cn("h-full rounded-full", barClass(pct))}
@@ -391,7 +397,9 @@ function usageLine(
   preferredModel: string,
   now: number,
 ): string {
+  if (account.problem?.kind === "unauthenticated") return "not logged in";
   if (account.usage === null) return "not measured yet";
+  if (account.usage.unknown === true) return "not measured (incomplete answer)";
   const pct = (w: { usedPercent: number; resetsAt: number | null }) =>
     `${Math.round(windowPercent(w, now))}%`;
   const parts = [
@@ -452,7 +460,7 @@ function ThreadAccountMenu({
   projectId: string;
   isCompactViewport: boolean;
 }) {
-  const { state, error, busy, setProjectAccount } = useAccounts();
+  const { state, changeError: error, busy, setProjectAccount } = useAccounts();
   if (state === null) return null;
   const now = Date.now();
   const status = headerStatus(state, projectId, now);
@@ -517,19 +525,25 @@ function ThreadAccountMenu({
             Set outside this plugin; change it where it was set.
           </DropdownMenuLabel>
         ) : (
-          <DropdownMenuRadioGroup
-            value={status.account ?? ""}
-            onValueChange={(account) => {
-              if (!busy && account !== status.account)
-                setProjectAccount(projectId, toValue(account));
-            }}
-          >
+          // Plain items marked as radios: the registry's radio group renders
+          // nothing in the compact drawer, which would leave nothing to pick.
+          <DropdownMenuGroup>
             {state.accounts.map((account) => (
-              <DropdownMenuRadioItem
+              <DropdownMenuItem
                 key={account.name}
-                value={account.name}
+                role="menuitemradio"
+                aria-checked={account.name === status.account}
                 disabled={busy}
+                onSelect={() => {
+                  if (!busy && account.name !== status.account)
+                    setProjectAccount(projectId, toValue(account.name));
+                }}
               >
+                {account.name === status.account ? (
+                  <Icon name="Check" className="size-3.5 shrink-0" />
+                ) : (
+                  <span aria-hidden className="size-3.5 shrink-0" />
+                )}
                 <span className="flex min-w-0 flex-col">
                   <span className="truncate">
                     {account.name}
@@ -539,9 +553,9 @@ function ThreadAccountMenu({
                     {usageLine(account, state.preferredModel, now)}
                   </span>
                 </span>
-              </DropdownMenuRadioItem>
+              </DropdownMenuItem>
             ))}
-          </DropdownMenuRadioGroup>
+          </DropdownMenuGroup>
         )}
         {error === null ? null : (
           <DropdownMenuLabel className="text-xs font-normal text-destructive">

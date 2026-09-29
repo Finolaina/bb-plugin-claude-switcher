@@ -314,7 +314,10 @@ For a minute after a switch or a wait, other turns of the same project
 that were still running keep failing; each of those is retried once as it
 is, on the new account (or queued for the same reset, after a wait),
 without a second switch. A thread that fails again inside that minute is
-judged afresh: the new account fails too.
+judged afresh: the new account fails too. Picking an account by hand (in a
+thread's header, in Settings or with `use`) gives the same minute when
+the picked account is measured able to run the preferred model; a pick of
+an account that is out gets none, and the next failure is judged.
 
 The plugin only ever changes a `CLAUDE_CONFIG_DIR` it wrote itself. A
 project whose variable was set by hand or inherited from the global
@@ -496,7 +499,7 @@ Coming from `claude-accounts` 0.1.x? See the upgrade note in
 - **A new project did not move to the best account.** Read
   `bb plugin logs claude-switcher`: each thread creation logs where the
   project was left and why. Projects created before the plugin first ran,
-  pinned in Settings or with `use`, or given a thread while `autoSwitch`
+  pinned in a thread's header, in Settings or with `use`, or given a thread while `autoSwitch`
   was off are not new. Hidden threads and threads of other providers are
   logged at debug level only.
 
