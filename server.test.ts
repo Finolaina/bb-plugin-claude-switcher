@@ -1769,10 +1769,10 @@ describe("placing a project before a new thread's first turn", () => {
     blocked.harness.dispose();
   });
 
-  it("leaves hidden threads, other plugins' threads, other providers, external variables and autoSwitch off alone", async () => {
+  it("leaves hidden threads, other providers, external variables and autoSwitch off alone", async () => {
     const cases: Array<[Partial<ThreadResponse>, HostOptions]> = [
       [{ visibility: "hidden" }, FABLE],
-      [{ originPluginId: "bb-recap" }, FABLE],
+      [{ visibility: "hidden", originPluginId: "bb-recap" }, FABLE],
       [{ providerId: "codex" }, FABLE],
       [{}, { settings: { preferredModel: "Fable", autoSwitch: false } }],
       [
@@ -1799,10 +1799,10 @@ describe("placing a project before a new thread's first turn", () => {
 });
 
 describe("failures this plugin must not act on", () => {
-  it("ignores a failed turn of a hidden thread or of a thread another plugin opened", async () => {
+  it("ignores a failed turn of a hidden thread, whoever opened it", async () => {
     for (const threads of [
       { "thread-1": { visibility: "hidden" as const } },
-      { "thread-1": { originPluginId: "bb-recap" } },
+      { "thread-1": { visibility: "hidden" as const, originPluginId: "bb-recap" } },
     ]) {
       const h = await host(ALL_FREE, { threads });
       const { errors } = await h.harness.behavior.emitThreadEvent(
@@ -2150,6 +2150,50 @@ describe("placement: the cases the second review found", () => {
     mainSession = 50;
     await h.harness.behavior.callRpc("accounts_refresh", null);
     await h.harness.behavior.emitThreadEvent("thread.created", created("thr-2", "proj-3"));
+    expect(h.envSet).toEqual([]);
+  });
+});
+
+describe("placement: the cases the third review found", () => {
+  const OUT = {
+    main: () => Response.json(payload(10, 40, 100)),
+    spare: () => Response.json(payload(10, 60, 20)),
+    work: () => Response.json(payload(5, 20, 30)),
+  };
+  const FABLE = { settings: { preferredModel: "Fable" } };
+
+  it("treats a visible thread another plugin's composer opened as the user's: placed, and switched on a limit", async () => {
+    const h = await host(OUT, {
+      ...FABLE,
+      threads: { "thr-p": { projectId: "proj-1", originPluginId: "some-composer" } },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("thread.created", {
+      thread: thread({ id: "thr-p", projectId: "proj-3", originPluginId: "some-composer" }),
+    });
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-3", `${ACCOUNTS}/work`],
+    ]);
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "thr-p" }));
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-3", `${ACCOUNTS}/work`],
+      ["proj-1", `${ACCOUNTS}/work`],
+    ]);
+  });
+
+  it("lets a pick of the default account made while the project is being placed win", async () => {
+    const h = await host(OUT, FABLE);
+    dispose = () => h.harness.dispose();
+    // Nothing measured yet: placement measures first, and the pick lands meanwhile.
+    await Promise.all([
+      h.harness.behavior.emitThreadEvent("thread.created", {
+        thread: thread({ id: "thr-new", projectId: "proj-3" }),
+      }),
+      h.harness.behavior.callRpc("project_set_account", {
+        projectId: "proj-3",
+        account: null,
+      }),
+    ]);
     expect(h.envSet).toEqual([]);
   });
 });

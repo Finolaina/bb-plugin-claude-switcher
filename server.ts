@@ -76,14 +76,15 @@ const KV_INSTALLED_AT = "installed-at";
 const KV_HANDLED_PROJECTS = "handled-projects";
 
 /**
- * A thread of another plugin (a hidden worker, a summary): moving the whole
- * project for it would surprise the user, and its owner decides about it.
+ * A hidden thread (a plugin's worker, a summary): moving the whole project
+ * for it would surprise the user, and its owner decides about it. A visible
+ * thread is the user's work even when a plugin's composer opened it.
  */
 function notTheUsersThread(thread: ThreadResponse): string | null {
-  if (thread.visibility === "hidden") return "hidden thread";
-  if (typeof thread.originPluginId === "string")
-    return `thread opened by plugin ${thread.originPluginId}`;
-  return null;
+  if (thread.visibility !== "hidden") return null;
+  return typeof thread.originPluginId === "string"
+    ? `hidden thread of plugin ${thread.originPluginId}`
+    : "hidden thread";
 }
 
 const windowSchema = z.object({
@@ -736,7 +737,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return;
     }
     const latest = await projectAccount(projectId);
-    if (!sameAccount(from, latest)) {
+    // A pick of the default account writes nothing; the handled mark shows it.
+    if (!sameAccount(from, latest) || (isNew && handled.has(projectId))) {
       bb.log.info(
         `thread ${thread.id}: not placed (the project's account changed meanwhile)`,
       );
