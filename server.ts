@@ -31,6 +31,7 @@ import { nodeAccountsIo, nodeCredentialIo } from "./src/node-io.js";
 import {
   CLAUDE_CODE_PROVIDER,
   declineReason,
+  bestAccount,
   decidePlacement,
   decideSwitch,
 } from "./src/switch.js";
@@ -137,6 +138,8 @@ const stateSchema = z.object({
   preferredModel: z.string(),
   autoSwitch: z.boolean(),
   lastSwitch: switchRecordSchema.nullable(),
+  /** The account the switch policy would pick now; null when none can run. */
+  bestAccount: z.string().nullable(),
 });
 export type State = z.infer<typeof stateSchema>;
 export type SwitchRecord = z.infer<typeof switchRecordSchema>;
@@ -383,6 +386,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     bb.realtime.publish(CHANGED, { at: deps.now() });
   }
 
+  /** Measurements recent enough to decide on (two refresh periods). */
+  function measuredAccounts() {
+    const maxAgeMs = 2 * Math.max(1, current.refreshMinutes) * 60_000;
+    return collector.usable(maxAgeMs, current.preferredModel);
+  }
+
   async function state(): Promise<State> {
     if (accounts.length === 0) await discover();
     // The personal project too: a variable set there must be visible and releasable.
@@ -412,6 +421,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       autoSwitch: current.autoSwitch,
       lastSwitch:
         (await bb.storage.kv.get<SwitchRecord>(KV_LAST_SWITCH)) ?? null,
+      bestAccount: bestAccount(
+        measuredAccounts(),
+        current.preferredModel,
+        deps.now(),
+      ),
     };
   }
 
@@ -702,8 +716,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         `thread ${thread.id}: project created at ${project.createdAt}, plugin installed at ${installedAt}: ${isNew ? "new" : "not new"}`,
       );
     }
-    const maxAgeMs = 2 * Math.max(1, current.refreshMinutes) * 60_000;
-    let measured = collector.usable(maxAgeMs, current.preferredModel);
+    let measured = measuredAccounts();
     // A new project is placed once: measure every account first, not only
     // those the startup refresh has reached.
     if (
@@ -711,7 +724,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       (isNew && measured.length < accounts.length)
     ) {
       await refreshAll();
-      measured = collector.usable(maxAgeMs, current.preferredModel);
+      measured = measuredAccounts();
     }
     if (measured.length === 0) {
       // Nothing to decide on: the project stays new for its next thread.

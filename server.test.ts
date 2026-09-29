@@ -2222,3 +2222,35 @@ describe("placement: the cases the third review found", () => {
     ]);
   });
 });
+
+describe("the account shown in each thread's header", () => {
+  it("names the best account for the preferred model, or none before anything is measured", async () => {
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, 40, 100)),
+        spare: () => Response.json(payload(10, 60, 20)),
+        work: () => Response.json(payload(5, 20, 30)),
+      },
+      { settings: { preferredModel: "Fable" } },
+    );
+    dispose = () => h.harness.dispose();
+    const before = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(before.bestAccount).toBeNull();
+    const after = (await h.harness.behavior.callRpc("accounts_refresh", null)) as State;
+    expect(after.bestAccount).toBe("work");
+  });
+
+  it("names no best account when none can run the preferred model", async () => {
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, 40, 100)),
+        spare: () => Response.json(payload(10, 60, 100)),
+        work: () => Response.json(payload(100, 20, 30)),
+      },
+      { settings: { preferredModel: "Fable" } },
+    );
+    dispose = () => h.harness.dispose();
+    const state = (await h.harness.behavior.callRpc("accounts_refresh", null)) as State;
+    expect(state.bestAccount).toBeNull();
+  });
+});

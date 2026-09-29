@@ -181,6 +181,20 @@ export interface PlacementInput {
  * answer lacked a window), or no other account able to run, keeps the
  * project: the failure path then decides, exactly as before this check existed.
  */
+/** The account a project would best run on now, for the thread header. */
+export function bestAccount(
+  accounts: AccountUsage[],
+  preferredModel: string,
+  now: number,
+): string | null {
+  return (
+    chooseAccount(
+      accounts.map((a) => settle(a, now)),
+      { preferredModel },
+    )?.account ?? null
+  );
+}
+
 export function decidePlacement(input: PlacementInput): PlacementDecision {
   const accounts = input.accounts.map((a) => settle(a, input.now));
   const options = { preferredModel: input.preferredModel };

@@ -5,10 +5,25 @@
 // last automatic switch. The windows themselves are ALSO published to bb's
 // Provider usage panel through server.ts; this section is where you act.
 import { useCallback, useEffect, useState } from "react";
-import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
+import {
+  definePluginApp,
+  useRealtime,
+  useRpc,
+  useSdk,
+} from "@get-bb/plugin-sdk/app";
 import type { rpcContract, State } from "./server";
-import { noLoginFound, projectLabel } from "./src/ui";
+import { headerStatus, noLoginFound, projectLabel } from "./src/ui";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Icon } from "@/components/ui/icon";
 import { cn } from "@/lib/utils";
 
@@ -348,7 +363,154 @@ function AccountsSection() {
   );
 }
 
+const TONE_DOT: Record<string, string> = {
+  ok: "bg-success",
+  tight: "bg-warning",
+  out: "bg-destructive",
+  unknown: "bg-muted-foreground",
+};
+const TONE_TEXT: Record<string, string> = {
+  ok: "has room",
+  tight: "running low",
+  out: "out of usage",
+  unknown: "not measured",
+};
+const CLAUDE_CODE = "claude-code";
+
+/** "session 10% · weekly 40% · Fable 100%" for the account menu. */
+function usageLine(account: AccountState, preferredModel: string): string {
+  if (account.usage === null) return "not measured yet";
+  const parts = [
+    `session ${Math.round(account.usage.session.usedPercent)}%`,
+    `weekly ${Math.round(account.usage.weekly.usedPercent)}%`,
+  ];
+  const model = Object.entries(account.usage.models).find(
+    ([name]) => name.toLowerCase() === preferredModel.toLowerCase(),
+  );
+  if (model !== undefined)
+    parts.push(`${model[0]} ${Math.round(model[1].usedPercent)}%`);
+  return parts.join(" · ");
+}
+
+/**
+ * The thread header control: which Claude Code account the thread's project
+ * runs on, how that account stands, and a menu to move the project to the
+ * best account or to any other one. Only for Claude Code threads.
+ */
+function ThreadAccount({
+  threadId,
+  projectId,
+  isCompactViewport,
+}: {
+  threadId: string;
+  projectId: string;
+  isCompactViewport: boolean;
+}) {
+  const sdk = useSdk();
+  const [isClaude, setIsClaude] = useState(false);
+  useEffect(() => {
+    let live = true;
+    sdk.threads.get({ threadId }).then(
+      (thread) => {
+        if (live) setIsClaude(thread.providerId === CLAUDE_CODE);
+      },
+      () => {
+        if (live) setIsClaude(false);
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [sdk, threadId]);
+  const { state, error, busy, setProjectAccount } = useAccounts();
+  if (!isClaude || state === null) return null;
+  const status = headerStatus(state, projectId);
+  if (status === null) return null;
+  const name = status.account ?? "unknown account";
+  const toValue = (account: string) =>
+    account === state.defaultAccountName ? null : account;
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 gap-1.5 px-2 text-xs"
+          disabled={busy}
+          aria-label={`Claude account: ${name}, ${TONE_TEXT[status.tone]}`}
+        >
+          <span
+            aria-hidden
+            className={cn("size-2 shrink-0 rounded-full", TONE_DOT[status.tone])}
+          />
+          {isCompactViewport ? null : (
+            <span className="max-w-32 truncate">{name}</span>
+          )}
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-72">
+        <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+          Claude account for this project, used by all its threads from their
+          next turn
+        </DropdownMenuLabel>
+        {status.canSwitch && status.best !== null ? (
+          <>
+            <DropdownMenuItem
+              disabled={busy}
+              onSelect={() => setProjectAccount(projectId, toValue(status.best!))}
+            >
+              <Icon name="Repeat" className="size-3.5" />
+              Switch now to {status.best}
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+          </>
+        ) : null}
+        {status.account === null && !status.canSwitch ? (
+          <DropdownMenuLabel className="text-xs font-normal">
+            Set outside this plugin; change it where it was set.
+          </DropdownMenuLabel>
+        ) : (
+          <DropdownMenuRadioGroup
+            value={status.account ?? ""}
+            onValueChange={(account) =>
+              setProjectAccount(projectId, toValue(account))
+            }
+          >
+            {state.accounts.map((account) => (
+              <DropdownMenuRadioItem
+                key={account.name}
+                value={account.name}
+                disabled={busy}
+              >
+                <span className="flex min-w-0 flex-col">
+                  <span className="truncate">
+                    {account.name}
+                    {account.name === status.best ? " · best now" : ""}
+                  </span>
+                  <span className="truncate text-xs text-muted-foreground">
+                    {usageLine(account, state.preferredModel)}
+                  </span>
+                </span>
+              </DropdownMenuRadioItem>
+            ))}
+          </DropdownMenuRadioGroup>
+        )}
+        {error === null ? null : (
+          <DropdownMenuLabel className="text-xs font-normal text-destructive">
+            {error}
+          </DropdownMenuLabel>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 export default definePluginApp((app) => {
+  app.slots.experimental_threadHeaderAction({
+    id: "claude-account",
+    title: "Claude account",
+    component: ThreadAccount,
+  });
   app.slots.settingsSection({
     id: "claude-switcher",
     title: "Claude Switcher",
