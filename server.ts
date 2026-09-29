@@ -458,6 +458,21 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * `choose` runs after a fresh discovery, so an account directory added
    * since the last one is pickable.
    */
+  /**
+   * No login, or MEASURED unable to run any model: a turn sent there would
+   * fail. Not measured yet, an incomplete answer, or no preferred model left
+   * do not count: those accounts may still run it.
+   */
+  function cannotRun(name: string): boolean {
+    if (collector.get(name)?.problem?.kind === "unauthenticated") return true;
+    const known = measuredAccounts().find((a) => a.name === name);
+    return (
+      known !== undefined &&
+      known.unknown !== true &&
+      bestAccount([known], "", deps.now()) !== name
+    );
+  }
+
   async function pickAccount(
     projectId: string,
     choose: (find: (name: string) => Account) => Account | null,
@@ -473,10 +488,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       if (toName === fromName) return;
       // A turn already running on the old account fails there after the
       // pick: like after a switch, it runs again once on the picked account.
-      // The pick is the user's, so it holds unless the account has no login
-      // or is MEASURED unable to run any model (not measured yet, an
-      // incomplete answer, or no preferred model left all keep it); its own
-      // failure is judged.
+      // The pick is the user's, so it holds unless the account cannot run a
+      // turn (see cannotRun); its own failure is judged.
       // A login made after the last measurement: look again before judging.
       const picked = accounts.find((a) => a.name === toName);
       if (
@@ -484,13 +497,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         collector.get(toName)?.problem?.kind === "unauthenticated"
       )
         await collector.collect(picked);
-      const known = measuredAccounts().find((a) => a.name === toName);
-      const pickOut =
-        collector.get(toName)?.problem?.kind === "unauthenticated" ||
-        (known !== undefined &&
-          known.unknown !== true &&
-          bestAccount([known], "", deps.now()) !== toName);
-      if (!pickOut)
+      if (!cannotRun(toName))
         recentSwitches.set(projectId, {
           at: deps.now(),
           to: toName,
@@ -899,11 +906,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (started !== undefined) {
       const at = await projectAccount(projectId);
       const currentName = at.account ?? current.defaultAccountName;
-      if (!at.external && started !== currentName) {
+      if (!at.external && started !== currentName && !cannotRun(currentName)) {
         // Started on the old account before the project moved: a leftover
         // (a long tool call can outlast the grace window), not a failure of
         // the project's account. It runs again there, or waits for the same
         // reset when the project's latest move was a wait on that account.
+        // Unless the project's account cannot run it either (a hand pick of
+        // an account without a login, or out): then it is judged below.
         const sendAt =
           recent !== undefined &&
           recent.to === currentName &&

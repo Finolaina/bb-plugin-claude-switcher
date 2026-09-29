@@ -1159,6 +1159,35 @@ describe("claude accounts plugin", () => {
     expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
   });
 
+  it("retries a straggler blind once: its retry failing at the door is judged", async () => {
+    let clock = NOW;
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    clock = NOW + 5 * 60_000;
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ threadId: "thread-3", requestId: "creq_9" }),
+    );
+    expect(h.retries[1]?.reason).toBe("Retrying on account work");
+    // The retry fails before any thread.active announces it: work's own failure.
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ threadId: "thread-3", requestId: "creq_10", attemptNumber: 2 }),
+    );
+    expect(h.retries[2]?.reason).toBe("Switched to account spare");
+  });
+
   it("judges a turn that started on the project's current account", async () => {
     let clock = NOW;
     const h = await host(
@@ -2396,6 +2425,10 @@ describe("the account shown in each thread's header", () => {
     expect(refreshed.accounts.find((a) => a.name === "work")?.problem).toEqual({
       kind: "unauthenticated",
     });
+    // As in bb, the leftover's turn announced itself when it started on main.
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-1", projectId: "proj-1" }),
+    });
     await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "work" });
     await h.harness.behavior.emitThreadEvent("turn.failed", failure());
     expect(h.retries[0]?.reason).toBe("Switched to account spare");
@@ -2409,6 +2442,10 @@ describe("the account shown in each thread's header", () => {
     });
     dispose = () => h.harness.dispose();
     await h.harness.behavior.callRpc("accounts_refresh", null);
+    // As in bb, the leftover's turn announced itself when it started on main.
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-1", projectId: "proj-1" }),
+    });
     await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "spare" });
     await h.harness.behavior.emitThreadEvent("turn.failed", failure());
     expect(h.retries[0]?.reason).toBe("Switched to account work");
