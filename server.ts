@@ -477,6 +477,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // or is MEASURED unable to run any model (not measured yet, an
       // incomplete answer, or no preferred model left all keep it); its own
       // failure is judged.
+      // A login made after the last measurement: look again before judging.
+      const picked = accounts.find((a) => a.name === toName);
+      if (
+        picked !== undefined &&
+        collector.get(toName)?.problem?.kind === "unauthenticated"
+      )
+        await collector.collect(picked);
       const known = measuredAccounts().find((a) => a.name === toName);
       const pickOut =
         collector.get(toName)?.problem?.kind === "unauthenticated" ||
@@ -613,7 +620,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         return;
       }
       if (alreadyOnItsWay(error)) {
-        bb.log.info(`thread ${threadId}: the queued retry is already on its way`);
+        bb.log.info(
+          `thread ${threadId}: the queued retry is already on its way`,
+        );
         return;
       }
       throw error;
@@ -725,7 +734,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** Same variable state: nobody moved the project while we were deciding. */
   function sameAccount(a: ProjectAccount, b: ProjectAccount): boolean {
     return (
-      a.account === b.account && a.owned === b.owned && a.external === b.external
+      a.account === b.account &&
+      a.owned === b.owned &&
+      a.external === b.external
     );
   }
 
@@ -759,10 +770,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     let measured = measuredAccounts();
     // A new project is placed once: measure every account first, not only
     // those the startup refresh has reached.
-    if (
-      measured.length === 0 ||
-      (isNew && measured.length < accounts.length)
-    ) {
+    if (measured.length === 0 || (isNew && measured.length < accounts.length)) {
       await refreshAll();
       measured = measuredAccounts();
     }
@@ -1122,14 +1130,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             let failed = 0;
             for (const p of s.projects) {
               if (p.external) {
-                lines.push(`${p.name}\tleft alone (external CLAUDE_CONFIG_DIR)`);
+                lines.push(
+                  `${p.name}\tleft alone (external CLAUDE_CONFIG_DIR)`,
+                );
               } else if (p.owned) {
                 try {
                   await inProjectQueue(p.id, async () => {
                     await applyAccount(p.id, null, await projectAccount(p.id));
                     recentSwitches.delete(p.id);
                   });
-                  lines.push(`${p.name}\treleased (was ${p.account ?? "a vanished account"})`);
+                  lines.push(
+                    `${p.name}\treleased (was ${p.account ?? "a vanished account"})`,
+                  );
                 } catch (error) {
                   failed += 1;
                   lines.push(

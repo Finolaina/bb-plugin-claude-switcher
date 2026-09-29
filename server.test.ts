@@ -2348,7 +2348,7 @@ describe("the account shown in each thread's header", () => {
     expect(h.retries[0]?.reason).toBe("Retrying on account work");
   });
 
-  it("keeps a hand pick of an account not measured yet when a turn left on the old account fails", async () => {
+  it("keeps a hand pick of an account whose answer lacked its windows when a turn left on the old account fails", async () => {
     const h = await host({
       main: () => Response.json(payload(100, 40)),
       spare: () => Response.json(payload(10, 60)),
@@ -2439,5 +2439,127 @@ describe("the account shown in each thread's header", () => {
     const usage = (name: string) => state.accounts.find((a) => a.name === name)?.usage;
     expect(usage("main")).toMatchObject({ blocked: true, unknown: true });
     expect(usage("work")?.unknown).toBeUndefined();
+  });
+
+  it("looks again at an account measured without a login before judging a pick of it", async () => {
+    let workLoggedIn = false;
+    const h = await host({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => (workLoggedIn ? Response.json(payload(5, 20)) : new Response(null, { status: 401 })),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // The user runs claude login for work, then picks it before the next refresh.
+    workLoggedIn = true;
+    await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "work" });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    expect(h.retries[0]?.reason).toBe("Retrying on account work");
+  });
+
+  it("keeps a hand pick of an account nobody has measured yet", async () => {
+    const h = await host({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => Response.json(payload(5, 20)),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "work" });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.retries[0]?.reason).toBe("Retrying on account work");
+  });
+
+  it("keeps a hand pick of an account whose last query failed but whose numbers are fresh", async () => {
+    let limited = false;
+    const h = await host({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => (limited ? new Response("", { status: 429 }) : Response.json(payload(5, 20))),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    limited = true;
+    const state = (await h.harness.behavior.callRpc("accounts_refresh", null)) as State;
+    expect(state.accounts.find((a) => a.name === "work")?.problem?.kind).toBe("error");
+    await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "work" });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.retries[0]?.reason).toBe("Retrying on account work");
+  });
+
+  it("drops the grace an earlier switch left when the user picks an account that is out", async () => {
+    const h = await host({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => Response.json(payload(100, 20)),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.retries.map((r) => r.reason)).toEqual(["Switched to account spare"]);
+    await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "work" });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "thread-3", requestId: "creq_9" }));
+    expect(h.retries[1]?.reason).toBe("Switched to account spare");
+  });
+
+  it("keeps a hand pick of an account whose reset has passed since it was measured", async () => {
+    let clock = NOW;
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(100, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + 2 * HOUR + 60_000;
+    await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "work" });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.retries[0]?.reason).toBe("Retrying on account work");
+  });
+
+  it("drops the grace of a switch when the CLI's release hands the project back", async () => {
+    const h = await host(ALL_FREE);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.retries.map((r) => r.reason)).toEqual(["Switched to account work"]);
+    await h.harness.behavior.runCli(["release"]);
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "thread-3", requestId: "creq_9" }));
+    expect(h.retries[1]?.reason).toBe("Switched to account work");
+  });
+
+  it("names no best account from measurements the endpoint no longer confirms", async () => {
+    let clock = NOW;
+    let down = false;
+    const answer = () => (down ? new Response("", { status: 500 }) : Response.json(payload(100, 40)));
+    const h = await host(
+      { main: answer, spare: answer, work: answer },
+      { clock: () => clock, settings: { refreshMinutes: 1 } },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    down = true;
+    clock = NOW + 3 * HOUR;
+    const state = (await h.harness.behavior.callRpc("accounts_refresh", null)) as State;
+    expect(state.bestAccount).toBeNull();
+  });
+
+  it("names a best account once a reset has passed, without measuring again", async () => {
+    let clock = NOW;
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(100, 60)),
+        work: () => Response.json(payload(100, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    const before = (await h.harness.behavior.callRpc("accounts_refresh", null)) as State;
+    expect(before.bestAccount).toBeNull();
+    clock = NOW + 2 * HOUR + 60_000;
+    const after = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(after.bestAccount).not.toBeNull();
   });
 });
