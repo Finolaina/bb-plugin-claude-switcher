@@ -86,16 +86,21 @@ export interface LoginStatus {
   message: string | null;
 }
 
-/** Any URL, for the message shown to the user; the consent URL must not travel further. */
+/**
+ * Any URL, for the message shown to the user; the consent URL must not
+ * travel further. (These patterns are about control characters, which is
+ * what the lint rule they switch off warns of.)
+ */
 // oxlint-disable-next-line no-control-regex
-const URL_PATTERN = /https?:\/\/[^\s\u001b]+/g;
+const URL_PATTERN = /https?:\/\/[^\s\u001b]+/gi;
 /**
  * Terminal escapes the login prints: the OSC 8 around its link, closed by
- * BEL (what Claude Code writes) or by ST, and colours.
+ * BEL (what Claude Code writes) or by ST, and any CSI sequence (colours,
+ * the cursor).
  */
 const ESCAPES =
   // oxlint-disable-next-line no-control-regex
-  /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b\[[0-9;]*[A-Za-z]/g;
+  /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]/g;
 
 /**
  * Credentials of the plugin's own environment: a login is for another
@@ -114,6 +119,8 @@ const OUTPUT_KEPT = 8_192;
 const MESSAGE_KEPT = 200;
 /** The prompt for a code, printed without a line break after it. */
 const PROMPT = /^Paste code here[^>]*(?:>\s*|$)/;
+/** What the login says when it has printed nothing that is an error. */
+const NO_MESSAGE = "the login ended without a message";
 // oxlint-disable-next-line no-control-regex
 const CONTROL = /[\u0000-\u001f\u007f]/g;
 
@@ -122,8 +129,11 @@ export class LoginFlow {
   private process: LoginProcess | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private output = "";
-  /** The codes handed to the running login, kept out of what it reports. */
-  private codes: string[] = [];
+  /**
+   * The codes handed to the running login, to keep out of what it reports:
+   * each whole and in its halves (`code#state`), whatever the case.
+   */
+  private codes: RegExp[] = [];
   /** The account whose directory is being prepared, before its login runs. */
   private starting: string | null = null;
   private startCancelled = false;
@@ -257,7 +267,13 @@ export class LoginFlow {
     if (line.search(CONTROL) !== -1)
       throw new Error("a login code is one line of text");
     // A few characters are no code, and would blank half a message.
-    if (line.length >= 8) this.codes = [...this.codes, line].slice(-20);
+    const pieces = [...new Set([line, ...line.split("#")])]
+      .filter((piece) => piece.length >= 8)
+      .map(
+        (piece) =>
+          new RegExp(piece.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"),
+      );
+    this.codes = [...this.codes, ...pieces].slice(-40);
     this.process.write(`${line}\n`);
   }
 
@@ -332,16 +348,19 @@ export class LoginFlow {
    * pasted codes blanked, the prompt and control characters out, cut short.
    */
   private lastLine(): string {
-    let last = "the login ended without a message";
+    let last = NO_MESSAGE;
     let afterUrl = false;
-    for (const raw of this.output.replace(ESCAPES, "").split(/\r?\n/)) {
+    for (const raw of this.output.replace(ESCAPES, "").split(/\r\n|\r|\n/)) {
       const blanked = raw.replace(URL_PATTERN, "<url>");
-      let line = blanked.replace(CONTROL, "").trim().replace(PROMPT, "");
-      for (const code of this.codes) line = line.split(code).join("<code>");
-      // What is left of an address cut in two lines follows its line.
-      const remnant: boolean = afterUrl && /^\S*[=&%]\S*$/.test(line);
+      const plain = blanked.replace(CONTROL, "").trim();
+      let line = plain.replace(PROMPT, "");
+      for (const code of this.codes) line = line.replace(code, "<code>");
+      // What is left of an address cut in lines follows its line, in one
+      // piece. What follows the prompt is an answer, not a piece.
+      const remnant: boolean = afterUrl && line === plain && /^\S+$/.test(line);
       afterUrl = blanked !== raw || remnant;
-      if (line !== "" && !remnant) last = line;
+      // The line that gives the address is no error.
+      if (line !== "" && !remnant && !/visit:\s*<url>/.test(line)) last = line;
     }
     return last.length > MESSAGE_KEPT
       ? `${last.slice(0, MESSAGE_KEPT)}…`

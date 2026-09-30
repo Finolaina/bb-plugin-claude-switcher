@@ -420,7 +420,7 @@ describe("LoginFlow", () => {
     await tick();
     expect(f.status()?.phase).toBe("failed");
     expect(f.status()?.message).toBe(
-      "If the browser didn't open, visit: <url> (exit code 1)",
+      "the login ended without a message (exit code 1)",
     );
   });
 
@@ -511,14 +511,12 @@ describe("LoginFlow", () => {
     const { io, spawned } = fakeIo();
     const { f } = flow(io);
     await f.start({ name: "team", configDir: "/d/team" });
-    spawned[0]!.emit(`bo\u0007om\u001b]0;never closed ${"x".repeat(9_000)}\n`);
+    spawned[0]!.emit(`${"x".repeat(9_000)}\n`);
     spawned[0]!.exit(1);
     await tick();
     const message = f.status()?.message ?? "";
     expect(message.length).toBeLessThanOrEqual(200 + "… (exit code 1)".length);
     expect(message.endsWith("… (exit code 1)")).toBe(true);
-    // oxlint-disable-next-line no-control-regex
-    expect(message).not.toMatch(/[\u0000-\u001f\u007f]/);
   });
 
   it("takes a code of one line only", async () => {
@@ -530,5 +528,73 @@ describe("LoginFlow", () => {
     expect(spawned[0]?.written).toEqual([]);
     f.code(" abc#def \n");
     expect(spawned[0]?.written).toEqual(["abc#def\n"]);
+  });
+
+  /** The message of a login that printed `chunks` and ended with exit code 1. */
+  async function failure(
+    chunks: string[],
+    code: string | null = null,
+  ): Promise<string | null> {
+    const { io, spawned } = fakeIo();
+    const { f } = flow(io);
+    await f.start({ name: "team", configDir: "/d/team" });
+    const [first, ...rest] = chunks;
+    spawned[0]!.emit(first ?? "");
+    if (code !== null) f.code(code);
+    for (const chunk of rest) spawned[0]!.emit(chunk);
+    spawned[0]!.exit(1);
+    await tick();
+    return f.status()?.message ?? null;
+  }
+  const NOTHING = "the login ended without a message (exit code 1)";
+  const VISIT = "If the browser didn't open, visit: ";
+
+  it("reports no piece of an address cut in lines, whatever the piece looks like", async () => {
+    // No = & or % in the tail: it is a piece of the address all the same.
+    expect(
+      await failure([
+        `${VISIT}https://claude.com/authorize?challenge=AAAA\nqwertyuiop\nasdfghjkl\n`,
+      ]),
+    ).toBe(NOTHING);
+    // Cut by a lone carriage return.
+    expect(
+      await failure([
+        `${VISIT}https://claude.com/authorize?cod\re_challenge=AAAA&state=SECRET\n`,
+      ]),
+    ).toBe(NOTHING);
+    // The line of the address alone is not an error either.
+    expect(await failure([BANNER])).toBe(NOTHING);
+  });
+
+  it("keeps an error of one word printed after the prompt", async () => {
+    expect(await failure([`${BANNER}error=access_denied\n`])).toBe(
+      "error=access_denied (exit code 1)",
+    );
+  });
+
+  it("blanks an address in capitals, a local one, and either half of a pasted code", async () => {
+    expect(
+      await failure(
+        [
+          BANNER,
+          "\nInvalid state secondHALF456 for FIRSThalf123 at HTTPS://claude.com/x?state=S or http://localhost:4000/callback?code=C\n",
+        ],
+        "firstHALF123#SECONDhalf456",
+      ),
+    ).toBe("Invalid state <code> for <code> at <url> or <url> (exit code 1)");
+  });
+
+  it("leaves a few pasted characters as they are: they are no code", async () => {
+    expect(await failure([BANNER, "\nabc is not a code\n"], "abc")).toBe(
+      "abc is not a code (exit code 1)",
+    );
+  });
+
+  it("drops the escapes and control characters of the line it reports", async () => {
+    expect(
+      await failure([
+        "\u001b[?25lLogin fai\u0007led: bo\u0001om\u001b[?25h\u001b[1;31m!\u001b[0m\n",
+      ]),
+    ).toBe("Login failed: boom! (exit code 1)");
   });
 });
