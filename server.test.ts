@@ -2917,6 +2917,33 @@ describe("the forecast of each window", () => {
     });
   });
 
+  it("keeps what it can read of the stored samples and of the stored history", async () => {
+    const h = await host(
+      { ...ALL_FREE, main: () => Response.json(payload(10, 70)) },
+      {
+        clock: () => NOW + 24 * HOUR,
+        kvPreset: {
+          "usage-series": {
+            main: { weekly: { resetsAt: NOW + 3 * 24 * HOUR, points: [[NOW, 40]] } },
+            spare: "not a series",
+          },
+          "switch-history": [
+            { at: NOW, threadId: "t", projectId: "proj-1", from: "main", to: "spare", reason: "Picked by hand" },
+            { at: "yesterday" },
+          ],
+        },
+      },
+    );
+    dispose = () => h.harness.dispose();
+    const state = (await h.harness.behavior.callRpc("accounts_refresh", null)) as State;
+    expect(state.forecasts.main?.weekly).toEqual({
+      kind: "runs-out",
+      at: NOW + 48 * HOUR,
+      percentPerDay: 30,
+    });
+    expect(state.history.map((r) => r.reason)).toEqual(["Picked by hand"]);
+  });
+
   it("forgets the samples of an account that is gone", async () => {
     let dirs = ["spare", "work"];
     let clock = NOW;

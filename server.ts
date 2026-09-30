@@ -399,10 +399,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** Latest first. Unreadable storage starts it again: a list, not a decision. */
   let history: SwitchRecord[] = [];
   try {
-    const parsed = z
-      .array(switchRecordSchema)
-      .safeParse(await bb.storage.kv.get<unknown>(KV_HISTORY));
-    if (parsed.success) history = parsed.data.slice(0, HISTORY_LIMIT);
+    // Record by record: one that cannot be read does not take the rest along.
+    const stored = await bb.storage.kv.get<unknown>(KV_HISTORY);
+    const records = Array.isArray(stored) ? stored : [];
+    history = records
+      .flatMap((record) => {
+        const parsed = switchRecordSchema.safeParse(record);
+        return parsed.success ? [parsed.data] : [];
+      })
+      .slice(0, HISTORY_LIMIT);
+    const dropped = Math.min(records.length, HISTORY_LIMIT) - history.length;
+    if (dropped > 0 || (stored != null && !Array.isArray(stored)))
+      bb.log.warn(
+        `the stored history of moves had ${dropped > 0 ? `${dropped} unreadable record${dropped === 1 ? "" : "s"}` : "an unreadable shape"}; kept the rest`,
+      );
   } catch (error) {
     bb.log.warn(
       `could not read the history of moves; starting it again: ${error instanceof Error ? error.message : String(error)}`,
@@ -411,10 +421,21 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** Usage samples per account and window, inside the window's current reset. */
   let series: Record<string, Record<string, Series>> = {};
   try {
-    const parsed = z
-      .record(z.string(), z.record(z.string(), seriesSchema))
-      .safeParse(await bb.storage.kv.get<unknown>(KV_SERIES));
-    if (parsed.success) series = parsed.data;
+    // Account by account, for the same reason.
+    const stored = await bb.storage.kv.get<unknown>(KV_SERIES);
+    const byAccount = z.record(z.string(), z.unknown()).safeParse(stored);
+    const unreadable: string[] = [];
+    for (const [name, value] of Object.entries(
+      byAccount.success ? byAccount.data : {},
+    )) {
+      const parsed = z.record(z.string(), seriesSchema).safeParse(value);
+      if (parsed.success) series[name] = parsed.data;
+      else unreadable.push(name);
+    }
+    if (unreadable.length > 0 || (stored != null && !byAccount.success))
+      bb.log.warn(
+        `the stored usage samples ${unreadable.length > 0 ? `of ${unreadable.join(", ")}` : ""} could not be read; their forecast starts again`,
+      );
   } catch (error) {
     bb.log.warn(
       `could not read the usage samples; starting them again: ${error instanceof Error ? error.message : String(error)}`,
