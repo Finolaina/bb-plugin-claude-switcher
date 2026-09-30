@@ -457,4 +457,78 @@ describe("LoginFlow", () => {
     expect(() => f.cancel()).toThrow(/the host is gone/);
     expect(spawned[0]?.killed).toBe(true);
   });
+
+  it("has stopped the process by the time it reports the timeout", async () => {
+    const { io, spawned } = fakeIo();
+    let killedAtReport: boolean | undefined;
+    const { f } = flow(io, {
+      timeoutMs: 20,
+      onChange: (status) => {
+        if (status.phase === "failed") killedAtReport = spawned[0]?.killed;
+      },
+    });
+    await f.start({ name: "team", configDir: "/d/team" });
+    await new Promise((r) => setTimeout(r, 60));
+    expect(f.status()?.phase).toBe("failed");
+    expect(killedAtReport).toBe(true);
+  });
+
+  it("keeps the error the login printed right after its prompt", async () => {
+    // The prompt ends without a line break; what comes next is glued to it.
+    const { io, spawned } = fakeIo();
+    const { f } = flow(io);
+    await f.start({ name: "team", configDir: "/d/team" });
+    spawned[0]!.emit(OPENING);
+    spawned[0]!.emit(`${BANNER}OAuth login failed: boom\n`);
+    spawned[0]!.exit(1);
+    await tick();
+    expect(f.status()?.message).toBe("OAuth login failed: boom (exit code 1)");
+  });
+
+  it("keeps a one-word error that no address precedes", async () => {
+    const { io, spawned } = fakeIo();
+    const { f } = flow(io);
+    await f.start({ name: "team", configDir: "/d/team" });
+    spawned[0]!.emit(`${OPENING}error=access_denied\n`);
+    spawned[0]!.exit(1);
+    await tick();
+    expect(f.status()?.message).toBe("error=access_denied (exit code 1)");
+  });
+
+  it("blanks a pasted code the login printed back", async () => {
+    const { io, spawned } = fakeIo();
+    const { f } = flow(io);
+    await f.start({ name: "team", configDir: "/d/team" });
+    spawned[0]!.emit(BANNER);
+    f.code("  PASTED-code#state ");
+    spawned[0]!.emit("PASTED-code#state\nInvalid code PASTED-code#state\n");
+    spawned[0]!.exit(1);
+    await tick();
+    expect(f.status()?.message).toBe("Invalid code <code> (exit code 1)");
+  });
+
+  it("cuts a long message and drops the control characters in it", async () => {
+    const { io, spawned } = fakeIo();
+    const { f } = flow(io);
+    await f.start({ name: "team", configDir: "/d/team" });
+    spawned[0]!.emit(`bo\u0007om\u001b]0;never closed ${"x".repeat(9_000)}\n`);
+    spawned[0]!.exit(1);
+    await tick();
+    const message = f.status()?.message ?? "";
+    expect(message.length).toBeLessThanOrEqual(200 + "… (exit code 1)".length);
+    expect(message.endsWith("… (exit code 1)")).toBe(true);
+    // oxlint-disable-next-line no-control-regex
+    expect(message).not.toMatch(/[\u0000-\u001f\u007f]/);
+  });
+
+  it("takes a code of one line only", async () => {
+    const { io, spawned } = fakeIo();
+    const { f } = flow(io);
+    await f.start({ name: "team", configDir: "/d/team" });
+    expect(() => f.code("abc\nrm -rf")).toThrow(/one line/);
+    expect(() => f.code("abc\u001b[2J")).toThrow(/one line/);
+    expect(spawned[0]?.written).toEqual([]);
+    f.code(" abc#def \n");
+    expect(spawned[0]?.written).toEqual(["abc#def\n"]);
+  });
 });

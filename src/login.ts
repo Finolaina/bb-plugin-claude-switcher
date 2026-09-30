@@ -110,12 +110,20 @@ const CREDENTIALS = new Set([
 
 /** How much of the login's output is kept (it prints a few lines). */
 const OUTPUT_KEPT = 8_192;
+/** How much of its last line is reported: it goes to the page and the log. */
+const MESSAGE_KEPT = 200;
+/** The prompt for a code, printed without a line break after it. */
+const PROMPT = /^Paste code here[^>]*(?:>\s*|$)/;
+// oxlint-disable-next-line no-control-regex
+const CONTROL = /[\u0000-\u001f\u007f]/g;
 
 export class LoginFlow {
   private current: LoginStatus | null = null;
   private process: LoginProcess | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private output = "";
+  /** The codes handed to the running login, kept out of what it reports. */
+  private codes: string[] = [];
   /** The account whose directory is being prepared, before its login runs. */
   private starting: string | null = null;
   private startCancelled = false;
@@ -172,6 +180,7 @@ export class LoginFlow {
     if (account.configDir !== null) env.CLAUDE_CONFIG_DIR = account.configDir;
     env.BROWSER = this.options.helper;
     this.output = "";
+    this.codes = [];
     const status: LoginStatus = {
       name: account.name,
       phase: "running",
@@ -243,7 +252,13 @@ export class LoginFlow {
   code(text: string): void {
     if (this.current?.phase !== "running" || this.process === null)
       throw new Error("no login is running");
-    this.process.write(`${text.trim()}\n`);
+    const line = text.trim();
+    // It is written to the login as it comes: one line, nothing to steer it.
+    if (line.search(CONTROL) !== -1)
+      throw new Error("a login code is one line of text");
+    // A few characters are no code, and would blank half a message.
+    if (line.length >= 8) this.codes = [...this.codes, line].slice(-20);
+    this.process.write(`${line}\n`);
   }
 
   /**
@@ -295,6 +310,9 @@ export class LoginFlow {
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
     this.process = null;
+    // Its output holds the address, and was read for the message already.
+    this.output = "";
+    this.codes = [];
     // The address and the prompt belong to the login that just ended.
     this.update({
       ...this.current,
@@ -309,19 +327,24 @@ export class LoginFlow {
     this.options.onChange?.(status);
   }
 
-  /** The last non-empty line the login printed, URLs blanked. */
+  /**
+   * The last line the login printed, for the message of a failure: URLs and
+   * pasted codes blanked, the prompt and control characters out, cut short.
+   */
   private lastLine(): string {
-    const lines = this.output
-      .replace(ESCAPES, "")
-      .split(/\r?\n/)
-      .map((l) => l.replace(URL_PATTERN, "<url>").trim())
-      .filter(
-        (l) =>
-          l !== "" &&
-          !l.startsWith("Paste code here") &&
-          // What is left of an address cut in two lines.
-          !/^\S*[=&%]\S*$/.test(l),
-      );
-    return lines[lines.length - 1] ?? "the login ended without a message";
+    let last = "the login ended without a message";
+    let afterUrl = false;
+    for (const raw of this.output.replace(ESCAPES, "").split(/\r?\n/)) {
+      const blanked = raw.replace(URL_PATTERN, "<url>");
+      let line = blanked.replace(CONTROL, "").trim().replace(PROMPT, "");
+      for (const code of this.codes) line = line.split(code).join("<code>");
+      // What is left of an address cut in two lines follows its line.
+      const remnant: boolean = afterUrl && /^\S*[=&%]\S*$/.test(line);
+      afterUrl = blanked !== raw || remnant;
+      if (line !== "" && !remnant) last = line;
+    }
+    return last.length > MESSAGE_KEPT
+      ? `${last.slice(0, MESSAGE_KEPT)}…`
+      : last;
   }
 }
