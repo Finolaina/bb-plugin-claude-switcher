@@ -271,9 +271,11 @@ directory (the browser answered with the session it had).
 - **What a failed login reports** is the last line it printed: addresses
   and the pasted code (whole, or either half of `code#state`, in any
   case) blanked, the prompt (printed without a line break), escapes and
-  control characters removed, cut at 200 characters. The line that gives
-  the address is not reported, nor a line of one word that follows an
-  address: it may be a piece of it. A code is one
+  control characters removed, cut at 200 characters. A line with
+  `visit: <address>` is not reported (it is the one that gives the
+  address, though an error worded that way would go too), nor a line of
+  one word right after a line with an address, which may be a piece of
+  it; what follows the prompt on its line is always kept. A code is one
   line; control characters in it are refused. The kept output is dropped
   when the login ends.
 - **No inherited credentials.** `ANTHROPIC_API_KEY`,
@@ -408,9 +410,10 @@ The refresh token rotates on every refresh, so the plugin:
 - **A forecast stops when its moment passes.** Past the moment it
   projected, with a last measurement that was not full, the pace was not
   kept or nothing was measured since: no forecast until the next sample.
-- **Logging a twin in again overwrites its store.** Both directories of
-  one Claude account offer it (the default account's never does), and the
-  page does not say which one a project is on. A directory on the
+- **Logging a twin in again overwrites its store.** Every directory of
+  one Claude account offers it except the default account's, so two
+  extra directories on one account both do, and the page does not say
+  which one a project is on. A directory on the
   Claude account of another one can log in again while a thread uses it;
   that turn may fail as it would with `claude auth login` in a terminal.
 - **A login outlives a killed bb.** A reload, a disable and a shutdown
