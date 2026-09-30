@@ -1265,19 +1265,40 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * measureForAhead for the project's own).
    */
   async function moveAhead(thread: ThreadResponse): Promise<void> {
+    // Asked again: the settings may have changed while the account was measured.
+    if (!current.autoSwitch || !(current.switchAheadPercent > 0)) return;
     const projectId = thread.projectId;
     const from = await projectAccount(projectId);
     if (from.external) return;
     const fromName = from.account ?? current.defaultAccountName;
+    const now = deps.now();
+    // Nothing fails if the project stays, so a target has to be sure: an
+    // account listed now, measured within two refresh periods (a query that
+    // keeps failing leaves an old measurement), and another Claude account
+    // (a directory of the same one shares its usage and gains nothing).
+    const maxAgeMs = 2 * Math.max(1, current.refreshMinutes) * 60_000;
+    const own = accounts.find((a) => a.name === fromName);
+    const candidates = measuredAccounts().filter((usage) => {
+      if (usage.name === fromName) return true;
+      const account = accounts.find((a) => a.name === usage.name);
+      const observedAt = collector.get(usage.name)?.observedAt ?? null;
+      return (
+        account !== undefined &&
+        observedAt !== null &&
+        now - observedAt <= maxAgeMs &&
+        (own === undefined ||
+          own.accountUuid === null ||
+          account.accountUuid !== own.accountUuid)
+      );
+    });
     const decision = decideAhead({
       currentAccount: fromName,
-      accounts: measuredAccounts(),
+      accounts: candidates,
       preferredModel: current.preferredModel,
       threshold: current.switchAheadPercent,
-      now: deps.now(),
+      now,
     });
     if (decision.kind === "keep") return;
-    const now = deps.now();
     await applyAccount(projectId, accountOrDefault(decision.account), from);
     await markHandled(projectId);
     const reason = `Switched ahead of the limit to ${decision.account}: ${fromName} at ${Math.round(decision.used)}% of ${decision.window}`;

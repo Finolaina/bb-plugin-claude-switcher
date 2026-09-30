@@ -3023,6 +3023,96 @@ describe("moving a project ahead of the limit, after a turn", () => {
     expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([["proj-1", ownNote("spare")]]);
   });
 
+  it("does not move to another directory of the same Claude account", async () => {
+    // The two share one usage: the other only looks roomier until it is measured.
+    let clock = NOW;
+    let mainFable = 70;
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, 40, mainFable)),
+        spare: () => Response.json(payload(10, 40, 70)),
+        work: () => Response.json(payload(5, 20, 95)),
+      },
+      { settings: { switchAheadPercent: 80, preferredModel: "Fable" }, clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    h.files[`${ACCOUNTS}/spare/.claude.json`] = claudeJson("main@example.com", "uuid-main");
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + 5 * 60_000;
+    mainFable = 85;
+    await idle(h);
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("does not move to an account whose last measurement is old", async () => {
+    // Its query has failed for hours: what it had left then is not what it has.
+    let clock = NOW;
+    let mainFable = 70;
+    let spareDown = false;
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, 40, mainFable)),
+        spare: () => (spareDown ? new Response(null, { status: 500 }) : Response.json(payload(10, 40, 10))),
+        work: () => Response.json(payload(5, 20, 95)),
+      },
+      { settings: { switchAheadPercent: 80, preferredModel: "Fable" }, clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    spareDown = true;
+    // Two refresh periods (5 min each) and a millisecond: too old.
+    clock = NOW + 10 * 60_000 - 2 * 60_000;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + 10 * 60_000 + 1;
+    mainFable = 85;
+    await idle(h);
+    expect(h.envSet).toEqual([]);
+    // At two periods exactly it still counts.
+    const at = await host(
+      {
+        main: () => Response.json(payload(10, 40, mainFable)),
+        spare: () => (spareDown ? new Response(null, { status: 500 }) : Response.json(payload(10, 40, 10))),
+        work: () => Response.json(payload(5, 20, 95)),
+      },
+      { settings: { switchAheadPercent: 80, preferredModel: "Fable" }, clock: () => clock },
+    );
+    clock = NOW;
+    spareDown = false;
+    mainFable = 70;
+    await at.harness.behavior.callRpc("accounts_refresh", null);
+    spareDown = true;
+    clock = NOW + 10 * 60_000;
+    mainFable = 85;
+    await idle(at);
+    expect(at.envSet.map((e) => e.note)).toEqual([ownNote("spare")]);
+    at.harness.dispose();
+  });
+
+  it("does not move when the automatic choice was turned off while the account was measured", async () => {
+    let clock = NOW;
+    let gated = false;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const answer = () => Response.json(payload(10, 40, 92));
+    const main = () => (gated ? gate.then(answer) : answer()) as Response;
+    const h = await host(
+      { ...AHEAD, main },
+      { settings: { switchAheadPercent: 90, preferredModel: "Fable" }, clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    gated = true;
+    clock = NOW + 5 * 60_000;
+    const pending = idle(h);
+    await new Promise((r) => setTimeout(r, 5));
+    await h.harness.behavior.setSettings({ autoSwitch: false });
+    release();
+    await pending;
+    expect(h.envSet).toEqual([]);
+  });
+
   it("leaves a project whose account was set by hand outside the plugin", async () => {
     const h = await host(AHEAD, {
       settings: { switchAheadPercent: 90, preferredModel: "Fable" },
