@@ -3010,6 +3010,34 @@ describe("moving a project ahead of the limit, after a turn", () => {
     expect(h.retries.map((r) => r.reason)).toEqual(["Retrying on account spare"]);
   });
 
+  it("finds the accounts again when their directory setting was just touched", async () => {
+    const h = await host(AHEAD, {
+      settings: { switchAheadPercent: 90, preferredModel: "Fable" },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // Changed and put back: the list of accounts is empty until the next look.
+    await h.harness.behavior.setSettings({ accountsDir: "/Users/someone/elsewhere" });
+    await h.harness.behavior.setSettings({ accountsDir: ACCOUNTS });
+    await idle(h);
+    expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([["proj-1", ownNote("spare")]]);
+  });
+
+  it("leaves a project whose account was set by hand outside the plugin", async () => {
+    const h = await host(AHEAD, {
+      settings: { switchAheadPercent: 90, preferredModel: "Fable" },
+      presetEnv: {
+        "proj-1": [{ name: ENV_VAR, note: "set by hand", secret: true, value: null }],
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await idle(h);
+    expect(h.envSet).toEqual([]);
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history).toEqual([]);
+  });
+
   it("does nothing unless the threshold is set", async () => {
     const h = await host(AHEAD, { settings: { preferredModel: "Fable" } });
     dispose = () => h.harness.dispose();
@@ -3445,6 +3473,19 @@ describe("adding an account by logging in from bb", () => {
     );
     expect(h.made).toEqual([]);
     expect(h.logins).toEqual([]);
+  });
+
+  it("refuses a new directory when the accounts directory is inside the default account's", async () => {
+    // `projects`, `plugins`... exist there and are what every account shares.
+    for (const accountsDir of [`${HOME}/.claude`, "~/.claude/", `${ACCOUNTS}/../.claude/sub`, `${HOME}/.CLAUDE`]) {
+      const h = await host(ALL_FREE, { settings: { accountsDir } });
+      await expect(h.harness.behavior.callRpc("account_login_start", { name: "projects" })).rejects.toThrow(
+        /inside the default account's directory/,
+      );
+      expect(h.made).toEqual([]);
+      expect(h.logins).toEqual([]);
+      h.harness.dispose();
+    }
   });
 
   it("lets an account without a login log in again, measuring it first when needed", async () => {

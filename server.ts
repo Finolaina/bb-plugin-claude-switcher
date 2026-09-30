@@ -220,7 +220,7 @@ export const rpcContract = defineRpcContract({
     output: stateSchema,
   },
   /** Log an account in from bb: a new directory under the accounts dir, or a listed account without a login. */
-  account_login_start: { input: z.object({ name: z.string() }), output: stateSchema },
+  account_login_start: { input: z.object({ name: z.string().max(255) }), output: stateSchema },
   account_login_code: { input: z.object({ code: z.string().max(4096) }), output: stateSchema },
   /** Stops a running login; when none runs, forgets the last outcome. */
   account_login_cancel: { input: z.null(), output: stateSchema },
@@ -575,6 +575,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     },
   });
   /**
+   * An absolute path without `.`, `..` or repeated slashes, in lower case:
+   * for comparing where two paths lead, on a disk that may ignore case.
+   */
+  function plainPath(path: string): string {
+    const parts: string[] = [];
+    for (const part of path.toLowerCase().split("/")) {
+      if (part === "" || part === ".") continue;
+      if (part === "..") parts.pop();
+      else parts.push(part);
+    }
+    return `/${parts.join("/")}`;
+  }
+  /**
    * Where a login for `name` goes: the default account (no directory), a
    * listed account without a login, or a new directory under the accounts
    * dir. An account already logged in is refused: its store would be
@@ -615,6 +628,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       current.accountsDir.trim(),
       deps.accountsIo.home,
     ).replace(/\/+$/, "");
+    // Under ~/.claude a new name can be `projects` or `plugins`: the login
+    // would write into what every account shares, and list it as an account.
+    const own = plainPath(`${deps.accountsIo.home}/.claude`);
+    const plain = plainPath(dir);
+    if (plain === own || plain.startsWith(`${own}/`))
+      throw new Error(
+        "the accounts directory is inside the default account's directory (~/.claude); set another one to add accounts from here",
+      );
     for (const entry of await deps.loginIo.entries(dir)) {
       if (entry.name.toLowerCase() !== lower) continue;
       if (entry.name !== name)
@@ -1284,6 +1305,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       notTheUsersThread(thread) !== null
     )
       return;
+    // Emptied by a change of the accounts directory, until the next look.
+    if (accounts.length === 0) await discover();
     await measureForAhead(thread.projectId);
     await inProjectQueue(thread.projectId, () => moveAhead(thread));
   });
