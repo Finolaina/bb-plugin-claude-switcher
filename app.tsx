@@ -192,12 +192,15 @@ function AccountCard({
   isDefault,
   forecasts,
   onLogin,
+  busy = false,
 }: {
   account: AccountState;
   isDefault: boolean;
   forecasts: Record<string, Forecast> | undefined;
   /** Offered for an account without a login; undefined while a login runs. */
   onLogin?: () => void;
+  /** Another request of this page is on its way. */
+  busy?: boolean;
 }) {
   const usage = account.usage;
   const status =
@@ -250,7 +253,13 @@ function AccountCard({
         </p>
       )}
       {account.problem?.kind === "unauthenticated" && onLogin !== undefined ? (
-        <Button variant="outline" size="sm" className="mt-2" onClick={onLogin}>
+        <Button
+          variant="outline"
+          size="sm"
+          className="mt-2"
+          onClick={onLogin}
+          disabled={busy}
+        >
           <Icon name="LogIn" className="size-3.5" />
           Log in
         </Button>
@@ -332,7 +341,10 @@ function AddAccount({
       role="status"
       className={cn(
         "rounded-md border p-3 text-xs",
-        login.phase === "failed" ? "border-destructive" : "border-border",
+        // A finished login with a message did not leave what was asked for.
+        login.phase === "failed" || login.message !== null
+          ? "border-destructive"
+          : "border-border",
       )}
     >
       <p>
@@ -341,7 +353,7 @@ function AddAccount({
         {login.phase === "running"
           ? "waiting for the login in the browser…"
           : login.phase === "done"
-            ? "logged in"
+            ? (login.message ?? "logged in")
             : login.phase === "cancelled"
               ? "login cancelled"
               : `login failed: ${login.message ?? "no message"}`}
@@ -485,6 +497,7 @@ function AccountsSection() {
                 ? undefined
                 : () => startLogin(account.name)
             }
+            busy={busy}
           />
         ))}
       </ul>
@@ -599,7 +612,7 @@ function History({ state }: { state: State }) {
             <span className="shrink-0 tabular-nums text-muted-foreground">
               {new Date(move.at).toLocaleString()}
             </span>
-            <span className="min-w-0">
+            <span className="min-w-0 break-words">
               <span className="font-medium">
                 {projectName(state.projects, move.projectId)}
               </span>
@@ -614,6 +627,7 @@ function History({ state }: { state: State }) {
           variant="ghost"
           size="sm"
           className="mt-1"
+          aria-expanded={all}
           onClick={() => setAll(!all)}
         >
           {all ? "Show fewer" : `Show all ${moves.length}`}
