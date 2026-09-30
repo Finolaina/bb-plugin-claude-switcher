@@ -5,7 +5,9 @@
 //      each) and publish the windows to bb's Provider usage panel.
 //   2. When a thread is created, put a new project on the best account, and
 //      move a known one off an account already measured unable to run, so
-//      the first turn does not fail.
+//      the first turn does not fail. Before every turn, the same for the
+//      model the turn is sent with (bb's dispatch checkpoint), whatever the
+//      preferred model.
 //   3. When a turn fails on a subscription limit, move the thread's project to
 //      another account (CLAUDE_CONFIG_DIR as a project machine env var) and
 //      retry the turn; when no account is free, retry at the earliest reset.
@@ -56,6 +58,7 @@ import {
   decideAhead,
   decidePlacement,
   decideSwitch,
+  modelFamily,
 } from "./src/switch.js";
 import {
   usageFetchMethod,
@@ -76,6 +79,8 @@ export const CHANGED = "accounts-changed";
 export const SWITCH_GRACE_MS = 60_000;
 /** A measurement older than this is taken again before moving a project ahead of the limit. */
 export const AHEAD_FRESH_MS = 60_000;
+/** bb fails a dispatch whose checkpoint takes 10 s: the placement before a turn is left behind well before. */
+export const DISPATCH_LIMIT_MS = 3_000;
 /** A login left waiting in the browser this long is given up. */
 export const LOGIN_TIMEOUT_MS = 10 * 60_000;
 /** An account directory name: one path segment, no leading dot. */
@@ -758,9 +763,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
 
   /** Measurements recent enough to decide on (two refresh periods). */
-  function measuredAccounts() {
+  function measuredAccounts(model = current.preferredModel) {
     const maxAgeMs = 2 * Math.max(1, current.refreshMinutes) * 60_000;
-    return collector.usable(maxAgeMs, current.preferredModel);
+    return collector.usable(maxAgeMs, model);
   }
 
   async function state(): Promise<State> {
@@ -1355,6 +1360,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   });
   bb.events.on("thread.archived", ({ thread }) => {
     startedOn.delete(thread.id);
+    threadModel.delete(thread.id);
   });
 
   bb.events.on("thread.created", async ({ thread }) => {
@@ -1373,6 +1379,90 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return;
     }
     await inProjectQueue(thread.projectId, () => placeProject(thread));
+  });
+
+  // ---- The model of each turn, at bb's dispatch checkpoint ----------------
+  /**
+   * The model each thread's latest message was sent with, as the usage API
+   * names it. bb says it only at the checkpoint (a thread row and a failed
+   * turn carry none): a failure of the thread is judged against it, and
+   * against the preferred model when the thread has not been seen here.
+   */
+  const threadModel = new Map<string, string>();
+  /**
+   * Before a turn starts: when the project's account is MEASURED unable to
+   * run the model the turn is sent with and another account can, the project
+   * moves there first. The preferred model does not decide here: a thread
+   * the user switched to Opus runs on an account with Opus left even when
+   * every account is out of the preferred one.
+   */
+  async function placeTurn(thread: ThreadResponse, model: string) {
+    const projectId = thread.projectId;
+    // Emptied by a change of the accounts directory, until the next look.
+    if (accounts.length === 0) await discover();
+    const from = await projectAccount(projectId);
+    if (from.external) return;
+    const fromName = from.account ?? current.defaultAccountName;
+    const now = deps.now();
+    const decision = decidePlacement({
+      currentAccount: fromName,
+      isNew: false,
+      accounts: measuredAccounts(model),
+      preferredModel: model,
+      now,
+    });
+    if (decision.kind === "keep") return;
+    await applyAccount(projectId, accountOrDefault(decision.account), from);
+    await markHandled(projectId);
+    const reason = `Moved to account ${decision.account} before the turn: ${fromName} cannot run ${model}`;
+    bb.log.info(`thread ${thread.id}: ${reason}`);
+    await recordMove(
+      {
+        at: now,
+        threadId: thread.id,
+        projectId,
+        from: fromName,
+        to: decision.account,
+        reason,
+      },
+      // Its turn has not started: it runs on the new account.
+      thread.id,
+    );
+  }
+
+  // bb holds every message of every thread on this answer and fails the
+  // attempt when a handler throws or takes 10 s: it always proceeds, decides
+  // on the measurements already there, and stays out of the project's queue
+  // (a retry sent from that queue passes through here). A read of bb that
+  // never answers is left behind after DISPATCH_LIMIT_MS.
+  bb.experimental_hooks.on("message.dispatch", async (ctx) => {
+    const { thread } = ctx;
+    const model = modelFamily(ctx.requestedExecution.model);
+    if (
+      model === null ||
+      thread.providerId !== CLAUDE_CODE_PROVIDER ||
+      notTheUsersThread(thread) !== null
+    )
+      return { action: "proceed" };
+    threadModel.set(thread.id, model);
+    if (current.autoSwitch && ctx.attempt === "start-turn") {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          placeTurn(thread, model),
+          new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, DISPATCH_LIMIT_MS);
+          }),
+        ]);
+      } catch (error) {
+        bb.log.warn(
+          `thread ${thread.id}: not placed before its turn: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    return { action: "proceed" };
   });
 
   // ---- Automatic switch on subscription limit ---------------------------
@@ -1440,14 +1530,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return;
     }
     const fromName = from.account ?? current.defaultAccountName;
+    const model = threadModel.get(event.threadId) ?? current.preferredModel;
     const decision = decideSwitch({
       failure: event,
       currentAccount: fromName,
-      accounts: collector.usable(
-        2 * Math.max(1, current.refreshMinutes) * 60_000,
-        current.preferredModel,
-      ),
-      preferredModel: current.preferredModel,
+      accounts: measuredAccounts(model),
+      preferredModel: model,
       maximumWaitMs:
         current.maximumWaitHours > 0
           ? current.maximumWaitHours * 3_600_000

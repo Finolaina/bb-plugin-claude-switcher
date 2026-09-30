@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import {
   createFakePluginHost,
+  makeMessageDispatchHookContext,
   makeThreadResponse,
   makeTurnFailedEvent,
 } from "@get-bb/plugin-sdk/testing";
@@ -296,6 +297,9 @@ interface HostOptions {
   projectCreatedAt?: Record<string, number>;
   /** setMachineEnvironmentVariable throws for these projects. */
   failSet?: string[];
+  /** machineEnvironment throws for these projects (a bb hiccup), or never answers. */
+  failEnvRead?: string[];
+  hangEnvRead?: string[];
   /** The plugin process's environment, as the login inherits it. */
   env?: Record<string, string>;
   /** What the accounts directory holds, links and files included; default: dirs() as directories. */
@@ -431,8 +435,13 @@ async function host(
             ? [{ id: "personal", name: "Personal" }]
             : []),
         ],
-        machineEnvironment: async ({ projectId }: { projectId: string }) =>
-          envList(projectId),
+        machineEnvironment: async ({ projectId }: { projectId: string }) => {
+          if (options.failEnvRead?.includes(projectId))
+            throw new Error(`HTTP 503: could not read ${projectId}`);
+          if (options.hangEnvRead?.includes(projectId))
+            await new Promise(() => {});
+          return envList(projectId);
+        },
         get: async ({ projectId }: { projectId: string }) => ({
           id: projectId,
           name: projectId,
@@ -3619,5 +3628,244 @@ describe("adding an account by logging in from bb", () => {
     await expect(h.harness.behavior.callRpc("account_login_start", { name: "side" })).rejects.toThrow(
       /still running/,
     );
+  });
+});
+
+describe("the model a thread's turn runs on", () => {
+  /** A usage answer with a weekly window per model. */
+  function usage(session: number, fable: number, opus: number) {
+    return () => {
+      const answer = payload(session, 40, fable);
+      (answer.limits as unknown[]).push({
+        kind: "weekly_scoped",
+        percent: opus,
+        resets_at: new Date(NOW + 4 * HOUR).toISOString(),
+        scope: { model: { display_name: "Opus" } },
+      });
+      return Response.json(answer);
+    };
+  }
+  /** `main` (the project's account) is out of its session; the others are out of Fable and can run Opus. */
+  const OPUS_ELSEWHERE = {
+    main: usage(100, 30, 0),
+    spare: usage(10, 100, 20),
+    work: usage(5, 100, 10),
+  };
+  const FABLE = { settings: { preferredModel: "Fable" } };
+
+  /** What bb asks before a message reaches the provider, answered by the plugin. */
+  function dispatch(
+    h: Awaited<ReturnType<typeof host>>,
+    model: string | null,
+    overrides: Parameters<typeof makeMessageDispatchHookContext>[0] = {},
+  ) {
+    return h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: "thread-1", projectId: "proj-1" }),
+        requestedExecution: { providerId: "claude-code", model },
+        attempt: "start-turn",
+        ...overrides,
+      }),
+    );
+  }
+
+  it("moves the project off an account that is out when the turn is sent with Opus and another account can run Opus, though none can run the preferred model", async () => {
+    const h = await host(OPUS_ELSEWHERE, FABLE);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const measured = h.usageCalls.length;
+    expect(await dispatch(h, "claude-opus-5-5")).toEqual({ action: "proceed" });
+    // Decided on the measurements already there: no query in the way of the turn.
+    expect(h.usageCalls.length).toBe(measured);
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-1", `${ACCOUNTS}/work`],
+    ]);
+    const state = (await h.harness.behavior.callRpc(
+      "accounts_list",
+      null,
+    )) as State;
+    expect(state.lastSwitch).toMatchObject({
+      threadId: "thread-1",
+      projectId: "proj-1",
+      from: "main",
+      to: "work",
+      reason: "Moved to account work before the turn: main cannot run Opus",
+    });
+    // Its turn started on `work`: a failure is that account's, judged against Opus.
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.retries.map((r) => r.reason)).toEqual([
+      "Switched to account spare (Opus)",
+    ]);
+  });
+
+  it("leaves a thread sent with Fable where it is when no account can run Fable: its failed turn still waits for Fable", async () => {
+    const h = await host(OPUS_ELSEWHERE, FABLE);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect(await dispatch(h, "claude-fable-5-1")).toEqual({ action: "proceed" });
+    expect(h.envSet).toEqual([]);
+    expect(h.envDeleted).toEqual([]);
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet).toEqual([]);
+    expect(h.retries).toEqual([
+      {
+        threadId: "thread-1",
+        turnRequestId: "creq_1",
+        sendAt: NOW + 2 * HOUR + BUFFER,
+        reason: "Waiting for Fable on main",
+      },
+    ]);
+  });
+
+  it("lets the message through when the project's account cannot be read, or the read never answers", async () => {
+    const failing = await host(OPUS_ELSEWHERE, {
+      ...FABLE,
+      failEnvRead: ["proj-1"],
+    });
+    dispose = () => failing.harness.dispose();
+    await failing.harness.behavior.callRpc("accounts_refresh", null).catch(() => {});
+    expect(await dispatch(failing, "claude-opus-5-5")).toEqual({
+      action: "proceed",
+    });
+    expect(failing.envSet).toEqual([]);
+    expect(
+      failing.harness.logEntries.filter((entry) => entry.level === "warn"),
+    ).toMatchObject([
+      {
+        message:
+          "thread thread-1: not placed before its turn: HTTP 503: could not read proj-1",
+      },
+    ]);
+    failing.harness.dispose();
+
+    const hanging = await host(OPUS_ELSEWHERE, {
+      ...FABLE,
+      hangEnvRead: ["proj-1"],
+    });
+    dispose = () => hanging.harness.dispose();
+    vi.useFakeTimers();
+    try {
+      const answer = dispatch(hanging, "claude-opus-5-5");
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(await answer).toEqual({ action: "proceed" });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(hanging.envSet).toEqual([]);
+  });
+
+  it("moves nothing for a message that joins a running turn, a model bb has not resolved or that is not a Claude model id, hidden threads, other providers, external variables and autoSwitch off", async () => {
+    type Case = [
+      string | null,
+      Parameters<typeof makeMessageDispatchHookContext>[0],
+      HostOptions,
+    ];
+    const opus = "claude-opus-5-5";
+    const cases: Case[] = [
+      [opus, { attempt: "join-turn" }, FABLE],
+      [null, {}, FABLE],
+      ["opusplan", {}, FABLE],
+      [opus, { thread: thread({ projectId: "proj-1", visibility: "hidden" }) }, FABLE],
+      [opus, { thread: thread({ projectId: "proj-1", providerId: "codex" }) }, FABLE],
+      [opus, {}, { settings: { preferredModel: "Fable", autoSwitch: false } }],
+      [
+        opus,
+        {},
+        {
+          ...FABLE,
+          presetEnv: {
+            "proj-1": [{ name: ENV_VAR, note: "mine", secret: true, value: null }],
+          },
+        },
+      ],
+    ];
+    for (const [model, overrides, options] of cases) {
+      const h = await host(OPUS_ELSEWHERE, options);
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, model, overrides)).toEqual({ action: "proceed" });
+      expect(h.envSet).toEqual([]);
+      expect(h.envDeleted).toEqual([]);
+      expect(
+        h.harness.logEntries.filter((entry) => entry.level === "warn"),
+      ).toEqual([]);
+      h.harness.dispose();
+    }
+  });
+
+  it("does not place a project again as new after moving it to the default account before a turn", async () => {
+    // `spare`, where the new project sits, is out; of the others only `main` (the default) has Opus left.
+    const h = await host(
+      { main: usage(10, 50, 0), spare: usage(100, 0, 0), work: usage(5, 0, 100) },
+      {
+        ...FABLE,
+        presetEnv: {
+          "proj-3": [
+            { name: ENV_VAR, note: ownNote("spare"), secret: true, value: null },
+          ],
+        },
+      },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await dispatch(h, "claude-opus-5-5", {
+      thread: thread({ id: "thr-new", projectId: "proj-3" }),
+    });
+    expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-3"]);
+    // `work` ranks better for the preferred model, and `main` can run it: a known project stays.
+    await h.harness.behavior.emitThreadEvent("thread.created", {
+      thread: thread({ id: "thr-new-2", projectId: "proj-3" }),
+    });
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("after the accounts directory changes, never moves a turn to an account of the old directory", async () => {
+    const h = await host(OPUS_ELSEWHERE, FABLE);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.setSettings({ accountsDir: "/Users/someone/elsewhere" });
+    expect(await dispatch(h, "claude-opus-5-5")).toEqual({ action: "proceed" });
+    expect(h.envSet).toEqual([]);
+    expect(
+      h.harness.logEntries.filter((entry) => entry.level === "warn"),
+    ).toEqual([]);
+  });
+
+  it("judges a failed turn against the model its thread was sent with: an Opus thread switches to an account with Opus left instead of waiting for the preferred model", async () => {
+    const h = await host(
+      { ...OPUS_ELSEWHERE, main: usage(50, 30, 0) },
+      FABLE,
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // Measured able to run: the turn starts where the project is.
+    expect(await dispatch(h, "claude-opus-5-5")).toEqual({ action: "proceed" });
+    expect(h.envSet).toEqual([]);
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-1", `${ACCOUNTS}/work`],
+    ]);
+    expect(h.retries).toEqual([
+      {
+        threadId: "thread-1",
+        turnRequestId: "creq_1",
+        reason: "Switched to account work (Opus)",
+      },
+    ]);
+  });
+
+  it("forgets a thread's model when the thread is archived: the preferred model decides its next failure", async () => {
+    const h = await host(
+      { ...OPUS_ELSEWHERE, main: usage(50, 30, 0) },
+      FABLE,
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await dispatch(h, "claude-opus-5-5");
+    await h.harness.behavior.emitThreadEvent("thread.archived", {
+      thread: thread({ id: "thread-1", projectId: "proj-1" }),
+    });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet).toEqual([]);
+    expect(h.retries.map((r) => r.reason)).toEqual(["Waiting for Fable on main"]);
   });
 });

@@ -65,6 +65,18 @@ export function declineReason(
   return null;
 }
 
+/**
+ * The usage API's name for the model a bb model id runs
+ * ("claude-opus-5-5" → "Opus"), or null when the id is not a Claude model id
+ * (none resolved yet, an alias): the preferred model decides then.
+ */
+export function modelFamily(modelId: string | null): string | null {
+  const family = /^claude-([a-z]+)-/.exec(modelId ?? "")?.[1];
+  return family === undefined
+    ? null
+    : family[0]!.toUpperCase() + family.slice(1);
+}
+
 /** A window whose reset has passed is free again, whatever a stale measurement says. */
 export function settle(account: AccountUsage, now: number): AccountUsage {
   const window = (w: UsageWindow): UsageWindow =>

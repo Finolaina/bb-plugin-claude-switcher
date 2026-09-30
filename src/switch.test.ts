@@ -7,6 +7,7 @@ import {
   decideAhead,
   decidePlacement,
   decideSwitch,
+  modelFamily,
   settle,
   type SwitchInput,
 } from "./switch.js";
@@ -611,5 +612,20 @@ describe("decideAhead", () => {
         ],
       }),
     ).toEqual({ kind: "move", account: "work", used: 99, window: "session" });
+  });
+});
+
+describe("modelFamily", () => {
+  it("names the model of a bb model id as the usage API does", () => {
+    // Ids as `bb provider models claude-code` lists them (2026-09-30).
+    expect(modelFamily("claude-opus-5-5")).toBe("Opus");
+    expect(modelFamily("claude-fable-5-1")).toBe("Fable");
+    expect(modelFamily("claude-sonnet-5")).toBe("Sonnet");
+    expect(modelFamily("claude-haiku-4-5-20251001")).toBe("Haiku");
+  });
+
+  it("names nothing for a model bb has not resolved, an alias or another provider's model", () => {
+    for (const id of [null, "", "opusplan", "opus", "gpt-6-astra", "claude-"])
+      expect(modelFamily(id)).toBeNull();
   });
 });
