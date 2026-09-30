@@ -70,6 +70,24 @@ describe("forecastWindow", () => {
     expect(forecastWindow(undefined, T0)).toEqual({ kind: "unknown" });
   });
 
+  it("draws each line at its exact value", () => {
+    const at = (resetsAt: number, points: [number, number][], now: number) =>
+      forecastWindow({ resetsAt, points }, now).kind;
+    // Two hours of history are enough; a millisecond less is not.
+    expect(at(RESET, [[T0, 10], [T0 + 2 * HOUR, 40]], T0 + 2 * HOUR)).toBe("runs-out");
+    expect(at(RESET, [[T0, 10], [T0 + 2 * HOUR - 1, 40]], T0 + 2 * HOUR)).toBe("unknown");
+    // One point a day is a pace; under it the window is steady.
+    expect(at(RESET, [[T0, 10], [T0 + 24 * HOUR, 11]], T0 + 24 * HOUR)).toBe("lasts");
+    expect(at(RESET, [[T0, 10], [T0 + 24 * HOUR, 10.99]], T0 + 24 * HOUR)).toBe("steady");
+    // 30 points a day from 40 %: 100 % at T0 + 72 h. Reaching it AT the reset is lasting.
+    const pace: [number, number][] = [[T0, 10], [T0 + 24 * HOUR, 40]];
+    expect(at(T0 + 72 * HOUR, pace, T0 + 24 * HOUR)).toBe("lasts");
+    expect(at(T0 + 72 * HOUR + 1, pace, T0 + 24 * HOUR)).toBe("runs-out");
+    // A reset that is now has passed.
+    expect(at(RESET, pace, RESET)).toBe("unknown");
+    expect(at(RESET, pace, RESET - 1)).not.toBe("unknown");
+  });
+
   it("rounds the pace to a tenth of a point", () => {
     const series: Series = {
       resetsAt: RESET,

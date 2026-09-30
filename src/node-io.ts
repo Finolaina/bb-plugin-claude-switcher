@@ -95,6 +95,9 @@ export function nodeLoginIo(): LoginIo {
         env,
         stdio: ["pipe", "pipe", "pipe"],
       });
+      // A login that ended closes its pipe: a write after that must not
+      // take the plugin down as an unhandled error.
+      child.stdin.on("error", () => {});
       const listeners: ((chunk: string) => void)[] = [];
       for (const stream of [child.stdout, child.stderr]) {
         stream.setEncoding("utf8");
@@ -104,7 +107,8 @@ export function nodeLoginIo(): LoginIo {
       }
       const exited = new Promise<{ code: number | null; error?: string }>(
         (resolve) => {
-          child.once("error", (error) =>
+          // `on`: a second error (a failed kill) has a listener too.
+          child.on("error", (error) =>
             resolve({ code: null, error: error.message }),
           );
           child.once("exit", (code) => resolve({ code }));
@@ -112,7 +116,7 @@ export function nodeLoginIo(): LoginIo {
       );
       return {
         write: (text) => {
-          child.stdin.write(text);
+          if (child.stdin.writable) child.stdin.write(text);
         },
         kill: () => {
           child.kill();
