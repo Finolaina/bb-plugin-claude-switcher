@@ -120,8 +120,8 @@ type ForecastLike =
 
 /** "2 d 5 h", "3 h", "40 min", or "now". */
 function inTime(ms: number): string {
-  if (ms <= 0) return "now";
   const minutes = Math.round(ms / 60_000);
+  if (minutes <= 0) return "now";
   if (minutes < 60) return `in ${minutes} min`;
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `in ${hours} h`;

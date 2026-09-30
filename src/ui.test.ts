@@ -225,6 +225,19 @@ describe("forecastLine", () => {
     expect(
       forecastLine({ kind: "runs-out", at: NOW - 1, percentPerDay: 99 }, NOW),
     ).toBe(`runs out now at this pace (99 %/day)`);
+    // Under half a minute is now, not "in 0 min".
+    expect(
+      forecastLine(
+        { kind: "runs-out", at: NOW + 29_000, percentPerDay: 99 },
+        NOW,
+      ),
+    ).toBe(`runs out now at this pace (99 %/day)`);
+    expect(
+      forecastLine(
+        { kind: "runs-out", at: NOW + 31_000, percentPerDay: 99 },
+        NOW,
+      ),
+    ).toBe(`runs out in 1 min at this pace (99 %/day)`);
   });
 
   it("says the window lasts until its reset, and nothing for a steady or unknown one", () => {

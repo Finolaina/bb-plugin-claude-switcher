@@ -259,6 +259,7 @@ function AccountCard({
           className="mt-2"
           onClick={onLogin}
           disabled={busy}
+          aria-label={`Log in ${account.name}`}
         >
           <Icon name="LogIn" className="size-3.5" />
           Log in
@@ -338,7 +339,6 @@ function AddAccount({
   const running = login.phase === "running";
   return (
     <div
-      role="status"
       className={cn(
         "rounded-md border p-3 text-xs",
         // A finished login with a message did not leave what was asked for.
@@ -347,7 +347,7 @@ function AddAccount({
           : "border-border",
       )}
     >
-      <p>
+      <p role={login.phase === "failed" ? "alert" : "status"}>
         <span className="font-medium">{login.name}</span>
         {": "}
         {login.phase === "running"
@@ -358,7 +358,7 @@ function AddAccount({
               ? "login cancelled"
               : `login failed: ${login.message ?? "no message"}`}
       </p>
-      {running && login.manualUrl !== null ? (
+      {running && login.manualUrl?.startsWith("https://") ? (
         <p className="mt-1 text-muted-foreground">
           If no browser window opened,{" "}
           <a
