@@ -159,9 +159,15 @@ interface FakeLogin {
   exit: (code: number | null) => void;
 }
 
-function fakeLoginIo(): { loginIo: LoginIo; logins: FakeLogin[]; made: string[] } {
+function fakeLoginIo(): {
+  loginIo: LoginIo;
+  logins: FakeLogin[];
+  made: string[];
+  links: [string, string][];
+} {
   const logins: FakeLogin[] = [];
   const made: string[] = [];
+  const links: [string, string][] = [];
   const loginIo: LoginIo = {
     spawn({ env }) {
       let resolveExit!: (r: { code: number | null }) => void;
@@ -188,9 +194,16 @@ function fakeLoginIo(): { loginIo: LoginIo; logins: FakeLogin[]; made: string[] 
     },
     async mkdir(dir) {
       made.push(dir);
+      return true;
+    },
+    // Only `projects` exists in the default account's directory.
+    async link(target, path) {
+      if (!target.endsWith("/projects")) return false;
+      links.push([target, path]);
+      return true;
     },
   };
-  return { loginIo, logins, made };
+  return { loginIo, logins, made, links };
 }
 
 /** attemptNumber of each failed request seen, so the fake retry can stamp bb's `attempt`. */
@@ -311,7 +324,7 @@ async function host(
     usage,
     options.dirs ?? (() => ["spare", "work"]),
   );
-  const { loginIo, logins, made } = fakeLoginIo();
+  const { loginIo, logins, made, links } = fakeLoginIo();
   const fake = createFakePluginHost({
     pluginId: "claude-switcher",
     settings: {
@@ -478,6 +491,7 @@ async function host(
     files,
     logins,
     made,
+    links,
   };
 }
 
@@ -2998,6 +3012,10 @@ describe("adding an account by logging in from bb", () => {
     await h.harness.behavior.callRpc("accounts_refresh", null);
     const started = (await h.harness.behavior.callRpc("account_login_start", { name: "team" })) as State;
     expect(h.made).toEqual([`${ACCOUNTS}/team`]);
+    // The new directory shares the default account's transcripts.
+    expect(h.links).toEqual([
+      [`${HOME}/.claude/projects`, `${ACCOUNTS}/team/projects`],
+    ]);
     expect(h.logins[0]?.env).toEqual({
       PATH: "/usr/bin",
       HOME: HOME,

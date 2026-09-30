@@ -9,6 +9,11 @@
 // reports how far it got. Exit 0 means Claude Code wrote the login to its
 // store; the caller then measures the account.
 //
+// A directory the plugin creates for a new account gets symlinks to what a
+// thread needs from the default account's directory (SHARED): without the
+// shared transcripts a project moved to the new account cannot resume its
+// threads. A directory that already existed is left as it is.
+//
 // The consent URL carries a one-time PKCE challenge: it is never logged.
 // The manual URL is kept for the UI (the user may need it), nothing else.
 
@@ -24,9 +29,28 @@ export interface LoginProcess {
 
 export interface LoginIo {
   spawn(args: { command: string; env: Record<string, string> }): LoginProcess;
-  /** Creates the directory and its parents; no error when it exists. */
-  mkdir(dir: string): Promise<void>;
+  /** Creates the directory and its parents; true when it did not exist. */
+  mkdir(dir: string): Promise<boolean>;
+  /** Symlinks `path` to `target` when `target` exists and `path` does not; true when it did. */
+  link(target: string, path: string): Promise<boolean>;
 }
+
+/**
+ * What a new account directory shares with the default one: the session
+ * transcripts (a thread cannot be resumed without them) and the user's
+ * configuration. The login itself (.claude.json) is never shared.
+ */
+export const SHARED = [
+  "projects",
+  "settings.json",
+  "hooks",
+  "CLAUDE.md",
+  "plugins",
+  "skills",
+  "agents",
+  "commands",
+  "rules",
+] as const;
 
 export interface LoginOptions {
   /** The Claude Code executable: a name looked up in PATH, or a path (read at each start). */
@@ -36,6 +60,8 @@ export interface LoginOptions {
   timeoutMs: number;
   now: () => number;
   onChange?: (status: LoginStatus) => void;
+  /** A new directory was created for `name` and these entries were linked into it. */
+  onShared?: (name: string, linked: string[]) => void;
 }
 
 export type LoginPhase = "running" | "done" | "failed" | "cancelled";
@@ -76,16 +102,36 @@ export class LoginFlow {
 
   /**
    * Starts the login for an account (configDir null = the default account).
-   * `baseEnv` is what the login inherits; CLAUDE_CONFIG_DIR and BROWSER are
-   * always replaced.
+   * `shareFrom` is the default account's directory: a directory created here
+   * links SHARED from it. `baseEnv` is what the login inherits;
+   * CLAUDE_CONFIG_DIR and BROWSER are always replaced.
    */
   async start(
-    account: { name: string; configDir: string | null },
+    account: {
+      name: string;
+      configDir: string | null;
+      shareFrom?: string | null;
+    },
     baseEnv: Record<string, string | undefined> = {},
   ): Promise<LoginStatus> {
     if (this.current?.phase === "running")
       throw new Error(`the login of ${this.current.name} is still running`);
-    if (account.configDir !== null) await this.io.mkdir(account.configDir);
+    if (account.configDir !== null) {
+      const created = await this.io.mkdir(account.configDir);
+      const from = account.shareFrom ?? null;
+      if (created && from !== null) {
+        const linked: string[] = [];
+        for (const entry of SHARED)
+          if (
+            await this.io.link(
+              `${from}/${entry}`,
+              `${account.configDir}/${entry}`,
+            )
+          )
+            linked.push(entry);
+        this.options.onShared?.(account.name, linked);
+      }
+    }
     const env: Record<string, string> = {};
     for (const [key, value] of Object.entries(baseEnv))
       if (value !== undefined && key !== "CLAUDE_CONFIG_DIR") env[key] = value;

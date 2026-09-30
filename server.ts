@@ -478,6 +478,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     helper: deps.loginHelper,
     timeoutMs: LOGIN_TIMEOUT_MS,
     now: deps.now,
+    onShared(name, linked) {
+      bb.log.info(
+        linked.length === 0
+          ? `created the directory of ${name}; nothing to share from the default account's directory`
+          : `created the directory of ${name}, sharing ${linked.join(", ")} with the default account's directory`,
+      );
+    },
     onChange(status) {
       bb.log.info(
         `login of ${status.name}: ${status.phase}${status.message === null ? "" : ` (${status.message})`}`,
@@ -805,7 +812,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     },
     async account_login_start({ name }) {
       const target = await loginTarget(name);
-      await login.start(target, {
+      const shareFrom = `${deps.accountsIo.home.replace(/\/+$/, "")}/.claude`;
+      await login.start({ ...target, shareFrom }, {
         ...deps.env,
         CLAUDE_SWITCHER_PRIVATE: current.loginPrivateWindow ? "1" : "0",
       });

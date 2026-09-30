@@ -21,9 +21,16 @@ interface Spawned {
   exit: (code: number | null, error?: string) => void;
 }
 
-function fakeIo(): { io: LoginIo; spawned: Spawned[]; made: string[] } {
+function fakeIo(existing: string[] = []): {
+  io: LoginIo;
+  spawned: Spawned[];
+  made: string[];
+  links: [string, string][];
+} {
   const spawned: Spawned[] = [];
   const made: string[] = [];
+  const links: [string, string][] = [];
+  const paths = new Set(existing);
   const io: LoginIo = {
     spawn({ command, env }) {
       let onOutput: (chunk: string) => void = () => {};
@@ -61,9 +68,18 @@ function fakeIo(): { io: LoginIo; spawned: Spawned[]; made: string[] } {
     },
     async mkdir(dir) {
       made.push(dir);
+      if (paths.has(dir)) return false;
+      paths.add(dir);
+      return true;
+    },
+    async link(target, path) {
+      if (!paths.has(target) || paths.has(path)) return false;
+      paths.add(path);
+      links.push([target, path]);
+      return true;
     },
   };
-  return { io, spawned, made };
+  return { io, spawned, made, links };
 }
 
 function flow(
@@ -204,6 +220,40 @@ describe("LoginFlow", () => {
       phase: "failed",
       message: "timed out after 1 minute",
     });
+  });
+
+  it("shares the default account's settings and transcripts with a directory it creates", async () => {
+    const { io, links } = fakeIo([
+      "/home/.claude/projects",
+      "/home/.claude/settings.json",
+      "/home/.claude/skills",
+      "/home/.claude/todos",
+    ]);
+    const shared: string[][] = [];
+    const { f } = flow(io, { onShared: (_name, names) => shared.push(names) });
+    await f.start({
+      name: "team",
+      configDir: "/accounts/team",
+      shareFrom: "/home/.claude",
+    });
+    // What exists there among the shared names, and nothing else (no todos).
+    expect(links).toEqual([
+      ["/home/.claude/projects", "/accounts/team/projects"],
+      ["/home/.claude/settings.json", "/accounts/team/settings.json"],
+      ["/home/.claude/skills", "/accounts/team/skills"],
+    ]);
+    expect(shared).toEqual([["projects", "settings.json", "skills"]]);
+  });
+
+  it("leaves a directory that already existed as it is", async () => {
+    const { io, links } = fakeIo(["/accounts/team", "/home/.claude/projects"]);
+    const { f } = flow(io);
+    await f.start({
+      name: "team",
+      configDir: "/accounts/team",
+      shareFrom: "/home/.claude",
+    });
+    expect(links).toEqual([]);
   });
 
   it("reports a directory that could not be created", async () => {

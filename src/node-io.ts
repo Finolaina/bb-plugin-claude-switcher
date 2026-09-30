@@ -1,7 +1,15 @@
 // Real filesystem, keychain and network adapters for the interfaces the
 // pure modules take. Everything a test wants to fake lives behind these.
 import { execFile, spawn } from "node:child_process";
-import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { homedir, platform, userInfo } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { AccountsIo } from "./accounts.js";
@@ -115,8 +123,23 @@ export function nodeLoginIo(): LoginIo {
         exited,
       };
     },
-    mkdir: async (dir) => {
-      await mkdir(dir, { recursive: true, mode: 0o700 });
+    // `mkdir` with `recursive` answers the first directory it created, or
+    // undefined when all of them existed.
+    mkdir: async (dir) =>
+      (await mkdir(dir, { recursive: true, mode: 0o700 })) !== undefined,
+    link: async (target, path) => {
+      try {
+        await lstat(target);
+      } catch {
+        return false;
+      }
+      try {
+        await symlink(target, path);
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+        throw error;
+      }
     },
   };
 }
