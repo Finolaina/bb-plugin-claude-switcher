@@ -60,8 +60,11 @@ export interface LoginOptions {
   timeoutMs: number;
   now: () => number;
   onChange?: (status: LoginStatus) => void;
-  /** A new directory was created for `name` and these entries were linked into it. */
-  onShared?: (name: string, linked: string[]) => void;
+  /**
+   * A new directory was created for `name`: the entries linked into it, and
+   * the ones that could not be ("entry: why").
+   */
+  onShared?: (name: string, linked: string[], failed: string[]) => void;
 }
 
 export type LoginPhase = "running" | "done" | "failed" | "cancelled";
@@ -85,8 +88,9 @@ const URL_PATTERN = /https?:\/\/[^\s\u001b]+/g;
  * Terminal escapes the login prints: the OSC 8 around its link, closed by
  * BEL (what Claude Code writes) or by ST, and colours.
  */
-// oxlint-disable-next-line no-control-regex
-const ESCAPES = /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b\[[0-9;]*[A-Za-z]/g;
+const ESCAPES =
+  // oxlint-disable-next-line no-control-regex
+  /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b\[[0-9;]*[A-Za-z]/g;
 
 /** How much of the login's output is kept (it prints a few lines). */
 const OUTPUT_KEPT = 8_192;
@@ -96,6 +100,9 @@ export class LoginFlow {
   private process: LoginProcess | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private output = "";
+  /** The account whose directory is being prepared, before its login runs. */
+  private starting: string | null = null;
+  private startCancelled = false;
 
   constructor(
     private readonly io: LoginIo,
@@ -122,22 +129,22 @@ export class LoginFlow {
   ): Promise<LoginStatus> {
     if (this.current?.phase === "running")
       throw new Error(`the login of ${this.current.name} is still running`);
-    if (account.configDir !== null) {
-      const created = await this.io.mkdir(account.configDir);
-      const from = account.shareFrom ?? null;
-      if (created && from !== null) {
-        const linked: string[] = [];
-        for (const entry of SHARED)
-          if (
-            await this.io.link(
-              `${from}/${entry}`,
-              `${account.configDir}/${entry}`,
-            )
-          )
-            linked.push(entry);
-        this.options.onShared?.(account.name, linked);
-      }
+    if (this.starting !== null)
+      throw new Error(`the login of ${this.starting} is still starting`);
+    // Reserved before the first await: a second start must not pass it.
+    this.starting = account.name;
+    this.startCancelled = false;
+    try {
+      if (account.configDir !== null)
+        await this.prepare(
+          account.name,
+          account.configDir,
+          account.shareFrom ?? null,
+        );
+    } finally {
+      this.starting = null;
     }
+    if (this.startCancelled) throw new Error("the login was cancelled");
     const env: Record<string, string> = {};
     for (const [key, value] of Object.entries(baseEnv))
       if (value !== undefined && key !== "CLAUDE_CONFIG_DIR") env[key] = value;
@@ -152,9 +159,21 @@ export class LoginFlow {
       wantsCode: false,
       message: null,
     };
-    this.current = status;
     const command = this.options.command();
-    const process = this.io.spawn({ command, env });
+    let process: LoginProcess;
+    try {
+      process = this.io.spawn({ command, env });
+    } catch (error) {
+      // Refused before it ran (a command that is not a valid path).
+      const failed: LoginStatus = {
+        ...status,
+        phase: "failed",
+        message: `could not run ${command}: ${error instanceof Error ? error.message : String(error)}`,
+      };
+      this.update(failed);
+      return failed;
+    }
+    this.current = status;
     this.process = process;
     process.onOutput((chunk) => {
       const now = this.current;
@@ -206,8 +225,38 @@ export class LoginFlow {
     this.process.write(`${text.trim()}\n`);
   }
 
-  /** Stops a running login; when none runs, forgets the last outcome. */
+  /**
+   * Makes the account's directory and, when it is new, links SHARED into it.
+   * One entry that cannot be linked does not stop the others or the login:
+   * the directory would count as existing from then on and never be linked.
+   */
+  private async prepare(
+    name: string,
+    configDir: string,
+    shareFrom: string | null,
+  ): Promise<void> {
+    const created = await this.io.mkdir(configDir);
+    if (!created || shareFrom === null) return;
+    const linked: string[] = [];
+    const failed: string[] = [];
+    for (const entry of SHARED) {
+      try {
+        if (
+          await this.io.link(`${shareFrom}/${entry}`, `${configDir}/${entry}`)
+        )
+          linked.push(entry);
+      } catch (error) {
+        failed.push(
+          `${entry}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    this.options.onShared?.(name, linked, failed);
+  }
+
+  /** Stops a running or starting login; when none runs, forgets the last outcome. */
   cancel(): void {
+    if (this.starting !== null) this.startCancelled = true;
     if (this.current?.phase === "running" && this.process !== null) {
       const process = this.process;
       this.end(process, { phase: "cancelled", message: null });
@@ -225,7 +274,13 @@ export class LoginFlow {
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
     this.process = null;
-    this.update({ ...this.current, ...outcome });
+    // The address and the prompt belong to the login that just ended.
+    this.update({
+      ...this.current,
+      ...outcome,
+      manualUrl: null,
+      wantsCode: false,
+    });
   }
 
   private update(status: LoginStatus): void {

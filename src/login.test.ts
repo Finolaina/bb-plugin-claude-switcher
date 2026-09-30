@@ -140,8 +140,10 @@ describe("LoginFlow", () => {
     expect(changes.map((c) => [c.phase, c.wantsCode])).toEqual([
       ["running", false],
       ["running", true],
-      ["done", true],
+      // The address and the prompt go with the login that ended.
+      ["done", false],
     ]);
+    expect(f.status()).toMatchObject({ manualUrl: null, wantsCode: false });
   });
 
   it("reads the fallback address from a link closed by ST too", async () => {
@@ -249,6 +251,34 @@ describe("LoginFlow", () => {
     expect(f.status()).toMatchObject({ name: "side", phase: "running" });
   });
 
+  it("starts one login when two are asked for at the same moment", async () => {
+    const { io, spawned } = fakeIo();
+    const { f } = flow(io);
+    const results = await Promise.allSettled([
+      f.start({ name: "team", configDir: "/d/team" }),
+      f.start({ name: "side", configDir: "/d/side" }),
+    ]);
+    expect(results.map((r) => r.status)).toEqual(["fulfilled", "rejected"]);
+    expect(String((results[1] as PromiseRejectedResult).reason)).toMatch(
+      /login of team is still starting/,
+    );
+    expect(spawned).toHaveLength(1);
+    expect(f.status()).toMatchObject({ name: "team", phase: "running" });
+  });
+
+  it("does not start a login cancelled while its directory was being made", async () => {
+    const { io, spawned } = fakeIo();
+    const { f } = flow(io);
+    const starting = f.start({ name: "team", configDir: "/d/team" });
+    f.cancel();
+    await expect(starting).rejects.toThrow(/cancelled/);
+    expect(spawned).toHaveLength(0);
+    expect(f.status()).toBeNull();
+    // And the next one starts normally.
+    await f.start({ name: "team", configDir: "/d/team" });
+    expect(spawned).toHaveLength(1);
+  });
+
   it("gives up after the timeout", async () => {
     let now = NOW;
     const { io, spawned } = fakeIo();
@@ -284,6 +314,58 @@ describe("LoginFlow", () => {
       ["/home/.claude/skills", "/accounts/team/skills"],
     ]);
     expect(shared).toEqual([["projects", "settings.json", "skills"]]);
+  });
+
+  it("links the rest, and still logs in, when one entry cannot be linked", async () => {
+    const { io, links, spawned } = fakeIo([
+      "/home/.claude/projects",
+      "/home/.claude/hooks",
+      "/home/.claude/skills",
+    ]);
+    const link = io.link;
+    io.link = async (target, path) => {
+      if (target.endsWith("/hooks")) throw new Error("EACCES: permission denied");
+      return link(target, path);
+    };
+    const shared: [string[], string[]][] = [];
+    const { f } = flow(io, {
+      onShared: (_name, linked, failed) => shared.push([linked, failed]),
+    });
+    await f.start({
+      name: "team",
+      configDir: "/accounts/team",
+      shareFrom: "/home/.claude",
+    });
+    expect(links.map(([, path]) => path)).toEqual([
+      "/accounts/team/projects",
+      "/accounts/team/skills",
+    ]);
+    expect(shared).toEqual([
+      [["projects", "skills"], ["hooks: EACCES: permission denied"]],
+    ]);
+    expect(spawned).toHaveLength(1);
+  });
+
+  it("reports a command the system refuses to run, and lets the next login start", async () => {
+    const { io, spawned } = fakeIo();
+    const spawn = io.spawn;
+    let refuse = true;
+    io.spawn = (args) => {
+      if (refuse) throw new Error("The argument 'file' must be a string without null bytes");
+      return spawn(args);
+    };
+    const { f } = flow(io);
+    const status = await f.start({ name: "team", configDir: "/d/team" });
+    expect(status).toMatchObject({
+      phase: "failed",
+      message:
+        "could not run claude: The argument 'file' must be a string without null bytes",
+    });
+    expect(f.status()).toMatchObject({ phase: "failed" });
+    refuse = false;
+    await f.start({ name: "team", configDir: "/d/team" });
+    expect(spawned).toHaveLength(1);
+    expect(f.status()).toMatchObject({ phase: "running" });
   });
 
   it("leaves a directory that already existed as it is", async () => {
