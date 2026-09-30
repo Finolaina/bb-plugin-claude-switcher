@@ -31,6 +31,11 @@ export interface LoginIo {
   spawn(args: { command: string; env: Record<string, string> }): LoginProcess;
   /** Creates the directory and its parents; true when it did not exist. */
   mkdir(dir: string): Promise<boolean>;
+  /**
+   * Everything in `dir`, and whether each entry is a real directory (a link
+   * to one is not); empty when `dir` does not exist.
+   */
+  entries(dir: string): Promise<{ name: string; directory: boolean }[]>;
   /** Symlinks `path` to `target` when `target` exists and `path` does not; true when it did. */
   link(target: string, path: string): Promise<boolean>;
 }

@@ -79,6 +79,9 @@ function fakeIo(existing: string[] = []): {
       paths.add(dir);
       return true;
     },
+    async entries() {
+      return [];
+    },
     async link(target, path) {
       if (!paths.has(target) || paths.has(path)) return false;
       paths.add(path);
@@ -201,7 +204,8 @@ describe("LoginFlow", () => {
     await tick();
     expect(f.status()).toMatchObject({
       phase: "failed",
-      message: "Login failed: Request failed with status code 400 (exit code 1)",
+      message:
+        "Login failed: Request failed with status code 400 (exit code 1)",
     });
   });
 
@@ -324,7 +328,8 @@ describe("LoginFlow", () => {
     ]);
     const link = io.link;
     io.link = async (target, path) => {
-      if (target.endsWith("/hooks")) throw new Error("EACCES: permission denied");
+      if (target.endsWith("/hooks"))
+        throw new Error("EACCES: permission denied");
       return link(target, path);
     };
     const shared: [string[], string[]][] = [];
@@ -351,7 +356,10 @@ describe("LoginFlow", () => {
     const spawn = io.spawn;
     let refuse = true;
     io.spawn = (args) => {
-      if (refuse) throw new Error("The argument 'file' must be a string without null bytes");
+      if (refuse)
+        throw new Error(
+          "The argument 'file' must be a string without null bytes",
+        );
       return spawn(args);
     };
     const { f } = flow(io);

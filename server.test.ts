@@ -159,7 +159,9 @@ interface FakeLogin {
   exit: (code: number | null) => void;
 }
 
-function fakeLoginIo(): {
+function fakeLoginIo(
+  entries: () => { name: string; directory: boolean }[],
+): {
   loginIo: LoginIo;
   logins: FakeLogin[];
   made: string[];
@@ -195,6 +197,9 @@ function fakeLoginIo(): {
     async mkdir(dir) {
       made.push(dir);
       return true;
+    },
+    async entries(dir) {
+      return dir === ACCOUNTS ? entries() : [];
     },
     // Only `projects` exists in the default account's directory.
     async link(target, path) {
@@ -293,6 +298,8 @@ interface HostOptions {
   failSet?: string[];
   /** The plugin process's environment, as the login inherits it. */
   env?: Record<string, string>;
+  /** What the accounts directory holds, links and files included; default: dirs() as directories. */
+  accountEntries?: () => { name: string; directory: boolean }[];
 }
 
 async function host(
@@ -324,7 +331,14 @@ async function host(
     usage,
     options.dirs ?? (() => ["spare", "work"]),
   );
-  const { loginIo, logins, made, links } = fakeLoginIo();
+  const { loginIo, logins, made, links } = fakeLoginIo(
+    options.accountEntries ??
+      (() =>
+        (options.dirs ?? (() => ["spare", "work"]))().map((name) => ({
+          name,
+          directory: true,
+        }))),
+  );
   const fake = createFakePluginHost({
     pluginId: "claude-switcher",
     settings: {
@@ -3072,6 +3086,62 @@ describe("adding an account by logging in from bb", () => {
     await expect(h.harness.behavior.callRpc("account_login_start", { name: "spare" })).rejects.toThrow(
       /already logged in/,
     );
+    expect(h.logins).toEqual([]);
+  });
+
+  it("refuses a name that differs only in case from an account or a directory that is there", async () => {
+    // On a case-insensitive disk `Spare` IS the directory of `spare`.
+    const h = await host(ALL_FREE, {
+      accountEntries: () => [
+        { name: "spare", directory: true },
+        { name: "work", directory: true },
+        { name: "old", directory: true },
+      ],
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await expect(h.harness.behavior.callRpc("account_login_start", { name: "Spare" })).rejects.toThrow(
+      /an account named spare already exists/,
+    );
+    await expect(h.harness.behavior.callRpc("account_login_start", { name: "MAIN" })).rejects.toThrow(
+      /an account named main already exists/,
+    );
+    await expect(h.harness.behavior.callRpc("account_login_start", { name: "Old" })).rejects.toThrow(
+      /a directory named old already exists/,
+    );
+    expect(h.made).toEqual([]);
+    expect(h.logins).toEqual([]);
+    // The same name, as a directory without a login yet, is fine.
+    await h.harness.behavior.callRpc("account_login_start", { name: "old" });
+    expect(h.logins[0]?.env.CLAUDE_CONFIG_DIR).toBe(`${ACCOUNTS}/old`);
+  });
+
+  it("logs in a listed account whatever its name", async () => {
+    const h = await host(ALL_FREE, {
+      dirs: () => ["spare", "work", "Work Account"],
+    });
+    dispose = () => h.harness.dispose();
+    h.files[`${ACCOUNTS}/Work Account/.claude.json`] = claudeJson("wa@example.com", "uuid-wa");
+    const state = (await h.harness.behavior.callRpc("account_login_start", {
+      name: "Work Account",
+    })) as State;
+    expect(state.login).toMatchObject({ name: "Work Account", phase: "running" });
+    expect(h.logins[0]?.env.CLAUDE_CONFIG_DIR).toBe(`${ACCOUNTS}/Work Account`);
+  });
+
+  it("refuses a name that is a link or a file in the accounts directory", async () => {
+    const h = await host(ALL_FREE, {
+      accountEntries: () => [
+        { name: "spare", directory: true },
+        { name: "work", directory: true },
+        { name: "elsewhere", directory: false },
+      ],
+    });
+    dispose = () => h.harness.dispose();
+    await expect(h.harness.behavior.callRpc("account_login_start", { name: "elsewhere" })).rejects.toThrow(
+      /is not a directory/,
+    );
+    expect(h.made).toEqual([]);
     expect(h.logins).toEqual([]);
   });
 

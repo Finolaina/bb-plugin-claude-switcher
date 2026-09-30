@@ -127,6 +127,15 @@ export function nodeLoginIo(): LoginIo {
     // undefined when all of them existed.
     mkdir: async (dir) =>
       (await mkdir(dir, { recursive: true, mode: 0o700 })) !== undefined,
+    entries: async (dir) => {
+      try {
+        const found = await readdir(dir, { withFileTypes: true });
+        return found.map((e) => ({ name: e.name, directory: e.isDirectory() }));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+        throw error;
+      }
+    },
     link: async (target, path) => {
       try {
         await lstat(target);

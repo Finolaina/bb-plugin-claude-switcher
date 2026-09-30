@@ -518,15 +518,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * overwritten while a thread may be using it.
    */
   async function loginTarget(name: string): Promise<Account> {
-    if (!ACCOUNT_NAME.test(name))
-      throw new Error(
-        "an account name is letters, digits, dots, dashes or underscores (up to 64), not starting with a dot",
-      );
     await discover();
-    if (name === "default" && name !== current.defaultAccountName)
-      throw new Error(
-        `"default" names the default account, called ${current.defaultAccountName} here; use that name`,
-      );
+    // A listed account keeps the name its directory has, whatever it is.
     const known = accounts.find((a) => a.name === name);
     if (known !== undefined) {
       if (collector.get(name) === undefined) await collector.collect(known);
@@ -534,10 +527,42 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         throw new Error(`${name} is already logged in`);
       return known;
     }
-    const dir = expandHome(current.accountsDir.trim(), deps.accountsIo.home);
+    // From here the name becomes a new directory: a trust boundary.
+    if (!ACCOUNT_NAME.test(name))
+      throw new Error(
+        "an account name is letters, digits, dots, dashes or underscores (up to 64), not starting with a dot",
+      );
+    if (name === "default" && name !== current.defaultAccountName)
+      throw new Error(
+        `"default" names the default account, called ${current.defaultAccountName} here; use that name`,
+      );
+    // On a disk that ignores case, `Team` IS the directory of `team`: the
+    // login would overwrite the store of an account that may be in use.
+    const lower = name.toLowerCase();
+    const twin = accounts.find((a) => a.name.toLowerCase() === lower);
+    if (twin !== undefined)
+      throw new Error(
+        `an account named ${twin.name} already exists; use that name`,
+      );
+    const dir = expandHome(
+      current.accountsDir.trim(),
+      deps.accountsIo.home,
+    ).replace(/\/+$/, "");
+    for (const entry of await deps.loginIo.entries(dir)) {
+      if (entry.name.toLowerCase() !== lower) continue;
+      if (entry.name !== name)
+        throw new Error(
+          `a directory named ${entry.name} already exists in the accounts directory; use that name`,
+        );
+      // A link would take the login, and what is linked into it, elsewhere.
+      if (!entry.directory)
+        throw new Error(
+          `${name} in the accounts directory is not a directory`,
+        );
+    }
     return {
       name,
-      configDir: `${dir.replace(/\/+$/, "")}/${name}`,
+      configDir: `${dir}/${name}`,
       email: null,
       accountUuid: null,
     };
