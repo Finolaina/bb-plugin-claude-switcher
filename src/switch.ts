@@ -219,3 +219,59 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     ? { kind: "keep" }
     : { kind: "move", account: choice.account, why: "current-blocked" };
 }
+
+export type AheadDecision =
+  | { kind: "keep" }
+  | { kind: "move"; account: string; used: number; window: string };
+
+export interface AheadInput {
+  currentAccount: string;
+  /** Every account with measured usage, the current one included. */
+  accounts: AccountUsage[];
+  /** "" = any model. */
+  preferredModel: string;
+  /** Share of a window (session, weekly or the preferred model's) at which the project moves ahead of the limit. */
+  threshold: number;
+  now: number;
+}
+
+/** The fullest of the windows a turn counts against, by name. */
+function fullestWindow(
+  account: AccountUsage,
+  preferredModel: string,
+): { window: string; used: number } {
+  const windows: [string, UsageWindow][] = [
+    ["session", account.session],
+    ["weekly", account.weekly],
+  ];
+  const scoped = modelWindow(account, preferredModel);
+  if (scoped !== undefined) windows.push([preferredModel, scoped]);
+  let fullest = windows[0]!;
+  for (const w of windows) if (w[1].usedPercent > fullest[1].usedPercent) fullest = w;
+  return { window: fullest[0], used: fullest[1].usedPercent };
+}
+
+/**
+ * Whether to move a project after a turn, before its account runs out: when
+ * the account is at or above `threshold` in any window a turn counts against
+ * and another account is below it in all of them. The target is chosen as a
+ * switch would choose it. An unmeasured current account keeps the project:
+ * only a measured number moves it.
+ */
+export function decideAhead(input: AheadInput): AheadDecision {
+  const accounts = input.accounts.map((a) => settle(a, input.now));
+  const current = accounts.find((a) => a.name === input.currentAccount);
+  if (current === undefined || current.unknown === true) return { kind: "keep" };
+  const { window, used } = fullestWindow(current, input.preferredModel);
+  if (used < input.threshold) return { kind: "keep" };
+  const roomy = accounts.filter(
+    (a) =>
+      a.name !== input.currentAccount &&
+      a.unknown !== true &&
+      fullestWindow(a, input.preferredModel).used < input.threshold,
+  );
+  const choice = chooseAccount(roomy, { preferredModel: input.preferredModel });
+  return choice === null
+    ? { kind: "keep" }
+    : { kind: "move", account: choice.account, used, window };
+}

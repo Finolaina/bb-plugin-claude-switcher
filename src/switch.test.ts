@@ -4,6 +4,7 @@ import type { PluginTurnFailedEvent } from "@get-bb/plugin-sdk";
 import type { AccountUsage } from "./policy.js";
 import {
   declineReason,
+  decideAhead,
   decidePlacement,
   decideSwitch,
   settle,
@@ -499,5 +500,104 @@ describe("decidePlacement", () => {
         now: NOW,
       }),
     ).toEqual({ kind: "keep" });
+  });
+});
+
+describe("decideAhead", () => {
+  const base = {
+    currentAccount: "main",
+    preferredModel: "Fable",
+    threshold: 90,
+    now: NOW,
+  };
+
+  it("moves the project when its account reached the threshold and another has room", () => {
+    expect(
+      decideAhead({
+        ...base,
+        accounts: [
+          account("main", { models: { Fable: { usedPercent: 92, resetsAt: NOW + HOUR } } }),
+          account("spare", { models: { Fable: { usedPercent: 40, resetsAt: NOW + HOUR } } }),
+        ],
+      }),
+    ).toEqual({ kind: "move", account: "spare", used: 92, window: "Fable" });
+  });
+
+  it("keeps the project under the threshold", () => {
+    expect(
+      decideAhead({
+        ...base,
+        accounts: [
+          account("main", { models: { Fable: { usedPercent: 89, resetsAt: NOW + HOUR } } }),
+          account("spare", { models: { Fable: { usedPercent: 40, resetsAt: NOW + HOUR } } }),
+        ],
+      }),
+    ).toEqual({ kind: "keep" });
+  });
+
+  it("looks at the session and weekly windows too, naming the fullest", () => {
+    expect(
+      decideAhead({
+        ...base,
+        accounts: [
+          account("main", { session: { usedPercent: 95, resetsAt: NOW + HOUR } }),
+          account("spare"),
+        ],
+      }),
+    ).toEqual({ kind: "move", account: "spare", used: 95, window: "session" });
+    expect(
+      decideAhead({
+        ...base,
+        accounts: [
+          account("main", { weekly: { usedPercent: 91, resetsAt: NOW + HOUR } }),
+          account("spare"),
+        ],
+      }),
+    ).toEqual({ kind: "move", account: "spare", used: 91, window: "weekly" });
+  });
+
+  it("never moves to an account that is itself at the threshold, or cannot run the model", () => {
+    expect(
+      decideAhead({
+        ...base,
+        accounts: [
+          account("main", { models: { Fable: { usedPercent: 92, resetsAt: NOW + HOUR } } }),
+          account("spare", { models: { Fable: { usedPercent: 90, resetsAt: NOW + HOUR } } }),
+          account("work", { session: { usedPercent: 90, resetsAt: NOW + HOUR } }),
+          account("other", { blocked: true }),
+        ],
+      }),
+    ).toEqual({ kind: "keep" });
+  });
+
+  it("keeps the project when its account is not measured", () => {
+    expect(
+      decideAhead({ ...base, accounts: [account("spare")] }),
+    ).toEqual({ kind: "keep" });
+  });
+
+  it("settles a window whose reset has passed before judging", () => {
+    expect(
+      decideAhead({
+        ...base,
+        accounts: [
+          account("main", { session: { usedPercent: 95, resetsAt: NOW - 1 } }),
+          account("spare"),
+        ],
+      }),
+    ).toEqual({ kind: "keep" });
+  });
+
+  it("picks the best of the accounts with room, like a switch would", () => {
+    expect(
+      decideAhead({
+        ...base,
+        accounts: [
+          account("main", { session: { usedPercent: 99, resetsAt: NOW + HOUR } }),
+          account("spare", { weekly: { usedPercent: 50, resetsAt: NOW + 5 * 24 * HOUR } }),
+          account("work", { weekly: { usedPercent: 50, resetsAt: NOW + 2 * 24 * HOUR } }),
+        ],
+      }),
+    ).toEqual({ kind: "move", account: "work", used: 99, window: "session" });
   });
 });

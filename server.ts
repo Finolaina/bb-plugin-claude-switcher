@@ -69,6 +69,9 @@ export function accountFromNote(note: string | null): string | null {
   );
 }
 const KV_LAST_SWITCH = "last-switch";
+/** Every move (automatic, ahead of the limit, or by hand), latest first. */
+const KV_HISTORY = "switch-history";
+export const HISTORY_LIMIT = 100;
 /** A thread as bb reports it (the SDK does not export the type by name). */
 type ThreadResponse = PluginThreadEventPayloads["thread.created"]["thread"];
 /** When this plugin first ran: a project created later is new. */
@@ -142,6 +145,8 @@ const stateSchema = z.object({
   lastSwitch: switchRecordSchema.nullable(),
   /** The account the switch policy would pick now; null when none can run. */
   bestAccount: z.string().nullable(),
+  /** Every move of a project, latest first (at most HISTORY_LIMIT). */
+  history: z.array(switchRecordSchema),
 });
 export type State = z.infer<typeof stateSchema>;
 export type SwitchRecord = z.infer<typeof switchRecordSchema>;
@@ -304,6 +309,34 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       `could not read the plugin's storage; new projects will not be placed: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  /** Latest first. Unreadable storage starts it again: a list, not a decision. */
+  let history: SwitchRecord[] = [];
+  try {
+    const parsed = z
+      .array(switchRecordSchema)
+      .safeParse(await bb.storage.kv.get<unknown>(KV_HISTORY));
+    if (parsed.success) history = parsed.data.slice(0, HISTORY_LIMIT);
+  } catch (error) {
+    bb.log.warn(
+      `could not read the history of moves; starting it again: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  /** Writes in order, like the handled list. */
+  let historyWrites: Promise<void> = Promise.resolve();
+  function addHistory(record: SwitchRecord): Promise<void> {
+    history = [record, ...history].slice(0, HISTORY_LIMIT);
+    const snapshot = history;
+    historyWrites = historyWrites.then(async () => {
+      try {
+        await bb.storage.kv.set(KV_HISTORY, snapshot);
+      } catch (error) {
+        bb.log.warn(
+          `could not record the move in the history: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    });
+    return historyWrites;
+  }
   /** Writes in order, so a slow write never overwrites a later, longer list. */
   let handledWrites: Promise<void> = Promise.resolve();
   function markHandled(projectId: string): Promise<void> {
@@ -428,6 +461,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         current.preferredModel,
         deps.now(),
       ),
+      history,
     };
   }
 
@@ -486,6 +520,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       const fromName = from.account ?? current.defaultAccountName;
       const toName = to?.name ?? current.defaultAccountName;
       if (toName === fromName) return;
+      await addHistory({
+        at: deps.now(),
+        threadId: "",
+        projectId,
+        from: fromName,
+        to: toName,
+        reason: "Picked by hand",
+      });
       // A turn already running on the old account fails there after the
       // pick: like after a switch, it runs again once on the picked account.
       // The pick is the user's, so it holds unless the account cannot run a
@@ -736,6 +778,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         `could not record the switch: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    await addHistory(record);
   }
 
   /** Same variable state: nobody moved the project while we were deciding. */

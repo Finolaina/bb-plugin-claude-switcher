@@ -2642,3 +2642,75 @@ describe("the account shown in each thread's header", () => {
     expect(after.bestAccount).not.toBeNull();
   });
 });
+
+describe("the history of moves", () => {
+  it("lists every move, latest first, and keeps it across a reload", async () => {
+    const h = await host(ALL_FREE);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    await h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-2",
+      account: "spare",
+    });
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history.map((r) => [r.projectId, r.from, r.to, r.reason])).toEqual([
+      ["proj-2", "main", "spare", "Picked by hand"],
+      ["proj-1", "main", "work", "Switched to account work"],
+    ]);
+    // Persisted: a fresh plugin over the same storage lists the same.
+    const stored = await h.bb.storage.kv.get("switch-history");
+    const again = await host(ALL_FREE, { kvPreset: { "switch-history": stored } });
+    const after = (await again.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(after.history.map((r) => r.reason)).toEqual([
+      "Picked by hand",
+      "Switched to account work",
+    ]);
+    again.harness.dispose();
+  });
+
+  it("does not record a pick of the account the project already has", async () => {
+    const h = await host(ALL_FREE);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-1",
+      account: null,
+    });
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history).toEqual([]);
+  });
+
+  it("keeps the last 100 moves", async () => {
+    // Stored latest first: `old 0` is the most recent.
+    const old = Array.from({ length: 100 }, (_, i) => ({
+      at: NOW - (i + 1) * 60_000,
+      threadId: "t",
+      projectId: "proj-1",
+      from: "a",
+      to: "b",
+      reason: `old ${i}`,
+    }));
+    const h = await host(ALL_FREE, { kvPreset: { "switch-history": old } });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-2",
+      account: "spare",
+    });
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history).toHaveLength(100);
+    expect(state.history[0]?.reason).toBe("Picked by hand");
+    expect(state.history[1]?.reason).toBe("old 0");
+    expect(state.history[99]?.reason).toBe("old 98");
+  });
+
+  it("starts the history again when the stored one is unreadable", async () => {
+    const h = await host(ALL_FREE, { kvPreset: { "switch-history": "junk" } });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-2",
+      account: "spare",
+    });
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history.map((r) => r.reason)).toEqual(["Picked by hand"]);
+  });
+});
