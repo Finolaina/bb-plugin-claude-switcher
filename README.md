@@ -319,11 +319,12 @@ For a minute after a switch or a wait, other turns of the same project
 that were still running keep failing; each of those is retried once as it
 is, on the new account (or queued for the same reset, after a wait),
 without a second switch. A thread that fails again inside that minute is
-judged afresh: the new account fails too. Picking an account by hand (in a
-thread's header, in Settings or with `use`) gives the same minute, so a
-turn still running on the old account follows your pick; only a pick of
-an account measured out of usage, or without a login (when picked, or by
-a measurement made since), gets none, and the next failure is judged.
+judged afresh: the new account fails too. So is any failure once the new
+account is measured out of usage or without a login (a wait keeps its
+minute: that account is out until its reset). Picking an account by hand
+(in a thread's header, in Settings or with `use`) gives the same minute,
+so a turn still running on the old account follows your pick, unless the
+picked account is measured out or has no login.
 
 The plugin only ever changes a `CLAUDE_CONFIG_DIR` it wrote itself. A
 project whose variable was set by hand or inherited from the global

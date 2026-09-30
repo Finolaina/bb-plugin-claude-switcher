@@ -2604,7 +2604,7 @@ describe("the account shown in each thread's header", () => {
     mainOut = true;
     await h.harness.behavior.emitThreadEvent("turn.failed", failure());
     expect(h.retries.map((r) => [r.threadId, r.reason])).toEqual([["thread-1", "Switched to account work"]]);
-    // A leftover of proj-2 fails 20 s after the pick: main is known out now.
+    // A leftover of proj-2 fails inside the pick's window: main is known out now.
     await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "thr-2", requestId: "creq_2" }));
     expect(h.retries[1]).toMatchObject({ threadId: "thr-2", reason: "Switched to account work" });
   });

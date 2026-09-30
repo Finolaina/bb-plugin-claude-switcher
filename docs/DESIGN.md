@@ -171,13 +171,14 @@ wait (`SWITCH_GRACE_MS`), a failure from another thread of that project is
 not judged again: it is retried once as it is, on the new account, or
 queued for the same reset after a wait. Once per thread: a second failure
 of the same thread inside the window means the new account fails too, and
-it is judged from scratch.
+it is judged from scratch. The window also closes, whoever opened it, once
+the new account is measured unable to run a turn (`cannotRun`: no login,
+or measured out for every model): a leftover's failure is then judged, so
+it can move to an account that works. A wait keeps its window whatever a
+later measurement says: that account is out until its reset.
 
 A hand pick (thread header, Settings or the CLI's `use`) opens the same
-window, unless the picked account has no login or is measured out, when
-picked or by any measurement made since: then a leftover's failure is
-judged, so it can move to an account that works. A wait keeps its window
-whatever a measurement says: the account is out until its reset.
+window, unless the picked account cannot run a turn when picked.
 
 A long turn can outlast the window. So the plugin also notes, on each
 `thread.active`, the account a turn of the user's Claude Code threads
