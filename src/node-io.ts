@@ -1,10 +1,12 @@
 // Real filesystem, keychain and network adapters for the interfaces the
 // pure modules take. Everything a test wants to fake lives behind these.
-import { execFile } from "node:child_process";
-import { readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { homedir, platform, userInfo } from "node:os";
+import { fileURLToPath } from "node:url";
 import type { AccountsIo } from "./accounts.js";
 import type { CredentialIo } from "./credentials.js";
+import type { LoginIo } from "./login.js";
 
 const SECURITY = "/usr/bin/security";
 /** A keychain prompt or a hung agent must not block the plugin forever. */
@@ -74,4 +76,57 @@ export function nodeAccountsIo(): AccountsIo {
       }
     },
   };
+}
+
+export function nodeLoginIo(): LoginIo {
+  return {
+    spawn({ command, env }) {
+      // No shell: the command is one executable (a name PATH resolves, or a
+      // path), and its arguments are fixed.
+      const child = spawn(command, ["auth", "login"], {
+        env,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      const listeners: ((chunk: string) => void)[] = [];
+      for (const stream of [child.stdout, child.stderr]) {
+        stream.setEncoding("utf8");
+        stream.on("data", (chunk: string) => {
+          for (const listener of listeners) listener(chunk);
+        });
+      }
+      const exited = new Promise<{ code: number | null; error?: string }>(
+        (resolve) => {
+          child.once("error", (error) =>
+            resolve({ code: null, error: error.message }),
+          );
+          child.once("exit", (code) => resolve({ code }));
+        },
+      );
+      return {
+        write: (text) => {
+          child.stdin.write(text);
+        },
+        kill: () => {
+          child.kill();
+        },
+        onOutput: (callback) => {
+          listeners.push(callback);
+        },
+        exited,
+      };
+    },
+    mkdir: async (dir) => {
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+    },
+  };
+}
+
+/**
+ * bin/open-login.sh next to the plugin's files: the source tree keeps it
+ * beside server.ts, the built plugin runs from dist/ one level down.
+ */
+export function loginHelperPath(moduleUrl: string): string {
+  const dir = fileURLToPath(new URL(".", moduleUrl));
+  const root = dir.endsWith("/dist/") ? dir.slice(0, -"dist/".length) : dir;
+  return `${root}bin/open-login.sh`;
 }

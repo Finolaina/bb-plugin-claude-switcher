@@ -22,6 +22,7 @@ import {
 import { z } from "zod";
 import {
   discoverAccounts,
+  expandHome,
   type Account,
   type AccountsIo,
 } from "./src/accounts.js";
@@ -33,7 +34,13 @@ import {
   type Series,
 } from "./src/forecast.js";
 import type { CredentialIo } from "./src/credentials.js";
-import { nodeAccountsIo, nodeCredentialIo } from "./src/node-io.js";
+import { LoginFlow, type LoginIo } from "./src/login.js";
+import {
+  loginHelperPath,
+  nodeAccountsIo,
+  nodeCredentialIo,
+  nodeLoginIo,
+} from "./src/node-io.js";
 import {
   CLAUDE_CODE_PROVIDER,
   declineReason,
@@ -60,6 +67,10 @@ export const CHANGED = "accounts-changed";
 export const SWITCH_GRACE_MS = 60_000;
 /** A measurement older than this is taken again before moving a project ahead of the limit. */
 export const AHEAD_FRESH_MS = 60_000;
+/** A login left waiting in the browser this long is given up. */
+export const LOGIN_TIMEOUT_MS = 10 * 60_000;
+/** An account directory name: one path segment, no leading dot. */
+const ACCOUNT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 /** Note written next to CLAUDE_CONFIG_DIR; the account name is read back from it (values are secret). */
 const NOTE_PREFIX = 'Claude Code account "';
 const NOTE_SUFFIX = '" (set by the Claude Switcher plugin)';
@@ -157,6 +168,14 @@ const seriesSchema = z.object({
   resetsAt: z.number().nullable(),
   points: z.array(z.tuple([z.number(), z.number()])),
 });
+const loginStatusSchema = z.object({
+  name: z.string(),
+  phase: z.enum(["running", "done", "failed", "cancelled"]),
+  startedAt: z.number(),
+  manualUrl: z.string().nullable(),
+  wantsCode: z.boolean(),
+  message: z.string().nullable(),
+});
 const switchRecordSchema = z.object({
   at: z.number(),
   threadId: z.string(),
@@ -178,6 +197,8 @@ const stateSchema = z.object({
   history: z.array(switchRecordSchema),
   /** Per account, per window ("weekly" or a model's display name): how it stands at the pace measured. */
   forecasts: z.record(z.string(), z.record(z.string(), forecastSchema)),
+  /** The login started from bb, running or just ended; null when none. */
+  login: loginStatusSchema.nullable(),
 });
 export type State = z.infer<typeof stateSchema>;
 export type SwitchRecord = z.infer<typeof switchRecordSchema>;
@@ -189,11 +210,21 @@ export const rpcContract = defineRpcContract({
     input: z.object({ projectId: z.string(), account: z.string().nullable() }),
     output: stateSchema,
   },
+  /** Log an account in from bb: a new directory under the accounts dir, or a listed account without a login. */
+  account_login_start: { input: z.object({ name: z.string() }), output: stateSchema },
+  account_login_code: { input: z.object({ code: z.string() }), output: stateSchema },
+  /** Stops a running login; when none runs, forgets the last outcome. */
+  account_login_cancel: { input: z.null(), output: stateSchema },
 });
 
 export interface PluginDeps {
   credentialIo: CredentialIo;
   accountsIo: AccountsIo;
+  loginIo: LoginIo;
+  /** Path of bin/open-login.sh, the BROWSER a login runs. */
+  loginHelper: string;
+  /** The plugin process's environment, inherited by a login. */
+  env: Record<string, string | undefined>;
   now: () => number;
   random: () => number;
 }
@@ -267,6 +298,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       label: "Usage refresh interval (minutes)",
       description: "Never below 1.",
       default: 5,
+    },
+    claudeCommand: {
+      type: "string",
+      label: "Claude Code executable",
+      description:
+        "Used to log an account in from bb (`claude auth login`). A name looked up in the bb server's PATH, or a full path.",
+      default: "claude",
+    },
+    loginPrivateWindow: {
+      type: "boolean",
+      label:
+        "Open logins in a private Chrome window (so they do not reuse the browser's Claude session)",
+      default: true,
     },
   });
   let current = await settings.get();
@@ -427,6 +471,65 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     return out;
   }
+  // ---- Login from bb -------------------------------------------------------
+  const login = new LoginFlow(deps.loginIo, {
+    command: () => current.claudeCommand.trim() || "claude",
+    helper: deps.loginHelper,
+    timeoutMs: LOGIN_TIMEOUT_MS,
+    now: deps.now,
+    onChange(status) {
+      bb.log.info(
+        `login of ${status.name}: ${status.phase}${status.message === null ? "" : ` (${status.message})`}`,
+      );
+      bb.realtime.publish(CHANGED, { at: deps.now() });
+      if (status.phase !== "done") return;
+      // The directory and its login are new: find and measure the account.
+      void (async () => {
+        try {
+          const found = await discover();
+          const account = found.find((a) => a.name === status.name);
+          if (account !== undefined) await collector.collect(account);
+          await recordSamples();
+        } catch (error) {
+          bb.log.warn(
+            `could not measure ${status.name} after its login: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        bb.realtime.publish(CHANGED, { at: deps.now() });
+      })();
+    },
+  });
+  /**
+   * Where a login for `name` goes: the default account (no directory), a
+   * listed account without a login, or a new directory under the accounts
+   * dir. An account already logged in is refused: its store would be
+   * overwritten while a thread may be using it.
+   */
+  async function loginTarget(name: string): Promise<Account> {
+    if (!ACCOUNT_NAME.test(name))
+      throw new Error(
+        "an account name is letters, digits, dots, dashes or underscores (up to 64), not starting with a dot",
+      );
+    await discover();
+    if (name === "default" && name !== current.defaultAccountName)
+      throw new Error(
+        `"default" names the default account, called ${current.defaultAccountName} here; use that name`,
+      );
+    const known = accounts.find((a) => a.name === name);
+    if (known !== undefined) {
+      if (collector.get(name) === undefined) await collector.collect(known);
+      if (collector.get(name)?.problem?.kind !== "unauthenticated")
+        throw new Error(`${name} is already logged in`);
+      return known;
+    }
+    const dir = expandHome(current.accountsDir.trim(), deps.accountsIo.home);
+    return {
+      name,
+      configDir: `${dir.replace(/\/+$/, "")}/${name}`,
+      email: null,
+      accountUuid: null,
+    };
+  }
   /** Writes in order, like the handled list. */
   let historyWrites: Promise<void> = Promise.resolve();
   function addHistory(record: SwitchRecord): Promise<void> {
@@ -570,6 +673,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       ),
       history,
       forecasts: forecasts(),
+      login: login.status(),
     };
   }
 
@@ -696,6 +800,22 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       await pickAccount(projectId, (discovered) =>
         account === null ? null : discovered(account),
       );
+      return state();
+    },
+    async account_login_start({ name }) {
+      const target = await loginTarget(name);
+      await login.start(target, {
+        ...deps.env,
+        CLAUDE_SWITCHER_PRIVATE: current.loginPrivateWindow ? "1" : "0",
+      });
+      return state();
+    },
+    async account_login_code({ code }) {
+      login.code(code);
+      return state();
+    },
+    async account_login_cancel() {
+      login.cancel();
       return state();
     },
   });
@@ -1395,6 +1515,9 @@ export default function plugin(bb: BbPluginApi) {
   return createPlugin(bb, {
     credentialIo: nodeCredentialIo(),
     accountsIo: nodeAccountsIo(),
+    loginIo: nodeLoginIo(),
+    loginHelper: loginHelperPath(import.meta.url),
+    env: process.env,
     now: Date.now,
     random: Math.random,
   });

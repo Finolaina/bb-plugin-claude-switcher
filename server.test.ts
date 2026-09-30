@@ -14,6 +14,7 @@ type ThreadResponse = PluginThreadEventPayloads["thread.created"]["thread"];
 import { createPlugin, ENV_VAR, type State } from "./server.js";
 import type { AccountsIo } from "./src/accounts.js";
 import type { CredentialIo } from "./src/credentials.js";
+import type { LoginIo, LoginProcess } from "./src/login.js";
 import {
   usageFetchMethod,
   usageListMethod,
@@ -100,6 +101,7 @@ function fakes(
     [`Claude Code-credentials-${hash(`${ACCOUNTS}/spare`)}`]: "spare",
     [`Claude Code-credentials-${hash(`${ACCOUNTS}/work`)}`]: "work",
     [`Claude Code-credentials-${hash(`${ACCOUNTS}/default`)}`]: "default",
+    [`Claude Code-credentials-${hash(`${ACCOUNTS}/team`)}`]: "team",
   };
   const usageCalls: string[] = [];
   const credentialIo: CredentialIo = {
@@ -146,7 +148,49 @@ function fakes(
       return path === ACCOUNTS ? dirs() : [];
     },
   };
-  return { credentialIo, accountsIo, usageCalls };
+  return { credentialIo, accountsIo, usageCalls, files };
+}
+
+/** A fake `claude auth login`: the test ends it with `exit`. */
+interface FakeLogin {
+  env: Record<string, string>;
+  written: string[];
+  killed: boolean;
+  exit: (code: number | null) => void;
+}
+
+function fakeLoginIo(): { loginIo: LoginIo; logins: FakeLogin[]; made: string[] } {
+  const logins: FakeLogin[] = [];
+  const made: string[] = [];
+  const loginIo: LoginIo = {
+    spawn({ env }) {
+      let resolveExit!: (r: { code: number | null }) => void;
+      const exited = new Promise<{ code: number | null }>((resolve) => {
+        resolveExit = resolve;
+      });
+      const entry: FakeLogin = {
+        env,
+        written: [],
+        killed: false,
+        exit: (code) => resolveExit({ code }),
+      };
+      logins.push(entry);
+      const process: LoginProcess = {
+        write: (text) => entry.written.push(text),
+        kill: () => {
+          entry.killed = true;
+          resolveExit({ code: null });
+        },
+        onOutput: () => {},
+        exited,
+      };
+      return process;
+    },
+    async mkdir(dir) {
+      made.push(dir);
+    },
+  };
+  return { loginIo, logins, made };
 }
 
 /** attemptNumber of each failed request seen, so the fake retry can stamp bb's `attempt`. */
@@ -234,6 +278,8 @@ interface HostOptions {
   projectCreatedAt?: Record<string, number>;
   /** setMachineEnvironmentVariable throws for these projects. */
   failSet?: string[];
+  /** The plugin process's environment, as the login inherits it. */
+  env?: Record<string, string>;
 }
 
 async function host(
@@ -261,10 +307,11 @@ async function host(
   const queued: QueuedRow[] = [...(options.queued ?? [])];
   let nextId = 1;
   let retryFailures = 0;
-  const { credentialIo, accountsIo, usageCalls } = fakes(
+  const { credentialIo, accountsIo, usageCalls, files } = fakes(
     usage,
     options.dirs ?? (() => ["spare", "work"]),
   );
+  const { loginIo, logins, made } = fakeLoginIo();
   const fake = createFakePluginHost({
     pluginId: "claude-switcher",
     settings: {
@@ -411,6 +458,9 @@ async function host(
   await createPlugin(fake.bb, {
     credentialIo,
     accountsIo,
+    loginIo,
+    loginHelper: "/plugin/bin/open-login.sh",
+    env: options.env ?? { PATH: "/usr/bin" },
     now: options.clock ?? (() => NOW),
     random: () => 0,
   });
@@ -425,6 +475,9 @@ async function host(
     deleted,
     queued,
     usageCalls,
+    files,
+    logins,
+    made,
   };
 }
 
@@ -463,7 +516,9 @@ describe("claude accounts plugin", () => {
     ).toEqual([
       "accountsDir",
       "autoSwitch",
+      "claudeCommand",
       "defaultAccountName",
+      "loginPrivateWindow",
       "maximumWaitHours",
       "preferredModel",
       "refreshMinutes",
@@ -474,6 +529,9 @@ describe("claude accounts plugin", () => {
         "accounts_list",
         "accounts_refresh",
         "project_set_account",
+        "account_login_start",
+        "account_login_code",
+        "account_login_cancel",
         usageFetchMethod,
         usageListMethod,
       ].sort(),
@@ -2874,5 +2932,118 @@ describe("moving a project ahead of the limit, after a turn", () => {
       lastAssistantText: null,
     });
     expect(h.envSet).toEqual([]);
+  });
+});
+
+describe("adding an account by logging in from bb", () => {
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+  const withTeam = {
+    ...ALL_FREE,
+    team: () => Response.json(payload(0, 5, 0)),
+  };
+
+  it("runs the login in a new account directory and lists the account once it is done", async () => {
+    let dirs = ["spare", "work"];
+    const h = await host(withTeam, { dirs: () => dirs, env: { PATH: "/usr/bin", HOME: HOME } });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const started = (await h.harness.behavior.callRpc("account_login_start", { name: "team" })) as State;
+    expect(h.made).toEqual([`${ACCOUNTS}/team`]);
+    expect(h.logins[0]?.env).toEqual({
+      PATH: "/usr/bin",
+      HOME: HOME,
+      CLAUDE_CONFIG_DIR: `${ACCOUNTS}/team`,
+      BROWSER: "/plugin/bin/open-login.sh",
+      CLAUDE_SWITCHER_PRIVATE: "1",
+    });
+    expect(started.login).toMatchObject({ name: "team", phase: "running" });
+    // Claude Code created the directory's .claude.json and wrote the login.
+    dirs = ["spare", "team", "work"];
+    h.files[`${ACCOUNTS}/team/.claude.json`] = claudeJson("team@example.com", "uuid-team");
+    h.logins[0]!.exit(0);
+    await tick();
+    await tick();
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.login).toMatchObject({ name: "team", phase: "done" });
+    expect(state.accounts.map((a) => [a.name, a.usage?.weekly.usedPercent ?? null])).toEqual([
+      ["main", 40],
+      ["spare", 60],
+      ["team", 5],
+      ["work", 20],
+    ]);
+    expect(h.harness.realtimeSignals.filter((s) => s.channel === "accounts-changed").length).toBeGreaterThan(1);
+  });
+
+  it("logs the default account in without CLAUDE_CONFIG_DIR and without a private window when so set", async () => {
+    const noMain = { ...ALL_FREE, main: () => new Response(null, { status: 401 }) };
+    const h = await host(noMain, {
+      settings: { loginPrivateWindow: false },
+      env: { PATH: "/usr/bin", CLAUDE_CONFIG_DIR: "/somewhere/else" },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.callRpc("account_login_start", { name: "main" });
+    expect(h.made).toEqual([]);
+    expect(h.logins[0]?.env).toEqual({
+      PATH: "/usr/bin",
+      BROWSER: "/plugin/bin/open-login.sh",
+      CLAUDE_SWITCHER_PRIVATE: "0",
+    });
+  });
+
+  it("refuses a name that is not a plain directory name, the `default` alias, or an account already logged in", async () => {
+    const h = await host(ALL_FREE);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    for (const name of ["", "../x", "a/b", ".hidden", "with space", "x".repeat(65)])
+      await expect(h.harness.behavior.callRpc("account_login_start", { name })).rejects.toThrow(
+        /letters, digits/,
+      );
+    await expect(h.harness.behavior.callRpc("account_login_start", { name: "default" })).rejects.toThrow(
+      /names the default account/,
+    );
+    await expect(h.harness.behavior.callRpc("account_login_start", { name: "spare" })).rejects.toThrow(
+      /already logged in/,
+    );
+    expect(h.logins).toEqual([]);
+  });
+
+  it("lets an account without a login log in again, measuring it first when needed", async () => {
+    const noWork = { ...ALL_FREE, work: () => new Response(null, { status: 401 }) };
+    const h = await host(noWork);
+    dispose = () => h.harness.dispose();
+    // Never measured: measured now, found without a login, allowed.
+    const state = (await h.harness.behavior.callRpc("account_login_start", { name: "work" })) as State;
+    expect(state.login).toMatchObject({ name: "work", phase: "running" });
+    expect(h.usageCalls).toEqual(["work"]);
+    expect(h.logins[0]?.env.CLAUDE_CONFIG_DIR).toBe(`${ACCOUNTS}/work`);
+  });
+
+  it("passes a pasted code on, cancels, and reports a failed login", async () => {
+    const h = await host(ALL_FREE);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("account_login_start", { name: "team" });
+    await h.harness.behavior.callRpc("account_login_code", { code: "abc" });
+    expect(h.logins[0]?.written).toEqual(["abc\n"]);
+    const cancelled = (await h.harness.behavior.callRpc("account_login_cancel", null)) as State;
+    expect(h.logins[0]?.killed).toBe(true);
+    expect(cancelled.login).toMatchObject({ phase: "cancelled" });
+    const cleared = (await h.harness.behavior.callRpc("account_login_cancel", null)) as State;
+    expect(cleared.login).toBeNull();
+
+    await h.harness.behavior.callRpc("account_login_start", { name: "team" });
+    h.logins[1]!.exit(1);
+    await tick();
+    const failed = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(failed.login).toMatchObject({ phase: "failed", message: expect.stringMatching(/exit code 1/) });
+  });
+
+  it("runs one login at a time", async () => {
+    const h = await host(ALL_FREE);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("account_login_start", { name: "team" });
+    await expect(h.harness.behavior.callRpc("account_login_start", { name: "side" })).rejects.toThrow(
+      /still running/,
+    );
   });
 });
