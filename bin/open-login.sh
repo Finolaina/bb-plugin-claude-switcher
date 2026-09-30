@@ -3,7 +3,8 @@
 # `claude auth login` runs this as $BROWSER with the consent URL as its only
 # argument. macOS: a private Chrome window, so the login does not reuse the
 # browser's Claude session (CLAUDE_SWITCHER_PRIVATE=0 opens the default
-# browser instead); without Chrome, the default browser. Linux: xdg-open.
+# browser instead); without Chrome, the default browser. Linux: xdg-open,
+# always the default browser.
 set -eu
 url="${1:-}"
 case "$url" in
@@ -17,4 +18,7 @@ if [ "$(uname)" = "Darwin" ]; then
   fi
   exec /usr/bin/open "$url"
 fi
+# Without a desktop xdg-open runs $BROWSER, which is this script: it would
+# call itself until the machine ran out of processes.
+unset BROWSER
 exec xdg-open "$url"
