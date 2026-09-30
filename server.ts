@@ -55,6 +55,7 @@ import {
   usageSourceRpcContract,
 } from "./src/usage-source-contract.js";
 import { toMeasurement, toResource } from "./src/usage-source.js";
+import { forecastLine, projectName } from "./src/ui.js";
 
 export const ENV_VAR = "CLAUDE_CONFIG_DIR";
 /** Realtime channel app.tsx listens on after any state change. */
@@ -1386,7 +1387,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       const models = Object.entries(a.usage.models)
         .map(([m, w]) => `${m} ${pct(w.usedPercent)}`)
         .join(" ");
-      return `${a.name}\tsession ${pct(a.usage.session.usedPercent)}\tweekly ${pct(a.usage.weekly.usedPercent)}\t${models}${a.usage.blocked ? "\tLOCKED" : ""}`;
+      // The pace of each window that has one: "weekly runs out in 2 d 5 h …".
+      const paces = Object.entries(s.forecasts[a.name] ?? {}).flatMap(
+        ([window, forecast]) => {
+          const line = forecastLine(forecast, deps.now());
+          return line === null ? [] : [`\t${window} ${line}`];
+        },
+      );
+      return `${a.name}\tsession ${pct(a.usage.session.usedPercent)}\tweekly ${pct(a.usage.weekly.usedPercent)}\t${models}${a.usage.blocked ? "\tLOCKED" : ""}${paces.join("")}`;
     });
     const projects = s.projects.map(
       (p) =>
@@ -1424,6 +1432,29 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
               stdout: options.json
                 ? `${JSON.stringify(s, null, 2)}\n`
                 : textState(s),
+            };
+          },
+        }),
+        history: cliCommand({
+          summary:
+            "Show every move of a project to another account, latest first, and why",
+          options: { json: JSON_OPTION },
+          async run({ options }) {
+            const s = await state();
+            if (options.json) {
+              return {
+                exitCode: 0,
+                stdout: `${JSON.stringify(s.history, null, 2)}\n`,
+              };
+            }
+            const lines = s.history.map(
+              (r) =>
+                `${new Date(r.at).toISOString()}\t${projectName(s.projects, r.projectId)}\t${r.from} → ${r.to}\t${r.reason}`,
+            );
+            return {
+              exitCode: 0,
+              stdout:
+                (lines.length === 0 ? "no moves yet" : lines.join("\n")) + "\n",
             };
           },
         }),

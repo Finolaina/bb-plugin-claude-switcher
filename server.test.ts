@@ -2773,6 +2773,55 @@ describe("the history of moves", () => {
     const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
     expect(state.history.map((r) => r.reason)).toEqual(["Picked by hand"]);
   });
+
+  it("prints the moves from the terminal, latest first, as text or JSON", async () => {
+    const h = await host(ALL_FREE);
+    dispose = () => h.harness.dispose();
+    const empty = await h.harness.behavior.runCli(["history"]);
+    expect(empty).toMatchObject({ exitCode: 0, stdout: "no moves yet\n" });
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    await h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-2",
+      account: "spare",
+    });
+    const text = await h.harness.behavior.runCli(["history"]);
+    expect(text.exitCode).toBe(0);
+    expect(text.stdout).toBe(
+      `${new Date(NOW).toISOString()}\tOther\tmain → spare\tPicked by hand\n` +
+        `${new Date(NOW).toISOString()}\tWebsite\tmain → work\tSwitched to account work\n`,
+    );
+    const json = await h.harness.behavior.runCli(["history", "--json"]);
+    expect(
+      (JSON.parse(json.stdout) as State["history"]).map((r) => r.to),
+    ).toEqual(["spare", "work"]);
+  });
+
+  it("shows in `list` the pace of a weekly window that has one", async () => {
+    let clock = NOW;
+    let weekly = 40;
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, weekly, 20)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + 24 * HOUR;
+    weekly = 70;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const lines = (await h.harness.behavior.runCli(["list"])).stdout.split("\n");
+    expect(lines.find((l) => l.startsWith("main\t"))).toBe(
+      "main\tsession 10%\tweekly 70%\tFable 20%\tweekly runs out in 1 d 0 h at this pace (30 %/day)",
+    );
+    // A steady window says nothing.
+    expect(lines.find((l) => l.startsWith("work\t"))).toBe(
+      "work\tsession 5%\tweekly 20%\t",
+    );
+  });
 });
 
 describe("the forecast of each window", () => {
