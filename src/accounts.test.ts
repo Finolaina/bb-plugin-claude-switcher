@@ -93,6 +93,20 @@ describe("discoverAccounts", () => {
     ]);
   });
 
+  it("takes an empty account id as none: two such directories are not one account", async () => {
+    const io = fakeIo(
+      {
+        [`${ACCOUNTS}/blank/.claude.json`]: claudeJson("blank@example.com", ""),
+      },
+      { [ACCOUNTS]: ["blank"] },
+    );
+    const accounts = await discoverAccounts(io, {
+      accountsDir: ACCOUNTS,
+      defaultAccountName: "default",
+    });
+    expect(accounts[1]).toMatchObject({ name: "blank", accountUuid: null });
+  });
+
   it("expands ~ in the accounts dir and tolerates a missing dir", async () => {
     const io = fakeIo({}, {});
     const accounts = await discoverAccounts(io, {

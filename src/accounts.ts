@@ -68,7 +68,8 @@ async function login(io: AccountsIo, file: string): Promise<Login | null> {
   const oauth = parsed.success ? parsed.data.oauthAccount : undefined;
   return {
     email: oauth?.emailAddress ?? null,
-    accountUuid: oauth?.accountUuid ?? null,
+    // Empty is none: two directories without an id are not one account.
+    accountUuid: oauth?.accountUuid || null,
   };
 }
 
