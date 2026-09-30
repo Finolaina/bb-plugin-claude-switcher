@@ -1389,6 +1389,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * against the preferred model when the thread has not been seen here.
    */
   const threadModel = new Map<string, string>();
+  /** A thread in one of these has a turn under way: a message sent then waits in bb's queue. */
+  const TURN_UNDER_WAY: ReadonlySet<string> = new Set([
+    "starting",
+    "active",
+    "stopping",
+  ]);
   /**
    * Before a turn starts: when the project's account is MEASURED unable to
    * run the model the turn is sent with and another account can, the project
@@ -1440,6 +1446,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const model = modelFamily(ctx.requestedExecution.model);
     if (
       model === null ||
+      // Queued behind a turn: bb asks again when it sends the message.
+      TURN_UNDER_WAY.has(thread.status) ||
       thread.providerId !== CLAUDE_CODE_PROVIDER ||
       notTheUsersThread(thread) !== null
     )

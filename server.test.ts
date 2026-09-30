@@ -3744,6 +3744,46 @@ describe("the model a thread's turn runs on", () => {
     });
   });
 
+  it.each(["starting", "active", "stopping"] as const)(
+    "does not take the model of a message queued behind a turn (thread %s) for that turn's: its failure still waits for Fable",
+    async (status) => {
+      const h = await host(
+        {
+          main: usage(10, 100, 0),
+          spare: usage(10, 100, 20),
+          work: usage(100, 100, 100),
+        },
+        FABLE,
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      await dispatch(h, "claude-fable-5-1");
+      // bb asks when the message is queued, and again when it sends it.
+      await dispatch(h, "claude-opus-5-5", {
+        thread: thread({ id: "thread-1", projectId: "proj-1", status }),
+      });
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(h.envSet).toEqual([]);
+      expect(h.retries.map((r) => r.reason)).toEqual([
+        "Waiting for Fable on main",
+      ]);
+    },
+  );
+
+  it("does not move the project for a message queued behind a running turn; it does when bb sends the message", async () => {
+    const h = await host(OPUS_ELSEWHERE, FABLE);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await dispatch(h, "claude-opus-5-5", {
+      thread: thread({ id: "thread-1", projectId: "proj-1", status: "active" }),
+    });
+    expect(h.envSet).toEqual([]);
+    await dispatch(h, "claude-opus-5-5");
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-1", `${ACCOUNTS}/work`],
+    ]);
+  });
+
   it("lets the message through when the project's account cannot be read, or the read never answers", async () => {
     const failing = await host(OPUS_ELSEWHERE, {
       ...FABLE,
