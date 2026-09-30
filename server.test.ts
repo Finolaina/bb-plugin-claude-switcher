@@ -3784,6 +3784,98 @@ describe("the model a thread's turn runs on", () => {
     ]);
   });
 
+  /** The project's variable as the plugin last set it, read from bb. */
+  function environmentOf(h: Awaited<ReturnType<typeof host>>) {
+    const last = h.envSet.at(-1);
+    return {
+      builtInGit: { status: "disabled" as const, statusMessage: "" },
+      inheritedVariables: [],
+      variables:
+        last === undefined
+          ? []
+          : [{ name: ENV_VAR, note: last.note ?? null, secret: true as const, value: null }],
+    };
+  }
+
+  it("never waits for the project's queue: a message sent while the project is being decided goes on", async () => {
+    const h = await host(OPUS_ELSEWHERE, FABLE);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let reads = 0;
+    h.harness.sdk.stub("projects.machineEnvironment", async () => {
+      const snapshot = environmentOf(h);
+      // The pick's read is slow: it holds the project's queue meanwhile.
+      if (reads++ === 0) await held;
+      return snapshot;
+    });
+    const picking = h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-1",
+      account: "spare",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(reads).toBe(1);
+    expect(
+      await Promise.race([
+        dispatch(h, "claude-opus-5-5"),
+        new Promise((resolve) => setTimeout(() => resolve("waited"), 50)),
+      ]),
+    ).toEqual({ action: "proceed" });
+    expect(h.envSet.map((e) => e.note)).toEqual([ownNote("work")]);
+    release();
+    await picking;
+    expect(h.envSet.map((e) => e.note)).toEqual([
+      ownNote("work"),
+      ownNote("spare"),
+    ]);
+  });
+
+  it("waits for a read of bb that takes a second and places the turn", async () => {
+    const h = await host(OPUS_ELSEWHERE, FABLE);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    vi.useFakeTimers();
+    try {
+      h.harness.sdk.stub("projects.machineEnvironment", async () => {
+        const snapshot = environmentOf(h);
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        return snapshot;
+      });
+      const answer = dispatch(h, "claude-opus-5-5");
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await answer).toEqual({ action: "proceed" });
+      expect(h.envSet.map((e) => e.note)).toEqual([ownNote("work")]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives up a placement that takes more than 3 s: the project is not moved later", async () => {
+    const h = await host(OPUS_ELSEWHERE, FABLE);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    vi.useFakeTimers();
+    try {
+      let reads = 0;
+      h.harness.sdk.stub("projects.machineEnvironment", async () => {
+        if (reads++ === 0)
+          await new Promise((resolve) => setTimeout(resolve, 5_000));
+        return environmentOf(h);
+      });
+      const answer = dispatch(h, "claude-opus-5-5");
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(await answer).toEqual({ action: "proceed" });
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(reads).toBe(1);
+      expect(h.envSet).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("lets the message through when the project's account cannot be read, or the read never answers", async () => {
     const failing = await host(OPUS_ELSEWHERE, {
       ...FABLE,

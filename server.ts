@@ -1400,9 +1400,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * run the model the turn is sent with and another account can, the project
    * moves there first. The preferred model does not decide here: a thread
    * the user switched to Opus runs on an account with Opus left even when
-   * every account is out of the preferred one.
+   * every account is out of the preferred one. `turn.abandoned` is set when
+   * the checkpoint stopped waiting: nothing is moved after that.
    */
-  async function placeTurn(thread: ThreadResponse, model: string) {
+  async function placeTurn(
+    thread: ThreadResponse,
+    model: string,
+    turn: { abandoned: boolean },
+  ) {
     const projectId = thread.projectId;
     // Emptied by a change of the accounts directory, until the next look.
     if (accounts.length === 0) await discover();
@@ -1417,7 +1422,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       preferredModel: model,
       now,
     });
-    if (decision.kind === "keep") return;
+    if (decision.kind === "keep" || turn.abandoned) return;
     await applyAccount(projectId, accountOrDefault(decision.account), from);
     await markHandled(projectId);
     const reason = `Moved to account ${decision.account} before the turn: ${fromName} cannot run ${model}`;
@@ -1439,8 +1444,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   // bb holds every message of every thread on this answer and fails the
   // attempt when a handler throws or takes 10 s: it always proceeds, decides
   // on the measurements already there, and stays out of the project's queue
-  // (a retry sent from that queue passes through here). A read of bb that
-  // never answers is left behind after DISPATCH_LIMIT_MS.
+  // (a retry sent from that queue passes through here). A placement that
+  // has not finished after DISPATCH_LIMIT_MS is given up.
   bb.experimental_hooks.on("message.dispatch", async (ctx) => {
     const { thread } = ctx;
     const model = modelFamily(ctx.requestedExecution.model);
@@ -1454,12 +1459,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return { action: "proceed" };
     threadModel.set(thread.id, model);
     if (current.autoSwitch && ctx.attempt === "start-turn") {
+      const turn = { abandoned: false };
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
-          placeTurn(thread, model),
+          placeTurn(thread, model, turn),
           new Promise<void>((resolve) => {
-            timer = setTimeout(resolve, DISPATCH_LIMIT_MS);
+            timer = setTimeout(() => {
+              turn.abandoned = true;
+              resolve();
+            }, DISPATCH_LIMIT_MS);
           }),
         ]);
       } catch (error) {
