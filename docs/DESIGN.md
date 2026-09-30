@@ -35,8 +35,11 @@ created (below).
 | `src/usage.ts`       | Parses the usage endpoint's answer into session, weekly and per-model windows.                                                                                          |
 | `src/collector.ts`   | One cached measurement per account, single-flight queries, the rule for stale measurements.                                                                             |
 | `src/policy.ts`      | Pure ranking: which usable account to choose.                                                                                                                           |
-| `src/switch.ts`      | Pure decisions: where a project runs before a new thread's first turn, and what to do with one failed turn (switch, wait or decline).                                   |
-| `server.ts`          | Wires it to bb: settings, the Provider usage source, `thread.created`, `turn.failed`, project variables, retries, CLI, realtime updates.                                 |
+| `src/switch.ts`      | Pure decisions: where a project runs before a new thread's first turn, what to do with one failed turn (switch, wait or decline), and whether to move ahead of the limit after a turn. |
+| `src/forecast.ts`    | Pure: the usage samples of a window and the pace they give.                                                                                                             |
+| `src/login.ts`       | A `claude auth login` run for one account directory: its phases, the fallback address and code, the timeout, and what a new directory shares with `~/.claude`.          |
+| `bin/open-login.sh`  | The `BROWSER` of that login: opens an `https://` address in a private Chrome window, or the default browser.                                                            |
+| `server.ts`          | Wires it to bb: settings, the Provider usage source, `thread.created`, `turn.failed`, `thread.idle`, project variables, retries, the history, CLI, realtime updates.     |
 | `app.tsx`            | The Claude Switcher section in Settings, and the account control in a Claude Code thread's header.                                                                      |
 
 The policy and the decision are pure functions of their inputs (usage,
@@ -163,6 +166,87 @@ Then `decideSwitch`:
 Failures of one project are handled one at a time, in order: two threads of
 the same project failing together must not make two different moves.
 
+## Moving ahead of the limit
+
+Off by default (`switchAheadPercent` = 0). With a percentage set, a
+visible Claude Code thread turning idle is the trigger: the turn has
+ended, so moving the project interrupts nothing and spends no retry.
+
+1. The project's account is measured again unless its measurement is
+   under a minute old: the turn that just ended used some of it.
+2. `decideAhead` keeps the project when its account is unknown or
+   unmeasured, or when the fullest of its session, weekly and
+   preferred-model windows (settled: a window past its reset counts 0) is
+   under the percentage.
+3. Otherwise the candidates are the accounts under the percentage in all
+   three windows, ranked by the same policy as a switch. None: the project
+   stays. A project never moves to an account as close to its limit as
+   the one it leaves, so two accounts cannot trade a project back and
+   forth.
+4. The move is recorded like a switch (reason
+   `Switched ahead of the limit to <name>: <old> at <n>% of <window>`) and
+   opens the grace window below for turns of the same project still
+   running on the old account.
+
+It needs `autoSwitch`, skips external variables, and also moves a project
+pinned by hand: the percentage is the user's standing instruction.
+
+## The forecast
+
+Each refresh adds a sample (time, percent) to a series per account and
+window, for the weekly and the per-model windows; the 5-hour session is
+too short to be worth one. Samples are kept half an hour apart (the latest
+always replaces the one before it when that one is younger), and a series
+starts over when the window's reset time changes or its share falls. The
+series live in the plugin's key-value storage, so a restart keeps them.
+
+The forecast is the average pace from the first sample of the window to
+the last: with at least two hours between them and at least one point a
+day, either the moment the window reaches 100 % at that pace (when that is
+before its reset) or "lasts until the reset". It is a line of text in
+Settings, the header menu and `list`. No decision reads it.
+
+## Logging an account in from bb
+
+`claude auth login` needs no terminal: it listens on a localhost port,
+hands the consent address to `$BROWSER` (one executable path, no
+arguments), and completes when the browser comes back. `LoginFlow` runs it
+as a child process of bb's server, without a shell, with
+`CLAUDE_CONFIG_DIR` set to the account's directory (removed from the
+inherited environment for the default account) and `BROWSER` set to
+`bin/open-login.sh`. Exit 0 means Claude Code wrote the login to its own
+store; the plugin then discovers and measures the account.
+
+- **The name is a trust boundary.** It becomes a directory under the
+  accounts directory: one segment of letters, digits, dots, dashes and
+  underscores, not starting with a dot, 64 characters at most. `default`
+  is refused when it is only the alias of the default account. An account
+  that already has a login is refused: its store would be overwritten
+  while a thread may be using it.
+- **A private window.** The helper opens Chrome with `--incognito`, so
+  the consent page asks which Claude account to use instead of taking the
+  one the browser is signed in to: that is how a second account ends up
+  in the second directory. Without Chrome, or with `loginPrivateWindow`
+  off, it opens the default browser.
+- **The consent address is not kept.** It goes from the CLI to the helper
+  as an argument. The plugin reads the CLI's output only for the fallback
+  address (printed when the browser could not be opened) and the prompt
+  for a code; a failure message has every address replaced by `<url>`.
+- **One login at a time**, given up after 10 minutes, and cancellable.
+- **A new directory shares `~/.claude`.** When the plugin creates the
+  directory it links `projects`, `settings.json`, `hooks`, `CLAUDE.md`,
+  `plugins`, `skills`, `agents`, `commands` and `rules` from `~/.claude`,
+  for those that exist: without `projects` a thread cannot resume on the
+  new account. A directory that already existed is never changed.
+
+## The history
+
+Every move of a project is a record (time, thread, project, from, to,
+reason): after a failed turn, when a thread is created, ahead of the
+limit, and a pick by hand (`Picked by hand`, only when the account
+changes). The last 100 are kept in key-value storage, latest first, and
+written in order so a slow write never replaces a later list.
+
 ## Leftover threads: the 60-second grace window
 
 When a project moves, its other threads that were already running on the
@@ -238,6 +322,17 @@ The refresh token rotates on every refresh, so the plugin:
   key-value storage. A reinstall then reads the old install time, so
   projects created while the plugin was removed count as new at their next
   thread.
+- **The forecast is an average.** It is the pace since the window's
+  first sample, so a burst at the end of a quiet week moves it slowly, and
+  a window first seen late has a short, noisy history.
+- **Moving ahead needs a turn to end.** A project whose only thread runs
+  one very long turn is not moved ahead; if that turn fails on the limit,
+  the ordinary switch takes over.
+- **The private window is Chrome on macOS.** Elsewhere, and without
+  Chrome, the login opens the default browser, which may be signed in to
+  another Claude account.
+- **A login from bb needs the `claude` executable** in the `PATH` of bb's
+  server, or its full path in `claudeCommand`.
 - **Shared transcripts are required.** A switch changes the whole config
   directory, so an account directory must share `projects/` (and normally
   settings, hooks and `CLAUDE.md`) with `~/.claude`, or the retried thread
@@ -269,17 +364,20 @@ retried turn completed there at 01:42:52.
 
 ## Decisions not taken
 
-- **No account pooling.** The plugin never spreads one person's work across
-  accounts to multiply quota, never logs anyone in, and never shares logins
-  between people. It only moves a project between logins its user already
-  holds, when the current one is blocked.
+- **No account pooling.** The plugin never shares logins between people
+  and never balances work across accounts: a project stays on its account
+  until that account is blocked or, if the user set a percentage, close to
+  its limit. A login happens only when the user asks for one, through
+  Claude Code's own `claude auth login`.
 - **No per-thread accounts.** The environment belongs to the project in bb;
   switching per thread would need a second mechanism and would split one
   project's sessions across directories.
-- **No switching on a forecast.** The plugin moves a project on a measured
-  block (a failed turn, or an account already measured out before a new
-  thread's first turn), never on a forecast such as "80 % used": a forecast
-  is a guess, and every guess costs a retry or a project the user placed.
+- **No switching on a forecast.** By default the plugin moves a project
+  only on a measured block (a failed turn, or an account already measured
+  out before a new thread's first turn). The opt-in move ahead of the
+  limit acts on a share measured at the end of a turn, against a
+  percentage the user chose, and costs no retry. The forecast ("runs out
+  in 2 d") is shown and never acted on: it is a guess.
 - **No guessing on stale data.** When the only evidence that an account is
   free is the clock and the measurement is old, the plugin declines rather
   than switch.

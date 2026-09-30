@@ -4,6 +4,45 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.4] - 2026-09-30
+
+### Added
+
+- **Add an account from bb.** Settings has an **Add account** form, and a
+  **Log in** button on every account without a login. Both run Claude
+  Code's own `claude auth login` for the account's directory and open the
+  consent page in a private Chrome window, so the login does not reuse the
+  browser's Claude session (the default browser when Chrome is missing or
+  `loginPrivateWindow` is off). The account is measured when the login
+  ends. If the browser cannot be opened, the section shows a link to the
+  login page and a field for the code it gives. One login at a time,
+  given up after 10 minutes. A directory the plugin creates links
+  `projects`, `settings.json`, `hooks`, `CLAUDE.md`, `plugins`, `skills`,
+  `agents`, `commands` and `rules` from `~/.claude` (those that exist), so
+  threads can move to the new account; a directory that already existed is
+  left as it is. New settings: `claudeCommand` and `loginPrivateWindow`.
+- **Switch ahead of the limit** (opt-in: `switchAheadPercent`, 0 = off).
+  When a turn ends with the project's account at or above that share of
+  its session, weekly or preferred-model window, and another account is
+  below it in all three, the project moves there. No turn is interrupted
+  and no retry is spent. It acts on a measurement taken at that moment,
+  not on the forecast.
+- **A forecast per weekly window.** Under each weekly and per-model window
+  in Settings, in the thread header menu and in `list`: when the window
+  runs out at the average pace since it started, or that it lasts until
+  its reset. It needs two hours of samples (one every half hour, kept in
+  the plugin's storage) and says nothing under one point a day.
+- **History of moves.** Every move of a project (after a failed turn, when
+  a thread is created, ahead of the limit or picked by hand) with its
+  time, accounts and reason: the last 100, in Settings and with
+  `bb claude-switcher history [--json]`.
+
+### Changed
+
+- Settings lists the history instead of only the last automatic switch.
+- The setup loop in the README also shares `skills`, `agents`, `commands`
+  and `rules`.
+
 ## [0.2.3] - 2026-09-30
 
 ### Added

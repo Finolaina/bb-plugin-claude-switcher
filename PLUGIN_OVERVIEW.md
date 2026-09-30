@@ -22,6 +22,16 @@ limit.
 - **The account in every thread.** A Claude Code thread's header shows
   the project's account with a coloured dot for how much it has left, and
   a menu to switch now to the best account or to any other.
+- **Switch ahead of the limit, if you want.** Set a percentage and, when
+  a turn ends with the project's account at or above it, the project moves
+  to an account below it before the next turn fails. Off by default.
+- **A forecast per window.** When each weekly window runs out at the pace
+  you have used it, or that it lasts until its reset.
+- **Add an account from bb.** Type a name in Settings: the plugin creates
+  the directory, shares your transcripts and configuration with it and
+  runs Claude Code's own login in a private browser window.
+- **A history of moves.** Every move of a project, automatic or by hand,
+  with its reason.
 - **A picker per project.** In Settings, choose which account each project
   runs with, or let the plugin manage it. The CLI does the same:
   `bb claude-switcher use PROJECT ACCOUNT`.
@@ -56,9 +66,10 @@ when it switches. Tokens are sent only to Anthropic's own OAuth and usage
 endpoints, the same ones the Claude Code CLI calls; nothing is sent
 anywhere else.
 
-Make each extra directory once (share `projects/` and the rest first, as the
-README shows), then `CLAUDE_CONFIG_DIR=~/.claude-accounts/work claude` and
-log in; the plugin finds it on the next refresh.
+Add each extra account from **Settings → Claude Switcher → Add account**,
+or by hand: make the directory once (share `projects/` and the rest first,
+as the README shows), then `CLAUDE_CONFIG_DIR=~/.claude-accounts/work claude`
+and log in; the plugin finds it on the next refresh.
 
 ## Privacy and terms
 

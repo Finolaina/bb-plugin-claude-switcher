@@ -1,8 +1,8 @@
 // Claude Switcher — bb plugin frontend.
 //
-// A Settings section: every Claude Code account with its usage windows,
-// which account each project runs on (with a picker to change it), and the
-// last automatic switch. The windows themselves are ALSO published to bb's
+// A Settings section: every Claude Code account with its usage windows and
+// their forecast, a form to add an account and log it in, which account each
+// project runs on (with a picker to change it), and the history of moves. The windows themselves are ALSO published to bb's
 // Provider usage panel through server.ts; this section is where you act.
 // And, in a Claude Code thread's header, the project's account with a menu
 // to change it (an experimental bb slot, registered only when the host has it).

@@ -1,6 +1,6 @@
 // Claude Switcher — bb plugin backend.
 //
-// Four jobs:
+// Seven jobs:
 //   1. Measure every Claude Code account on this machine (one config dir
 //      each) and publish the windows to bb's Provider usage panel.
 //   2. When a thread is created, put a new project on the best account, and
@@ -10,6 +10,10 @@
 //      another account (CLAUDE_CONFIG_DIR as a project machine env var) and
 //      retry the turn; when no account is free, retry at the earliest reset.
 //   4. Let the user pin a project to an account from Settings or the CLI.
+//   5. Optionally, when a turn ends with the project's account close to its
+//      limit, move the project to an account with more room.
+//   6. Keep the history of moves and a forecast of each weekly window.
+//   7. Log an account in from Settings (`claude auth login` as a child).
 import {
   PluginCliError,
   cliCommand,
