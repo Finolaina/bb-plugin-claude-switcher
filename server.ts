@@ -888,7 +888,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       recent !== undefined &&
       now - recent.at <= SWITCH_GRACE_MS &&
       recent.threadId !== event.threadId &&
-      !recent.graced.has(event.threadId)
+      !recent.graced.has(event.threadId) &&
+      // Measured since as unable to run a turn (a wait keeps its grace:
+      // the account is out by definition until its reset): judged below.
+      (recent.sendAt !== undefined || !cannotRun(recent.to))
     ) {
       // Another thread of the project, still running on the old account
       // (whatever its attempt: a leftover can be a retry too): the project

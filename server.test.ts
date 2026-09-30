@@ -2582,6 +2582,48 @@ describe("the account shown in each thread's header", () => {
     expect(state.bestAccount).toBeNull();
   });
 
+  it("judges a leftover inside the grace when the picked account has since been measured out", async () => {
+    let mainOut = false;
+    const h = await host(
+      {
+        main: () => Response.json(payload(mainOut ? 100 : 10, 40)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      {
+        presetEnv: {
+          "proj-2": [{ name: ENV_VAR, note: ownNote("spare"), secret: true, value: null }],
+        },
+      },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // main looks free when the user picks it for proj-2.
+    await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-2", account: "main" });
+    // proj-1, also on main, exhausts it: its failure measures every account again.
+    mainOut = true;
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.retries.map((r) => [r.threadId, r.reason])).toEqual([["thread-1", "Switched to account work"]]);
+    // A leftover of proj-2 fails 20 s after the pick: main is known out now.
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "thr-2", requestId: "creq_2" }));
+    expect(h.retries[1]).toMatchObject({ threadId: "thr-2", reason: "Switched to account work" });
+  });
+
+  it("judges a leftover inside the grace when the picked account turned out to have no login", async () => {
+    const h = await host({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => new Response(null, { status: 401 }),
+    });
+    dispose = () => h.harness.dispose();
+    // Nothing measured yet: the pick of work holds.
+    await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "work" });
+    const state = (await h.harness.behavior.callRpc("accounts_refresh", null)) as State;
+    expect(state.accounts.find((a) => a.name === "work")?.problem).toEqual({ kind: "unauthenticated" });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.retries[0]?.reason).toBe("Switched to account spare");
+  });
+
   it("names a best account once a reset has passed, without measuring again", async () => {
     let clock = NOW;
     const h = await host(

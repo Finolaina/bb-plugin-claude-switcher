@@ -174,8 +174,10 @@ of the same thread inside the window means the new account fails too, and
 it is judged from scratch.
 
 A hand pick (thread header, Settings or the CLI's `use`) opens the same
-window, unless the picked account has no login or is measured out: then a
-leftover's failure is judged, so it can move to an account that works.
+window, unless the picked account has no login or is measured out, when
+picked or by any measurement made since: then a leftover's failure is
+judged, so it can move to an account that works. A wait keeps its window
+whatever a measurement says: the account is out until its reset.
 
 A long turn can outlast the window. So the plugin also notes, on each
 `thread.active`, the account a turn of the user's Claude Code threads
