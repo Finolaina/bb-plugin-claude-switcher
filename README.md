@@ -94,6 +94,8 @@ choose.
 
 Name one (for example `Fable`) and only accounts that can still run it are
 chosen. The three Claude Code limits are never treated as interchangeable.
+A thread you switch to another model in bb's picker is judged by that
+model instead.
 
 </td>
 </tr>
@@ -322,6 +324,15 @@ flowchart TD
   [Setting up extra accounts](#setting-up-extra-accounts). A project you
   pinned by hand (the default account included) stays put while its
   account works.
+- **Before every turn.** bb tells the plugin the model each message is
+  sent with. When the project's account is measured unable to run that
+  model and another account can, the project moves there before the turn
+  starts, and a turn that fails on a limit is judged against that model
+  too. So a thread you switch to Opus runs on an account with Opus left
+  even when `preferredModel` is `Fable` and no account has Fable left,
+  while a thread sent with Fable waits for Fable as before. This is
+  decided on the measurements already there and never holds or refuses a
+  message; the plugin never changes a thread's model.
 - **When a turn ends (opt-in).** With `switchAheadPercent` above 0 and
   `autoSwitch` on, the
   plugin measures the project's account when a turn of one of its threads
@@ -389,7 +400,7 @@ and up to 30 s of jitter, like bb's own provider-retry plugin; both stop
 after 5 attempts. The reasons this plugin writes are
 `Switched to account <name>[ (<model>)]`, `Waiting for [<model> on ]<name>`
 and `Retrying on account <name>`, plus two for moves made when a thread is
-created: `New project placed on account <name>[ (<model>)]` and
+created or before a turn: `New project placed on account <name>[ (<model>)]` and
 `Moved to account <name> before the turn: <old> cannot run <model>` (or
 `is out of usage` without a preferred model), one for a move after a
 turn: `Switched ahead of the limit to <name>: <old> at <n>% of <window>`,
@@ -560,7 +571,7 @@ named `default`; the default account's own name always works.
 | -------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `accountsDir`        | `~/.claude-accounts` | Where the extra config directories live.                                                                                                                  |
 | `defaultAccountName` | `default`            | Name shown for `~/.claude`. A subdirectory with the same name is skipped, with a warning in the log.                                                      |
-| `preferredModel`     | _(empty = any)_      | Model display name as the usage API reports it (e.g. `Fable`, case-insensitive). Only accounts that can still run it are chosen; else wait for its reset. |
+| `preferredModel`     | _(empty = any)_      | Model display name as the usage API reports it (e.g. `Fable`, case-insensitive). Only accounts that can still run it are chosen; else wait for its reset. A thread sent with another model is judged by that model. |
 | `autoSwitch`         | `true`               | Place projects when a thread is created, and switch and retry on subscription limits. Off = the panel and the picker only.                               |
 | `maximumWaitHours`   | `6`                  | Queue a retry for a reset only if it is closer than this (0 = no limit).                                                                                  |
 | `refreshMinutes`     | `5`                  | Background usage refresh interval (never below 1).                                                                                                        |

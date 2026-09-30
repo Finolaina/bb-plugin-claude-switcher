@@ -119,12 +119,46 @@ on the old account follow it. If the install time cannot be read or
 stored, no project is moved for being new; the measured-block rule still
 applies.
 
-This check races the thread's first turn on purpose: holding the turn until
-it finishes would need bb's experimental dispatch hook, which fails the
-turn when a plugin is slow. When the turn starts first, it runs where the
+This check races the thread's first turn on purpose: it may have to query
+the accounts, and bb's dispatch checkpoint fails the turn when a plugin is
+slow (the checkpoint is used only for the bounded rule of the next
+section). When the turn starts first, it runs where the
 project was; if it fails there, it is retried once on the new account (the
 placing thread gets the grace retry too, because no failure caused the
 move), and a second failure is judged as below.
+
+## Placing a turn by its model
+
+bb runs its `message.dispatch` checkpoint before each message is sent, and
+says there the model the turn will run with (`requestedExecution.model`);
+neither a thread row nor a failed turn carries one. The handler translates
+the id to the usage API's name (`claude-opus-5-5` → `Opus`), remembers it
+for the thread, and, for a message that starts a turn, applies the rule
+for a known project above with that model in place of the preferred one:
+the project moves only when its account is measured unable to run that
+model and another account can.
+
+The checkpoint fails a message whose handler throws or takes more than
+10 s, and runs every handler under one lock, so this one:
+
+- always answers `proceed`: it never holds or refuses a message;
+- decides on the measurements already in hand and asks the provider
+  nothing;
+- catches every error (logged as a warning) and gives the placement up
+  after 3 s (`DISPATCH_LIMIT_MS`): nothing is moved after that;
+- stays out of the project's queue: a retry sent from that queue passes
+  through this same checkpoint and would wait for itself.
+
+It does nothing for a message that joins a running turn or is queued
+behind one (the thread is starting, active or stopping: bb asks again when
+it sends the message), a model id that is not a Claude model id (none
+resolved yet, an alias), a hidden thread, another provider, a variable the
+plugin did not set, or with `autoSwitch` off.
+
+A failed turn is judged against the model its thread was last sent with
+(kept in memory, forgotten when the thread is archived); a thread not seen
+at the checkpoint since the plugin started, against the preferred model.
+The plugin never changes a thread's model: it only chooses the account.
 
 ## Deciding on a failed turn
 
@@ -463,7 +497,25 @@ The refresh token rotates on every refresh, so the plugin:
   variable can be seen and removed.
 - **A hand-pinned project on an account out of the preferred model** is
   moved when a thread is created, even if that thread will run another
-  model: bb does not tell the plugin a thread's model at creation.
+  model: bb does not tell the plugin a thread's model at creation. The
+  turn's own model decides again when its first message is sent.
+- **A project has one account, whatever its threads' models.** Two threads
+  of a project sent with different models, when no single account can run
+  both, move the project back and forth before each turn.
+- **A placement before a turn that takes more than 3 s** is given up: the
+  turn starts where the project was and, if it fails there, is judged like
+  any failed turn.
+- **An account picked by hand during the one read a placement before a
+  turn makes** can be overwritten by the move: that placement runs outside
+  the project's queue, which the checkpoint must never wait for.
+- **The first turn of a new thread is placed twice**, by the preferred
+  model when the thread is created and by its own model when its message
+  is sent, in no fixed order. When the two disagree, the turn can start on
+  an account that cannot run it, fail once and be judged by its model.
+- **The retry of a leftover turn and the switch ahead of the limit do not
+  look at a thread's model**: the first follows the project's latest move,
+  the second decides by the preferred model. The placement before the next
+  turn corrects both, at the cost of one more move.
 
 ## Measured in real use
 

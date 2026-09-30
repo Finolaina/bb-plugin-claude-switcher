@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.5] - 2026-09-30
+
+### Fixed
+
+- **A thread you switch to another model follows that model.** Every
+  decision looked only at `preferredModel`, so a thread switched to Opus
+  in bb's model picker, in a project whose account was out, kept waiting
+  for the preferred model (or failed with a 429) while other accounts had
+  Opus left. bb now tells the plugin the model each turn is sent with
+  (its dispatch checkpoint), and that model decides:
+  - **Before every turn**, a project whose account is measured unable to
+    run the turn's model moves to an account that can. It is decided on
+    the measurements already there; nothing is asked of the provider, and
+    the message is never held or refused: if anything fails here, it is
+    logged and the message goes on as before.
+  - **When a turn fails on a limit**, it is judged against the model its
+    thread was last sent with: an Opus thread switches to an account with
+    Opus left, or waits for Opus.
+  A thread sent with the preferred model behaves as before, and so does a
+  thread bb has not sent a message for since the plugin started. The
+  plugin never changes a thread's model: it only chooses the account.
+
 ## [0.2.4] - 2026-09-30
 
 ### Added

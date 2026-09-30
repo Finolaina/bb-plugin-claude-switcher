@@ -44,7 +44,8 @@ candidate while its session and its weekly window are both under 100 % and
 the provider reports no lock. Candidates are ordered by the closest weekly
 reset, then by the lowest session use. If you name a preferred model, only
 accounts that can still run it are chosen; when none can, the retry waits for
-the first moment an account can run that model again.
+the first moment an account can run that model again. A thread you switch to
+another model in bb's picker is judged by that model instead.
 
 ## Requirements
 
