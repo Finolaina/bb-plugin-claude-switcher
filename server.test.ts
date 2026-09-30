@@ -3717,6 +3717,33 @@ describe("the model a thread's turn runs on", () => {
     ]);
   });
 
+  it("counts a turn sent with Opus against the session and the week when the usage API lists no Opus window, as it does today", async () => {
+    // The answer's shape on 2026-09-30: only Fable has a window of its own.
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 20, 32)),
+        spare: () => Response.json(payload(0, 82, 100)),
+        work: () => Response.json(payload(2, 67, 100)),
+      },
+      FABLE,
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect(await dispatch(h, "claude-opus-5-5")).toEqual({ action: "proceed" });
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-1", `${ACCOUNTS}/spare`],
+    ]);
+    const state = (await h.harness.behavior.callRpc(
+      "accounts_list",
+      null,
+    )) as State;
+    expect(state.lastSwitch).toMatchObject({
+      from: "main",
+      to: "spare",
+      reason: "Moved to account spare before the turn: main cannot run Opus",
+    });
+  });
+
   it("lets the message through when the project's account cannot be read, or the read never answers", async () => {
     const failing = await host(OPUS_ELSEWHERE, {
       ...FABLE,
