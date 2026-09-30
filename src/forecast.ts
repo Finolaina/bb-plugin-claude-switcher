@@ -61,6 +61,9 @@ export function forecastWindow(
   if (percentPerDay < STEADY_PER_DAY) return { kind: "steady" };
   const left = 100 - last[1];
   const at = last[0] + (left / percentPerDay) * DAY_MS;
+  // The projected moment passed and the last measurement was not full: the
+  // pace was not kept (or nothing was measured since). No "runs out now".
+  if (left > 0 && at <= now) return { kind: "unknown" };
   const rounded = Math.round(percentPerDay * 10) / 10;
   return at < series.resetsAt
     ? { kind: "runs-out", at: Math.round(at), percentPerDay: rounded }

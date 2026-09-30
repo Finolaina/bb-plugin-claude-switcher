@@ -54,6 +54,22 @@ describe("forecastWindow", () => {
     expect(forecastWindow(series, T0 + 24 * HOUR)).toEqual({ kind: "steady" });
   });
 
+  it("has no forecast once the moment it projected has passed without the window running out", () => {
+    // 30 points a day from 40 %: out at T0 + 72 h. Not measured since, and
+    // that hour is gone: the pace was not kept, and "now" would be false.
+    const stale: Series = { resetsAt: RESET, points: [[T0, 10], [T0 + 24 * HOUR, 40]] };
+    expect(forecastWindow(stale, T0 + 72 * HOUR - 1).kind).toBe("runs-out");
+    expect(forecastWindow(stale, T0 + 72 * HOUR)).toEqual({ kind: "unknown" });
+    expect(forecastWindow(stale, T0 + 80 * HOUR)).toEqual({ kind: "unknown" });
+    // A window measured full has run out, whenever it is looked at.
+    const full: Series = { resetsAt: RESET, points: [[T0, 10], [T0 + 24 * HOUR, 100]] };
+    expect(forecastWindow(full, T0 + 80 * HOUR)).toEqual({
+      kind: "runs-out",
+      at: T0 + 24 * HOUR,
+      percentPerDay: 90,
+    });
+  });
+
   it("has no forecast with less than two hours of history, no reset, or a reset already passed", () => {
     const short: Series = {
       resetsAt: RESET,
@@ -85,7 +101,7 @@ describe("forecastWindow", () => {
     expect(at(T0 + 72 * HOUR + 1, pace, T0 + 24 * HOUR)).toBe("runs-out");
     // A reset that is now has passed.
     expect(at(RESET, pace, RESET)).toBe("unknown");
-    expect(at(RESET, pace, RESET - 1)).not.toBe("unknown");
+    expect(at(RESET, [[T0, 10], [T0 + 24 * HOUR, 20]], RESET - 1)).toBe("lasts");
   });
 
   it("rounds the pace to a tenth of a point", () => {
