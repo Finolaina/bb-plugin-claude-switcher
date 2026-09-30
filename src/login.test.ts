@@ -188,6 +188,30 @@ describe("LoginFlow", () => {
     });
   });
 
+  it("keeps reading after the banner: the failure it reports is the last thing printed", async () => {
+    const { io, spawned } = fakeIo();
+    const { f } = flow(io);
+    await f.start({ name: "team", configDir: "/d/team" });
+    spawned[0]!.emit(OPENING);
+    spawned[0]!.emit(BANNER);
+    spawned[0]!.emit("\nLogin failed: Request failed with status code 400\n");
+    spawned[0]!.exit(1);
+    await tick();
+    expect(f.status()).toMatchObject({
+      phase: "failed",
+      message: "Login failed: Request failed with status code 400 (exit code 1)",
+    });
+  });
+
+  it("keeps the fallback address however much the login prints after it", async () => {
+    const { io, spawned } = fakeIo();
+    const { f } = flow(io);
+    await f.start({ name: "team", configDir: "/d/team" });
+    spawned[0]!.emit(BANNER);
+    for (let i = 0; i < 40; i++) spawned[0]!.emit(`${"x".repeat(1023)}\n`);
+    expect(f.status()).toMatchObject({ manualUrl: URL, wantsCode: true });
+  });
+
   it("reports a login command that could not start", async () => {
     const { io, spawned } = fakeIo();
     const { f } = flow(io);

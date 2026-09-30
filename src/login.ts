@@ -88,6 +88,9 @@ const URL_PATTERN = /https?:\/\/[^\s\u001b]+/g;
 // oxlint-disable-next-line no-control-regex
 const ESCAPES = /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b\[[0-9;]*[A-Za-z]/g;
 
+/** How much of the login's output is kept (it prints a few lines). */
+const OUTPUT_KEPT = 8_192;
+
 export class LoginFlow {
   private current: LoginStatus | null = null;
   private process: LoginProcess | null = null;
@@ -154,13 +157,16 @@ export class LoginFlow {
     const process = this.io.spawn({ command, env });
     this.process = process;
     process.onOutput((chunk) => {
-      if (this.current !== status) return;
-      this.output += chunk;
+      const now = this.current;
+      if (this.process !== process || now?.phase !== "running") return;
+      // The tail is enough for the last line; what was found stays found.
+      this.output = (this.output + chunk).slice(-OUTPUT_KEPT);
       const plain = this.output.replace(ESCAPES, "");
-      const url = plain.match(/visit:\s*(https?:\/\/\S+)/)?.[1] ?? null;
-      const wantsCode = /Paste code here/.test(plain);
-      if (url !== status.manualUrl || wantsCode !== status.wantsCode) {
-        this.update({ ...status, manualUrl: url, wantsCode });
+      const url =
+        plain.match(/visit:\s*(https?:\/\/\S+)/)?.[1] ?? now.manualUrl;
+      const wantsCode = now.wantsCode || /Paste code here/.test(plain);
+      if (url !== now.manualUrl || wantsCode !== now.wantsCode) {
+        this.update({ ...now, manualUrl: url, wantsCode });
       }
     });
     this.timer = setTimeout(() => {
