@@ -19,6 +19,7 @@ import {
   headerStatus,
   noLoginFound,
   projectName,
+  sharedWith,
   windowForecast,
   windowPercent,
 } from "./src/ui";
@@ -191,13 +192,19 @@ function AccountCard({
   account,
   isDefault,
   forecasts,
+  twin = null,
   onLogin,
   busy = false,
 }: {
   account: AccountState;
   isDefault: boolean;
   forecasts: Record<string, Forecast> | undefined;
-  /** Offered for an account without a login; undefined while a login runs. */
+  /** Another listed account that is the same Claude account. */
+  twin?: string | null;
+  /**
+   * Offered for an account without a login, or logged in to the Claude
+   * account of another one; undefined while a login runs.
+   */
   onLogin?: () => void;
   /** Another request of this page is on its way. */
   busy?: boolean;
@@ -211,6 +218,9 @@ function AccountCard({
       : account.problem?.kind === "error"
         ? account.problem.message
         : null;
+  const noLogin = account.problem?.kind === "unauthenticated";
+  // The default account's directory is the CLI's own: the other one is redone.
+  const again = twin !== null && !isDefault;
   return (
     <li className="rounded-md border border-border p-3">
       <div className="flex items-baseline justify-between gap-2">
@@ -252,17 +262,22 @@ function AccountCard({
           {status}
         </p>
       )}
-      {account.problem?.kind === "unauthenticated" && onLogin !== undefined ? (
+      {twin === null ? null : (
+        <p className="mt-1 text-xs text-muted-foreground">
+          Same Claude account as {twin}: the two share one usage
+        </p>
+      )}
+      {(noLogin || again) && onLogin !== undefined ? (
         <Button
           variant="outline"
           size="sm"
           className="mt-2"
           onClick={onLogin}
           disabled={busy}
-          aria-label={`Log in ${account.name}`}
+          aria-label={`Log in ${account.name}${noLogin ? "" : " again"}`}
         >
           <Icon name="LogIn" className="size-3.5" />
-          Log in
+          {noLogin ? "Log in" : "Log in again"}
         </Button>
       ) : null}
       {usage === null ? null : (
@@ -492,6 +507,7 @@ function AccountsSection() {
             account={account}
             isDefault={account.name === state.defaultAccountName}
             forecasts={state.forecasts?.[account.name]}
+            twin={sharedWith(account, state.accounts)}
             onLogin={
               state.login?.phase === "running"
                 ? undefined

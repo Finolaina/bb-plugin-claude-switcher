@@ -4,6 +4,7 @@ import {
   headerStatus,
   noLoginFound,
   projectName,
+  sharedWith,
   windowForecast,
 } from "./ui.js";
 
@@ -22,6 +23,22 @@ describe("noLoginFound", () => {
     // The default account is always listed, so this never happens; if it
     // did, there is nothing to log in to either.
     expect(noLoginFound([])).toBe(true);
+  });
+});
+
+describe("sharedWith", () => {
+  const main = { name: "main", accountUuid: "u-1" };
+  const team = { name: "team", accountUuid: "u-1" };
+  const work = { name: "work", accountUuid: "u-2" };
+  const bare = { name: "bare", accountUuid: null };
+  const other = { name: "other", accountUuid: null };
+  it("names another account with the same Claude account", () => {
+    expect(sharedWith(team, [main, team, work])).toBe("main");
+    expect(sharedWith(main, [main, team, work])).toBe("team");
+    expect(sharedWith(work, [main, team, work])).toBeNull();
+  });
+  it("takes accounts without a known Claude account as different ones", () => {
+    expect(sharedWith(bare, [bare, other, main])).toBeNull();
   });
 });
 

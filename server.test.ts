@@ -3317,6 +3317,24 @@ describe("adding an account by logging in from bb", () => {
     const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
     expect(state.login).toMatchObject({ name: "team", phase: "done" });
     expect(state.login?.message).toMatch(/same Claude account as spare/);
+    // What the note asks for can be done: the account logs in again, to the
+    // directory it has, although it has a login.
+    await h.harness.behavior.callRpc("account_login_cancel", null);
+    const again = (await h.harness.behavior.callRpc("account_login_start", { name: "team" })) as State;
+    expect(again.login).toMatchObject({ name: "team", phase: "running" });
+    expect(h.logins[1]?.env.CLAUDE_CONFIG_DIR).toBe(`${ACCOUNTS}/team`);
+  });
+
+  it("does not log the default account in again for sharing its Claude account", async () => {
+    // Its directory is the CLI's own: the other directory is the one to redo.
+    const h = await host(ALL_FREE, { dirs: () => ["spare", "team", "work"] });
+    dispose = () => h.harness.dispose();
+    h.files[`${ACCOUNTS}/team/.claude.json`] = claudeJson("main@example.com", "uuid-main");
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await expect(h.harness.behavior.callRpc("account_login_start", { name: "main" })).rejects.toThrow(
+      /main is already logged in/,
+    );
+    expect(h.logins).toEqual([]);
   });
 
   it("stops a login that is running when the plugin is unloaded", async () => {

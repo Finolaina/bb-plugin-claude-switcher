@@ -63,7 +63,7 @@ import {
   usageSourceRpcContract,
 } from "./src/usage-source-contract.js";
 import { toMeasurement, toResource } from "./src/usage-source.js";
-import { forecastLine, projectName } from "./src/ui.js";
+import { forecastLine, projectName, sharedWith } from "./src/ui.js";
 
 export const ENV_VAR = "CLAUDE_CONFIG_DIR";
 /** Realtime channel app.tsx listens on after any state change. */
@@ -552,20 +552,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           await recordSamples();
           // Exit 0 is Claude Code's word; what it left is checked here.
           const twin =
-            account === undefined || account.accountUuid === null
-              ? undefined
-              : found.find(
-                  (a) =>
-                    a.name !== account.name &&
-                    a.accountUuid === account.accountUuid,
-                );
+            account === undefined ? null : sharedWith(account, found);
           const text =
             account === undefined
               ? "Claude Code reported a login, but no account was found in its directory"
               : collector.get(account.name)?.problem?.kind === "unauthenticated"
                 ? "Claude Code reported a login, but the account still has no login; try again"
-                : twin !== undefined
-                  ? `logged in to the same Claude account as ${twin.name}: the two share one usage. Log in again and pick another account in the browser`
+                : twin !== null
+                  ? `logged in to the same Claude account as ${twin}: the two share one usage. Log in again and pick another account in the browser`
                   : null;
           if (text !== null) {
             loginNote = { of: status, text };
@@ -584,13 +578,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * Where a login for `name` goes: the default account (no directory), a
    * listed account without a login, or a new directory under the accounts
    * dir. An account already logged in is refused: its store would be
-   * overwritten while a thread may be using it.
+   * overwritten while a thread may be using it. The exception is a directory
+   * logged in to the Claude account of another one (the browser answered
+   * with the session it had): its login is the mistake to redo.
    */
   async function loginTarget(name: string): Promise<Account> {
     await discover();
     // A listed account keeps the name its directory has, whatever it is.
     const known = accounts.find((a) => a.name === name);
     if (known !== undefined) {
+      if (known.configDir !== null && sharedWith(known, accounts) !== null)
+        return known;
       if (collector.get(name) === undefined) await collector.collect(known);
       if (collector.get(name)?.problem?.kind !== "unauthenticated")
         throw new Error(`${name} is already logged in`);

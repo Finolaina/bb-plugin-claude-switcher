@@ -7,6 +7,22 @@ export function noLoginFound(
   return accounts.every((a) => a.problem?.kind === "unauthenticated");
 }
 
+/**
+ * The name of another listed account that is the same Claude account (two
+ * directories logged in to one account share one usage), or null.
+ */
+export function sharedWith(
+  account: { name: string; accountUuid: string | null },
+  accounts: ReadonlyArray<{ name: string; accountUuid: string | null }>,
+): string | null {
+  if (account.accountUuid === null) return null;
+  return (
+    accounts.find(
+      (a) => a.name !== account.name && a.accountUuid === account.accountUuid,
+    )?.name ?? null
+  );
+}
+
 /** The name of the project a move was about; a fixed phrase once it is gone. */
 export function projectName(
   projects: ReadonlyArray<{ id: string; name: string }>,
