@@ -331,7 +331,8 @@ flowchart TD
   turn of the same project still running on the old account is covered by
   the minute of grace described below. When every other account is also
   at or above the percentage, the project stays: it only moves to an
-  account under the percentage. This also moves a project you pinned
+  account under the percentage, measured in the last two refresh
+  intervals, that is another Claude account. This also moves a project you pinned
   by hand; leave the setting at 0 to move only on a failed turn.
 - **The forecast is shown, never acted on.** For each weekly window the
   plugin keeps its first measurement of the window and the latest, and

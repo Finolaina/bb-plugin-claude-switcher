@@ -32,7 +32,8 @@ project uses [Semantic Versioning](https://semver.org/).
   needs `autoSwitch`).
   When a turn ends with the project's account at or above that share of
   its session, weekly or preferred-model window, and another account is
-  below it in all three, the project moves there. No turn is interrupted
+  below it in all three (measured lately, and another Claude account),
+  the project moves there. No turn is interrupted
   and no retry is spent. It acts on measured usage (the project's account
   is measured again when its measurement is over a minute old), not on
   the forecast.

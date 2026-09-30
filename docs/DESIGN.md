@@ -184,8 +184,12 @@ ended, so moving the project interrupts nothing and spends no retry.
    preferred-model windows (settled: a window past its reset counts 0) is
    under the percentage.
 3. Otherwise the candidates are the accounts under the percentage in all
-   three windows, ranked by the same policy as a switch. None: the project
-   stays. The target is under the percentage and the account left is at
+   three windows, ranked by the same policy as a switch. A candidate is
+   listed now, was measured within two refresh periods (an account whose
+   query keeps failing keeps an old measurement, which a switch after a
+   failed turn still tries and this does not: nothing fails if the project
+   stays), and is another Claude account (a directory of the same one
+   shares its usage). None: the project stays. The target is under the percentage and the account left is at
    or above it; usage only falls at a reset, so the project does not come
    back before the account it left has reset.
 4. The move is recorded like a switch (reason
@@ -195,8 +199,9 @@ ended, so moving the project interrupts nothing and spends no retry.
    cause: its next failure is judged on the new account, not retried as
    a leftover.
 
-It needs `autoSwitch`, skips external variables, and also moves a project
-pinned by hand: the percentage is the user's standing instruction.
+It needs `autoSwitch` (read again after the measurement), skips external
+variables, and also moves a project pinned by hand: the percentage is the
+user's standing instruction.
 
 ## The forecast
 
@@ -264,8 +269,11 @@ directory (the browser answered with the session it had).
   stopped when the plugin is reloaded, disabled or bb shuts down. The
   process is killed before the end is reported.
 - **What a failed login reports** is the last line it printed: addresses
-  and the pasted code blanked, the prompt (printed without a line break)
-  and control characters removed, cut at 200 characters. A code is one
+  and the pasted code (whole, or either half of `code#state`, in any
+  case) blanked, the prompt (printed without a line break), escapes and
+  control characters removed, cut at 200 characters. The line that gives
+  the address is not reported, nor a line of one word that follows an
+  address: it may be a piece of it. A code is one
   line; control characters in it are refused. The kept output is dropped
   when the login ends.
 - **No inherited credentials.** `ANTHROPIC_API_KEY`,
@@ -373,6 +381,20 @@ The refresh token rotates on every refresh, so the plugin:
 - **Moving ahead needs a turn to end.** A project whose only thread runs
   one very long turn is not moved ahead; if that turn fails on the limit,
   the ordinary switch takes over.
+- **Placement and "best now" do not read the percentage.** A new project
+  is placed, and the header offers, the account the switch policy ranks
+  first (the nearest weekly reset among those that can run), which may be
+  at or above `switchAheadPercent`: its first turn runs there and the
+  project moves ahead when that turn ends. Two records, no failed turn.
+- **`lastSwitch` is the last automatic move.** A pick by hand goes to the
+  history only, so `list --json` can show a `lastSwitch` older than the
+  first record of `history`.
+- **A move from an account that is gone is recorded as from the default
+  one.** A project whose variable names a directory that no longer holds
+  an account counts as on the default account, in the history too.
+- **`list` says less than Settings.** The text output does not say how old
+  a measurement is, that its last query failed, or that two accounts are
+  the same Claude account; `list --json` has the fields.
 - **A locked account under the percentage is not moved ahead.** The move
   ahead reads the used shares only; an account the provider locked below
   the percentage is switched by its next failed turn, as before.
@@ -386,7 +408,9 @@ The refresh token rotates on every refresh, so the plugin:
 - **A forecast stops when its moment passes.** Past the moment it
   projected, with a last measurement that was not full, the pace was not
   kept or nothing was measured since: no forecast until the next sample.
-- **Logging a twin in again overwrites its store.** A directory on the
+- **Logging a twin in again overwrites its store.** Both directories of
+  one Claude account offer it (the default account's never does), and the
+  page does not say which one a project is on. A directory on the
   Claude account of another one can log in again while a thread uses it;
   that turn may fail as it would with `claude auth login` in a terminal.
 - **A login outlives a killed bb.** A reload, a disable and a shutdown
