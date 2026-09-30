@@ -2943,6 +2943,8 @@ describe("the forecast of each window", () => {
           "switch-history": [
             { at: NOW, threadId: "t", projectId: "proj-1", from: "main", to: "spare", reason: "Picked by hand" },
             { at: "yesterday" },
+            // Not a date: formatting it would fail the whole listing.
+            { at: 1e20, threadId: "t", projectId: "proj-1", from: "main", to: "spare", reason: "Out of range" },
           ],
         },
       },
@@ -2955,6 +2957,8 @@ describe("the forecast of each window", () => {
       percentPerDay: 30,
     });
     expect(state.history.map((r) => r.reason)).toEqual(["Picked by hand"]);
+    const listing = await h.harness.behavior.runCli(["history"]);
+    expect(listing.stdout).toMatch(/Picked by hand/);
   });
 
   it("forgets the samples of an account that is gone", async () => {

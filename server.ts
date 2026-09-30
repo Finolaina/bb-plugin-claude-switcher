@@ -186,7 +186,8 @@ const loginStatusSchema = z.object({
   message: z.string().nullable(),
 });
 const switchRecordSchema = z.object({
-  at: z.number(),
+  // A time a Date can hold: the history prints it as a date.
+  at: z.number().min(0).max(8.64e15),
   threadId: z.string(),
   projectId: z.string(),
   from: z.string(),
