@@ -217,7 +217,7 @@ export const rpcContract = defineRpcContract({
   },
   /** Log an account in from bb: a new directory under the accounts dir, or a listed account without a login. */
   account_login_start: { input: z.object({ name: z.string() }), output: stateSchema },
-  account_login_code: { input: z.object({ code: z.string() }), output: stateSchema },
+  account_login_code: { input: z.object({ code: z.string().max(4096) }), output: stateSchema },
   /** Stops a running login; when none runs, forgets the last outcome. */
   account_login_cancel: { input: z.null(), output: stateSchema },
 });
@@ -477,17 +477,36 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return out;
   }
   // ---- Login from bb -------------------------------------------------------
+  /** What the check after a finished login found, shown with its status. */
+  let loginNote: { name: string; startedAt: number; text: string } | null =
+    null;
+  function loginStatus(): State["login"] {
+    const status = login.status();
+    if (
+      status === null ||
+      status.phase !== "done" ||
+      loginNote === null ||
+      loginNote.name !== status.name ||
+      loginNote.startedAt !== status.startedAt
+    )
+      return status;
+    return { ...status, message: loginNote.text };
+  }
   const login = new LoginFlow(deps.loginIo, {
     command: () => current.claudeCommand.trim() || "claude",
     helper: deps.loginHelper,
     timeoutMs: LOGIN_TIMEOUT_MS,
     now: deps.now,
-    onShared(name, linked) {
+    onShared(name, linked, failed) {
       bb.log.info(
         linked.length === 0
           ? `created the directory of ${name}; nothing to share from the default account's directory`
           : `created the directory of ${name}, sharing ${linked.join(", ")} with the default account's directory`,
       );
+      if (failed.length > 0)
+        bb.log.warn(
+          `the directory of ${name} could not share ${failed.join("; ")}: link them by hand (see the README)`,
+        );
     },
     onChange(status) {
       bb.log.info(
@@ -502,6 +521,27 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           const account = found.find((a) => a.name === status.name);
           if (account !== undefined) await collector.collect(account);
           await recordSamples();
+          // Exit 0 is Claude Code's word; what it left is checked here.
+          const twin =
+            account === undefined || account.accountUuid === null
+              ? undefined
+              : found.find(
+                  (a) =>
+                    a.name !== account.name &&
+                    a.accountUuid === account.accountUuid,
+                );
+          const text =
+            account === undefined
+              ? "Claude Code reported a login, but no account was found in its directory"
+              : collector.get(account.name)?.problem?.kind === "unauthenticated"
+                ? "Claude Code reported a login, but the account still has no login; try again"
+                : twin !== undefined
+                  ? `logged in to the same Claude account as ${twin.name}: the two share one usage. Log in again and pick another account in the browser`
+                  : null;
+          if (text !== null) {
+            loginNote = { name: status.name, startedAt: status.startedAt, text };
+            bb.log.warn(`login of ${status.name}: ${text}`);
+          }
         } catch (error) {
           bb.log.warn(
             `could not measure ${status.name} after its login: ${error instanceof Error ? error.message : String(error)}`,
@@ -710,7 +750,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       ),
       history,
       forecasts: forecasts(),
-      login: login.status(),
+      login: loginStatus(),
     };
   }
 
@@ -841,6 +881,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     },
     async account_login_start({ name }) {
       const target = await loginTarget(name);
+      loginNote = null;
       const shareFrom = `${deps.accountsIo.home.replace(/\/+$/, "")}/.claude`;
       await login.start({ ...target, shareFrom }, {
         ...deps.env,
@@ -1409,6 +1450,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       handleFailure(event, thread.projectId),
     );
   });
+
+  // A login must not outlive the plugin that runs it (reload, disable, shutdown).
+  bb.onDispose(() => login.cancel());
 
   // ---- Periodic refresh -------------------------------------------------
   bb.background.service("usage-refresh", {

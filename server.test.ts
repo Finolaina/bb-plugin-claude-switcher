@@ -3168,6 +3168,71 @@ describe("adding an account by logging in from bb", () => {
     expect(h.harness.realtimeSignals.filter((s) => s.channel === "accounts-changed").length).toBeGreaterThan(1);
   });
 
+  it("says so when the login ended but left no account, or no login", async () => {
+    let dirs = ["spare", "work"];
+    const h = await host(ALL_FREE, { dirs: () => dirs });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // Claude Code exits 0, and nothing is in the directory.
+    await h.harness.behavior.callRpc("account_login_start", { name: "empty" });
+    h.logins[0]!.exit(0);
+    await tick();
+    await tick();
+    let state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.login).toMatchObject({ name: "empty", phase: "done" });
+    expect(state.login?.message).toMatch(/no account was found/);
+    // A new start forgets the note.
+    await h.harness.behavior.callRpc("account_login_cancel", null);
+    // The directory is an account now, with nothing in the login store.
+    dirs = ["nologin", "spare", "work"];
+    h.files[`${ACCOUNTS}/nologin/.claude.json`] = claudeJson("n@example.com", "uuid-n");
+    state = (await h.harness.behavior.callRpc("account_login_start", { name: "nologin" })) as State;
+    expect(state.login?.message).toBeNull();
+    h.logins[1]!.exit(0);
+    await tick();
+    await tick();
+    state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.login).toMatchObject({ name: "nologin", phase: "done" });
+    expect(state.login?.message).toMatch(/still has no login/);
+  });
+
+  it("says so when the new account is the Claude account of another one", async () => {
+    let dirs = ["spare", "work"];
+    const h = await host(withTeam, { dirs: () => dirs });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.callRpc("account_login_start", { name: "team" });
+    // The browser was signed in to spare's Claude account and answered with it.
+    dirs = ["spare", "team", "work"];
+    h.files[`${ACCOUNTS}/team/.claude.json`] = claudeJson("spare@example.com", "uuid-spare");
+    h.logins[0]!.exit(0);
+    await tick();
+    await tick();
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.login).toMatchObject({ name: "team", phase: "done" });
+    expect(state.login?.message).toMatch(/same Claude account as spare/);
+  });
+
+  it("stops a login that is running when the plugin is unloaded", async () => {
+    const h = await host(ALL_FREE);
+    await h.harness.behavior.callRpc("account_login_start", { name: "team" });
+    expect(h.logins[0]?.killed).toBe(false);
+    await h.harness.dispose();
+    expect(h.logins[0]?.killed).toBe(true);
+  });
+
+  it("refuses a code longer than any code", async () => {
+    const h = await host(ALL_FREE);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("account_login_start", { name: "team" });
+    await expect(
+      h.harness.behavior.callRpc("account_login_code", { code: "x".repeat(4097) }),
+    ).rejects.toThrow();
+    expect(h.logins[0]?.written).toEqual([]);
+    await h.harness.behavior.callRpc("account_login_code", { code: "x".repeat(4096) });
+    expect(h.logins[0]?.written).toHaveLength(1);
+  });
+
   it("logs the default account in without CLAUDE_CONFIG_DIR and without a private window when so set", async () => {
     const noMain = { ...ALL_FREE, main: () => new Response(null, { status: 401 }) };
     const h = await host(noMain, {
