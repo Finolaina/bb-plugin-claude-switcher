@@ -15,12 +15,14 @@ project uses [Semantic Versioning](https://semver.org/).
   reuse the browser's Claude session (the default browser when Chrome is
   missing, when `loginPrivateWindow` is off, and on Linux). The account is measured when the login
   ends, and the section says when the login left no account, no login, or
-  the Claude account of another directory. While it runs, the section
+  the Claude account of another directory; such a directory keeps saying
+  it on its card, with **Log in again**. While it runs, the section
   shows a link to the login page and a field for the code that page
   gives, for when no window opens. One login at a time, given up after 10
   minutes and stopped with the plugin. A new name that differs only in
   case from an account or a directory, or that is a link or a file, is
-  refused. The login does not inherit credentials from bb's environment.
+  refused, and so is a new directory under `~/.claude`. The login does
+  not inherit credentials from bb's environment.
   A directory the plugin creates links
   `projects`, `settings.json`, `hooks`, `CLAUDE.md`, `plugins`, `skills`,
   `agents`, `commands` and `rules` from `~/.claude` (those that exist), so
@@ -40,7 +42,8 @@ project uses [Semantic Versioning](https://semver.org/).
   current window, or
   that it lasts until its reset. It needs two hours between that first
   measurement and the latest (both kept in the plugin's storage) and says
-  nothing under one point a day.
+  nothing under one point a day, or once the moment it projected has
+  passed.
 - **History of moves.** Every move of a project (after a failed turn, when
   a thread is created, ahead of the limit or picked by hand) with its
   time, accounts and reason: the last 100, in Settings and with

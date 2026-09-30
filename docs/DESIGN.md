@@ -238,13 +238,18 @@ directory (the browser answered with the session it had).
   characters at most. `default`
   is refused when it is only the alias of the default account. An account
   that already has a login is refused: its store would be overwritten
-  while a thread may be using it. On a disk that ignores case `Team` is
+  while a thread may be using it. The exception is a directory, other than
+  the default account's, logged in to the Claude account of another listed
+  one: that login is the mistake, and doing it again is the way out. On a disk that ignores case `Team` is
   the directory of `team`, and a link under the accounts directory leads
   elsewhere: a new name that matches an account ignoring case, that
   differs only in case from an entry of the accounts directory, or whose
   entry there is not a real directory, is refused. A real directory of
   that exact name without an account in it (what a cancelled login
-  leaves) is taken as it is, with nothing linked into it. A listed account without a login logs in under
+  leaves) is taken as it is, with nothing linked into it. While the
+  accounts directory is the default account's directory or inside it
+  (compared without `.` and `..`, ignoring case), no new directory is
+  taken: `projects` or `plugins` there are what every account shares. A listed account without a login logs in under
   the name its directory has, whatever it is.
 - **A private window.** The helper opens Chrome with `--incognito`, so
   the consent page asks which Claude account to use instead of taking the
@@ -258,6 +263,11 @@ directory (the browser answered with the session it had).
 - **One login at a time**, given up after 10 minutes, cancellable, and
   stopped when the plugin is reloaded, disabled or bb shuts down. The
   process is killed before the end is reported.
+- **What a failed login reports** is the last line it printed: addresses
+  and the pasted code blanked, the prompt (printed without a line break)
+  and control characters removed, cut at 200 characters. A code is one
+  line; control characters in it are refused. The kept output is dropped
+  when the login ends.
 - **No inherited credentials.** `ANTHROPIC_API_KEY`,
   `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` and
   `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` of bb's environment are not passed
@@ -373,6 +383,28 @@ The refresh token rotates on every refresh, so the plugin:
 - **A clock set back delays the move ahead.** The minute between
   questions to the provider is counted from the last one; after a jump
   back, the periodic refresh still measures.
+- **A forecast stops when its moment passes.** Past the moment it
+  projected, with a last measurement that was not full, the pace was not
+  kept or nothing was measured since: no forecast until the next sample.
+- **Logging a twin in again overwrites its store.** A directory on the
+  Claude account of another one can log in again while a thread uses it;
+  that turn may fail as it would with `claude auth login` in a terminal.
+- **A login outlives a killed bb.** A reload, a disable and a shutdown
+  stop it; if bb's server is killed outright, `claude auth login` stays
+  until it is ended by hand, waiting on a local port nobody else can use.
+- **Only four credentials are kept from the login.** The rest of bb's
+  environment reaches `claude` and, on Linux, the browser.
+- **A failed start names the command.** "could not run ..." repeats the
+  `claudeCommand` setting as it is written.
+- **Logins are not rationed.** Any local process that can call the
+  plugin's RPC as the app can start and cancel logins, each leaving a
+  directory; it runs as the same user, who can do as much by hand.
+- **A move-ahead percentage above 100 never moves.** It is not refused.
+- **Accounts that vanish for a moment lose their samples.** If the
+  accounts directory cannot be listed while the default account still
+  is, the series of the others start again at the next look.
+- **The accounts directory is compared as written.** A link that leads
+  into `~/.claude` is not followed when refusing a new directory there.
 - **A cancelled login leaves its directory.** Claude Code writes a
   `.claude.json` there as it starts, so the name stays listed as an
   account without a login; log it in later or delete the directory.

@@ -228,7 +228,9 @@ login page and a field for the code that page gives you, for when no
 window opens. When it ends, the section says if something is off: no
 login was left, or the account is the Claude account of another
 directory (the browser answered with the session it had). An account listed
-without a login gets a **Log in** button that does the same. The plugin
+without a login gets a **Log in** button that does the same, and a
+directory logged in to the Claude account of another one says so on its
+card and gets **Log in again**. The plugin
 links nothing into a directory that already existed.
 
 The rest of this section is the same setup by hand.
@@ -506,15 +508,19 @@ executable (`claude auth login`) as a child process of bb's server.
   default browser. The consent address goes from the CLI to that script
   and is never logged or stored. The second address the CLI prints, for when no window
   opens, is kept in memory while the login runs, shown in Settings and
-  included in `list --json` and `refresh --json`; it is dropped when you
-  dismiss the login. The login does not inherit an API key or OAuth token
+  included in `list --json` and `refresh --json`; it is dropped when the
+  login ends. What a failed login reports is its last line, with
+  addresses and the pasted code blanked, control characters removed and
+  cut at 200 characters. The login does not inherit an API key or OAuth token
   from bb's environment (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
   `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`).
   Anything typed in the code field goes to the CLI's standard input and
   nowhere else. One login at a time, given up after 10 minutes and
   stopped when the plugin is reloaded or disabled. A new account's name
   that differs only in case from an existing account or directory, or
-  that is a link or a file in the accounts directory, is refused.
+  that is a link or a file in the accounts directory, is refused, and so
+  is any new directory while the accounts directory is `~/.claude` or
+  inside it.
 - A directory the plugin creates for a new account (mode 0700) gets
   symbolic links to `projects`, `settings.json`, `hooks`, `CLAUDE.md`,
   `plugins`, `skills`, `agents`, `commands` and `rules` of `~/.claude`,
@@ -617,9 +623,10 @@ Coming from `claude-accounts` 0.1.x? See the upgrade note in
   the account; if `loginPrivateWindow` is off or Chrome is missing, the
   default browser answers with the Claude account it already has
   (Settings says so when the login ends on the account of another
-  directory). Cancel or dismiss,
+  directory, and the account's card keeps saying it). Dismiss,
   sign out of claude.ai in that browser (or, on macOS, install Chrome and
-  turn `loginPrivateWindow` on) and press **Log in** again.
+  turn `loginPrivateWindow` on) and press **Log in again** on the
+  account's card.
 - **No forecast under a window.** It needs two hours of samples within
   the current window, and says nothing while the window grows less than
   one point a day.
