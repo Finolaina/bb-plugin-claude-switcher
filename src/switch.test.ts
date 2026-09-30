@@ -535,6 +535,18 @@ describe("decideAhead", () => {
     ).toEqual({ kind: "keep" });
   });
 
+  it("moves at exactly the threshold", () => {
+    expect(
+      decideAhead({
+        ...base,
+        accounts: [
+          account("main", { models: { Fable: { usedPercent: 90, resetsAt: NOW + HOUR } } }),
+          account("spare", { models: { Fable: { usedPercent: 89, resetsAt: NOW + HOUR } } }),
+        ],
+      }),
+    ).toEqual({ kind: "move", account: "spare", used: 90, window: "Fable" });
+  });
+
   it("looks at the session and weekly windows too, naming the fullest", () => {
     expect(
       decideAhead({

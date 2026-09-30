@@ -1143,29 +1143,41 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
 
   // ---- Move ahead of the limit, after a turn -----------------------------
+  /** When the usage of each account was last asked for here, answered or not. */
+  const aheadAsked = new Map<string, number>();
+  /**
+   * The turn that just ended consumed some of the account: measure it again
+   * unless it was measured, or asked, within AHEAD_FRESH_MS (a provider that
+   * is failing is not asked again at every turn end). Outside the project's
+   * queue: a failed turn of the project must not wait on this query.
+   */
+  async function measureForAhead(projectId: string): Promise<void> {
+    const at = await projectAccount(projectId);
+    if (at.external) return;
+    const name = at.account ?? current.defaultAccountName;
+    const account = accounts.find((a) => a.name === name);
+    if (account === undefined) return;
+    const now = deps.now();
+    const latest = Math.max(
+      collector.get(name)?.observedAt ?? -Infinity,
+      aheadAsked.get(name) ?? -Infinity,
+    );
+    if (now - latest <= AHEAD_FRESH_MS) return;
+    aheadAsked.set(name, now);
+    await collector.collect(account);
+    await recordSamples();
+  }
   /**
    * When a turn ends, the project's account may be close to its limit: move
    * the project now, while another account has room, rather than let the
-   * next turn fail. The account is measured again first when its last
-   * measurement is older than AHEAD_FRESH_MS: the turn that just ended
-   * consumed some of it.
+   * next turn fail. Judged on the latest measurement of each account (see
+   * measureForAhead for the project's own).
    */
   async function moveAhead(thread: ThreadResponse): Promise<void> {
     const projectId = thread.projectId;
     const from = await projectAccount(projectId);
     if (from.external) return;
     const fromName = from.account ?? current.defaultAccountName;
-    const account = accounts.find((a) => a.name === fromName);
-    if (account === undefined) return;
-    const m = collector.get(fromName);
-    if (
-      m?.observedAt === undefined ||
-      m.observedAt === null ||
-      deps.now() - m.observedAt > AHEAD_FRESH_MS
-    ) {
-      await collector.collect(account);
-      await recordSamples();
-    }
     const decision = decideAhead({
       currentAccount: fromName,
       accounts: measuredAccounts(),
@@ -1190,7 +1202,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         to: decision.account,
         reason,
       },
-      null,
+      // The thread's next turn runs on the new account: its failure is
+      // that account's, not a leftover of the old one.
+      thread.id,
     );
   }
 
@@ -1202,6 +1216,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       notTheUsersThread(thread) !== null
     )
       return;
+    await measureForAhead(thread.projectId);
     await inProjectQueue(thread.projectId, () => moveAhead(thread));
   });
 

@@ -2990,6 +2990,91 @@ describe("moving a project ahead of the limit, after a turn", () => {
     expect(h.envSet).toHaveLength(1);
   });
 
+  it("measures again past a minute, not at a minute", async () => {
+    let clock = NOW;
+    const h = await host(AHEAD, {
+      settings: { switchAheadPercent: 95, preferredModel: "Fable" },
+      clock: () => clock,
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const before = h.usageCalls.length;
+    clock = NOW + 60_000;
+    await idle(h);
+    expect(h.usageCalls.slice(before)).toEqual([]);
+    clock = NOW + 60_001;
+    await idle(h);
+    expect(h.usageCalls.slice(before)).toEqual(["main"]);
+  });
+
+  it("does not ask again at every turn end while the measurement fails", async () => {
+    let clock = NOW;
+    let down = false;
+    const h = await host(
+      {
+        ...AHEAD,
+        main: () => (down ? new Response("", { status: 429 }) : Response.json(payload(10, 40, 50))),
+      },
+      { settings: { switchAheadPercent: 90, preferredModel: "Fable" }, clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    down = true;
+    clock = NOW + 5 * 60_000;
+    const before = h.usageCalls.length;
+    await idle(h);
+    await idle(h, "thread-2");
+    clock = NOW + 5 * 60_000 + 60_000;
+    await idle(h);
+    // Ten turns ending in a minute are one question to a provider that is failing.
+    expect(h.usageCalls.slice(before)).toEqual(["main"]);
+    clock = NOW + 5 * 60_000 + 60_001;
+    await idle(h);
+    expect(h.usageCalls.slice(before)).toEqual(["main", "main"]);
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("judges the account the project is on when its turn in the queue comes", async () => {
+    let clock = NOW;
+    const h = await host(AHEAD, {
+      settings: { switchAheadPercent: 90, preferredModel: "Fable" },
+      clock: () => clock,
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + 5 * 60_000;
+    // The pick by hand lands while the account is being measured.
+    await Promise.all([
+      idle(h),
+      h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "spare" }),
+    ]);
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history.map((r) => r.reason)).toEqual(["Picked by hand"]);
+    expect(h.envSet.map((e) => e.note)).toEqual([ownNote("spare")]);
+  });
+
+  it("marks the project as handled and does not take the next failure of its own thread for a leftover", async () => {
+    const h = await host(AHEAD, {
+      settings: { switchAheadPercent: 90, preferredModel: "Fable" },
+      kvPreset: { "installed-at": NOW - HOUR },
+      threads: { "thread-9": { projectId: "proj-3" } },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // proj-3 was created after the plugin was installed: new until handled.
+    await idle(h, "thread-9", "proj-3");
+    expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([["proj-3", ownNote("spare")]]);
+    expect(await h.bb.storage.kv.get("handled-projects")).toContain("proj-3");
+    // Its next turn runs on spare: a failure there is spare's, judged with a fresh measurement.
+    const before = h.usageCalls.length;
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ threadId: "thread-9", requestId: "creq_9" }),
+    );
+    expect(h.retries.map((r) => r.reason)).not.toContain("Retrying on account spare");
+    expect(h.usageCalls.slice(before).sort()).toEqual(["main", "spare", "work"]);
+  });
+
   it("leaves the project when no other account has room, when automatic choice is off, and when the variable is external", async () => {
     const tight = {
       main: () => Response.json(payload(10, 40, 92)),
