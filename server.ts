@@ -26,12 +26,19 @@ import {
   type AccountsIo,
 } from "./src/accounts.js";
 import { UsageCollector } from "./src/collector.js";
+import {
+  forecastWindow,
+  recordSample,
+  type Forecast,
+  type Series,
+} from "./src/forecast.js";
 import type { CredentialIo } from "./src/credentials.js";
 import { nodeAccountsIo, nodeCredentialIo } from "./src/node-io.js";
 import {
   CLAUDE_CODE_PROVIDER,
   declineReason,
   bestAccount,
+  decideAhead,
   decidePlacement,
   decideSwitch,
 } from "./src/switch.js";
@@ -51,6 +58,8 @@ export const CHANGED = "accounts-changed";
  * inside this window is one of those: retried as is, no second switch.
  */
 export const SWITCH_GRACE_MS = 60_000;
+/** A measurement older than this is taken again before moving a project ahead of the limit. */
+export const AHEAD_FRESH_MS = 60_000;
 /** Note written next to CLAUDE_CONFIG_DIR; the account name is read back from it (values are secret). */
 const NOTE_PREFIX = 'Claude Code account "';
 const NOTE_SUFFIX = '" (set by the Claude Switcher plugin)';
@@ -71,6 +80,8 @@ export function accountFromNote(note: string | null): string | null {
 const KV_LAST_SWITCH = "last-switch";
 /** Every move (automatic, ahead of the limit, or by hand), latest first. */
 const KV_HISTORY = "switch-history";
+/** Usage samples per account and window, for the forecast. */
+const KV_SERIES = "usage-series";
 export const HISTORY_LIMIT = 100;
 /** A thread as bb reports it (the SDK does not export the type by name). */
 type ThreadResponse = PluginThreadEventPayloads["thread.created"]["thread"];
@@ -128,6 +139,24 @@ const projectStateSchema = z.object({
   /** CLAUDE_CONFIG_DIR is set on the project (or inherited) by something other than this plugin. */
   external: z.boolean(),
 });
+const forecastSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("runs-out"),
+    at: z.number(),
+    percentPerDay: z.number(),
+  }),
+  z.object({
+    kind: z.literal("lasts"),
+    until: z.number(),
+    percentPerDay: z.number(),
+  }),
+  z.object({ kind: z.literal("steady") }),
+  z.object({ kind: z.literal("unknown") }),
+]);
+const seriesSchema = z.object({
+  resetsAt: z.number().nullable(),
+  points: z.array(z.tuple([z.number(), z.number()])),
+});
 const switchRecordSchema = z.object({
   at: z.number(),
   threadId: z.string(),
@@ -147,6 +176,8 @@ const stateSchema = z.object({
   bestAccount: z.string().nullable(),
   /** Every move of a project, latest first (at most HISTORY_LIMIT). */
   history: z.array(switchRecordSchema),
+  /** Per account, per window ("weekly" or a model's display name): how it stands at the pace measured. */
+  forecasts: z.record(z.string(), z.record(z.string(), forecastSchema)),
 });
 export type State = z.infer<typeof stateSchema>;
 export type SwitchRecord = z.infer<typeof switchRecordSchema>;
@@ -216,6 +247,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       label:
         "Choose accounts automatically: start new projects on the best one, and switch when a turn hits a subscription limit",
       default: true,
+    },
+    switchAheadPercent: {
+      type: "number",
+      label: "Switch ahead of the limit at (%)",
+      description:
+        "After each turn, when the project's account is at or above this share of its session, weekly or preferred-model window and another account is below it, the project moves there before a turn fails. 0 = off (switch only when a turn fails).",
+      default: 0,
     },
     maximumWaitHours: {
       type: "number",
@@ -321,6 +359,74 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       `could not read the history of moves; starting it again: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  /** Usage samples per account and window, inside the window's current reset. */
+  let series: Record<string, Record<string, Series>> = {};
+  try {
+    const parsed = z
+      .record(z.string(), z.record(z.string(), seriesSchema))
+      .safeParse(await bb.storage.kv.get<unknown>(KV_SERIES));
+    if (parsed.success) series = parsed.data;
+  } catch (error) {
+    bb.log.warn(
+      `could not read the usage samples; starting them again: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  let seriesWrites: Promise<void> = Promise.resolve();
+  /**
+   * Note the measured windows of every known account (the weekly one and
+   * each model's) and drop the accounts that are gone. One write per pass.
+   */
+  function recordSamples(): Promise<void> {
+    const next: Record<string, Record<string, Series>> = {};
+    for (const account of accounts) {
+      const m = collector.get(account.name);
+      const own = series[account.name] ?? {};
+      if (m?.usage === null || m?.usage === undefined || m.observedAt === null) {
+        if (series[account.name] !== undefined) next[account.name] = own;
+        continue;
+      }
+      // Only a fresh measurement is a sample: a failed query keeps the old usage.
+      if (m.problem !== null && m.problem.kind === "error") {
+        next[account.name] = own;
+        continue;
+      }
+      const windows: [string, { usedPercent: number; resetsAt: number | null }][] = [
+        ["weekly", m.usage.weekly],
+        ...Object.entries(m.usage.models),
+      ];
+      const updated: Record<string, Series> = {};
+      for (const [name, w] of windows)
+        updated[name] = recordSample(own[name], {
+          at: m.observedAt,
+          usedPercent: w.usedPercent,
+          resetsAt: w.resetsAt,
+        });
+      next[account.name] = updated;
+    }
+    series = next;
+    const snapshot = series;
+    seriesWrites = seriesWrites.then(async () => {
+      try {
+        await bb.storage.kv.set(KV_SERIES, snapshot);
+      } catch (error) {
+        bb.log.warn(
+          `could not store the usage samples: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    });
+    return seriesWrites;
+  }
+  function forecasts(): State["forecasts"] {
+    const now = deps.now();
+    const out: State["forecasts"] = {};
+    for (const [name, windows] of Object.entries(series)) {
+      const own: Record<string, Forecast> = {};
+      for (const [w, s] of Object.entries(windows))
+        own[w] = forecastWindow(s, now);
+      out[name] = own;
+    }
+    return out;
+  }
   /** Writes in order, like the handled list. */
   let historyWrites: Promise<void> = Promise.resolve();
   function addHistory(record: SwitchRecord): Promise<void> {
@@ -368,6 +474,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   async function refreshAll(): Promise<void> {
     const found = await discover();
     await collector.collectAll(found);
+    await recordSamples();
     bb.realtime.publish(CHANGED, { at: deps.now() });
   }
 
@@ -462,6 +569,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         deps.now(),
       ),
       history,
+      forecasts: forecasts(),
     };
   }
 
@@ -875,6 +983,69 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       null,
     );
   }
+
+  // ---- Move ahead of the limit, after a turn -----------------------------
+  /**
+   * When a turn ends, the project's account may be close to its limit: move
+   * the project now, while another account has room, rather than let the
+   * next turn fail. The account is measured again first when its last
+   * measurement is older than AHEAD_FRESH_MS: the turn that just ended
+   * consumed some of it.
+   */
+  async function moveAhead(thread: ThreadResponse): Promise<void> {
+    const projectId = thread.projectId;
+    const from = await projectAccount(projectId);
+    if (from.external) return;
+    const fromName = from.account ?? current.defaultAccountName;
+    const account = accounts.find((a) => a.name === fromName);
+    if (account === undefined) return;
+    const m = collector.get(fromName);
+    if (
+      m?.observedAt === undefined ||
+      m.observedAt === null ||
+      deps.now() - m.observedAt > AHEAD_FRESH_MS
+    ) {
+      await collector.collect(account);
+      await recordSamples();
+    }
+    const decision = decideAhead({
+      currentAccount: fromName,
+      accounts: measuredAccounts(),
+      preferredModel: current.preferredModel,
+      threshold: current.switchAheadPercent,
+      now: deps.now(),
+    });
+    if (decision.kind === "keep") return;
+    const latest = await projectAccount(projectId);
+    if (!sameAccount(from, latest)) return;
+    const now = deps.now();
+    await applyAccount(projectId, accountOrDefault(decision.account), latest);
+    await markHandled(projectId);
+    const reason = `Switched ahead of the limit to ${decision.account}: ${fromName} at ${Math.round(decision.used)}% of ${decision.window}`;
+    bb.log.info(`thread ${thread.id}: ${reason}`);
+    await recordMove(
+      {
+        at: now,
+        threadId: thread.id,
+        projectId,
+        from: fromName,
+        to: decision.account,
+        reason,
+      },
+      null,
+    );
+  }
+
+  bb.events.on("thread.idle", async ({ thread }) => {
+    if (
+      !current.autoSwitch ||
+      !(current.switchAheadPercent > 0) ||
+      thread.providerId !== CLAUDE_CODE_PROVIDER ||
+      notTheUsersThread(thread) !== null
+    )
+      return;
+    await inProjectQueue(thread.projectId, () => moveAhead(thread));
+  });
 
   /**
    * The account each thread's turn started on (read when it turned active):

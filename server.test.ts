@@ -116,7 +116,8 @@ function fakes(
           claudeAiOauth: {
             accessToken: `tok-${name}`,
             refreshToken: "r",
-            expiresAt: NOW + HOUR,
+            // Far ahead: no test here exercises the token refresh (credentials.test.ts does).
+            expiresAt: NOW + 30 * 24 * HOUR,
           },
         }),
       };
@@ -466,6 +467,7 @@ describe("claude accounts plugin", () => {
       "maximumWaitHours",
       "preferredModel",
       "refreshMinutes",
+      "switchAheadPercent",
     ]);
     expect(h.harness.registrations.rpcMethods.sort()).toEqual(
       [
@@ -2712,5 +2714,165 @@ describe("the history of moves", () => {
     });
     const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
     expect(state.history.map((r) => r.reason)).toEqual(["Picked by hand"]);
+  });
+});
+
+describe("the forecast of each window", () => {
+  it("says when a window runs out at the pace measured since it started, and remembers the samples", async () => {
+    let clock = NOW;
+    let weekly = 40;
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, weekly, 20)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    const first = (await h.harness.behavior.callRpc("accounts_refresh", null)) as State;
+    // One sample: nothing to say yet.
+    expect(first.forecasts.main).toEqual({ weekly: { kind: "unknown" }, Fable: { kind: "unknown" } });
+    clock = NOW + 24 * HOUR;
+    weekly = 70;
+    const later = (await h.harness.behavior.callRpc("accounts_refresh", null)) as State;
+    expect(later.forecasts.main).toEqual({
+      // 30 points a day, 30 left: out in a day, before the reset in two more.
+      weekly: { kind: "runs-out", at: NOW + 48 * HOUR, percentPerDay: 30 },
+      // Its reset (4 h after the first sample) has passed: no window to measure against.
+      Fable: { kind: "unknown" },
+    });
+    expect(later.forecasts.work?.weekly).toEqual({ kind: "steady" });
+    // The samples survive a reload of the plugin.
+    const stored = await h.bb.storage.kv.get("usage-series");
+    const again = await host(
+      { main: () => Response.json(payload(10, 70, 20)), spare: () => Response.json(payload(10, 60)), work: () => Response.json(payload(5, 20)) },
+      { clock: () => NOW + 25 * HOUR, kvPreset: { "usage-series": stored } },
+    );
+    const after = (await again.harness.behavior.callRpc("accounts_refresh", null)) as State;
+    expect(after.forecasts.main?.weekly).toMatchObject({ kind: "runs-out" });
+    again.harness.dispose();
+  });
+
+  it("forgets the samples of an account that is gone", async () => {
+    let dirs = ["spare", "work"];
+    let clock = NOW;
+    const h = await host(ALL_FREE, { dirs: () => dirs, clock: () => clock });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    dirs = ["spare"];
+    clock = NOW + HOUR;
+    const state = (await h.harness.behavior.callRpc("accounts_refresh", null)) as State;
+    expect(Object.keys(state.forecasts).sort()).toEqual(["main", "spare"]);
+    const stored = (await h.bb.storage.kv.get("usage-series")) as Record<string, unknown>;
+    expect(Object.keys(stored).sort()).toEqual(["main", "spare"]);
+  });
+});
+
+describe("moving a project ahead of the limit, after a turn", () => {
+  const AHEAD = {
+    main: () => Response.json(payload(10, 40, 92)),
+    spare: () => Response.json(payload(10, 60, 40)),
+    work: () => Response.json(payload(5, 20, 95)),
+  };
+  const idle = (h: Awaited<ReturnType<typeof host>>, id = "thread-1", projectId = "proj-1") =>
+    h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id, projectId }),
+      lastAssistantText: null,
+    });
+
+  it("moves the project when its account is at the threshold and another has room, and records why", async () => {
+    let clock = NOW;
+    const h = await host(AHEAD, {
+      settings: { switchAheadPercent: 90, preferredModel: "Fable" },
+      clock: () => clock,
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // The turn ran for a while: the account is measured again before judging.
+    clock = NOW + 5 * 60_000;
+    const before = h.usageCalls.length;
+    await idle(h);
+    expect(h.usageCalls.slice(before)).toEqual(["main"]);
+    expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([["proj-1", ownNote("spare")]]);
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history[0]).toMatchObject({
+      projectId: "proj-1",
+      from: "main",
+      to: "spare",
+      reason: "Switched ahead of the limit to spare: main at 92% of Fable",
+    });
+    // A thread of the project still running on main fails right after: retried on spare.
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "thread-2", requestId: "creq_2" }));
+    expect(h.retries.map((r) => r.reason)).toEqual(["Retrying on account spare"]);
+  });
+
+  it("does nothing unless the threshold is set", async () => {
+    const h = await host(AHEAD, { settings: { preferredModel: "Fable" } });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await idle(h);
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("uses a measurement under a minute old as is", async () => {
+    const h = await host(AHEAD, {
+      settings: { switchAheadPercent: 90, preferredModel: "Fable" },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const before = h.usageCalls.length;
+    await idle(h);
+    expect(h.usageCalls.slice(before)).toEqual([]);
+    expect(h.envSet).toHaveLength(1);
+  });
+
+  it("leaves the project when no other account has room, when automatic choice is off, and when the variable is external", async () => {
+    const tight = {
+      main: () => Response.json(payload(10, 40, 92)),
+      spare: () => Response.json(payload(10, 60, 91)),
+      work: () => Response.json(payload(5, 20, 95)),
+    };
+    const h = await host(tight, {
+      settings: { switchAheadPercent: 90, preferredModel: "Fable" },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await idle(h);
+    expect(h.envSet).toEqual([]);
+
+    const off = await host(AHEAD, {
+      settings: { switchAheadPercent: 90, preferredModel: "Fable", autoSwitch: false },
+    });
+    await off.harness.behavior.callRpc("accounts_refresh", null);
+    await idle(off);
+    expect(off.envSet).toEqual([]);
+    off.harness.dispose();
+
+    const external = await host(AHEAD, {
+      settings: { switchAheadPercent: 90, preferredModel: "Fable" },
+      presetEnv: { "proj-1": [{ name: ENV_VAR, note: "mine", secret: true, value: null }] },
+    });
+    await external.harness.behavior.callRpc("accounts_refresh", null);
+    await idle(external);
+    expect(external.envSet).toEqual([]);
+    external.harness.dispose();
+  });
+
+  it("ignores threads of other providers and hidden threads", async () => {
+    const h = await host(AHEAD, {
+      settings: { switchAheadPercent: 90, preferredModel: "Fable" },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "t", projectId: "proj-1", providerId: "codex" }),
+      lastAssistantText: null,
+    });
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "t", projectId: "proj-1", visibility: "hidden", originPluginId: "x" }),
+      lastAssistantText: null,
+    });
+    expect(h.envSet).toEqual([]);
   });
 });
