@@ -14,9 +14,12 @@ project uses [Semantic Versioning](https://semver.org/).
   consent page in a private Chrome window, so the login does not reuse the
   browser's Claude session (the default browser when Chrome is missing or
   `loginPrivateWindow` is off). The account is measured when the login
-  ends. If the browser cannot be opened, the section shows a link to the
-  login page and a field for the code it gives. One login at a time,
-  given up after 10 minutes. A directory the plugin creates links
+  ends, and the section says when the login left no account, no login, or
+  the Claude account of another directory. While it runs, the section
+  shows a link to the login page and a field for the code that page
+  gives, for when no window opens. One login at a time, given up after 10
+  minutes and stopped with the plugin. A new name that matches an account
+  or a directory ignoring case, or that is a link, is refused. A directory the plugin creates links
   `projects`, `settings.json`, `hooks`, `CLAUDE.md`, `plugins`, `skills`,
   `agents`, `commands` and `rules` from `~/.claude` (those that exist), so
   threads can move to the new account; a directory that already existed is
@@ -25,17 +28,19 @@ project uses [Semantic Versioning](https://semver.org/).
   When a turn ends with the project's account at or above that share of
   its session, weekly or preferred-model window, and another account is
   below it in all three, the project moves there. No turn is interrupted
-  and no retry is spent. It acts on a measurement taken at that moment,
-  not on the forecast.
+  and no retry is spent. It acts on measured usage (the project's account
+  is measured again when its measurement is over a minute old), not on
+  the forecast.
 - **A forecast per weekly window.** Under each weekly and per-model window
   in Settings, in the thread header menu and in `list`: when the window
-  runs out at the average pace since it started, or that it lasts until
-  its reset. It needs two hours of samples (one every half hour, kept in
-  the plugin's storage) and says nothing under one point a day.
+  runs out at the average pace since the plugin first measured it, or
+  that it lasts until its reset. It needs two hours between that first
+  measurement and the latest (both kept in the plugin's storage) and says
+  nothing under one point a day.
 - **History of moves.** Every move of a project (after a failed turn, when
   a thread is created, ahead of the limit or picked by hand) with its
   time, accounts and reason: the last 100, in Settings and with
-  `bb claude-switcher history [--json]`.
+  `bb claude-switcher history [--json]`. `release` is not recorded.
 
 ### Changed
 

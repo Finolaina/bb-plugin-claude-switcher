@@ -122,7 +122,7 @@ public SDK surfaces, and never touches a `CLAUDE_CONFIG_DIR` it did not set.
 ### 🔮 A forecast per window
 
 Under each weekly window: when it runs out at the pace you have used it
-since it started, or that it lasts until its reset. Also in the thread
+since the plugin first measured it, or that it lasts until its reset. Also in the thread
 header menu and in `list`.
 
 </td>
@@ -221,8 +221,11 @@ there, plus `skills`, `agents`, `commands` and `rules`) and runs
 Chrome window, so it does not reuse the Claude session of your browser
 (your default browser when Chrome is not installed, or when
 `loginPrivateWindow` is off). Approve it there and the account appears
-with its usage. If the browser cannot be opened, the section shows a link
-to the login page and a field for the code that page gives you. An account listed
+with its usage. While the login runs, the section shows a link to the
+login page and a field for the code that page gives you, for when no
+window opens. When it ends, the section says if something is off: no
+login was left, or the account is the Claude account of another
+directory (the browser answered with the session it had). An account listed
 without a login gets a **Log in** button that does the same. The plugin
 links nothing into a directory that already existed.
 
@@ -322,13 +325,14 @@ flowchart TD
   project moves there. No turn is interrupted and no retry is spent; a
   turn of the same project still running on the old account is covered by
   the minute of grace described below. When every other account is also
-  at or above the percentage, the project stays: it never moves to an
-  account as close to its own limit. This also moves a project you pinned
+  at or above the percentage, the project stays: it only moves to an
+  account under the percentage. This also moves a project you pinned
   by hand; leave the setting at 0 to move only on a failed turn.
 - **The forecast is shown, never acted on.** For each weekly window the
-  plugin keeps a usage sample every half hour and reports the average
-  pace since the window started: "runs out in 2 d 5 h at this pace
-  (30 %/day)" or "lasts until the reset". It needs two hours of samples,
+  plugin keeps its first measurement of the window and the latest, and
+  reports the average pace between them: "runs out in 2 d 5 h at this
+  pace (30 %/day)" or "lasts until the reset". It needs two hours between
+  the two,
   and says nothing for a window that grows less than one point a day.
   Moves are decided on measured usage only.
 - **Only visible threads.** Hidden threads (another plugin's workers) are
@@ -497,11 +501,14 @@ executable (`claude auth login`) as a child process of bb's server.
   the plugin's `bin/open-login.sh`, a small script that accepts only an
   `https://` address and opens it in a private Chrome window or the
   default browser. The consent address goes from the CLI to that script
-  and is never logged or stored. The second address the CLI prints when
-  the browser could not be opened is kept in memory while the login runs, shown in Settings and
+  and is never logged or stored. The second address the CLI prints, for when no window
+  opens, is kept in memory while the login runs, shown in Settings and
   included in `list --json`; it is dropped when you dismiss the login.
   Anything typed in the code field goes to the CLI's standard input and
-  nowhere else. One login at a time, given up after 10 minutes.
+  nowhere else. One login at a time, given up after 10 minutes and
+  stopped when the plugin is reloaded or disabled. A new account's name
+  that matches an existing account or directory ignoring case, or that
+  is a link in the accounts directory, is refused.
 - A directory the plugin creates for a new account (mode 0700) gets
   symbolic links to `projects`, `settings.json`, `hooks`, `CLAUDE.md`,
   `plugins`, `skills`, `agents`, `commands` and `rules` of `~/.claude`,
@@ -601,7 +608,9 @@ Coming from `claude-accounts` 0.1.x? See the upgrade note in
 - **The login window opened in the wrong browser profile, or signed in
   the wrong account.** A private window has no session, so it asks for
   the account; if `loginPrivateWindow` is off or Chrome is missing, the
-  default browser answers with the Claude account it already has. Cancel,
+  default browser answers with the Claude account it already has
+  (Settings says so when the login ends on the account of another
+  directory). Cancel or dismiss,
   sign out of claude.ai in that browser (or install Chrome and turn
   `loginPrivateWindow` on) and press **Log in** again.
 - **No forecast under a window.** It needs two hours of samples within
