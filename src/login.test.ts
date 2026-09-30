@@ -9,8 +9,15 @@ import {
 const NOW = Date.parse("2026-09-30T10:00:00.000Z");
 const URL =
   "https://claude.com/cai/oauth/authorize?code=true&client_id=x&state=abc";
-/** What `claude auth login` prints, OSC 8 hyperlink included, when the browser did not answer. */
-const BANNER = `Opening browser to sign in…\nIf the browser didn't open, visit: \u001b]8;;${URL}\u001b\\${URL}\u001b]8;;\u001b\\\nPaste code here if prompted > `;
+/**
+ * What `claude auth login` prints, as captured from Claude Code 2.1.285 on
+ * 2026-09-30 (the address replaced): two chunks, the second with an OSC 8
+ * hyperlink closed by BEL. It prints both whether or not $BROWSER worked.
+ */
+const OPENING = "Opening browser to sign in…\n";
+const BANNER = `If the browser didn't open, visit: \u001b]8;;${URL}\u0007${URL}\u001b]8;;\u0007\nPaste code here if prompted > `;
+/** The same link closed by ST, as other terminals' tools write it. */
+const BANNER_ST = `If the browser didn't open, visit: \u001b]8;;${URL}\u001b\\${URL}\u001b]8;;\u001b\\\nPaste code here if prompted > `;
 
 interface Spawned {
   command: string;
@@ -122,6 +129,8 @@ describe("LoginFlow", () => {
       wantsCode: false,
       message: null,
     });
+    spawned[0]!.emit(OPENING);
+    expect(f.status()).toMatchObject({ manualUrl: null, wantsCode: false });
     spawned[0]!.emit(BANNER);
     expect(f.status()).toMatchObject({ manualUrl: URL, wantsCode: true });
     spawned[0]!.exit(0);
@@ -133,6 +142,14 @@ describe("LoginFlow", () => {
       ["running", true],
       ["done", true],
     ]);
+  });
+
+  it("reads the fallback address from a link closed by ST too", async () => {
+    const { io, spawned } = fakeIo();
+    const { f } = flow(io);
+    await f.start({ name: "team", configDir: "/d/team" });
+    spawned[0]!.emit(BANNER_ST);
+    expect(f.status()).toMatchObject({ manualUrl: URL, wantsCode: true });
   });
 
   it("logs the default account in without CLAUDE_CONFIG_DIR, whatever the plugin's own environment says", async () => {

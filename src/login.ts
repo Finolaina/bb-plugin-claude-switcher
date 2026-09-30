@@ -81,9 +81,12 @@ export interface LoginStatus {
 /** Any URL, for the message shown to the user; the consent URL must not travel further. */
 // oxlint-disable-next-line no-control-regex
 const URL_PATTERN = /https?:\/\/[^\s\u001b]+/g;
-/** Terminal escapes the login prints around its link (OSC 8) and colours. */
+/**
+ * Terminal escapes the login prints: the OSC 8 around its link, closed by
+ * BEL (what Claude Code writes) or by ST, and colours.
+ */
 // oxlint-disable-next-line no-control-regex
-const ESCAPES = /\u001b\][^\u001b]*\u001b\\|\u001b\[[0-9;]*[A-Za-z]/g;
+const ESCAPES = /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b\[[0-9;]*[A-Za-z]/g;
 
 export class LoginFlow {
   private current: LoginStatus | null = null;
