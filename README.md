@@ -120,6 +120,9 @@ public SDK surfaces, and never touches a `CLAUDE_CONFIG_DIR` it did not set.
 <td align="center"><img src="docs/screenshots/provider-usage.png" alt="Every Claude Code account in bb's Provider usage panel" width="440"><br><sub><b>Every account in Provider usage</b></sub></td>
 <td align="center"><img src="docs/screenshots/settings.png" alt="The Claude Switcher section in Settings" width="440"><br><sub><b>The account each project runs on</b></sub></td>
 </tr>
+<tr>
+<td align="center" colspan="2"><img src="docs/screenshots/thread-header.png" alt="The project's account in a Claude Code thread's header, with its menu open: switch now to the best account, or pick any" width="290"><br><sub><b>The account in every thread's header, and the menu to change it</b></sub></td>
+</tr>
 </table>
 </div>
 
