@@ -97,6 +97,17 @@ const ESCAPES =
   // oxlint-disable-next-line no-control-regex
   /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b\[[0-9;]*[A-Za-z]/g;
 
+/**
+ * Credentials of the plugin's own environment: a login is for another
+ * account, and must not be answered, or skipped, with these.
+ */
+const CREDENTIALS = new Set([
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+]);
+
 /** How much of the login's output is kept (it prints a few lines). */
 const OUTPUT_KEPT = 8_192;
 
@@ -152,7 +163,12 @@ export class LoginFlow {
     if (this.startCancelled) throw new Error("the login was cancelled");
     const env: Record<string, string> = {};
     for (const [key, value] of Object.entries(baseEnv))
-      if (value !== undefined && key !== "CLAUDE_CONFIG_DIR") env[key] = value;
+      if (
+        value !== undefined &&
+        key !== "CLAUDE_CONFIG_DIR" &&
+        !CREDENTIALS.has(key)
+      )
+        env[key] = value;
     if (account.configDir !== null) env.CLAUDE_CONFIG_DIR = account.configDir;
     env.BROWSER = this.options.helper;
     this.output = "";
@@ -186,8 +202,7 @@ export class LoginFlow {
       // The tail is enough for the last line; what was found stays found.
       this.output = (this.output + chunk).slice(-OUTPUT_KEPT);
       const plain = this.output.replace(ESCAPES, "");
-      const url =
-        plain.match(/visit:\s*(https?:\/\/\S+)/)?.[1] ?? now.manualUrl;
+      const url = plain.match(/visit:\s*(https:\/\/\S+)/)?.[1] ?? now.manualUrl;
       const wantsCode = now.wantsCode || /Paste code here/.test(plain);
       if (url !== now.manualUrl || wantsCode !== now.wantsCode) {
         this.update({ ...now, manualUrl: url, wantsCode });
@@ -196,11 +211,12 @@ export class LoginFlow {
     this.timer = setTimeout(() => {
       if (this.current?.phase !== "running" || this.process !== process) return;
       const minutes = Math.max(1, Math.round(this.options.timeoutMs / 60_000));
+      // Killed first: whatever the report does, no login is left running.
+      process.kill();
       this.end(process, {
         phase: "failed",
         message: `timed out after ${minutes} minute${minutes === 1 ? "" : "s"}`,
       });
-      process.kill();
     }, this.options.timeoutMs);
     void process.exited.then((result) => {
       if (this.process !== process) return;
@@ -264,8 +280,8 @@ export class LoginFlow {
     if (this.starting !== null) this.startCancelled = true;
     if (this.current?.phase === "running" && this.process !== null) {
       const process = this.process;
-      this.end(process, { phase: "cancelled", message: null });
       process.kill();
+      this.end(process, { phase: "cancelled", message: null });
       return;
     }
     this.current = null;
@@ -299,7 +315,13 @@ export class LoginFlow {
       .replace(ESCAPES, "")
       .split(/\r?\n/)
       .map((l) => l.replace(URL_PATTERN, "<url>").trim())
-      .filter((l) => l !== "" && !l.startsWith("Paste code here"));
+      .filter(
+        (l) =>
+          l !== "" &&
+          !l.startsWith("Paste code here") &&
+          // What is left of an address cut in two lines.
+          !/^\S*[=&%]\S*$/.test(l),
+      );
     return lines[lines.length - 1] ?? "the login ended without a message";
   }
 }

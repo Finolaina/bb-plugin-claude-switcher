@@ -398,4 +398,63 @@ describe("LoginFlow", () => {
     ).rejects.toThrow(/EACCES/);
     expect(f.status()).toBeNull();
   });
+
+  it("takes only an https address for the login page", async () => {
+    const { io, spawned } = fakeIo();
+    const { f } = flow(io);
+    await f.start({ name: "team", configDir: "/d/team" });
+    spawned[0]!.emit(
+      "If the browser didn't open, visit: http://claude.example/authorize?x=1\nPaste code here if prompted > ",
+    );
+    expect(f.status()).toMatchObject({ manualUrl: null, wantsCode: true });
+  });
+
+  it("keeps a piece of an address cut in two lines out of the failure it reports", async () => {
+    const { io, spawned } = fakeIo();
+    const { f } = flow(io);
+    await f.start({ name: "team", configDir: "/d/team" });
+    spawned[0]!.emit(
+      "If the browser didn't open, visit: https://claude.com/authorize?code_challenge=AAAA\nBBBB&state=SECRET\n",
+    );
+    spawned[0]!.exit(1);
+    await tick();
+    expect(f.status()?.phase).toBe("failed");
+    expect(f.status()?.message).toBe(
+      "If the browser didn't open, visit: <url> (exit code 1)",
+    );
+  });
+
+  it("does not hand the credentials of the plugin's environment to the login", async () => {
+    const { io, spawned } = fakeIo();
+    const { f } = flow(io);
+    await f.start(
+      { name: "team", configDir: "/d/team" },
+      {
+        PATH: "/usr/bin",
+        ANTHROPIC_API_KEY: "k",
+        ANTHROPIC_AUTH_TOKEN: "t",
+        CLAUDE_CODE_OAUTH_TOKEN: "o",
+        CLAUDE_CODE_OAUTH_REFRESH_TOKEN: "r",
+        CLAUDE_CODE_USE_BEDROCK: "0",
+      },
+    );
+    expect(spawned[0]?.env).toEqual({
+      PATH: "/usr/bin",
+      CLAUDE_CODE_USE_BEDROCK: "0",
+      CLAUDE_CONFIG_DIR: "/d/team",
+      BROWSER: "/plugin/bin/open-login.sh",
+    });
+  });
+
+  it("stops the process before it reports the end, so a report that fails leaves none running", async () => {
+    const { io, spawned } = fakeIo();
+    const { f } = flow(io, {
+      onChange: (status) => {
+        if (status.phase !== "running") throw new Error("the host is gone");
+      },
+    });
+    await f.start({ name: "team", configDir: "/d/team" });
+    expect(() => f.cancel()).toThrow(/the host is gone/);
+    expect(spawned[0]?.killed).toBe(true);
+  });
 });
