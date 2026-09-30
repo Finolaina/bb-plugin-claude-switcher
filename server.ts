@@ -1441,7 +1441,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     );
   }
 
-  // bb holds every message of every thread on this answer and fails the
+  // bb holds every message it asks about on this answer and fails the
   // attempt when a handler throws or takes 10 s: it always proceeds, decides
   // on the measurements already there, and stays out of the project's queue
   // (a retry sent from that queue passes through here). A placement that

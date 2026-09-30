@@ -17,14 +17,18 @@ project uses [Semantic Versioning](https://semver.org/).
   - **Before every turn**, a project whose account is measured unable to
     run the turn's model moves to an account that can. It is decided on
     the measurements already there; nothing is asked of the provider, and
-    the message is never held or refused: if anything fails here, it is
-    logged and the message goes on as before.
+    the message is never refused and is delayed 3 seconds at most: if
+    anything fails here, it is logged and the message goes on as before.
   - **When a turn fails on a limit**, it is judged against the model its
     thread was last sent with: an Opus thread switches to an account with
     Opus left, or waits for Opus.
-  A thread sent with the preferred model behaves as before, and so does a
-  thread bb has not sent a message for since the plugin started. The
-  plugin never changes a thread's model: it only chooses the account.
+  A thread sent with the preferred model is decided by that model, as
+  before: when no account can run it, the project stays and the retry
+  waits for it. A thread bb has not sent a message for since the plugin
+  started is judged by the preferred model. The plugin never changes a
+  thread's model: it only chooses the account. With `preferredModel`
+  empty, a thread's own model now counts too, and the reasons name it
+  (`Waiting for Fable on work`).
 
 ## [0.2.4] - 2026-09-30
 

@@ -111,7 +111,8 @@ usable measurement, and if none can be measured the project is left alone
    of another provider, a project whose
    `CLAUDE_CONFIG_DIR` the plugin did not set, or when no other account
    can run. A pick by hand waits in the project's queue for a placement or
-   a switch in progress and lands after it, so the pick wins.
+   a switch in progress and lands after it, so the pick wins (the placement
+   before a turn is the exception: see Known limits).
 
 A move is recorded as the last switch and opens the same 60-second grace
 window as a switch after a failure, so the project's threads still running
@@ -141,11 +142,13 @@ model and another account can.
 The checkpoint fails a message whose handler throws or takes more than
 10 s, and runs every handler under one lock, so this one:
 
-- always answers `proceed`: it never holds or refuses a message;
+- always answers `proceed`: it never refuses a message nor sends it to
+  bb's queue, and delays it 3 s at most;
 - decides on the measurements already in hand and asks the provider
   nothing;
 - catches every error (logged as a warning) and gives the placement up
-  after 3 s (`DISPATCH_LIMIT_MS`): nothing is moved after that;
+  after 3 s (`DISPATCH_LIMIT_MS`): a placement that has not begun to
+  write the variable by then moves nothing;
 - stays out of the project's queue: a retry sent from that queue passes
   through this same checkpoint and would wait for itself.
 
@@ -504,7 +507,21 @@ The refresh token rotates on every refresh, so the plugin:
   both, move the project back and forth before each turn.
 - **A placement before a turn that takes more than 3 s** is given up: the
   turn starts where the project was and, if it fails there, is judged like
-  any failed turn.
+  any failed turn. A write of the variable already on its way at that
+  moment still lands: the turn starts on the old account and its failure
+  there is retried on the new one.
+- **Messages bb sends without its checkpoint** are neither placed nor
+  remembered: a Send now of a queued message and an edited message sent
+  again (bb 0.44). A turn started that way after the thread's model
+  changed runs where the project is and, if it fails, is judged by the
+  model the thread was last sent with through the checkpoint.
+- **A message bb will hold for later** (scheduled, or waiting for an
+  interaction or a host) is placed when bb asks, which is before it is
+  sent, and again when it is sent.
+- **With the checkpoint registered, bb asks the plugin before every
+  message of every provider**, under its server-wide lock, and no longer
+  takes its shortcut for draining queued messages. With `autoSwitch` off
+  the handler answers at once.
 - **An account picked by hand during the one read a placement before a
   turn makes** can be overwritten by the move: that placement runs outside
   the project's queue, which the checkpoint must never wait for.

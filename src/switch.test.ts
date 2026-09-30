@@ -625,7 +625,17 @@ describe("modelFamily", () => {
   });
 
   it("names nothing for a model bb has not resolved, an alias or another provider's model", () => {
-    for (const id of [null, "", "opusplan", "opus", "gpt-6-astra", "claude-"])
+    for (const id of [
+      null,
+      "",
+      "opusplan",
+      "opus",
+      "gpt-6-astra",
+      "claude-",
+      "claude-opus",
+      "claude-3-5-sonnet-20241022",
+      "my-claude-opus-5-5",
+    ])
       expect(modelFamily(id)).toBeNull();
   });
 });

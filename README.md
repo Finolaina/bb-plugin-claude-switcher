@@ -331,8 +331,10 @@ flowchart TD
   too. So a thread you switch to Opus runs on an account with Opus left
   even when `preferredModel` is `Fable` and no account has Fable left,
   while a thread sent with Fable waits for Fable as before. This is
-  decided on the measurements already there and never holds or refuses a
-  message; the plugin never changes a thread's model.
+  decided on the measurements already there and never refuses a message
+  (at worst it delays it 3 seconds); the plugin never changes a thread's
+  model. bb does not ask for a Send now of a queued message nor for an
+  edited message sent again: those run where the project is.
 - **When a turn ends (opt-in).** With `switchAheadPercent` above 0 and
   `autoSwitch` on, the
   plugin measures the project's account when a turn of one of its threads
@@ -509,6 +511,10 @@ executable (`claude auth login`) as a child process of bb's server.
   read and its write, or bb stops while a rotated login is still only in
   memory, that account can be logged out and needs `/login` again.
 - It does this in the background whether or not `autoSwitch` is on.
+- Before each message is sent, bb asks the plugin whether it may go and
+  hands it the message with the question. The plugin looks at the thread,
+  its project and the model the turn is sent with; it neither reads,
+  stores nor logs the text of the message.
 - No telemetry, no third-party services, no data leaves the machine except
   those calls to Anthropic. It moves projects between your own logins and
   never shares or pools accounts between people.
