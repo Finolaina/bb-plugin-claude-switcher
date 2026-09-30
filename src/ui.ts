@@ -7,13 +7,14 @@ export function noLoginFound(
   return accounts.every((a) => a.problem?.kind === "unauthenticated");
 }
 
-/** " (Website)" for the project the last automatic switch moved, "" if it is gone. */
-export function projectLabel(
+/** The name of the project a move was about; a fixed phrase once it is gone. */
+export function projectName(
   projects: ReadonlyArray<{ id: string; name: string }>,
   projectId: string,
 ): string {
-  const project = projects.find((p) => p.id === projectId);
-  return project === undefined ? "" : ` (${project.name})`;
+  return (
+    projects.find((p) => p.id === projectId)?.name ?? "a project that is gone"
+  );
 }
 
 type Window = { usedPercent: number; resetsAt: number | null };
@@ -87,19 +88,19 @@ export function headerStatus(
   const used =
     usage === null
       ? []
-      : [usage.session, usage.weekly, ...(model ? [model] : [])].map(
-          (w) => windowPercent(w, now),
+      : [usage.session, usage.weekly, ...(model ? [model] : [])].map((w) =>
+          windowPercent(w, now),
         );
   const tone =
     entry?.problem?.kind === "unauthenticated"
       ? "nologin"
       : account === null || usage === null || usage.unknown === true
-      ? "unknown"
-      : usage.blocked || used.some((u) => u >= 100)
-        ? "out"
-        : used.some((u) => u >= TIGHT_PERCENT)
-          ? "tight"
-          : "ok";
+        ? "unknown"
+        : usage.blocked || used.some((u) => u >= 100)
+          ? "out"
+          : used.some((u) => u >= TIGHT_PERCENT)
+            ? "tight"
+            : "ok";
   // `?? null`: a server older than the header (during an update) sends none.
   const best = state.bestAccount ?? null;
   return {
@@ -109,4 +110,57 @@ export function headerStatus(
     canSwitch: !project.external && best !== null && best !== account,
     external: project.external,
   };
+}
+
+type ForecastLike =
+  | { kind: "runs-out"; at: number; percentPerDay: number }
+  | { kind: "lasts"; until: number; percentPerDay: number }
+  | { kind: "steady" }
+  | { kind: "unknown" };
+
+/** "2 d 5 h", "3 h", "40 min", or "now". */
+function inTime(ms: number): string {
+  if (ms <= 0) return "now";
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 60) return `in ${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `in ${hours} h`;
+  const days = Math.floor(hours / 24);
+  return `in ${days} d ${hours % 24} h`;
+}
+
+/** One line under a window's bar; null when there is nothing worth saying. */
+export function forecastLine(
+  forecast: ForecastLike,
+  now: number,
+): string | null {
+  switch (forecast.kind) {
+    case "runs-out":
+      return `runs out ${inTime(forecast.at - now)} at this pace (${forecast.percentPerDay} %/day)`;
+    case "lasts":
+      return `lasts until the reset at this pace (${forecast.percentPerDay} %/day)`;
+    default:
+      return null;
+  }
+}
+
+/**
+ * The forecast that matters for an account: its preferred model's window
+ * when it has one, else its weekly window. Null when the account has none.
+ */
+export function windowForecast(
+  forecasts: Record<string, Record<string, ForecastLike>> | undefined,
+  account: string,
+  preferredModel: string,
+): [string, ForecastLike] | null {
+  const own = forecasts?.[account];
+  if (own === undefined) return null;
+  const model = Object.keys(own).find(
+    (name) =>
+      preferredModel !== "" &&
+      name.toLowerCase() === preferredModel.toLowerCase(),
+  );
+  const key = model ?? "weekly";
+  const forecast = own[key];
+  return forecast === undefined ? null : [key, forecast];
 }

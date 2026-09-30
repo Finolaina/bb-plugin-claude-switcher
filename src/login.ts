@@ -53,8 +53,10 @@ export interface LoginStatus {
 }
 
 /** Any URL, for the message shown to the user; the consent URL must not travel further. */
+// oxlint-disable-next-line no-control-regex
 const URL_PATTERN = /https?:\/\/[^\s\u001b]+/g;
 /** Terminal escapes the login prints around its link (OSC 8) and colours. */
+// oxlint-disable-next-line no-control-regex
 const ESCAPES = /\u001b\][^\u001b]*\u001b\\|\u001b\[[0-9;]*[A-Za-z]/g;
 
 export class LoginFlow {
@@ -182,7 +184,7 @@ export class LoginFlow {
       .replace(ESCAPES, "")
       .split(/\r?\n/)
       .map((l) => l.replace(URL_PATTERN, "<url>").trim())
-      .filter((l) => l !== "" && !/^Paste code here/.test(l));
+      .filter((l) => l !== "" && !l.startsWith("Paste code here"));
     return lines[lines.length - 1] ?? "the login ended without a message";
   }
 }

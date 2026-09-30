@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { headerStatus, noLoginFound, projectLabel } from "./ui.js";
+import {
+  forecastLine,
+  headerStatus,
+  noLoginFound,
+  projectName,
+  windowForecast,
+} from "./ui.js";
 
 const ok = { problem: null };
 const unauth = { problem: { kind: "unauthenticated" as const } };
@@ -19,18 +25,26 @@ describe("noLoginFound", () => {
   });
 });
 
-describe("projectLabel", () => {
+describe("projectName", () => {
   const projects = [{ id: "proj-1", name: "Website" }];
-  it("names the project of the last switch, or says nothing when it is gone", () => {
-    expect(projectLabel(projects, "proj-1")).toBe(" (Website)");
-    expect(projectLabel(projects, "proj-9")).toBe("");
+  it("names the project of a move, or says it is gone", () => {
+    expect(projectName(projects, "proj-1")).toBe("Website");
+    expect(projectName(projects, "proj-9")).toBe("a project that is gone");
   });
 });
 
 describe("headerStatus", () => {
   const NOW = 1_000_000;
-  const win = (usedPercent: number, resetsAt: number | null = null) => ({ usedPercent, resetsAt });
-  const usage = (session: number, weekly: number, fable: number, blocked = false) => ({
+  const win = (usedPercent: number, resetsAt: number | null = null) => ({
+    usedPercent,
+    resetsAt,
+  });
+  const usage = (
+    session: number,
+    weekly: number,
+    fable: number,
+    blocked = false,
+  ) => ({
     blocked,
     session: win(session),
     weekly: win(weekly),
@@ -63,13 +77,27 @@ describe("headerStatus", () => {
 
   it("names the project's account and how it stands for the preferred model", () => {
     expect(headerStatus(base, "p-default", NOW)).toEqual({
-      account: "main", tone: "out", best: "work", canSwitch: true, external: false,
+      account: "main",
+      tone: "out",
+      best: "work",
+      canSwitch: true,
+      external: false,
     });
     expect(headerStatus(base, "p-work", NOW)).toEqual({
-      account: "work", tone: "ok", best: "work", canSwitch: false, external: false,
+      account: "work",
+      tone: "ok",
+      best: "work",
+      canSwitch: false,
+      external: false,
     });
-    expect(headerStatus(base, "p-busy", NOW)).toMatchObject({ account: "busy", tone: "tight" });
-    expect(headerStatus(base, "p-fresh", NOW)).toMatchObject({ account: "fresh", tone: "unknown" });
+    expect(headerStatus(base, "p-busy", NOW)).toMatchObject({
+      account: "busy",
+      tone: "tight",
+    });
+    expect(headerStatus(base, "p-fresh", NOW)).toMatchObject({
+      account: "fresh",
+      tone: "unknown",
+    });
   });
 
   const only = (u: Usage, preferredModel = "Fable") => ({
@@ -100,7 +128,9 @@ describe("headerStatus", () => {
   it("says so when the project's account has no login", () => {
     const loggedOut = {
       ...base,
-      accounts: [{ name: "main", usage: null, problem: { kind: "unauthenticated" } }],
+      accounts: [
+        { name: "main", usage: null, problem: { kind: "unauthenticated" } },
+      ],
     };
     expect(headerStatus(loggedOut, "p-default", NOW)?.tone).toBe("nologin");
   });
@@ -110,8 +140,12 @@ describe("headerStatus", () => {
       ...base,
       accounts: [{ name: "main", usage: u, problem: { kind: "error" } }],
     });
-    expect(headerStatus(failed(usage(100, 10, 10)), "p-default", NOW)?.tone).toBe("out");
-    expect(headerStatus(failed(usage(10, 10, 10)), "p-default", NOW)?.tone).toBe("ok");
+    expect(
+      headerStatus(failed(usage(100, 10, 10)), "p-default", NOW)?.tone,
+    ).toBe("out");
+    expect(
+      headerStatus(failed(usage(10, 10, 10)), "p-default", NOW)?.tone,
+    ).toBe("ok");
   });
 
   it("offers no switch when an older server sends no best account", () => {
@@ -139,18 +173,89 @@ describe("headerStatus", () => {
 
   it("offers no switch where the plugin may not act, and says when there is nothing better", () => {
     expect(headerStatus(base, "p-ext", NOW)).toEqual({
-      account: null, tone: "unknown", best: "work", canSwitch: false, external: true,
+      account: null,
+      tone: "unknown",
+      best: "work",
+      canSwitch: false,
+      external: true,
     });
     expect(headerStatus(base, "p-gone", NOW)).toMatchObject({
-      account: null, canSwitch: true, external: false,
+      account: null,
+      canSwitch: true,
+      external: false,
     });
     // Nothing measured yet: a project on a vanished account is still the plugin's to change.
-    expect(headerStatus({ ...base, bestAccount: null }, "p-gone", NOW)).toMatchObject({
-      account: null, canSwitch: false, external: false,
+    expect(
+      headerStatus({ ...base, bestAccount: null }, "p-gone", NOW),
+    ).toMatchObject({
+      account: null,
+      canSwitch: false,
+      external: false,
     });
-    expect(headerStatus({ ...base, bestAccount: null }, "p-default", NOW)).toMatchObject({
+    expect(
+      headerStatus({ ...base, bestAccount: null }, "p-default", NOW),
+    ).toMatchObject({
       canSwitch: false,
     });
     expect(headerStatus(base, "p-missing", NOW)).toBeNull();
+  });
+});
+
+describe("forecastLine", () => {
+  const NOW = Date.parse("2026-09-30T10:00:00.000Z");
+  const DAY = 24 * 3_600_000;
+
+  it("says when the window runs out, in a day count or a date, with the pace", () => {
+    expect(
+      forecastLine(
+        { kind: "runs-out", at: NOW + 3 * 3_600_000, percentPerDay: 30 },
+        NOW,
+      ),
+    ).toBe(`runs out in 3 h at this pace (30 %/day)`);
+    expect(
+      forecastLine(
+        {
+          kind: "runs-out",
+          at: NOW + 2 * DAY + 5 * 3_600_000,
+          percentPerDay: 12.5,
+        },
+        NOW,
+      ),
+    ).toBe(`runs out in 2 d 5 h at this pace (12.5 %/day)`);
+    expect(
+      forecastLine({ kind: "runs-out", at: NOW - 1, percentPerDay: 99 }, NOW),
+    ).toBe(`runs out now at this pace (99 %/day)`);
+  });
+
+  it("says the window lasts until its reset, and nothing for a steady or unknown one", () => {
+    expect(
+      forecastLine({ kind: "lasts", until: NOW + DAY, percentPerDay: 4 }, NOW),
+    ).toBe("lasts until the reset at this pace (4 %/day)");
+    expect(forecastLine({ kind: "steady" }, NOW)).toBeNull();
+    expect(forecastLine({ kind: "unknown" }, NOW)).toBeNull();
+  });
+});
+
+describe("windowForecast", () => {
+  const runsOut = { kind: "runs-out" as const, at: 1, percentPerDay: 1 };
+  const lasts = { kind: "lasts" as const, until: 1, percentPerDay: 1 };
+  const forecasts = { main: { weekly: lasts, Fable: runsOut } };
+
+  it("takes the preferred model's window when the account has one, else the weekly one", () => {
+    expect(windowForecast(forecasts, "main", "Fable")).toEqual([
+      "Fable",
+      runsOut,
+    ]);
+    expect(windowForecast(forecasts, "main", "fable")).toEqual([
+      "Fable",
+      runsOut,
+    ]);
+    expect(windowForecast(forecasts, "main", "Opus")).toEqual([
+      "weekly",
+      lasts,
+    ]);
+    expect(windowForecast(forecasts, "main", "")).toEqual(["weekly", lasts]);
+    expect(windowForecast(forecasts, "gone", "Fable")).toBeNull();
+    expect(windowForecast(undefined, "main", "Fable")).toBeNull();
   });
 });

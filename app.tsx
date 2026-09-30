@@ -15,9 +15,11 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import type { rpcContract, State } from "./server";
 import {
+  forecastLine,
   headerStatus,
   noLoginFound,
-  projectLabel,
+  projectName,
+  windowForecast,
   windowPercent,
 } from "./src/ui";
 import { CLAUDE_CODE_PROVIDER } from "./src/switch";
@@ -32,6 +34,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Icon } from "@/components/ui/icon";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
 type AccountState = State["accounts"][number];
@@ -86,7 +89,33 @@ function useAccounts() {
     refresh: () => run(() => rpc.call("accounts_refresh", null)),
     setProjectAccount: (projectId: string, account: string | null) =>
       run(() => rpc.call("project_set_account", { projectId, account })),
+    startLogin: (name: string) =>
+      run(() => rpc.call("account_login_start", { name })),
+    sendCode: (code: string) =>
+      run(() => rpc.call("account_login_code", { code })),
+    cancelLogin: () => run(() => rpc.call("account_login_cancel", null)),
   };
+}
+
+type Forecast = State["forecasts"][string][string];
+
+/** The forecast under a window's bar, when there is one. */
+function ForecastLine({ forecast }: { forecast: Forecast | undefined }) {
+  const line =
+    forecast === undefined ? null : forecastLine(forecast, Date.now());
+  if (line === null) return null;
+  return (
+    <p
+      className={cn(
+        "mt-0.5 text-[11px]",
+        forecast?.kind === "runs-out"
+          ? "text-warning"
+          : "text-muted-foreground",
+      )}
+    >
+      {line}
+    </p>
+  );
 }
 
 function formatReset(resetsAt: number | null): string {
@@ -113,7 +142,15 @@ function barClass(usedPercent: number): string {
   return "bg-primary";
 }
 
-function WindowBar({ label, window }: { label: string; window: Window }) {
+function WindowBar({
+  label,
+  window,
+  forecast,
+}: {
+  label: string;
+  window: Window;
+  forecast?: Forecast;
+}) {
   const used = windowPercent(window, Date.now());
   const pct = Math.max(0, Math.min(100, used));
   return (
@@ -145,6 +182,7 @@ function WindowBar({ label, window }: { label: string; window: Window }) {
           style={{ width: `${pct}%` }}
         />
       </div>
+      <ForecastLine forecast={forecast} />
     </div>
   );
 }
@@ -152,9 +190,14 @@ function WindowBar({ label, window }: { label: string; window: Window }) {
 function AccountCard({
   account,
   isDefault,
+  forecasts,
+  onLogin,
 }: {
   account: AccountState;
   isDefault: boolean;
+  forecasts: Record<string, Forecast> | undefined;
+  /** Offered for an account without a login; undefined while a login runs. */
+  onLogin?: () => void;
 }) {
   const usage = account.usage;
   const status =
@@ -206,15 +249,26 @@ function AccountCard({
           {status}
         </p>
       )}
+      {account.problem?.kind === "unauthenticated" && onLogin !== undefined ? (
+        <Button variant="outline" size="sm" className="mt-2" onClick={onLogin}>
+          <Icon name="LogIn" className="size-3.5" />
+          Log in
+        </Button>
+      ) : null}
       {usage === null ? null : (
         <div className="mt-2 grid gap-2">
           <WindowBar label="Session (5 h)" window={usage.session} />
-          <WindowBar label="Weekly (all models)" window={usage.weekly} />
+          <WindowBar
+            label="Weekly (all models)"
+            window={usage.weekly}
+            forecast={forecasts?.weekly}
+          />
           {Object.entries(usage.models).map(([model, window]) => (
             <WindowBar
               key={model}
               label={`Weekly · ${model}`}
               window={window}
+              forecast={forecasts?.[model]}
             />
           ))}
         </div>
@@ -223,9 +277,143 @@ function AccountCard({
   );
 }
 
+/** The "add an account" form and the login it started. */
+function AddAccount({
+  login,
+  busy,
+  onStart,
+  onCode,
+  onCancel,
+}: {
+  login: State["login"];
+  busy: boolean;
+  onStart: (name: string) => void;
+  onCode: (code: string) => void;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [code, setCode] = useState("");
+  if (login === null) {
+    return (
+      <form
+        className="flex flex-wrap items-center gap-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (name.trim() !== "") onStart(name.trim());
+        }}
+      >
+        <Input
+          className="h-8 w-40 text-xs"
+          aria-label="Name of the new account"
+          placeholder="new account name"
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          disabled={busy}
+        />
+        <Button
+          type="submit"
+          variant="outline"
+          size="sm"
+          disabled={busy || name.trim() === ""}
+        >
+          <Icon name="Plus" className="size-3.5" />
+          Add account
+        </Button>
+        <span className="text-xs text-muted-foreground">
+          Opens Claude's login in the browser; the account gets its own
+          directory under the accounts directory.
+        </span>
+      </form>
+    );
+  }
+  const running = login.phase === "running";
+  return (
+    <div
+      role="status"
+      className={cn(
+        "rounded-md border p-3 text-xs",
+        login.phase === "failed" ? "border-destructive" : "border-border",
+      )}
+    >
+      <p>
+        <span className="font-medium">{login.name}</span>
+        {": "}
+        {login.phase === "running"
+          ? "waiting for the login in the browser…"
+          : login.phase === "done"
+            ? "logged in"
+            : login.phase === "cancelled"
+              ? "login cancelled"
+              : `login failed: ${login.message ?? "no message"}`}
+      </p>
+      {running && login.manualUrl !== null ? (
+        <p className="mt-1 text-muted-foreground">
+          If no browser window opened,{" "}
+          <a
+            className="underline"
+            href={login.manualUrl}
+            target="_blank"
+            rel="noreferrer"
+          >
+            open the login page
+          </a>{" "}
+          and paste the code it shows below.
+        </p>
+      ) : null}
+      {running && login.wantsCode ? (
+        <form
+          className="mt-2 flex items-center gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (code.trim() !== "") {
+              onCode(code.trim());
+              setCode("");
+            }
+          }}
+        >
+          <Input
+            className="h-8 w-56 text-xs"
+            aria-label="Code shown by Claude"
+            placeholder="code shown by Claude, if any"
+            value={code}
+            onChange={(event) => setCode(event.target.value)}
+            disabled={busy}
+          />
+          <Button
+            type="submit"
+            variant="outline"
+            size="sm"
+            disabled={busy || code.trim() === ""}
+          >
+            Send code
+          </Button>
+        </form>
+      ) : null}
+      <Button
+        variant="ghost"
+        size="sm"
+        className="mt-2"
+        onClick={onCancel}
+        disabled={busy}
+      >
+        {running ? "Cancel" : "Dismiss"}
+      </Button>
+    </div>
+  );
+}
+
 function AccountsSection() {
-  const { state, error, busy, refresh, refetch, setProjectAccount } =
-    useAccounts();
+  const {
+    state,
+    error,
+    busy,
+    refresh,
+    refetch,
+    setProjectAccount,
+    startLogin,
+    sendCode,
+    cancelLogin,
+  } = useAccounts();
   if (state === null) {
     return (
       <div className="space-y-2 text-sm">
@@ -280,8 +468,9 @@ function AccountsSection() {
       {noLoginFound(state.accounts) ? (
         <p className="text-muted-foreground">
           No Claude Code login found. Log in once with <code>claude</code> (the
-          default account) or with <code>CLAUDE_CONFIG_DIR=&lt;dir&gt; claude</code>{" "}
-          for an extra one, then refresh.
+          default account) or with{" "}
+          <code>CLAUDE_CONFIG_DIR=&lt;dir&gt; claude</code> for an extra one,
+          then refresh.
         </p>
       ) : null}
       <ul aria-label="Claude accounts" className="grid gap-2 lg:grid-cols-2">
@@ -290,9 +479,22 @@ function AccountsSection() {
             key={account.name}
             account={account}
             isDefault={account.name === state.defaultAccountName}
+            forecasts={state.forecasts?.[account.name]}
+            onLogin={
+              state.login?.phase === "running"
+                ? undefined
+                : () => startLogin(account.name)
+            }
           />
         ))}
       </ul>
+      <AddAccount
+        login={state.login ?? null}
+        busy={busy}
+        onStart={startLogin}
+        onCode={sendCode}
+        onCancel={cancelLogin}
+      />
       <div>
         <h4 className="font-medium">Projects</h4>
         <p className="text-xs text-muted-foreground">
@@ -364,15 +566,59 @@ function AccountsSection() {
           ))}
         </ul>
       </div>
-      {state.lastSwitch === null ? null : (
-        <p className="text-xs text-muted-foreground">
-          Last automatic switch
-          {projectLabel(state.projects, state.lastSwitch.projectId)}:{" "}
-          {state.lastSwitch.from} →{" "}
-          {state.lastSwitch.to}, {new Date(state.lastSwitch.at).toLocaleString()}
-          . {state.lastSwitch.reason}.
-        </p>
-      )}
+      <History state={state} />
+    </div>
+  );
+}
+
+const HISTORY_SHOWN = 20;
+
+/** Every move of a project, latest first: automatic, ahead of the limit, or by hand. */
+function History({ state }: { state: State }) {
+  const [all, setAll] = useState(false);
+  // A server older than this page sends only the last automatic switch.
+  const moves =
+    state.history ?? (state.lastSwitch === null ? [] : [state.lastSwitch]);
+  if (moves.length === 0) return null;
+  const shown = all ? moves : moves.slice(0, HISTORY_SHOWN);
+  return (
+    <div>
+      <h4 className="font-medium">History</h4>
+      <p className="text-xs text-muted-foreground">
+        Every move of a project to another account, and why.
+      </p>
+      <ol
+        aria-label="Moves"
+        className="mt-2 divide-y divide-border rounded-md border border-border text-xs"
+      >
+        {shown.map((move, i) => (
+          <li
+            key={`${move.at}-${i}`}
+            className="flex flex-wrap gap-x-3 gap-y-0.5 px-3 py-1.5"
+          >
+            <span className="shrink-0 tabular-nums text-muted-foreground">
+              {new Date(move.at).toLocaleString()}
+            </span>
+            <span className="min-w-0">
+              <span className="font-medium">
+                {projectName(state.projects, move.projectId)}
+              </span>
+              : {move.from} → {move.to}
+              <span className="text-muted-foreground"> · {move.reason}</span>
+            </span>
+          </li>
+        ))}
+      </ol>
+      {moves.length > HISTORY_SHOWN ? (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="mt-1"
+          onClick={() => setAll(!all)}
+        >
+          {all ? "Show fewer" : `Show all ${moves.length}`}
+        </Button>
+      ) : null}
     </div>
   );
 }
@@ -419,8 +665,7 @@ function usageLine(
       preferredModel !== "" &&
       name.toLowerCase() === preferredModel.toLowerCase(),
   );
-  if (model !== undefined)
-    parts.push(`${model[0]} ${pct(model[1])}`);
+  if (model !== undefined) parts.push(`${model[0]} ${pct(model[1])}`);
   return parts.join(" · ") + (failed ? " (last query failed)" : "");
 }
 
@@ -476,6 +721,12 @@ function ThreadAccountMenu({
   const status = headerStatus(state, projectId, now);
   if (status === null) return null;
   const name = status.account ?? "unknown account";
+  // The pace of the window that decides for this account, when it is known.
+  const picked =
+    status.account === null
+      ? null
+      : windowForecast(state.forecasts, status.account, state.preferredModel);
+  const pace = picked === null ? null : forecastLine(picked[1], now);
   const toValue = (account: string) =>
     account === state.defaultAccountName ? null : account;
   return (
@@ -492,7 +743,10 @@ function ThreadAccountMenu({
         >
           <span
             aria-hidden
-            className={cn("size-2 shrink-0 rounded-full", TONE_DOT[status.tone])}
+            className={cn(
+              "size-2 shrink-0 rounded-full",
+              TONE_DOT[status.tone],
+            )}
           />
           {isCompactViewport ? null : (
             <span className="max-w-32 truncate">{name}</span>
@@ -517,12 +771,19 @@ function ThreadAccountMenu({
         <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
           Claude account for this project, used by all its threads from their
           next turn
+          {picked === null || pace === null ? null : (
+            <span className="block text-foreground">
+              {picked[0] === "weekly" ? "Weekly" : picked[0]}: {pace}
+            </span>
+          )}
         </DropdownMenuLabel>
         {status.canSwitch && status.best !== null ? (
           <>
             <DropdownMenuItem
               disabled={busy}
-              onSelect={() => setProjectAccount(projectId, toValue(status.best!))}
+              onSelect={() =>
+                setProjectAccount(projectId, toValue(status.best!))
+              }
             >
               <Icon name="Repeat" className="size-3.5" />
               Switch now to {status.best}
