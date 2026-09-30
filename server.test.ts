@@ -2917,6 +2917,19 @@ describe("the forecast of each window", () => {
     });
   });
 
+  it("starts the history with the last switch an earlier version stored", async () => {
+    const last = { at: NOW - HOUR, threadId: "t", projectId: "proj-1", from: "main", to: "spare", reason: "Switched to spare" };
+    const h = await host(ALL_FREE, { kvPreset: { "last-switch": last } });
+    dispose = () => h.harness.dispose();
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history).toEqual([last]);
+    // Only while there is no history: an empty one stored by this version stays empty.
+    const own = await host(ALL_FREE, { kvPreset: { "last-switch": last, "switch-history": [] } });
+    const later = (await own.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(later.history).toEqual([]);
+    own.harness.dispose();
+  });
+
   it("keeps what it can read of the stored samples and of the stored history", async () => {
     const h = await host(
       { ...ALL_FREE, main: () => Response.json(payload(10, 70)) },
@@ -3102,6 +3115,36 @@ describe("moving a project ahead of the limit, after a turn", () => {
     expect(h.usageCalls.slice(before).sort()).toEqual(["main", "spare", "work"]);
   });
 
+  it("keeps the usage samples when a measurement lands while the accounts are being looked up again", async () => {
+    let clock = NOW;
+    let gated = false;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const answer = () => Response.json(payload(10, 40, 50));
+    // The fake fetch awaits what this returns: the answer can be held back.
+    const main = () => (gated ? gate.then(answer) : answer()) as Response;
+    const h = await host(
+      { ...AHEAD, main },
+      { settings: { switchAheadPercent: 90, preferredModel: "Fable" }, clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const before = await h.bb.storage.kv.get("usage-series");
+    expect(Object.keys(before as object).sort()).toEqual(["main", "spare", "work"]);
+    gated = true;
+    clock = NOW + 5 * 60_000;
+    const pending = idle(h);
+    await new Promise((r) => setTimeout(r, 5));
+    // A change of the accounts directory empties the list until the next look.
+    await h.harness.behavior.setSettings({ accountsDir: "/Users/someone/elsewhere" });
+    release();
+    await pending;
+    const after = (await h.bb.storage.kv.get("usage-series")) as object;
+    expect(Object.keys(after).sort()).toEqual(["main", "spare", "work"]);
+  });
+
   it("leaves the project when no other account has room, when automatic choice is off, and when the variable is external", async () => {
     const tight = {
       main: () => Response.json(payload(10, 40, 92)),
@@ -3197,7 +3240,10 @@ describe("adding an account by logging in from bb", () => {
 
   it("says so when the login ended but left no account, or no login", async () => {
     let dirs = ["spare", "work"];
-    const h = await host(ALL_FREE, { dirs: () => dirs });
+    let teamIn = false;
+    const team = () =>
+      teamIn ? Response.json(payload(0, 5, 0)) : new Response(null, { status: 401 });
+    const h = await host({ ...ALL_FREE, team }, { dirs: () => dirs });
     dispose = () => h.harness.dispose();
     await h.harness.behavior.callRpc("accounts_refresh", null);
     // Claude Code exits 0, and nothing is in the directory.
@@ -3221,6 +3267,39 @@ describe("adding an account by logging in from bb", () => {
     state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
     expect(state.login).toMatchObject({ name: "nologin", phase: "done" });
     expect(state.login?.message).toMatch(/still has no login/);
+    // A login that leaves what it should carries no note of the ones before.
+    await h.harness.behavior.callRpc("account_login_cancel", null);
+    h.files[`${ACCOUNTS}/team/.claude.json`] = claudeJson("team@example.com", "uuid-team");
+    dirs = ["nologin", "spare", "team", "work"];
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    teamIn = true;
+    await h.harness.behavior.callRpc("account_login_start", { name: "team" });
+    h.logins[2]!.exit(0);
+    await tick();
+    await tick();
+    state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.login).toMatchObject({ name: "team", phase: "done", message: null });
+  });
+
+  it("says so when the account could not be checked after its login", async () => {
+    let broken = false;
+    const h = await host(ALL_FREE, {
+      dirs: () => {
+        if (broken) throw new Error("EACCES: the accounts directory");
+        return ["spare", "work"];
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.callRpc("account_login_start", { name: "team" });
+    broken = true;
+    h.logins[0]!.exit(0);
+    await tick();
+    await tick();
+    broken = false;
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.login).toMatchObject({ name: "team", phase: "done" });
+    expect(state.login?.message).toMatch(/could not be checked.*EACCES/);
   });
 
   it("says so when the new account is the Claude account of another one", async () => {
@@ -3283,7 +3362,7 @@ describe("adding an account by logging in from bb", () => {
     await h.harness.behavior.callRpc("accounts_refresh", null);
     for (const name of ["", "../x", "a/b", ".hidden", "with space", "x".repeat(65)])
       await expect(h.harness.behavior.callRpc("account_login_start", { name })).rejects.toThrow(
-        /letters, digits/,
+        /starts with a letter or a digit/,
       );
     await expect(h.harness.behavior.callRpc("account_login_start", { name: "default" })).rejects.toThrow(
       /names the default account/,

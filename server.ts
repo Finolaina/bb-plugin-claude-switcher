@@ -38,7 +38,11 @@ import {
   type Series,
 } from "./src/forecast.js";
 import type { CredentialIo } from "./src/credentials.js";
-import { LoginFlow, type LoginIo } from "./src/login.js";
+import {
+  LoginFlow,
+  type LoginIo,
+  type LoginStatus,
+} from "./src/login.js";
 import {
   loginHelperPath,
   nodeAccountsIo,
@@ -288,7 +292,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       type: "number",
       label: "Switch ahead of the limit at (%)",
       description:
-        "After each turn, when the project's account is at or above this share of its session, weekly or preferred-model window and another account is below it, the project moves there before a turn fails. 0 = off (switch only when a turn fails).",
+        "After each turn, when the project's account is at or above this share of its session, weekly or preferred-model window and another account is below it, the project moves there before a turn fails. Needs the automatic choice above. 0 = off (switch only when a turn fails).",
       default: 0,
     },
     maximumWaitHours: {
@@ -314,7 +318,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     loginPrivateWindow: {
       type: "boolean",
       label:
-        "Open logins in a private Chrome window (so they do not reuse the browser's Claude session)",
+        "Open logins in a private Chrome window on macOS (so they do not reuse the browser's Claude session)",
       default: true,
     },
   });
@@ -401,7 +405,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   try {
     // Record by record: one that cannot be read does not take the rest along.
     const stored = await bb.storage.kv.get<unknown>(KV_HISTORY);
-    const records = Array.isArray(stored) ? stored : [];
+    // No history yet: a version before it kept only the last switch.
+    const records = Array.isArray(stored)
+      ? stored
+      : stored == null
+        ? [await bb.storage.kv.get<unknown>(KV_LAST_SWITCH)].filter(
+            (record) => record != null,
+          )
+        : [];
     history = records
       .flatMap((record) => {
         const parsed = switchRecordSchema.safeParse(record);
@@ -447,6 +458,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * each model's) and drop the accounts that are gone. One write per pass.
    */
   function recordSamples(): Promise<void> {
+    // No account found (an unreadable home, a directory being changed) is
+    // not every account removed: the samples wait.
+    if (accounts.length === 0) return seriesWrites;
     const next: Record<string, Record<string, Series>> = {};
     for (const account of accounts) {
       const m = collector.get(account.name);
@@ -499,19 +513,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
   // ---- Login from bb -------------------------------------------------------
   /** What the check after a finished login found, shown with its status. */
-  let loginNote: { name: string; startedAt: number; text: string } | null =
-    null;
+  let loginNote: { of: LoginStatus; text: string } | null = null;
   function loginStatus(): State["login"] {
     const status = login.status();
-    if (
-      status === null ||
-      status.phase !== "done" ||
-      loginNote === null ||
-      loginNote.name !== status.name ||
-      loginNote.startedAt !== status.startedAt
-    )
-      return status;
-    return { ...status, message: loginNote.text };
+    // The note of the very login on show: each end is its own status object.
+    return status !== null && loginNote?.of === status
+      ? { ...status, message: loginNote.text }
+      : status;
   }
   const login = new LoginFlow(deps.loginIo, {
     command: () => current.claudeCommand.trim() || "claude",
@@ -560,13 +568,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                   ? `logged in to the same Claude account as ${twin.name}: the two share one usage. Log in again and pick another account in the browser`
                   : null;
           if (text !== null) {
-            loginNote = { name: status.name, startedAt: status.startedAt, text };
+            loginNote = { of: status, text };
             bb.log.warn(`login of ${status.name}: ${text}`);
           }
         } catch (error) {
-          bb.log.warn(
-            `could not measure ${status.name} after its login: ${error instanceof Error ? error.message : String(error)}`,
-          );
+          const text = `the account could not be checked after its login: ${error instanceof Error ? error.message : String(error)}`;
+          loginNote = { of: status, text };
+          bb.log.warn(`login of ${status.name}: ${text}`);
         }
         bb.realtime.publish(CHANGED, { at: deps.now() });
       })();
@@ -591,7 +599,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // From here the name becomes a new directory: a trust boundary.
     if (!ACCOUNT_NAME.test(name))
       throw new Error(
-        "an account name is letters, digits, dots, dashes or underscores (up to 64), not starting with a dot",
+        "an account name starts with a letter or a digit and goes on with letters, digits, dots, dashes or underscores (up to 64)",
       );
     if (name === "default" && name !== current.defaultAccountName)
       throw new Error(
@@ -830,6 +838,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       const fromName = from.account ?? current.defaultAccountName;
       const toName = to?.name ?? current.defaultAccountName;
       if (toName === fromName) return;
+      bb.log.info(
+        `project ${projectId}: picked by hand, ${fromName} → ${toName}`,
+      );
       await addHistory({
         at: deps.now(),
         threadId: "",
@@ -902,7 +913,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     },
     async account_login_start({ name }) {
       const target = await loginTarget(name);
-      loginNote = null;
       const shareFrom = `${deps.accountsIo.home.replace(/\/+$/, "")}/.claude`;
       await login.start({ ...target, shareFrom }, {
         ...deps.env,
@@ -1248,10 +1258,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       now: deps.now(),
     });
     if (decision.kind === "keep") return;
-    const latest = await projectAccount(projectId);
-    if (!sameAccount(from, latest)) return;
     const now = deps.now();
-    await applyAccount(projectId, accountOrDefault(decision.account), latest);
+    await applyAccount(projectId, accountOrDefault(decision.account), from);
     await markHandled(projectId);
     const reason = `Switched ahead of the limit to ${decision.account}: ${fromName} at ${Math.round(decision.used)}% of ${decision.window}`;
     bb.log.info(`thread ${thread.id}: ${reason}`);
