@@ -11,20 +11,23 @@ project uses [Semantic Versioning](https://semver.org/).
 - **Add an account from bb.** Settings has an **Add account** form, and a
   **Log in** button on every account without a login. Both run Claude
   Code's own `claude auth login` for the account's directory and open the
-  consent page in a private Chrome window, so the login does not reuse the
-  browser's Claude session (the default browser when Chrome is missing or
-  `loginPrivateWindow` is off). The account is measured when the login
+  consent page in a private Chrome window on macOS, so the login does not
+  reuse the browser's Claude session (the default browser when Chrome is
+  missing, when `loginPrivateWindow` is off, and on Linux). The account is measured when the login
   ends, and the section says when the login left no account, no login, or
   the Claude account of another directory. While it runs, the section
   shows a link to the login page and a field for the code that page
   gives, for when no window opens. One login at a time, given up after 10
-  minutes and stopped with the plugin. A new name that matches an account
-  or a directory ignoring case, or that is a link, is refused. A directory the plugin creates links
+  minutes and stopped with the plugin. A new name that differs only in
+  case from an account or a directory, or that is a link or a file, is
+  refused. The login does not inherit credentials from bb's environment.
+  A directory the plugin creates links
   `projects`, `settings.json`, `hooks`, `CLAUDE.md`, `plugins`, `skills`,
   `agents`, `commands` and `rules` from `~/.claude` (those that exist), so
   threads can move to the new account; a directory that already existed is
   left as it is. New settings: `claudeCommand` and `loginPrivateWindow`.
-- **Switch ahead of the limit** (opt-in: `switchAheadPercent`, 0 = off).
+- **Switch ahead of the limit** (opt-in: `switchAheadPercent`, 0 = off;
+  needs `autoSwitch`).
   When a turn ends with the project's account at or above that share of
   its session, weekly or preferred-model window, and another account is
   below it in all three, the project moves there. No turn is interrupted
@@ -33,14 +36,16 @@ project uses [Semantic Versioning](https://semver.org/).
   the forecast.
 - **A forecast per weekly window.** Under each weekly and per-model window
   in Settings, in the thread header menu and in `list`: when the window
-  runs out at the average pace since the plugin first measured it, or
+  runs out at the average pace since the plugin first measured the
+  current window, or
   that it lasts until its reset. It needs two hours between that first
   measurement and the latest (both kept in the plugin's storage) and says
   nothing under one point a day.
 - **History of moves.** Every move of a project (after a failed turn, when
   a thread is created, ahead of the limit or picked by hand) with its
   time, accounts and reason: the last 100, in Settings and with
-  `bb claude-switcher history [--json]`. `release` is not recorded.
+  `bb claude-switcher history [--json]`. `release` is not recorded. It
+  starts with the last switch 0.2.3 had stored.
 
 ### Changed
 

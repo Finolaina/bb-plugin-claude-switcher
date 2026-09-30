@@ -122,7 +122,8 @@ public SDK surfaces, and never touches a `CLAUDE_CONFIG_DIR` it did not set.
 ### 🔮 A forecast per window
 
 Under each weekly window: when it runs out at the pace you have used it
-since the plugin first measured it, or that it lasts until its reset. Also in the thread
+since the plugin first measured the current window, or that it lasts
+until its reset. Also in the thread
 header menu and in `list`.
 
 </td>
@@ -132,7 +133,7 @@ header menu and in `list`.
 
 Opt-in. Set a percentage and, when a turn ends with the project's account
 at or above it, the project moves to an account below it, so the next
-turn does not fail first.
+turn does not fail first. Needs the automatic choice on.
 
 </td>
 </tr>
@@ -143,7 +144,8 @@ turn does not fail first.
 
 **Add account** in Settings creates the account's directory, shares your
 transcripts and configuration with it and runs Claude Code's own login in
-a private browser window. No terminal.
+a private Chrome window (macOS; the default browser elsewhere). No
+terminal.
 
 </td>
 <td valign="top">
@@ -217,10 +219,10 @@ contains a `.claude.json`.
 and the plugin creates `<accounts directory>/<name>`, links what a thread
 needs from `~/.claude` into it (the entries of step 1 below that exist
 there, plus `skills`, `agents`, `commands` and `rules`) and runs
-`claude auth login` for that directory. The login page opens in a private
-Chrome window, so it does not reuse the Claude session of your browser
-(your default browser when Chrome is not installed, or when
-`loginPrivateWindow` is off). Approve it there and the account appears
+`claude auth login` for that directory. On macOS the login page opens in
+a private Chrome window, so it does not reuse the Claude session of your
+browser (your default browser when Chrome is not installed, when
+`loginPrivateWindow` is off, and always on Linux). Approve it there and the account appears
 with its usage. While the login runs, the section shows a link to the
 login page and a field for the code that page gives you, for when no
 window opens. When it ends, the section says if something is off: no
@@ -318,7 +320,8 @@ flowchart TD
   [Setting up extra accounts](#setting-up-extra-accounts). A project you
   pinned by hand (the default account included) stays put while its
   account works.
-- **When a turn ends (opt-in).** With `switchAheadPercent` above 0, the
+- **When a turn ends (opt-in).** With `switchAheadPercent` above 0 and
+  `autoSwitch` on, the
   plugin measures the project's account when a turn of one of its threads
   ends. If its session, weekly or preferred-model window is at or above
   that percentage and another account is below it in all three, the
@@ -503,17 +506,21 @@ executable (`claude auth login`) as a child process of bb's server.
   default browser. The consent address goes from the CLI to that script
   and is never logged or stored. The second address the CLI prints, for when no window
   opens, is kept in memory while the login runs, shown in Settings and
-  included in `list --json`; it is dropped when you dismiss the login.
+  included in `list --json` and `refresh --json`; it is dropped when you
+  dismiss the login. The login does not inherit an API key or OAuth token
+  from bb's environment (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+  `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`).
   Anything typed in the code field goes to the CLI's standard input and
   nowhere else. One login at a time, given up after 10 minutes and
   stopped when the plugin is reloaded or disabled. A new account's name
-  that matches an existing account or directory ignoring case, or that
-  is a link in the accounts directory, is refused.
+  that differs only in case from an existing account or directory, or
+  that is a link or a file in the accounts directory, is refused.
 - A directory the plugin creates for a new account (mode 0700) gets
   symbolic links to `projects`, `settings.json`, `hooks`, `CLAUDE.md`,
   `plugins`, `skills`, `agents`, `commands` and `rules` of `~/.claude`,
-  for those that exist. The name is one path segment of letters, digits,
-  dots, dashes and underscores. A directory that already existed is not
+  for those that exist. The name is one path segment that starts with a
+  letter or a digit and goes on with letters, digits, dots, dashes and
+  underscores. A directory that already existed is not
   changed.
 - Like every bb plugin, it is full-trust code running in bb's server
   process. See [SECURITY.md](SECURITY.md) to report a vulnerability.
@@ -552,7 +559,7 @@ named `default`; the default account's own name always works.
 | `refreshMinutes`     | `5`                  | Background usage refresh interval (never below 1).                                                                                                        |
 | `switchAheadPercent` | `0` (off)            | When a turn ends with the project's account at or above this share of its session, weekly or preferred-model window, move the project to an account below it. Needs `autoSwitch`. |
 | `claudeCommand`      | `claude`             | The Claude Code executable used to log an account in from bb: a name looked up in the `PATH` of bb's server, or a full path.                              |
-| `loginPrivateWindow` | `true`               | Open logins in a private Chrome window, so they do not reuse the browser's Claude session. Off, or without Chrome: the default browser.                   |
+| `loginPrivateWindow` | `true`               | macOS: open logins in a private Chrome window, so they do not reuse the browser's Claude session. Off, without Chrome, or on Linux: the default browser. |
 
 The accounts are read again whenever you pick one (`use`, the picker) and
 when a thread is created, so a new account directory or a changed
@@ -611,8 +618,8 @@ Coming from `claude-accounts` 0.1.x? See the upgrade note in
   default browser answers with the Claude account it already has
   (Settings says so when the login ends on the account of another
   directory). Cancel or dismiss,
-  sign out of claude.ai in that browser (or install Chrome and turn
-  `loginPrivateWindow` on) and press **Log in** again.
+  sign out of claude.ai in that browser (or, on macOS, install Chrome and
+  turn `loginPrivateWindow` on) and press **Log in** again.
 - **No forecast under a window.** It needs two hours of samples within
   the current window, and says nothing while the window grows less than
   one point a day.

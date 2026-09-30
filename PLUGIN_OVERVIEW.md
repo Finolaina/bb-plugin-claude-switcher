@@ -24,12 +24,13 @@ limit.
   a menu to switch now to the best account or to any other.
 - **Switch ahead of the limit, if you want.** Set a percentage and, when
   a turn ends with the project's account at or above it, the project moves
-  to an account below it before the next turn fails. Off by default.
+  to an account below it before the next turn fails. Off by default;
+  needs the automatic choice on.
 - **A forecast per window.** When each weekly window runs out at the pace
   you have used it, or that it lasts until its reset.
 - **Add an account from bb.** Type a name in Settings: the plugin creates
   the directory, shares your transcripts and configuration with it and
-  runs Claude Code's own login in a private browser window.
+  runs Claude Code's own login, in a private Chrome window on macOS.
 - **A history of moves.** Every move of a project, automatic or by hand,
   with its reason.
 - **A picker per project.** In Settings, choose which account each project

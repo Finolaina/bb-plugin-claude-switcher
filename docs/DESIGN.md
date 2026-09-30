@@ -207,8 +207,9 @@ the window and the latest, which is all the forecast reads. It starts
 over when the window's reset moves by five minutes or more (the provider
 answers one reset with another fraction of a second at each query) or
 its share falls; a window without a reset keeps one point and has no
-forecast. The series live in the plugin's key-value storage, so a restart
-keeps them; they are read account by account, and one that cannot be read
+forecast. Samples are not pruned while the list of accounts is empty (a
+changed accounts directory, before the next look). The series live in
+the plugin's key-value storage, so a restart keeps them; they are read account by account, and one that cannot be read
 starts again.
 
 The forecast is the average pace from the first sample of the window to
@@ -232,15 +233,18 @@ account still has no login, or its Claude account is the one of another
 directory (the browser answered with the session it had).
 
 - **The name is a trust boundary.** It becomes a directory under the
-  accounts directory: one segment of letters, digits, dots, dashes and
-  underscores, not starting with a dot, 64 characters at most. `default`
+  accounts directory: one segment that starts with a letter or a digit
+  and goes on with letters, digits, dots, dashes and underscores, 64
+  characters at most. `default`
   is refused when it is only the alias of the default account. An account
   that already has a login is refused: its store would be overwritten
   while a thread may be using it. On a disk that ignores case `Team` is
   the directory of `team`, and a link under the accounts directory leads
-  elsewhere: a new name that matches an account or an entry of the
-  accounts directory ignoring case, or an entry that is not a real
-  directory, is refused. A listed account without a login logs in under
+  elsewhere: a new name that matches an account ignoring case, that
+  differs only in case from an entry of the accounts directory, or whose
+  entry there is not a real directory, is refused. A real directory of
+  that exact name without an account in it (what a cancelled login
+  leaves) is taken as it is, with nothing linked into it. A listed account without a login logs in under
   the name its directory has, whatever it is.
 - **A private window.** The helper opens Chrome with `--incognito`, so
   the consent page asks which Claude account to use instead of taking the
@@ -252,7 +256,15 @@ directory (the browser answered with the session it had).
   address (always printed, for when no window opens) and the prompt
   for a code; a failure message has every address replaced by `<url>`.
 - **One login at a time**, given up after 10 minutes, cancellable, and
-  stopped when the plugin is reloaded, disabled or bb shuts down.
+  stopped when the plugin is reloaded, disabled or bb shuts down. The
+  process is killed before the end is reported.
+- **No inherited credentials.** `ANTHROPIC_API_KEY`,
+  `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` and
+  `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` of bb's environment are not passed
+  on: the login is for another account.
+- **The helper clears `BROWSER`.** On a Linux without a known desktop
+  `xdg-open` runs `$BROWSER`, which is the helper itself; it unsets the
+  variable before handing the address over.
 - **A new directory shares `~/.claude`.** When the plugin creates the
   directory it links `projects`, `settings.json`, `hooks`, `CLAUDE.md`,
   `plugins`, `skills`, `agents`, `commands` and `rules` from `~/.claude`,
@@ -267,7 +279,8 @@ limit, and a pick by hand (`Picked by hand`, only when the account
 changes). The last 100 are kept in key-value storage, latest first, and
 written in order so a slow write never replaces a later list; they are
 read record by record. `release` is not recorded: it runs before an
-uninstall.
+uninstall. With no history stored yet, it starts with the last switch a
+version before 0.2.4 kept.
 
 ## Leftover threads: the 60-second grace window
 
@@ -353,6 +366,13 @@ The refresh token rotates on every refresh, so the plugin:
 - **A locked account under the percentage is not moved ahead.** The move
   ahead reads the used shares only; an account the provider locked below
   the percentage is switched by its next failed turn, as before.
+- **A login reads "logged in" while it is checked.** The check of what
+  the login left (the account, its login, whose Claude account it is)
+  measures the account, which takes seconds; its note replaces "logged
+  in" when it ends.
+- **A clock set back delays the move ahead.** The minute between
+  questions to the provider is counted from the last one; after a jump
+  back, the periodic refresh still measures.
 - **A cancelled login leaves its directory.** Claude Code writes a
   `.claude.json` there as it starts, so the name stays listed as an
   account without a login; log it in later or delete the directory.
