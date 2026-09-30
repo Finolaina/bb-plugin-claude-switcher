@@ -2889,6 +2889,34 @@ describe("the forecast of each window", () => {
     again.harness.dispose();
   });
 
+  it("keeps measuring the same window when its reset comes with another fraction of a second", async () => {
+    // Measured on 2026-09-30: two queries in a row gave resets 0.6 s apart.
+    let clock = NOW;
+    let weekly = 40;
+    let jitter = 612;
+    const main = () => {
+      const body = payload(10, weekly) as { limits: { resets_at: string }[] };
+      body.limits[1]!.resets_at = new Date(NOW + 3 * 24 * HOUR + jitter).toISOString();
+      return Response.json(body);
+    };
+    const h = await host({ ...ALL_FREE, main }, { clock: () => clock });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + 12 * HOUR;
+    weekly = 55;
+    jitter = -377;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + 24 * HOUR;
+    weekly = 70;
+    jitter = 45;
+    const state = (await h.harness.behavior.callRpc("accounts_refresh", null)) as State;
+    expect(state.forecasts.main?.weekly).toEqual({
+      kind: "runs-out",
+      at: NOW + 48 * HOUR,
+      percentPerDay: 30,
+    });
+  });
+
   it("forgets the samples of an account that is gone", async () => {
     let dirs = ["spare", "work"];
     let clock = NOW;

@@ -1,10 +1,10 @@
 // Pace of a usage window and when it runs out at that pace.
 //
 // One series per window (the weekly window, each model's window) holds the
-// samples taken inside the CURRENT window: a new reset starts a new series.
-// The forecast is the average pace since the first sample of the window
-// ("at this pace"): plain and explainable, and a quiet night does not hide a
-// busy week the way a short-term slope would.
+// first sample taken inside the CURRENT window and the latest one: a new
+// reset starts a new series. The forecast is the average pace between the
+// two ("at this pace"): plain and explainable, and a quiet night does not
+// hide a busy week the way a short-term slope would.
 
 export interface Sample {
   at: number;
@@ -15,7 +15,7 @@ export interface Sample {
 export interface Series {
   /** The window's reset; null when the provider gave none (no forecast then). */
   resetsAt: number | null;
-  /** [at, usedPercent], oldest first. */
+  /** [at, usedPercent]: the first sample of the window and, after it, the latest. */
   points: [number, number][];
 }
 
@@ -31,8 +31,12 @@ export type Forecast =
 
 /** Below this span the pace is guesswork. */
 export const MIN_SPAN_MS = 2 * 3_600_000;
-/** Samples closer than this to the previous one are folded into it. */
-export const SAMPLE_SPACING_MS = 30 * 60_000;
+/**
+ * Two resets closer than this are the same window: the provider answers
+ * one reset with a different fraction of a second at each query, and no
+ * window is this short.
+ */
+export const SAME_RESET_MS = 5 * 60_000;
 /** Under this pace (points per day) the window counts as idle. */
 const STEADY_PER_DAY = 1;
 const DAY_MS = 24 * 3_600_000;
@@ -65,28 +69,31 @@ export function forecastWindow(
 
 /**
  * The series with `sample` added: a new window (another reset, or the used
- * share fell, which only a reset does) starts a fresh series; a sample too
- * close to the previous one replaces it, so a busy hour costs no storage.
+ * share fell, which only a reset does) starts a fresh series; otherwise the
+ * sample replaces the latest one, so a series never grows past two points.
+ * Without a reset there is no window to follow: one point, no forecast.
  */
 export function recordSample(
   series: Series | undefined,
   sample: Sample,
 ): Series {
+  const first = series?.points[0];
   const last = series?.points[series.points.length - 1];
   if (
     series === undefined ||
+    first === undefined ||
     last === undefined ||
-    series.resetsAt !== sample.resetsAt ||
+    series.resetsAt === null ||
+    sample.resetsAt === null ||
+    Math.abs(series.resetsAt - sample.resetsAt) >= SAME_RESET_MS ||
     sample.usedPercent < last[1]
   )
     return {
       resetsAt: sample.resetsAt,
       points: [[sample.at, sample.usedPercent]],
     };
-  const points = series.points.slice();
-  const previous = points[points.length - 2];
-  if (previous !== undefined && sample.at - previous[0] < SAMPLE_SPACING_MS)
-    points.pop();
-  points.push([sample.at, sample.usedPercent]);
-  return { resetsAt: series.resetsAt, points };
+  return {
+    resetsAt: sample.resetsAt,
+    points: [first, [sample.at, sample.usedPercent]],
+  };
 }
