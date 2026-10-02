@@ -21,7 +21,8 @@ project uses [Semantic Versioning](https://semver.org/).
   view listed again on the same event. On 2026-10-02 bb's server stalled
   over half a second 556 times in 3 h, with this list in flight in about
   140 of them. The views now share one read for 30 s; a change made by the
-  plugin drops it, one made in bb's own settings shows within that time.
+  plugin, or in the accounts it finds, drops it; one made in bb's own
+  settings shows within that time.
   The Refresh button, the account menu, logins and the CLI still read
   fresh, and decisions still read each project directly.
 - **A retry refused because a newer turn replaced the failed one is not an
