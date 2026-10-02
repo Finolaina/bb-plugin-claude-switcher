@@ -357,6 +357,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const at = refusedAt.get(name);
     return at !== undefined && deps.now() - at < REFUSAL_MS;
   }
+  /** Why a project moves off `name` before a turn, for the history. */
+  function whyOut(name: string, model: string): string {
+    if (refusing(name)) return "refused a turn";
+    return model === "" ? "is out of usage" : `cannot run ${model}`;
+  }
   /** Switches applied per project, for the grace window after each one. */
   const recentSwitches = new Map<
     string,
@@ -1242,7 +1247,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const reason =
       decision.why === "new-project"
         ? `New project placed on account ${decision.account}${current.preferredModel === "" ? "" : ` (${current.preferredModel})`}`
-        : `Moved to account ${decision.account} before the turn: ${fromName} ${current.preferredModel === "" ? "is out of usage" : `cannot run ${current.preferredModel}`}`;
+        : `Moved to account ${decision.account} before the turn: ${fromName} ${whyOut(fromName, current.preferredModel)}`;
     bb.log.info(`thread ${thread.id}: ${reason}`);
     await recordMove(
       {
@@ -1443,7 +1448,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (decision.kind === "keep" || turn.abandoned) return;
     await applyAccount(projectId, accountOrDefault(decision.account), from);
     await markHandled(projectId);
-    const reason = `Moved to account ${decision.account} before the turn: ${fromName} cannot run ${model}`;
+    const reason = `Moved to account ${decision.account} before the turn: ${fromName} ${whyOut(fromName, model)}`;
     bb.log.info(`thread ${thread.id}: ${reason}`);
     await recordMove(
       {

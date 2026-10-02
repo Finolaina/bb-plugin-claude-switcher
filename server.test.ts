@@ -4167,6 +4167,62 @@ describe("an account that refuses the turn", () => {
     ]);
   });
 
+  it("says the account refused when it moves a project off it before a turn", async () => {
+    const h = await host(MAIN_BEST);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", refused());
+    const lastReason = async () =>
+      (
+        (await h.harness.behavior.callRpc("accounts_list", null)) as State
+      ).lastSwitch?.reason;
+    await h.harness.behavior.emitThreadEvent(
+      "thread.created",
+      created("thr-2", "proj-2"),
+    );
+    expect(await lastReason()).toBe(
+      "Moved to account work before the turn: main refused a turn",
+    );
+    // Put back on main by hand, and sent with a model: the same reason.
+    await h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-2",
+      account: "main",
+    });
+    await h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: "thr-2", projectId: "proj-2" }),
+        requestedExecution: { providerId: "claude-code", model: "claude-opus-5-5" },
+        attempt: "start-turn",
+      }),
+    );
+    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-2", value: `${ACCOUNTS}/work` });
+    expect(await lastReason()).toBe(
+      "Moved to account work before the turn: main refused a turn",
+    );
+  });
+
+  it("sets no account aside for a refusal it does not act on: automatic switching off, or a variable set outside the plugin", async () => {
+    const h = await host(MAIN_BEST, {
+      settings: { autoSwitch: false },
+      presetEnv: {
+        "proj-2": [{ name: ENV_VAR, note: null, secret: true, value: null }],
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", refused());
+    await h.harness.behavior.setSettings({ autoSwitch: true });
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      refused({ threadId: "thr-2" }),
+    );
+    expect(h.retries).toEqual([]);
+    // main is still the best account: a new project stays on it.
+    await h.harness.behavior.emitThreadEvent(
+      "thread.created",
+      created("thr-new", "proj-3"),
+    );
+    expect(h.envSet).toEqual([]);
+  });
+
   it("leaves alone a refusal in a thread of another provider: nothing else says whose it was", async () => {
     const h = await host(MAIN_BEST, {
       threads: { "thread-1": { providerId: "codex" } },
