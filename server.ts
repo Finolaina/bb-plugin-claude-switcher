@@ -727,6 +727,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     });
     // A measurement of an account that is gone must never be chosen.
     collector.prune(accounts);
+    // Which account a project's note names depends on the accounts found.
+    projectsRead = null;
     return accounts;
   }
 

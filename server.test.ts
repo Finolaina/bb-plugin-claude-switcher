@@ -311,6 +311,8 @@ interface HostOptions {
   projectCreatedAt?: Record<string, number>;
   /** setMachineEnvironmentVariable throws for these projects. */
   failSet?: string[];
+  /** Runs as each setMachineEnvironmentVariable starts, before it lands. */
+  beforeSet?: () => Promise<unknown>;
   /** machineEnvironment throws for these projects (a bb hiccup), or never answers. */
   failEnvRead?: string[];
   hangEnvRead?: string[];
@@ -493,6 +495,7 @@ async function host(
               : NOW + 1_000),
         }),
         setMachineEnvironmentVariable: async (args: EnvCall) => {
+          await options.beforeSet?.();
           if (options.failSet?.includes(args.projectId)) {
             throw new Error(`HTTP 503: could not set on ${args.projectId}`);
           }
@@ -2281,6 +2284,87 @@ describe("placement: the cases the first review found", () => {
     await expect(list()).rejects.toThrow(/503/);
     fail = false;
     expect(proj1(await list())).toMatchObject({ account: null, owned: false });
+  });
+
+  it("a list after the accounts change names each project's account by the new set, not by the shared read", async () => {
+    let dirs = ["work"];
+    const h = await host(ALL_FREE, {
+      dirs: () => dirs,
+      presetEnv: {
+        "proj-1": [
+          { name: ENV_VAR, note: ownNote("spare"), secret: true, value: null },
+        ],
+      },
+    });
+    dispose = () => h.harness.dispose();
+    const list = () =>
+      h.harness.behavior.callRpc("accounts_list", null) as Promise<State>;
+    const proj1 = (state: State) => state.projects.find((p) => p.id === "proj-1");
+    // spare is not found yet: its project shows no known account.
+    expect(proj1(await list())).toMatchObject({ account: null, owned: true });
+    // Its directory appears (a login); the periodic refresh finds it.
+    dirs = ["work", "spare"];
+    const run = h.harness.behavior.runService("usage-refresh");
+    await vi.waitFor(() => {
+      expect(h.usageCalls).toContain("spare");
+    });
+    run.controller.abort();
+    await run.done;
+    expect(proj1(await list())).toMatchObject({ account: "spare", owned: true });
+  });
+
+  it("a list after a switch made here shows it, even while an older read is still under way", async () => {
+    const h = await host(ALL_FREE);
+    dispose = () => h.harness.dispose();
+    const list = () =>
+      h.harness.behavior.callRpc("accounts_list", null) as Promise<State>;
+    const proj1 = (state: State) => state.projects.find((p) => p.id === "proj-1");
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let holding = true;
+    // Like bb: a read answers with what was there when it started.
+    h.harness.sdk.stub(
+      "projects.machineEnvironment",
+      async ({ projectId }: { projectId: string }) => {
+        const snapshot = {
+          builtInGit: { status: "disabled" as const, statusMessage: "" },
+          inheritedVariables: [],
+          variables: [...(h.env.get(projectId) ?? [])],
+        };
+        if (holding) await held;
+        return snapshot;
+      },
+    );
+    const older = list();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    holding = false;
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-1"]);
+    expect(proj1(await list())).toMatchObject({ account: "work", owned: true });
+    release();
+    // The older read answers its own caller, and is not what is shared after.
+    expect(proj1(await older)).toMatchObject({ account: null, owned: false });
+    expect(proj1(await list())).toMatchObject({ account: "work", owned: true });
+  });
+
+  it("a list after a switch made here shows it, even when a view listed while the switch was being written", async () => {
+    let duringWrite: () => Promise<unknown> = async () => {};
+    const h = await host(ALL_FREE, { beforeSet: () => duringWrite() });
+    dispose = () => h.harness.dispose();
+    const list = () =>
+      h.harness.behavior.callRpc("accounts_list", null) as Promise<State>;
+    const proj1 = (state: State) => state.projects.find((p) => p.id === "proj-1");
+    let listedDuring: State | undefined;
+    duringWrite = async () => {
+      listedDuring = await list();
+    };
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-1"]);
+    // The view that listed mid-write saw the old account; the next list shows the switch.
+    expect(listedDuring && proj1(listedDuring)).toMatchObject({ account: null, owned: false });
+    expect(proj1(await list())).toMatchObject({ account: "work", owned: true });
   });
 
   it("treats every project created before the plugin was first installed as known, and survives garbage in storage", async () => {
