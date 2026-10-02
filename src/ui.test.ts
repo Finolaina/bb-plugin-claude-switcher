@@ -4,6 +4,7 @@ import {
   headerStatus,
   noLoginFound,
   projectName,
+  retryDelayMs,
   sharedWith,
   windowForecast,
 } from "./ui.js";
@@ -287,5 +288,13 @@ describe("windowForecast", () => {
     expect(windowForecast(forecasts, "main", "")).toEqual(["weekly", lasts]);
     expect(windowForecast(forecasts, "gone", "Fable")).toBeNull();
     expect(windowForecast(undefined, "main", "Fable")).toBeNull();
+  });
+});
+
+describe("retryDelayMs", () => {
+  it("retries a read the screen needs soon, then backs off to once a minute", () => {
+    expect([0, 1, 2, 3, 4, 5, 50].map(retryDelayMs)).toEqual([
+      2_000, 5_000, 15_000, 30_000, 60_000, 60_000, 60_000,
+    ]);
   });
 });

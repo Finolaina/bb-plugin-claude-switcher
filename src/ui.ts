@@ -180,3 +180,11 @@ export function windowForecast(
   const forecast = own[key];
   return forecast === undefined ? null : [key, forecast];
 }
+
+/**
+ * The wait before retry number `attempt` (from 0) of a read the screen
+ * needs: soon at first, then once a minute while bb stays busy.
+ */
+export function retryDelayMs(attempt: number): number {
+  return [2_000, 5_000, 15_000, 30_000][attempt] ?? 60_000;
+}

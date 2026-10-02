@@ -6,7 +6,7 @@
 // Provider usage panel through server.ts; this section is where you act.
 // And, in a Claude Code thread's header, the project's account with a menu
 // to change it (an experimental bb slot, registered only when the host has it).
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   definePluginApp,
   useRealtime,
@@ -19,6 +19,7 @@ import {
   headerStatus,
   noLoginFound,
   projectName,
+  retryDelayMs,
   sharedWith,
   windowForecast,
   windowPercent,
@@ -44,9 +45,15 @@ const EXTERNAL = "__external__";
 const STALE = "__stale__";
 type Window = NonNullable<AccountState["usage"]>["session"];
 
+// The last list any view received: a header mounting for another thread
+// shows it at once while its own read is under way (bb can take seconds).
+let lastSeen: State | null = null;
+// Whether each thread is a Claude Code thread: a thread keeps its provider.
+const claudeThreads = new Map<string, boolean>();
+
 function useAccounts() {
   const rpc = useRpc<typeof rpcContract>();
-  const [state, setState] = useState<State | null>(null);
+  const [state, setState] = useState<State | null>(lastSeen);
   const [error, setError] = useState<string | null>(null);
   /** Only a change the user made (not a refresh) that failed. */
   const [changeError, setChangeError] = useState<string | null>(null);
@@ -54,14 +61,44 @@ function useAccounts() {
   const report = useCallback((cause: unknown) => {
     setError(cause instanceof Error ? cause.message : String(cause));
   }, []);
+  const keep = useCallback((next: State) => {
+    lastSeen = next;
+    setState(next);
+  }, []);
+  // A failed read is tried again (bb busy or restarting) rather than leaving
+  // the view empty until the next change; one pending retry per view.
+  const retry = useRef<{
+    alive: boolean;
+    attempt: number;
+    timer?: ReturnType<typeof setTimeout>;
+  }>({ alive: true, attempt: 0 });
   const refetch = useCallback(() => {
-    rpc.call("accounts_list", null).then((next) => {
-      setState(next);
-      setError(null);
-    }, report);
-  }, [rpc, report]);
+    clearTimeout(retry.current.timer);
+    rpc.call("accounts_list", null).then(
+      (next) => {
+        retry.current.attempt = 0;
+        keep(next);
+        setError(null);
+      },
+      (cause) => {
+        report(cause);
+        if (!retry.current.alive) return;
+        clearTimeout(retry.current.timer);
+        retry.current.timer = setTimeout(
+          refetch,
+          retryDelayMs(retry.current.attempt++),
+        );
+      },
+    );
+  }, [rpc, report, keep]);
   useEffect(() => {
+    const current = retry.current;
+    current.alive = true;
     refetch();
+    return () => {
+      current.alive = false;
+      clearTimeout(current.timer);
+    };
   }, [refetch]);
   useRealtime("accounts-changed", refetch);
   const run = useCallback(
@@ -70,7 +107,7 @@ function useAccounts() {
       // Cleared first, so a repeated failure is announced again.
       setChangeError(null);
       try {
-        setState(await work());
+        keep(await work());
         setError(null);
       } catch (cause) {
         report(cause);
@@ -79,7 +116,7 @@ function useAccounts() {
         setBusy(false);
       }
     },
-    [report],
+    [report, keep],
   );
   return {
     state,
@@ -714,19 +751,32 @@ function ThreadAccount({
   isCompactViewport: boolean;
 }) {
   const sdk = useSdk();
-  const [claudeThread, setClaudeThread] = useState<string | null>(null);
+  const [claudeThread, setClaudeThread] = useState<string | null>(
+    claudeThreads.get(threadId) === true ? threadId : null,
+  );
   useEffect(() => {
     let live = true;
-    setClaudeThread(null);
-    sdk.threads.get({ threadId }).then(
-      (thread) => {
-        if (live && thread.providerId === CLAUDE_CODE_PROVIDER)
-          setClaudeThread(threadId);
-      },
-      () => {},
-    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const known = claudeThreads.get(threadId);
+    setClaudeThread(known === true ? threadId : null);
+    if (known !== undefined) return;
+    let attempt = 0;
+    const ask = () => {
+      sdk.threads.get({ threadId }).then(
+        (thread) => {
+          const claude = thread.providerId === CLAUDE_CODE_PROVIDER;
+          claudeThreads.set(threadId, claude);
+          if (live && claude) setClaudeThread(threadId);
+        },
+        () => {
+          if (live) timer = setTimeout(ask, retryDelayMs(attempt++));
+        },
+      );
+    };
+    ask();
     return () => {
       live = false;
+      clearTimeout(timer);
     };
   }, [sdk, threadId]);
   if (claudeThread !== threadId) return null;

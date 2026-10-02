@@ -15,6 +15,20 @@ describe("app.tsx", () => {
   });
 });
 
+// The thread header vanished whenever its reads were slow or failed (bb
+// busy, 2026-10-02): no DOM tests here, so these guard the two fixes.
+describe("the thread header's reads", () => {
+  it("starts from the last list any view saw, and retries a failed read instead of staying empty", async () => {
+    const source = await readFile(new URL("./app.tsx", import.meta.url), "utf8");
+    expect(source).toContain("useState<State | null>(lastSeen)");
+    expect(source).toContain("lastSeen = next;");
+    // accounts_list and threads.get both try again after a failure.
+    expect(source.split("retryDelayMs(")).toHaveLength(3);
+    // A thread keeps its provider: asked once per thread.
+    expect(source).toContain("claudeThreads.set(threadId, claude)");
+  });
+});
+
 // The host hands setup() an `app` whose slots are functions; a host that
 // predates (or drops) an experimental slot simply lacks that member.
 async function register(slotNames: string[]) {
