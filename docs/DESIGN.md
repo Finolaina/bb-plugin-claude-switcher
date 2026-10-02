@@ -437,6 +437,11 @@ The refresh token rotates on every refresh, so the plugin:
   of the same account refreshes between the plugin's read and its write,
   or bb stops while a rotated login is only in memory, that account needs
   `/login` again.
+- **A project's account set in bb's own settings shows in the views within
+  30 s.** bb has no batch read of machine environments, so the views share
+  one read of every project's account for 30 s (concurrent lists included);
+  a change made by the plugin drops it at once. The Refresh button, the
+  account menu, logins, the CLI and every decision read fresh.
 - **Same machine only.** The variable is a path on bb's machine, set on
   the project's machine environment. The plugin does not check which host
   runs a thread, so a thread on another host may get a path that does not

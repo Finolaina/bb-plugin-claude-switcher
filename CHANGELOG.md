@@ -4,6 +4,36 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.8] - 2026-10-02
+
+### Fixed
+
+- **The account control in a thread's header no longer comes and goes.**
+  It drew nothing until two reads answered (is this a Claude Code thread,
+  and the list of accounts and projects), again on every thread switch,
+  and a failed read was never tried again. With bb busy each list took
+  3-10 s, so the control appeared on some threads and not on others. A
+  header now starts from the last list any view received, asks once per
+  thread whether it is a Claude Code thread, and retries a failed read (2,
+  5, 15 and 30 s, then once a minute) while it is open.
+- **Listing the accounts costs bb far less.** Each list read every
+  project's machine environment, one bb call per project, and every open
+  view listed again on the same event. On 2026-10-02 bb's server stalled
+  over half a second 556 times in 3 h, with this list in flight in about
+  140 of them. The views now share one read for 30 s; a change made by the
+  plugin drops it, one made in bb's own settings shows within that time.
+  The Refresh button, the account menu, logins and the CLI still read
+  fresh, and decisions still read each project directly.
+- **A retry refused because a newer turn replaced the failed one is not an
+  error.** When a message sent after the failure has started a newer turn,
+  bb refuses the retry ("is not the failed turn"); that newer turn runs on
+  the project's account and its own failure is handled apart. The plugin
+  logs it and moves on instead of reporting a failed handler.
+
+### Changed
+
+- `@types/node`, `hono` and `vitest` updated to their latest patches.
+
 ## [0.2.7] - 2026-10-02
 
 ### Fixed
