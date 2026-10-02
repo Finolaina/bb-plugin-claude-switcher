@@ -180,6 +180,37 @@ describe("decideSwitch", () => {
     expect(jittered.sendAt).toBeLessThan(NOW + 3 * HOUR + BUFFER + JITTER);
   });
 
+  it("under a warning report, waits on the failed account for the window that warned, not for the latest reset", () => {
+    // bb's latest stored report when the provider refused the turn: the
+    // session window warned, the weekly one did not and resets much later.
+    const warned = failure();
+    warned.rateLimits!.status = "warning";
+    warned.rateLimits!.windows = [
+      {
+        providerKey: "five_hour",
+        label: "Current session",
+        status: "warning",
+        resetsAtMs: NOW + 3 * HOUR,
+      },
+      {
+        providerKey: "seven_day",
+        label: "Weekly limit",
+        status: "allowed",
+        resetsAtMs: NOW + 26 * HOUR,
+      },
+    ];
+    const accounts = [
+      account("main"),
+      account("work", { weekly: { usedPercent: 100, resetsAt: NOW + 20 * HOUR } }),
+    ];
+    expect(decideSwitch(input({ accounts, failure: warned }))).toEqual({
+      kind: "wait",
+      account: "main",
+      sendAt: NOW + 3 * HOUR + BUFFER,
+      reason: "Waiting for main",
+    });
+  });
+
   it("waits for another account's session or weekly reset, and never schedules in the past", () => {
     const accounts = [
       account("main", {

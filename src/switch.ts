@@ -142,9 +142,14 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
   // The provider's own report wins over our (possibly stale) measurement of
   // the account that just failed: it is blocked at least until its reset.
   // A refusal reports no reset: the account that refused is never waited for.
+  // Under a warning report no window is blocked: the one that warned is the
+  // one the provider enforced, not the one that resets last.
   const windows = rateLimits?.windows ?? [];
   const blocked = windows.filter((w) => w.status === "blocked");
-  const reported = (blocked.length > 0 ? blocked : windows)
+  const warned = windows.filter((w) => w.status === "warning");
+  const flagged =
+    blocked.length > 0 ? blocked : warned.length > 0 ? warned : windows;
+  const reported = flagged
     .map((w) => w.resetsAtMs)
     .filter((ms): ms is number => ms !== null);
   const failedFreeAt = reported.length === 0 ? null : Math.max(...reported);
