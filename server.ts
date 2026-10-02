@@ -1412,6 +1412,30 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * against the preferred model when the thread has not been seen here.
    */
   const threadModel = new Map<string, string>();
+  /**
+   * The model of the thread's latest message in bb's log, for a thread whose
+   * sending this plugin did not see (it was reloaded or restarted since: a
+   * long turn outlives both). Null when the log cannot be read or names no
+   * Claude model: the preferred model decides then.
+   */
+  async function loggedModel(threadId: string): Promise<string | null> {
+    try {
+      const [row] = await bb.sdk.threads.events.list({
+        threadId,
+        types: ["client/turn/requested"],
+        order: "desc",
+        limit: "1",
+      });
+      return row?.type === "client/turn/requested"
+        ? modelFamily(row.data.execution?.model ?? null)
+        : null;
+    } catch (error) {
+      bb.log.warn(
+        `thread ${threadId}: its model not read from bb: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+  }
   /** A thread in one of these has a turn under way: a message sent then waits in bb's queue. */
   const TURN_UNDER_WAY: ReadonlySet<string> = new Set([
     "starting",
@@ -1577,7 +1601,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         `account ${fromName} refused a turn (HTTP ${event.errorInfo?.httpStatusCode ?? "?"}): chosen for nothing for ${REFUSAL_MS / 3_600_000} h`,
       );
     }
-    const model = threadModel.get(event.threadId) ?? current.preferredModel;
+    const model =
+      threadModel.get(event.threadId) ??
+      (await loggedModel(event.threadId)) ??
+      current.preferredModel;
     const decision = decideSwitch({
       failure: event,
       currentAccount: fromName,

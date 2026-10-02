@@ -212,6 +212,14 @@ function fakeLoginIo(
   return { loginIo, logins, made, links };
 }
 
+/** A row of bb's raw thread log; `data` as bb stores it. */
+interface LoggedEvent {
+  seq: number;
+  type: string;
+  data: Record<string, unknown>;
+  [field: string]: unknown;
+}
+
 /** attemptNumber of each failed request seen, so the fake retry can stamp bb's `attempt`. */
 const attemptOf = new Map<string, number>();
 
@@ -289,6 +297,10 @@ interface HostOptions {
   clock?: () => number;
   /** What threads.get answers per thread, over a visible Claude Code thread of the user. */
   threads?: Record<string, Partial<ThreadResponse>>;
+  /** bb's raw log per thread, as threads.events.list answers it. */
+  threadEvents?: Record<string, LoggedEvent[]>;
+  /** threads.events.list throws this (a bb hiccup). */
+  threadEventsError?: string;
   /** Plugin storage answers every read with this error while the plugin loads. */
   kvReadError?: string;
   /** Values already in plugin storage when the plugin loads. */
@@ -358,6 +370,26 @@ async function host(
             projectId: threadId === "thr-2" ? "proj-2" : "proj-1",
             ...options.threads?.[threadId],
           }),
+        events: {
+          // Like bb: only the asked types, oldest first unless desc, then the limit.
+          list: async (args: {
+            threadId: string;
+            types?: readonly string[];
+            order?: "asc" | "desc";
+            limit?: string;
+          }) => {
+            if (options.threadEventsError !== undefined)
+              throw new Error(options.threadEventsError);
+            const rows = (options.threadEvents?.[args.threadId] ?? [])
+              .filter(
+                (row) => args.types === undefined || args.types.includes(row.type),
+              )
+              .sort((a, b) => (args.order === "desc" ? b.seq - a.seq : a.seq - b.seq));
+            return args.limit === undefined
+              ? rows
+              : rows.slice(0, Number(args.limit));
+          },
+        },
         retry: async (args: (typeof retries)[number]) => {
           if (options.retryBehaviour === "conflict") {
             throw new Error(
@@ -4010,6 +4042,107 @@ describe("the model a thread's turn runs on", () => {
         reason: "Switched to account work (Opus)",
       },
     ]);
+  });
+
+  /**
+   * A message as bb logs it: the row of a real thread read on 2026-10-02
+   * (thr_dgciuctr8n, seq 3923), its text cut and its model a parameter.
+   */
+  function requested(seq: number, model: string | null): LoggedEvent {
+    return {
+      id: `evt_${seq}`,
+      scope: { kind: "thread" },
+      threadId: "thread-1",
+      seq,
+      createdAt: NOW - HOUR + seq,
+      type: "client/turn/requested",
+      data: {
+        direction: "outbound",
+        requestId: `creq_${seq}`,
+        source: "tell",
+        initiator: "user",
+        senderThreadId: null,
+        systemMessageKind: "unlabeled",
+        systemMessageSubject: null,
+        input: [{ type: "text", text: "o apuntaselo al optimizador", mentions: [] }],
+        target: { kind: "steer", expectedTurnId: "dae8f36cd7-t3" },
+        request: { method: "turn/start", params: {} },
+        execution: {
+          model,
+          serviceTier: "default",
+          reasoningLevel: "xhigh",
+          permissionMode: "full",
+          source: "client/turn/requested",
+        },
+      },
+    };
+  }
+
+  it("judges a failed turn it never saw sent (the plugin reloaded meanwhile) against the model of the thread's latest message in bb's log: an Opus thread switches instead of waiting for the preferred model", async () => {
+    const h = await host(
+      { ...OPUS_ELSEWHERE, main: usage(50, 30, 0) },
+      {
+        ...FABLE,
+        threadEvents: {
+          "thread-1": [
+            requested(10, "claude-fable-5-1"),
+            requested(20, "claude-opus-5-5"),
+            { ...requested(30, null), type: "turn/started", data: {} },
+          ],
+        },
+      },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-1", `${ACCOUNTS}/work`],
+    ]);
+    expect(h.retries.map((r) => r.reason)).toEqual([
+      "Switched to account work (Opus)",
+    ]);
+  });
+
+  it("falls back to the preferred model when bb's log cannot be read, is empty, or its latest message names no Claude model", async () => {
+    const cases: [HostOptions, number][] = [
+      [{ threadEventsError: "HTTP 503: internal error" }, 1],
+      [{ threadEvents: {} }, 0],
+      [{ threadEvents: { "thread-1": [requested(20, null)] } }, 0],
+      [{ threadEvents: { "thread-1": [requested(20, "opusplan")] } }, 0],
+    ];
+    for (const [options, warnings] of cases) {
+      const h = await host(
+        { ...OPUS_ELSEWHERE, main: usage(50, 30, 0) },
+        { ...FABLE, ...options },
+      );
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(h.envSet).toEqual([]);
+      expect(h.retries.map((r) => r.reason)).toEqual([
+        "Waiting for Fable on main",
+      ]);
+      expect(
+        h.harness.logEntries.filter((entry) => entry.level === "warn"),
+      ).toHaveLength(warnings);
+      h.harness.dispose();
+    }
+  });
+
+  it("asks bb's log only for a thread whose model it does not know: the model of the message it saw sent wins", async () => {
+    const h = await host(
+      { ...OPUS_ELSEWHERE, main: usage(50, 30, 0) },
+      { ...FABLE, threadEventsError: "HTTP 503: internal error" },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await dispatch(h, "claude-opus-5-5");
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.retries.map((r) => r.reason)).toEqual([
+      "Switched to account work (Opus)",
+    ]);
+    expect(
+      h.harness.logEntries.filter((entry) => entry.level === "warn"),
+    ).toEqual([]);
   });
 
   it("forgets a thread's model when the thread is archived: the preferred model decides its next failure", async () => {
