@@ -73,8 +73,9 @@ Refreshed in the background and on demand.
 
 ### 🔁 Automatic switch and retry
 
-When a turn fails on a **subscription-window** rate limit, the project
-moves to the best other account and the failed turn runs again there.
+When a turn fails on a **subscription-window** rate limit, or the account
+refuses it, the project moves to the best other account and the failed
+turn runs again there.
 
 </td>
 </tr>
@@ -302,7 +303,7 @@ it decides between three outcomes:
 
 ```mermaid
 flowchart TD
-  A[A Claude Code turn fails] --> B{Subscription-window<br/>rate limit on Claude Code?}
+  A[A Claude Code turn fails] --> B{"Subscription-window<br/>rate limit on Claude Code,<br/>or the account refused it?"}
   B -- no --> Z[Do nothing: bb and its other plugins handle it]
   B -- yes --> C[Refresh the usage of every account]
   C --> X{"CLAUDE_CONFIG_DIR set<br/>outside the plugin?"}
@@ -454,7 +455,7 @@ executable (`claude auth login`) as a child process of bb's server.
 | bb surface                                                       | What the plugin does with it                                                               |
 | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
 | Provider usage source (the panel's RPC contract)                 | Publishes one resource per account, with its session, weekly and per-model windows.        |
-| `turn.failed` event                                              | Detects subscription-window rate limits of the Claude Code provider.                       |
+| `turn.failed` event                                              | Detects subscription-window rate limits of the Claude Code provider, and refused turns.    |
 | `thread.created` event and `projects.get`                        | Places a project when one of its threads is created (a new project by its creation date).  |
 | `thread.idle` event                                              | With `switchAheadPercent` set, measures the account when a turn ends and moves the project. |
 | Project machine environment variables                            | Sets `CLAUDE_CONFIG_DIR` on the project, with a note naming the account.                   |
@@ -484,9 +485,10 @@ executable (`claude auth login`) as a child process of bb's server.
   login happens only when you press **Add account** or **Log in**, and it
   is Claude Code's own `claude auth login` in your browser: the plugin
   never sees a password, and the CLI writes the login to its own store.
-- 🛑 **Knows when to stop.** Limits that are not Claude Code
-  subscription-window limits are left to bb, a turn is tried at most five
-  times, and a wait longer than your maximum is declined.
+- 🛑 **Knows when to stop.** Failures that are neither a Claude Code
+  subscription-window limit nor an account refusing the turn are left to
+  bb, a turn is tried at most five times, and a wait longer than your
+  maximum is declined.
 - 📝 **Everything is logged.** Every switch, wait and decline, and every
   placement or reason for leaving a project where it was, is written to
   `bb plugin logs claude-switcher` with its reason.
@@ -661,6 +663,11 @@ Coming from `claude-accounts` 0.1.x? See the upgrade note in
   its reason. Limits that are not Claude Code subscription-window limits
   and turns already on their fifth attempt are logged at debug level
   only, and nothing is logged while `autoSwitch` is off.
+- **A project left an account that works.** An account that refused a
+  turn (HTTP 401 or 403: its organization turned subscription access off,
+  or its login stopped working) is set aside for 6 hours, and the log
+  names it. Fix the account (log in again, or ask the organization's
+  admin) and run `bb plugin reload claude-switcher` to use it at once.
 - **A new project did not move to the best account.** Read
   `bb plugin logs claude-switcher`: each thread creation logs where the
   project was left and why. Projects created before the plugin first ran,

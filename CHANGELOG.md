@@ -4,6 +4,31 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.6] - 2026-10-02
+
+### Fixed
+
+- **An account that refuses the turn is left like one at its limit.** On
+  2026-09-30 an account whose organization had turned off subscription
+  access answered every turn with "Your organization has disabled Claude
+  subscription access for Claude Code" (HTTP 403) while its usage still
+  measured fine; the plugin took it for an error that was not its business
+  and left the turn failed. Now a refused turn (`unauthorized`, in a Claude
+  Code thread) moves the project to another account and runs again there,
+  as after a limit, and the account that refused is chosen for nothing for
+  6 hours: no new project is placed on it, a project still on it leaves at
+  its next thread, and a switch never goes back to it. The retry says which
+  account refused (`Switched to account work: main refused the turn`). It
+  is remembered in memory: `bb plugin reload claude-switcher` forgets it.
+  This also covers a new thread's first turn, which in bb 0.44 starts on
+  the account the project had before it was placed.
+
+### Added
+
+- `THIRD_PARTY_NOTICES.md` lists the licenses of `zod`,
+  `@radix-ui/react-slot` and `@radix-ui/react-compose-refs`, which the
+  built plugin bundles.
+
 ## [0.2.5] - 2026-09-30
 
 ### Fixed

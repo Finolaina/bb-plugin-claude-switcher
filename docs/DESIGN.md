@@ -102,8 +102,9 @@ usable measurement, and if none can be measured the project is left alone
    given a thread while `autoSwitch` was off (key `handled-projects`). A
    project that already carries a variable this plugin set is never new.
 2. **A known project** moves only when its account is **measured** unable
-   to run: a lock the provider reported, a window at 100 %, or the
-   preferred model used up. A usage answer that lacks the session or the
+   to run: a lock the provider reported, a window at 100 %, the
+   preferred model used up, or a turn it refused in the last 6 hours (see
+   "Deciding on a failed turn"). A usage answer that lacks the session or the
    weekly window is unknown, not out, and moves nothing. A project pinned
    by hand stays put while its account works, even when another account
    ranks better.
@@ -169,9 +170,16 @@ The plugin never changes a thread's model: it only chooses the account.
 queries every account. The plugin acts only when all of these hold:
 
 - the attempt number is below 5 (`MAX_ATTEMPTS`, as provider-retry);
-- the error category is `rate-limit`;
-- the rate-limit state is `blocked`, its kind is `subscription-window`;
-- the provider is `claude-code`.
+- and either the turn hit a limit: the error category is `rate-limit`, the
+  rate-limit state is `blocked`, its kind is `subscription-window`, and
+  the provider is `claude-code`;
+- or the account refused the turn: the error category is `unauthorized`
+  (on 2026-09-30 an account whose organization had turned subscription
+  access off answered every turn with HTTP 403 while its usage still
+  measured fine; an account whose login stopped working is the same case),
+  and the thread's provider is `claude-code`. A refusal carries no
+  rate-limit report, so the thread row is the only thing that names its
+  provider.
 
 It also leaves alone any project whose `CLAUDE_CONFIG_DIR` it did not set
 (recognised by the note it writes next to the variable), and any failure of
@@ -180,6 +188,12 @@ report, not from the thread row): moving the whole project for another
 plugin's hidden worker would surprise the user, and the plugin that owns
 the worker decides what to do with it. A visible thread is the user's work
 even when a plugin's composer opened it, and is handled like any other.
+
+An account that refused a turn is taken as out for 6 hours
+(`REFUSAL_MS`), whatever its usage says: no placement, switch or move
+ahead chooses it, and a known project on it leaves at its next thread. The
+retry's reason names it (`Switched to account work: main refused the
+turn`), and the log says until when.
 
 Then `decideSwitch`:
 
@@ -190,7 +204,8 @@ Then `decideSwitch`:
    and the failed turn is retried at once.
 3. **Wait** otherwise, for the account that can run the turn first. For
    the account that just failed, the provider's own reported reset wins
-   over our measurement: it is blocked at least until then. Ties go to the
+   over our measurement: it is blocked at least until then; an account
+   that refused is never waited for. Ties go to the
    current account (no move needed), then to the name. The project moves
    to that account if it is another one, and the retry is queued for its
    reset plus 15 s (`RESET_BUFFER_MS`) and up to 30 s of jitter
@@ -417,6 +432,24 @@ The refresh token rotates on every refresh, so the plugin:
 - **The forecast is an average.** It is the pace since the window's
   first sample, so a burst at the end of a quiet week moves it slowly, and
   a window first seen late has a short, noisy history.
+- **A new thread's first turn runs where the project was.** In bb 0.44
+  the start of a new thread (its provisioning) runs alongside the dispatch
+  checkpoint, not after it: in the canary of 2026-09-30 bb resolved the
+  thread's environment 1.9 s before the placement set the variable. So a
+  placement counts from the thread's second turn; if the first one fails
+  there on a limit or a refusal, it is retried once on the new account.
+- **A refusal is remembered in memory only.** A reload or a restart of bb
+  forgets which accounts refused; the next refusal sets the account aside
+  again. Settings and the thread header do not show it: the account still
+  shows its usage, and only the reason of the move it caused and the log
+  say it refused. A refusal of a turn left on the old account after a move
+  (the grace retry) sets no account aside: which account ran that turn is
+  not certain.
+- **Every account refusing makes the plugin quiet for 6 hours.** Should an
+  outage answer every account with `unauthorized`, each failure would set
+  one account aside (up to the 5 attempts), and then no account is chosen:
+  projects stay where they are and bb's own retry decides, as without the
+  plugin.
 - **Moving ahead needs a turn to end.** A project whose only thread runs
   one very long turn is not moved ahead; if that turn fails on the limit,
   the ordinary switch takes over.
