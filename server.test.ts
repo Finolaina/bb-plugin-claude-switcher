@@ -326,6 +326,8 @@ async function host(
 ) {
   const envSet: EnvCall[] = [];
   const envDeleted: EnvCall[] = [];
+  /** Every machineEnvironment read, by project. */
+  const envReads: string[] = [];
   const env = new Map<string, EnvVar[]>(
     Object.entries(options.presetEnv ?? {}),
   );
@@ -474,6 +476,7 @@ async function host(
             : []),
         ],
         machineEnvironment: async ({ projectId }: { projectId: string }) => {
+          envReads.push(projectId);
           if (options.failEnvRead?.includes(projectId))
             throw new Error(`HTTP 503: could not read ${projectId}`);
           if (options.hangEnvRead?.includes(projectId))
@@ -544,6 +547,7 @@ async function host(
     env,
     envSet,
     envDeleted,
+    envReads,
     retries,
     sent,
     deleted,
@@ -2235,6 +2239,48 @@ describe("placement: the cases the first review found", () => {
     await h.harness.behavior.setSettings({ autoSwitch: true });
     await h.harness.behavior.emitThreadEvent("thread.created", created("thr-2", "proj-3"));
     expect(h.envSet).toEqual([]);
+  });
+
+  it("the views' lists share one read of the projects' accounts; a switch made here, a failed read or 30 s mean a new one", async () => {
+    let clock = NOW;
+    const h = await host(ALL_FREE, { clock: () => clock });
+    dispose = () => h.harness.dispose();
+    const list = () =>
+      h.harness.behavior.callRpc("accounts_list", null) as Promise<State>;
+    const proj1 = (state: State) => state.projects.find((p) => p.id === "proj-1");
+    await list();
+    const reads = () => [...h.envReads].sort();
+    h.envReads.length = 0;
+    // Every open header refetches on the same event: one read per project.
+    clock = NOW + 30_000;
+    await Promise.all([list(), list()]);
+    expect(reads()).toEqual(["personal", "proj-1", "proj-2"]);
+    clock = NOW + 59_999;
+    await list();
+    expect(h.envReads).toHaveLength(3);
+    clock = NOW + 60_000;
+    await list();
+    expect(h.envReads).toHaveLength(6);
+    // A switch made here (a turn of proj-1 out on main) shows in the next list at once.
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-1"]);
+    expect(proj1(await list())).toMatchObject({ account: "work", owned: true });
+    // Asked for by hand, the answer is fresh, whatever the views share.
+    const changed = (await h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-1",
+      account: "spare",
+    })) as State;
+    expect(proj1(changed)).toMatchObject({ account: "spare", owned: true });
+    // A failed read is not kept: the next list, at the same time, reads again.
+    clock = NOW + 120_000;
+    let fail = true;
+    h.harness.sdk.stub("projects.machineEnvironment", async () => {
+      if (fail) throw new Error("HTTP 503: bb is busy");
+      return { builtInGit: { status: "disabled" as const, statusMessage: "" }, inheritedVariables: [], variables: [] };
+    });
+    await expect(list()).rejects.toThrow(/503/);
+    fail = false;
+    expect(proj1(await list())).toMatchObject({ account: null, owned: false });
   });
 
   it("treats every project created before the plugin was first installed as known, and survives garbage in storage", async () => {

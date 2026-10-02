@@ -78,6 +78,8 @@ export const CHANGED = "accounts-changed";
  * inside this window is one of those: retried as is, no second switch.
  */
 export const SWITCH_GRACE_MS = 60_000;
+/** How long a list keeps the projects' accounts it read (see sharedProjects). */
+export const PROJECTS_FRESH_MS = 30_000;
 /**
  * An account that refused a turn (its organization turned subscription access
  * off, or its login stopped working) is chosen for nothing this long, though
@@ -737,6 +739,50 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * (set by hand, or inherited from the global environment) is "external"
    * and this plugin never touches it.
    */
+  // ponytail: bb has no batch read of machine environments, so a list costs
+  // one call per project, seconds each when bb is busy, and every open view
+  // refetches on the same event. The views' lists share one read, kept
+  // PROJECTS_FRESH_MS; a change made here drops it, one made in bb's own
+  // settings shows within that time. Everything else reads fresh, and
+  // decisions read projectAccount directly.
+  let projectsRead: {
+    at: number;
+    value: Promise<State["projects"]>;
+  } | null = null;
+
+  function sharedProjects(): Promise<State["projects"]> {
+    if (
+      projectsRead !== null &&
+      deps.now() - projectsRead.at < PROJECTS_FRESH_MS
+    ) {
+      return projectsRead.value;
+    }
+    return readProjects();
+  }
+
+  /** A fresh read, which the views' next lists share. */
+  function readProjects(): Promise<State["projects"]> {
+    const now = deps.now();
+    const value = (async () => {
+      // The personal project too: a variable set there must be visible and releasable.
+      const projects = await bb.sdk.projects.list({ includePersonal: true });
+      return Promise.all(
+        projects.map(async (p) => ({
+          id: p.id,
+          name: p.name,
+          ...(await projectAccount(p.id)),
+        })),
+      );
+    })();
+    const read = { at: now, value };
+    projectsRead = read;
+    // A failed read is not kept; its callers still see the failure.
+    value.catch(() => {
+      if (projectsRead === read) projectsRead = null;
+    });
+    return value;
+  }
+
   async function projectAccount(projectId: string): Promise<ProjectAccount> {
     const env = await bb.sdk.projects.machineEnvironment({ projectId });
     const own = env.variables.find((v) => v.name === ENV_VAR);
@@ -761,21 +807,26 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         `${ENV_VAR} on project ${projectId} was set outside this plugin; change it in the project's machine environment`,
       );
     }
-    if (account === null || account.configDir === null) {
-      // Default account = no variable. Only ours can be there (see above).
-      if (from.owned) {
-        await bb.sdk.projects.deleteMachineEnvironmentVariable({
+    try {
+      if (account === null || account.configDir === null) {
+        // Default account = no variable. Only ours can be there (see above).
+        if (from.owned) {
+          await bb.sdk.projects.deleteMachineEnvironmentVariable({
+            projectId,
+            name: ENV_VAR,
+          });
+        }
+      } else {
+        await bb.sdk.projects.setMachineEnvironmentVariable({
           projectId,
           name: ENV_VAR,
+          value: account.configDir,
+          note: noteFor(account.name),
         });
       }
-    } else {
-      await bb.sdk.projects.setMachineEnvironmentVariable({
-        projectId,
-        name: ENV_VAR,
-        value: account.configDir,
-        note: noteFor(account.name),
-      });
+    } finally {
+      // Also after a failure: a delete may have landed before it.
+      projectsRead = null;
     }
     bb.realtime.publish(CHANGED, { at: deps.now() });
   }
@@ -791,10 +842,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     });
   }
 
-  async function state(): Promise<State> {
+  /** `shared`: the views' list, which may reuse a recent read (see sharedProjects). */
+  async function state({ shared = false } = {}): Promise<State> {
     if (accounts.length === 0) await discover();
-    // The personal project too: a variable set there must be visible and releasable.
-    const projects = await bb.sdk.projects.list({ includePersonal: true });
+    const projects = await (shared ? sharedProjects() : readProjects());
     return {
       accounts: accounts.map((account) => {
         const m = collector.get(account.name);
@@ -808,13 +859,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           usage: m?.usage ?? null,
         };
       }),
-      projects: await Promise.all(
-        projects.map(async (p) => ({
-          id: p.id,
-          name: p.name,
-          ...(await projectAccount(p.id)),
-        })),
-      ),
+      projects,
       defaultAccountName: current.defaultAccountName,
       preferredModel: current.preferredModel,
       autoSwitch: current.autoSwitch,
@@ -948,7 +993,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
 
   // ---- Page RPC ---------------------------------------------------------
   bb.rpc.register(rpcContract, {
-    accounts_list: () => state(),
+    accounts_list: () => state({ shared: true }),
     async accounts_refresh() {
       await refreshAll();
       return state();
