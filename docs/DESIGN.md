@@ -159,9 +159,16 @@ it sends the message), a model id that is not a Claude model id (none
 resolved yet, an alias), a hidden thread, another provider, a variable the
 plugin did not set, or with `autoSwitch` off.
 
-A failed turn is judged against the model its thread was last sent with
-(kept in memory, forgotten when the thread is archived); a thread not seen
-at the checkpoint since the plugin started, against the preferred model.
+A failed turn is judged against the model its thread was last sent with:
+kept in memory at the checkpoint (forgotten when the thread is archived)
+and, for a thread not seen there since the plugin started (a reload or a
+restart while a long turn ran), read from bb's log: the `execution.model`
+of the thread's newest `client/turn/requested` event. When neither names a
+Claude model (the log cannot be read, is empty, or holds an alias), the
+preferred model decides. On 2026-10-02 an Opus turn of 2 h 40 min failed
+on its account's weekly limit half an hour after a reload; judged against
+the preferred Fable, which no account had left, it was given up, while
+two other accounts still had a quarter of their week left for Opus.
 The plugin never changes a thread's model: it only chooses the account.
 
 ## Deciding on a failed turn
@@ -171,8 +178,13 @@ queries every account. The plugin acts only when all of these hold:
 
 - the attempt number is below 5 (`MAX_ATTEMPTS`, as provider-retry);
 - and either the turn hit a limit: the error category is `rate-limit`, the
-  rate-limit state is `blocked`, its kind is `subscription-window`, and
-  the provider is `claude-code`;
+  rate-limit state is `blocked` or `warning`, its kind is
+  `subscription-window`, and the provider is `claude-code`. A warning
+  counts because bb sends the thread's latest stored report, and a
+  provider that refuses the turn before reporting the limit reached
+  leaves a warning there (2026-10-02: "rate limit rejected; type
+  seven_day_overage_included" under a weekly warning, on an account the
+  usage API measured at 96 %);
 - or the account refused the turn: the error category is `unauthorized`
   (on 2026-09-30 an account whose organization had turned subscription
   access off answered every turn with HTTP 403 while its usage still

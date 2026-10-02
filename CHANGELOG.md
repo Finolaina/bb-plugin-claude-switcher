@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.7] - 2026-10-02
+
+### Fixed
+
+- **A long turn is judged by its own model after a reload.** The model a
+  thread was sent with was only kept in memory, so a turn that outlived a
+  reload or a restart of the plugin was judged against `preferredModel`.
+  On 2026-10-02 an Opus turn that had run for 2 h 40 min hit its account's
+  weekly limit half an hour after a reload; judged against Fable, which no
+  account had left, it was given up (`no switch (beyond-maximum-wait)`)
+  while two other accounts still had a quarter of their week left. Now a
+  thread the plugin has not seen sent is judged by the model of its latest
+  message in bb's log; the preferred model decides only when the log names
+  none.
+- **A limit enforced before bb reported it blocked is acted on.** bb sends
+  a failed turn with the thread's latest stored rate-limit report; when
+  the provider refuses the turn before reporting the limit reached
+  ("rate limit rejected; type seven_day_overage_included"), that report is
+  still a warning and the plugin left the turn failed (`ignored
+  (no-rate-limit-state)`). A `rate-limit` failure under a `warning` report
+  is now judged like one under `blocked`.
+
 ## [0.2.6] - 2026-10-02
 
 ### Fixed
