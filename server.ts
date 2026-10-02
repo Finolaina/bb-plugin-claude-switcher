@@ -353,6 +353,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     now: deps.now,
   });
   let accounts: Account[] = [];
+  /** The views' latest read of every project's account (see sharedProjects). */
+  let projectsRead: {
+    at: number;
+    value: Promise<State["projects"]>;
+  } | null = null;
   /** When each account last refused a turn (in memory: a reload forgets it). */
   const refusedAt = new Map<string, number>();
   function refusing(name: string): boolean {
@@ -732,24 +737,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     bb.realtime.publish(CHANGED, { at: deps.now() });
   }
 
-  /**
-   * The project's account is whatever its CLAUDE_CONFIG_DIR machine variable
-   * says, read from bb every time: bb never returns values, so the name comes
-   * from the note this plugin writes next to it. A variable with another note
-   * (set by hand, or inherited from the global environment) is "external"
-   * and this plugin never touches it.
-   */
   // ponytail: bb has no batch read of machine environments, so a list costs
   // one call per project, seconds each when bb is busy, and every open view
   // refetches on the same event. The views' lists share one read, kept
   // PROJECTS_FRESH_MS; a change made here drops it, one made in bb's own
   // settings shows within that time. Everything else reads fresh, and
   // decisions read projectAccount directly.
-  let projectsRead: {
-    at: number;
-    value: Promise<State["projects"]>;
-  } | null = null;
-
   function sharedProjects(): Promise<State["projects"]> {
     if (
       projectsRead !== null &&
@@ -783,6 +776,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return value;
   }
 
+  /**
+   * The project's account is whatever its CLAUDE_CONFIG_DIR machine variable
+   * says, read from bb every time: bb never returns values, so the name comes
+   * from the note this plugin writes next to it. A variable with another note
+   * (set by hand, or inherited from the global environment) is "external"
+   * and this plugin never touches it.
+   */
   async function projectAccount(projectId: string): Promise<ProjectAccount> {
     const env = await bb.sdk.projects.machineEnvironment({ projectId });
     const own = env.variables.find((v) => v.name === ENV_VAR);
