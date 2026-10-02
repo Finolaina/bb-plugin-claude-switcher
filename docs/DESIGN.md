@@ -448,6 +448,13 @@ The refresh token rotates on every refresh, so the plugin:
   the old account before it and is refused more than 60 s after a move is
   taken for a refusal of the project's current account, which is then set
   aside for 6 hours; bb does not say which account ran a turn.
+- **A pick by hand does not lift a refusal.** For the 6 hours a refused
+  account is set aside, a project picked onto it by hand (header,
+  Settings, `use`) moves off again at its next message, with the reason
+  "refused a turn"; nothing but the clock or `bb plugin reload
+  claude-switcher` lifts it, not a new login either. A wait for another
+  account's reset after a refusal says "Waiting for ...", without naming
+  the refusal. A clock set back lengthens the 6 hours by as much.
 - **Every account refusing makes the plugin quiet for 6 hours.** Should an
   outage answer every account with `unauthorized`, each failure would set
   one account aside (up to the 5 attempts), and then no account is chosen:
