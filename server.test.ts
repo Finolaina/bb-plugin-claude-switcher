@@ -4162,6 +4162,50 @@ describe("the model a thread's turn runs on", () => {
   });
 });
 
+describe("a limit the provider enforced before bb reported it blocked", () => {
+  it("moves the project and retries when the turn failed for a limit and bb's latest report only warned", async () => {
+    const h = await host({
+      main: () => Response.json(payload(40, 96)),
+      spare: () => Response.json(payload(10, 20)),
+      work: () => Response.json(payload(80, 90)),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // As bb sent it on 2026-10-02 at 02:12 (thr_pqzfkcgihq): the provider
+    // refused the turn, and the thread's latest stored report was a warning.
+    const warned = failure({
+      errorInfo: {
+        category: "rate-limit",
+        providerCode: "rate_limit_event",
+        httpStatusCode: null,
+      },
+      rateLimits: {
+        providerId: "claude-code",
+        status: "warning",
+        kind: "subscription-window",
+        windows: [
+          {
+            providerKey: "seven_day",
+            label: "Weekly limit",
+            status: "warning",
+            resetsAtMs: NOW + 26 * HOUR,
+          },
+        ],
+        reachedReason: null,
+        overageStatus: null,
+        overageReason: null,
+      },
+    });
+    await h.harness.behavior.emitThreadEvent("turn.failed", warned);
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-1", `${ACCOUNTS}/spare`],
+    ]);
+    expect(h.retries.map((r) => r.reason)).toEqual([
+      "Switched to account spare",
+    ]);
+  });
+});
+
 describe("an account that refuses the turn", () => {
   /** `main` (the default) measures best, as the account that refused every turn on 2026-09-30 did. */
   const MAIN_BEST = {

@@ -328,6 +328,17 @@ describe("decideSwitch", () => {
     expect(declineReason(failure({ rateLimits: null }))).toBe(
       "no-rate-limit-state",
     );
+    // A limit the provider enforced while bb's latest report only warned is
+    // judged; one with no limit reported is not.
+    for (const [status, reason] of [
+      ["warning", null],
+      ["allowed", "no-rate-limit-state"],
+      ["unknown", "no-rate-limit-state"],
+    ] as const) {
+      const report = failure();
+      report.rateLimits!.status = status;
+      expect(declineReason(report)).toBe(reason);
+    }
     const spend = failure();
     spend.rateLimits!.kind = "spend-control";
     expect(declineReason(spend)).toBe("not-subscription-window");
