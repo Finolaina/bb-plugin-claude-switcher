@@ -440,11 +440,14 @@ The refresh token rotates on every refresh, so the plugin:
   there on a limit or a refusal, it is retried once on the new account.
 - **A refusal is remembered in memory only.** A reload or a restart of bb
   forgets which accounts refused; the next refusal sets the account aside
-  again. Settings and the thread header do not show it: the account still
-  shows its usage, and only the reason of the move it caused and the log
-  say it refused. A refusal of a turn left on the old account after a move
+  again. Settings and the thread header do not mark it: the account still
+  shows its usage (though the header no longer offers it as the best one),
+  and only the reasons of the moves it causes and the log say it refused. A refusal of a turn left on the old account after a move
   (the grace retry) sets no account aside: which account ran that turn is
-  not certain.
+  not certain. And the reverse: after a reload, a turn that started on
+  the old account before it and is refused more than 60 s after a move is
+  taken for a refusal of the project's current account, which is then set
+  aside for 6 hours; bb does not say which account ran a turn.
 - **Every account refusing makes the plugin quiet for 6 hours.** Should an
   outage answer every account with `unauthorized`, each failure would set
   one account aside (up to the 5 attempts), and then no account is chosen:

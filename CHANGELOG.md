@@ -18,7 +18,8 @@ project uses [Semantic Versioning](https://semver.org/).
   as after a limit, and the account that refused is chosen for nothing for
   6 hours: no new project is placed on it, a project still on it leaves at
   its next thread, and a switch never goes back to it. The retry says which
-  account refused (`Switched to account work: main refused the turn`). It
+  account refused (`Switched to account work: main refused the turn`), and
+  so does a project moved off it before a turn (`main refused a turn`). It
   is remembered in memory: `bb plugin reload claude-switcher` forgets it.
   This also covers a new thread's first turn, which in bb 0.44 starts on
   the account the project had before it was placed.

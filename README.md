@@ -664,8 +664,9 @@ Coming from `claude-accounts` 0.1.x? See the upgrade note in
   and turns already on their fifth attempt are logged at debug level
   only, and nothing is logged while `autoSwitch` is off.
 - **A project left an account that works.** An account that refused a
-  turn (HTTP 401 or 403: its organization turned subscription access off,
-  or its login stopped working) is set aside for 6 hours, and the log
+  turn (an `unauthorized` error, usually HTTP 401 or 403: its organization
+  turned subscription access off, or its login stopped working) is set
+  aside for 6 hours, and the log
   names it. Fix the account (log in again, or ask the organization's
   admin) and run `bb plugin reload claude-switcher` to use it at once.
 - **A new project did not move to the best account.** Read
