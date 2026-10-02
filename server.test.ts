@@ -4028,3 +4028,153 @@ describe("the model a thread's turn runs on", () => {
     expect(h.retries.map((r) => r.reason)).toEqual(["Waiting for Fable on main"]);
   });
 });
+
+describe("an account that refuses the turn", () => {
+  /** `main` (the default) measures best, as the account that refused every turn on 2026-09-30 did. */
+  const MAIN_BEST = {
+    main: () => Response.json(payload(1, 40)),
+    spare: () => Response.json(payload(10, 60)),
+    work: () => Response.json(payload(5, 20)),
+  };
+  /** As bb reported it: no rate-limit report comes with it. */
+  function refused(
+    overrides: Partial<PluginTurnFailedEvent> = {},
+  ): PluginTurnFailedEvent {
+    return failure({
+      errorInfo: {
+        category: "unauthorized",
+        providerCode: null,
+        httpStatusCode: 403,
+      },
+      rateLimits: null,
+      ...overrides,
+    });
+  }
+  const created = (id: string, projectId: string) => ({
+    thread: thread({ id, projectId }),
+  });
+
+  it("moves the project off the account that refused its turn and retries it at once", async () => {
+    const h = await host(MAIN_BEST);
+    dispose = () => h.harness.dispose();
+    const { errors } = await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      refused(),
+    );
+    expect(errors).toEqual([]);
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-1", `${ACCOUNTS}/work`],
+    ]);
+    expect(h.retries).toEqual([
+      {
+        threadId: "thread-1",
+        turnRequestId: "creq_1",
+        reason: "Switched to account work: main refused the turn",
+      },
+    ]);
+  });
+
+  it("chooses the refusing account for nothing during six hours, and again from then on", async () => {
+    let now = NOW;
+    const h = await host(MAIN_BEST, { clock: () => now });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", refused());
+    // A new project goes to the best account but main.
+    await h.harness.behavior.emitThreadEvent(
+      "thread.created",
+      created("thr-new", "proj-3"),
+    );
+    // A known project still on main leaves it at its next thread.
+    await h.harness.behavior.emitThreadEvent(
+      "thread.created",
+      created("thr-2", "proj-2"),
+    );
+    // A limit on work goes to spare, not back to main.
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-1", `${ACCOUNTS}/work`],
+      ["proj-3", `${ACCOUNTS}/work`],
+      ["proj-2", `${ACCOUNTS}/work`],
+      ["proj-1", `${ACCOUNTS}/spare`],
+    ]);
+    now = NOW + 6 * HOUR - 1;
+    await h.harness.behavior.emitThreadEvent(
+      "thread.created",
+      created("thr-4", "proj-4"),
+    );
+    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-4" });
+    now = NOW + 6 * HOUR;
+    await h.harness.behavior.emitThreadEvent(
+      "thread.created",
+      created("thr-5", "proj-5"),
+    );
+    // main is the best account again: the new project stays on it.
+    expect(h.envSet.map((e) => e.projectId)).not.toContain("proj-5");
+  });
+
+  it("retries the first turn of a thread it placed on the new account, when the old account refused it", async () => {
+    // The real case of 2026-09-30: bb started the turn on the old account
+    // while the plugin was placing the project.
+    const h = await host(
+      { ...MAIN_BEST, main: () => Response.json(payload(10, 40)) },
+      { threads: { "thr-a": { projectId: "proj-3" } } },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent(
+      "thread.created",
+      created("thr-a", "proj-3"),
+    );
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      refused({ threadId: "thr-a" }),
+    );
+    expect(h.retries).toEqual([
+      {
+        threadId: "thr-a",
+        turnRequestId: "creq_1",
+        reason: "Retrying on account work",
+      },
+    ]);
+    expect(h.envSet).toHaveLength(1);
+  });
+
+  it("takes a refusing account whose answer lacked a window as out, not as unknown", async () => {
+    const h = await host({
+      ...MAIN_BEST,
+      main: () =>
+        Response.json({
+          limits: [
+            {
+              kind: "weekly_all",
+              percent: 10,
+              resets_at: new Date(NOW + 3 * 24 * HOUR).toISOString(),
+            },
+          ],
+          five_hour: { locked_reason: null },
+          seven_day: { locked_reason: null },
+        }),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", refused());
+    await h.harness.behavior.emitThreadEvent(
+      "thread.created",
+      created("thr-2", "proj-2"),
+    );
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-1", `${ACCOUNTS}/work`],
+      ["proj-2", `${ACCOUNTS}/work`],
+    ]);
+  });
+
+  it("leaves alone a refusal in a thread of another provider: nothing else says whose it was", async () => {
+    const h = await host(MAIN_BEST, {
+      threads: { "thread-1": { providerId: "codex" } },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", refused());
+    expect(h.retries).toEqual([]);
+    expect(h.usageCalls).toEqual([]);
+    expect(h.envSet).toEqual([]);
+  });
+});

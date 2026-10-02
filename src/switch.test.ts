@@ -346,6 +346,56 @@ describe("decideSwitch", () => {
   });
 });
 
+describe("a turn the account refused", () => {
+  // As bb reported it on 2026-09-30 for an account whose organization turned
+  // off subscription access: no rate-limit report comes with it.
+  const refused = (overrides: Partial<PluginTurnFailedEvent> = {}) =>
+    failure({
+      errorInfo: {
+        category: "unauthorized",
+        providerCode: null,
+        httpStatusCode: 403,
+      },
+      rateLimits: null,
+      ...overrides,
+    });
+
+  it("moves the project to another account that can run, however well the refusing one measures", () => {
+    expect(declineReason(refused())).toBeNull();
+    expect(
+      decideSwitch(
+        input({
+          failure: refused(),
+          accounts: [account("main"), account("work")],
+        }),
+      ),
+    ).toEqual({ kind: "switch", account: "work", model: null });
+  });
+
+  it("waits for another account's reset when none can run now, and never for the account that refused", () => {
+    const out = { usedPercent: 100, resetsAt: NOW + HOUR };
+    expect(
+      decideSwitch(
+        input({
+          failure: refused(),
+          accounts: [account("main"), account("work", { session: out })],
+        }),
+      ),
+    ).toEqual({
+      kind: "wait",
+      account: "work",
+      sendAt: NOW + HOUR + BUFFER,
+      reason: "Waiting for work",
+    });
+    expect(
+      decideSwitch(input({ failure: refused(), accounts: [account("main")] })),
+    ).toEqual({ kind: "decline", reason: "no-account-usable" });
+    expect(declineReason(refused({ attemptNumber: ATTEMPTS }))).toBe(
+      "attempts-exhausted",
+    );
+  });
+});
+
 describe("decidePlacement", () => {
   const fable = (usedPercent: number) => ({
     Fable: { usedPercent, resetsAt: NOW + 4 * HOUR },

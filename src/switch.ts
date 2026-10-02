@@ -48,6 +48,16 @@ export interface SwitchInput {
 }
 
 /**
+ * The account itself refused the turn (its login, or its organization turned
+ * subscription access off): another account may run it. No rate-limit report
+ * comes with it, so nothing in the failure says whose provider refused: the
+ * caller checks the thread's.
+ */
+export function isRefusal(failure: PluginTurnFailedEvent): boolean {
+  return failure.errorInfo?.category === "unauthorized";
+}
+
+/**
  * Why this failure is none of this plugin's business, or null when it is.
  * Cheap and pure: call it before measuring anything.
  */
@@ -55,6 +65,7 @@ export function declineReason(
   failure: PluginTurnFailedEvent,
 ): DeclineReason | null {
   if (failure.attemptNumber >= MAX_ATTEMPTS) return "attempts-exhausted";
+  if (isRefusal(failure)) return null;
   if (failure.errorInfo?.category !== "rate-limit") return "not-rate-limit";
   const rateLimits = failure.rateLimits;
   if (rateLimits === null || rateLimits.status !== "blocked")
@@ -108,7 +119,7 @@ function freeAt(account: AccountUsage, model: string): number | null {
 export function decideSwitch(input: SwitchInput): SwitchDecision {
   const declined = declineReason(input.failure);
   if (declined !== null) return { kind: "decline", reason: declined };
-  const rateLimits = input.failure.rateLimits!;
+  const rateLimits = input.failure.rateLimits;
 
   const accounts = input.accounts.map((a) => settle(a, input.now));
   const others = accounts.filter((a) => a.name !== input.currentAccount);
@@ -125,8 +136,10 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
 
   // The provider's own report wins over our (possibly stale) measurement of
   // the account that just failed: it is blocked at least until its reset.
-  const blocked = rateLimits.windows.filter((w) => w.status === "blocked");
-  const reported = (blocked.length > 0 ? blocked : rateLimits.windows)
+  // A refusal reports no reset: the account that refused is never waited for.
+  const windows = rateLimits?.windows ?? [];
+  const blocked = windows.filter((w) => w.status === "blocked");
+  const reported = (blocked.length > 0 ? blocked : windows)
     .map((w) => w.resetsAtMs)
     .filter((ms): ms is number => ms !== null);
   const failedFreeAt = reported.length === 0 ? null : Math.max(...reported);

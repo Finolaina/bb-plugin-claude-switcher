@@ -58,6 +58,7 @@ import {
   decideAhead,
   decidePlacement,
   decideSwitch,
+  isRefusal,
   modelFamily,
 } from "./src/switch.js";
 import {
@@ -77,6 +78,12 @@ export const CHANGED = "accounts-changed";
  * inside this window is one of those: retried as is, no second switch.
  */
 export const SWITCH_GRACE_MS = 60_000;
+/**
+ * An account that refused a turn (its organization turned subscription access
+ * off, or its login stopped working) is chosen for nothing this long, though
+ * its usage still measures fine.
+ */
+export const REFUSAL_MS = 6 * 60 * 60_000;
 /** A measurement older than this is taken again before moving a project ahead of the limit. */
 export const AHEAD_FRESH_MS = 60_000;
 /** bb fails a dispatch whose checkpoint takes 10 s: the placement before a turn is left behind well before. */
@@ -344,6 +351,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     now: deps.now,
   });
   let accounts: Account[] = [];
+  /** When each account last refused a turn (in memory: a reload forgets it). */
+  const refusedAt = new Map<string, number>();
+  function refusing(name: string): boolean {
+    const at = refusedAt.get(name);
+    return at !== undefined && deps.now() - at < REFUSAL_MS;
+  }
   /** Switches applied per project, for the grace window after each one. */
   const recentSwitches = new Map<
     string,
@@ -765,7 +778,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** Measurements recent enough to decide on (two refresh periods). */
   function measuredAccounts(model = current.preferredModel) {
     const maxAgeMs = 2 * Math.max(1, current.refreshMinutes) * 60_000;
-    return collector.usable(maxAgeMs, model);
+    // A refusing account is out, whatever its numbers say.
+    return collector.usable(maxAgeMs, model).map((a) => {
+      if (!refusing(a.name)) return a;
+      const { unknown: _, ...known } = a;
+      return { ...known, blocked: true };
+    });
   }
 
   async function state(): Promise<State> {
@@ -1547,6 +1565,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return;
     }
     const fromName = from.account ?? current.defaultAccountName;
+    const refusal = isRefusal(event);
+    if (refusal) {
+      refusedAt.set(fromName, now);
+      bb.log.warn(
+        `account ${fromName} refused a turn (HTTP ${event.errorInfo?.httpStatusCode ?? "?"}): chosen for nothing for ${REFUSAL_MS / 3_600_000} h`,
+      );
+    }
     const model = threadModel.get(event.threadId) ?? current.preferredModel;
     const decision = decideSwitch({
       failure: event,
@@ -1569,7 +1594,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     const reason =
       decision.kind === "switch"
-        ? `Switched to account ${decision.account}${decision.model === null ? "" : ` (${decision.model})`}`
+        ? `Switched to account ${decision.account}${decision.model === null ? "" : ` (${decision.model})`}${refusal ? `: ${fromName} refused the turn` : ""}`
         : decision.reason;
     const sendAt = decision.kind === "wait" ? decision.sendAt : undefined;
     if (decision.account !== fromName) {
@@ -1618,7 +1643,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return;
     }
     const thread = await bb.sdk.threads.get({ threadId: event.threadId });
-    const skipped = notTheUsersThread(thread);
+    const skipped =
+      notTheUsersThread(thread) ??
+      // A limit names its provider; a refusal only has the thread's.
+      (isRefusal(event) && thread.providerId !== CLAUDE_CODE_PROVIDER
+        ? `refusal of provider ${thread.providerId}`
+        : null);
     if (skipped !== null) {
       bb.log.debug(`thread ${event.threadId}: ignored (${skipped})`);
       return;
