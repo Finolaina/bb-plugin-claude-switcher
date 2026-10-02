@@ -1040,6 +1040,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     );
   }
 
+  /** bb's refusal to retry a turn that is no longer the thread's latest. */
+  function superseded(error: unknown): boolean {
+    const status =
+      typeof error === "object" && error !== null && "status" in error
+        ? error.status
+        : undefined;
+    const message = error instanceof Error ? error.message : String(error);
+    return status === 409 && /is not the failed turn/i.test(message);
+  }
+
   async function sendQueued(threadId: string, id: string): Promise<void> {
     try {
       await bb.sdk.threads.queuedMessages.send({
@@ -1115,6 +1125,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             `thread ${threadId}: another retry was queued first; leaving it`,
           );
         }
+        return;
+      }
+      // A newer turn replaced the failed one (a message sent meanwhile): it
+      // runs on the project's account, and its own failure comes on its own.
+      if (superseded(error)) {
+        bb.log.info(
+          `thread ${threadId}: turn ${event.requestId} is no longer its latest; the newer turn goes on`,
+        );
         return;
       }
       if (existing === null || sendAt === undefined) throw error;

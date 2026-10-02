@@ -287,6 +287,8 @@ interface HostOptions {
   queued?: QueuedRow[];
   /** What threads.retry does: default queues a row; "conflict" throws like bb's 409; "fail-once" fails the first call (a 5xx); "fail" fails every call. */
   retryBehaviour?: "queue" | "conflict" | "fail-once" | "fail";
+  /** threads.retry throws this, shaped like bb's BbHttpError. */
+  retryError?: { message: string; code?: string; status?: number };
   /** queuedMessages.send throws this, shaped like bb's BbHttpError: `code` apart from the message. */
   sendError?: { message: string; code?: string; status?: number };
   /** deleteMachineEnvironmentVariable throws for these projects (deleted meanwhile, or a bb hiccup). */
@@ -391,6 +393,10 @@ async function host(
           },
         },
         retry: async (args: (typeof retries)[number]) => {
+          if (options.retryError !== undefined) {
+            const { message, ...rest } = options.retryError;
+            throw Object.assign(new Error(message), rest);
+          }
           if (options.retryBehaviour === "conflict") {
             throw new Error(
               `Turn ${args.turnRequestId} already has a retry waiting on thread ${args.threadId}.`,
@@ -1147,6 +1153,47 @@ describe("claude accounts plugin", () => {
     expect(second.errors).toHaveLength(1);
     // The original failure (503) and the restore's (502) both survive in the message.
     expect(String(second.errors[0])).toMatch(/503.*restor.*502/);
+  });
+
+  it("a retry bb refuses because a newer turn replaced the failed one is no failure: logged, not thrown", async () => {
+    // bb's answer on 2026-10-02 (thr_2stddgrdfb): a message sent after the
+    // failed turn started a newer one, whose own failure is handled apart.
+    const h = await host(ALL_FREE, {
+      retryError: {
+        message:
+          "HTTP 409: Turn creq_1 is not the failed turn on thread thread-1; its most recent turn is creq_2.",
+        code: "invalid_request",
+        status: 409,
+      },
+    });
+    dispose = () => h.harness.dispose();
+    const { errors } = await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure(),
+    );
+    expect(errors).toEqual([]);
+    expect(
+      h.harness.logEntries.filter((entry) => entry.level === "warn"),
+    ).toEqual([]);
+    expect(h.harness.logEntries.map((entry) => entry.message)).toContain(
+      "thread thread-1: turn creq_1 is no longer its latest; the newer turn goes on",
+    );
+    // Any other refusal of the retry, a 409 included, is still reported.
+    const other = await host(ALL_FREE, {
+      retryError: { message: "HTTP 409: Conflict", status: 409 },
+    });
+    const disposeFirst = dispose;
+    dispose = () => {
+      disposeFirst?.();
+      other.harness.dispose();
+    };
+    const refused = await other.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure(),
+    );
+    expect(refused.errors.map(String)).toEqual([
+      expect.stringMatching(/HTTP 409: Conflict/),
+    ]);
   });
 
   it("a wait on the CURRENT account also counts as the project's last move: a leftover thread waits for the same reset instead of retrying at once", async () => {
