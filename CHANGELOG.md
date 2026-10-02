@@ -24,7 +24,9 @@ project uses [Semantic Versioning](https://semver.org/).
   ("rate limit rejected; type seven_day_overage_included"), that report is
   still a warning and the plugin left the turn failed (`ignored
   (no-rate-limit-state)`). A `rate-limit` failure under a `warning` report
-  is now judged like one under `blocked`.
+  is now judged like one under `blocked`; when no other account can run
+  the turn, the failed account is waited for until the window that
+  warned resets, not the one that resets last.
 
 ## [0.2.6] - 2026-10-02
 

@@ -184,7 +184,11 @@ queries every account. The plugin acts only when all of these hold:
   provider that refuses the turn before reporting the limit reached
   leaves a warning there (2026-10-02: "rate limit rejected; type
   seven_day_overage_included" under a weekly warning, on an account the
-  usage API measured at 96 %);
+  usage API measured at 96 %). Accepted risk: bb's report is the latest
+  stored one, not tied to the failure, so a `rate-limit` failure that is
+  not a subscription limit, under an old warning, is judged as one too;
+  the cost is a needless move to an account that can run the turn,
+  bounded by the attempt cap;
 - or the account refused the turn: the error category is `unauthorized`
   (on 2026-09-30 an account whose organization had turned subscription
   access off answered every turn with HTTP 403 while its usage still
@@ -216,7 +220,10 @@ Then `decideSwitch`:
    and the failed turn is retried at once.
 3. **Wait** otherwise, for the account that can run the turn first. For
    the account that just failed, the provider's own reported reset wins
-   over our measurement: it is blocked at least until then; an account
+   over our measurement: it is blocked at least until then (the latest
+   reset of its blocked windows; under a warning report, of the windows
+   that warned, since the one that resets last may not be the one
+   enforced); an account
    that refused is never waited for. Ties go to the
    current account (no move needed), then to the name. The project moves
    to that account if it is another one, and the retry is queued for its
