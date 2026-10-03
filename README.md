@@ -289,7 +289,7 @@ starts on a fresh account runs without your settings, hooks and
 | Where                                                | What                                                                                                                                                       |
 | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **A Claude Code thread's header**                    | The project's account with a dot (green: room, amber: running low, red: out or not logged in, grey: not measured), and a menu with the forecast of its window, to switch now to the best account or pick any other. |
-| **The new-thread composer**                          | The same control for the project picked there, before the first message, with the best account beside it when it is another one. A pick there, even of the account shown, keeps the project on it from the first message. On bb 0.44 it shows for every provider (that bb does not tell plugins which one is picked). |
+| **The new-thread composer**                          | The same control for the project picked there, before the first message, with the best account beside it when it is another one. A pick there before you send, even of the account shown, keeps the project on it from the first message, unless that account is out of your preferred model when the thread is created. On bb 0.44 it shows for every provider (that bb does not tell plugins which one is picked). |
 | **Settings → Claude Switcher**                       | The nine settings, a card per account with its windows and their forecast, **Add account** and **Log in**, the account each project runs on (with a picker), **Refresh usage**, and the history of moves. |
 | **Settings → Provider usage** (and its sidebar card) | Pick **Claude accounts** in the source menu to see every account's session, weekly and per-model windows.                                                  |
 | **A thread's retry reason**                          | `Switched to account <name>`, `Waiting for <name>` or `Retrying on account <name>`, wherever bb shows why a turn was retried.                              |
@@ -427,7 +427,8 @@ without a second switch. A thread that fails again inside that minute is
 judged afresh: the new account fails too. So is any failure once the new
 account is measured out of usage or without a login (a wait keeps its
 minute: that account is out until its reset). Picking an account by hand
-(in a thread's header, in Settings or with `use`) gives the same minute,
+(in a thread's header, in the new-thread composer, in Settings or with
+`use`) gives the same minute,
 so a turn still running on the old account follows your pick, unless the
 picked account is measured out or has no login.
 
@@ -677,7 +678,8 @@ Coming from `claude-accounts` 0.1.x? See the upgrade note in
 - **A new project did not move to the best account.** Read
   `bb plugin logs claude-switcher`: each thread creation logs where the
   project was left and why. Projects created before the plugin first ran,
-  pinned in a thread's header, in Settings or with `use`, or given a thread while `autoSwitch`
+  pinned in a thread's header, in the new-thread composer, in Settings or
+  with `use`, or given a thread while `autoSwitch`
   was off are not new. Hidden threads and threads of other providers are
   logged at debug level only.
 

@@ -387,7 +387,8 @@ or measured out for every model): a leftover's failure is then judged, so
 it can move to an account that works. A wait keeps its window whatever a
 later measurement says: that account is out until its reset.
 
-A hand pick (thread header, Settings or the CLI's `use`) opens the same
+A hand pick (thread header, new-thread composer, Settings or the CLI's
+`use`) opens the same
 window, unless the picked account cannot run a turn when picked.
 
 A long turn can outlast the window. So the plugin also notes, on each
@@ -481,7 +482,7 @@ The refresh token rotates on every refresh, so the plugin:
   aside for 6 hours; bb does not say which account ran a turn.
 - **A pick by hand does not lift a refusal.** For the 6 hours a refused
   account is set aside, a project picked onto it by hand (header,
-  Settings, `use`) moves off again at its next message, with the reason
+  new-thread composer, Settings, `use`) moves off again at its next message, with the reason
   "refused a turn"; nothing but the clock or `bb plugin reload
   claude-switcher` lifts it, not a new login either. A wait for another
   account's reset after a refusal says "Waiting for ...", without naming
