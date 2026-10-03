@@ -41,6 +41,9 @@ describe("the new-thread account control", () => {
     expect(source).toContain("() => setFailedReads((n) => n + 1),");
     expect(source).toContain("lockInput={composer.setInputLock}");
     expect(source).toContain("lockInput(true);");
+    // The composer sits in bb's <form>, and the mobile menu trigger sets no
+    // type of its own: without this, opening the menu sends the draft.
+    expect(source).toMatch(/<Button\s+type="button"\s+variant="ghost"\s+size="sm"\s+className="h-7 gap-1\.5 px-2 text-xs"/);
     expect(source).toContain("newThread && state.autoSwitch && !status.external");
     expect(source).toContain("key={projectId}");
     expect(source).toContain('rpc.call("accounts_list", { project })');

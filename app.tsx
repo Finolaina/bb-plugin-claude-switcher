@@ -875,6 +875,7 @@ function ThreadAccountMenu({
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
+          type="button"
           variant="ghost"
           size="sm"
           className="h-7 gap-1.5 px-2 text-xs"
