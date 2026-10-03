@@ -126,8 +126,8 @@ public SDK surfaces, and never touches a `CLAUDE_CONFIG_DIR` it did not set.
 
 Under each weekly window: when it runs out at the pace you have used it
 since the plugin first measured the current window, or that it lasts
-until its reset. Also in the thread
-header menu and in `list`.
+until its reset. Also in the account menu
+of a thread's header and of the new-thread composer, and in `list`.
 
 </td>
 <td valign="top">
@@ -289,7 +289,7 @@ starts on a fresh account runs without your settings, hooks and
 | Where                                                | What                                                                                                                                                       |
 | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **A Claude Code thread's header**                    | The project's account with a dot (green: room, amber: running low, red: out or not logged in, grey: not measured), and a menu with the forecast of its window, to switch now to the best account or pick any other. |
-| **The new-thread composer**                          | The same control for the project picked there, before the first message, with the best account beside it when it is another one. On bb 0.44 it shows for every provider (that bb does not tell plugins which one is picked). |
+| **The new-thread composer**                          | The same control for the project picked there, before the first message, with the best account beside it when it is another one. A pick there, even of the account shown, keeps the project on it from the first message. On bb 0.44 it shows for every provider (that bb does not tell plugins which one is picked). |
 | **Settings → Claude Switcher**                       | The nine settings, a card per account with its windows and their forecast, **Add account** and **Log in**, the account each project runs on (with a picker), **Refresh usage**, and the history of moves. |
 | **Settings → Provider usage** (and its sidebar card) | Pick **Claude accounts** in the source menu to see every account's session, weekly and per-model windows.                                                  |
 | **A thread's retry reason**                          | `Switched to account <name>`, `Waiting for <name>` or `Retrying on account <name>`, wherever bb shows why a turn was retried.                              |
@@ -450,6 +450,9 @@ experimental and may change: the thread header slot, the `experimental_Icon`
 component, and the `experimental_discoverable` and `experimental_description`
 options of the Provider usage source. The thread header control is registered only when
 the host offers that slot, so a bb without it keeps the Settings section.
+The new-thread control is registered only when the host offers
+`composer.customize`; it reads the composer through `useComposerView` on
+bb 0.44 and through `useComposer` on later bb, which dropped that hook.
 Outside bb's SDK, a login you start from Settings runs the `claude`
 executable (`claude auth login`) as a child process of bb's server.
 
@@ -463,7 +466,7 @@ executable (`claude auth login`) as a child process of bb's server.
 | `threads.retry` and queued messages                              | Retries the failed turn now, or at a reset, and reuses the retry provider-retry queued.    |
 | Settings and a settings section                                  | The nine settings, plus the per-project picker, the account cards, the login and the history. |
 | `experimental_threadHeaderAction` slot and `threads.get`         | The account control in a Claude Code thread's header. Experimental in bb: it may change.   |
-| `composer.customize` (a new-thread action) and `useComposerView` | The account control in the new-thread composer, for the project picked there.              |
+| `composer.customize` (a new-thread action), `useComposer` and `useComposerView` | The account control in the new-thread composer, for the project picked there. |
 | CLI registration                                                 | `bb claude-switcher list`, `refresh`, `history`, `use` and `release`.                      |
 | Background service, key-value storage, realtime signals, logging | Periodic usage refresh, the history of moves, the usage samples behind the forecast, the install time and the new projects already handled, live updates of the section, and a log. |
 

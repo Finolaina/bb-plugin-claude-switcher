@@ -9,12 +9,15 @@ project uses [Semantic Versioning](https://semver.org/).
 ### Added
 
 - **The account is in the new-thread composer too.** Before the first
-  message, the composer shows the account the picked project will start
-  on, with the same coloured dot as a thread's header, the best account
-  beside it when it is another one, and the same menu to switch to it or
-  to any other. On bb 0.45 and later it shows only when Claude Code is the
-  picked provider; bb 0.44 does not tell plugins which provider is picked,
-  so there it shows for every provider.
+  message, the composer shows the account the picked project is on, with
+  the same coloured dot as a thread's header, the best account beside it
+  when it is another one, and the same menu to switch to it or to any
+  other. Picking an account there, even the one shown, keeps the project
+  on it from the first message; without a pick, a new project still moves
+  to the best account after its first turn. On bb 0.45 and later it shows
+  only when Claude Code is the picked provider; bb 0.44 does not tell
+  plugins which provider is picked, so there it shows for every provider.
+  A project made a moment ago shows up within about 30 seconds.
 
 ## [0.2.8] - 2026-10-02
 

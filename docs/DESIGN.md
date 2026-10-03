@@ -98,7 +98,7 @@ usable measurement, and if none can be measured the project is left alone
 1. **A new project** goes to the best account under the policy above. A
    project is new when bb created it after the plugin first ran (plugin
    storage, key `installed-at`, compared with the project's `createdAt`)
-   and it was never placed, kept, pinned (thread header, Settings or `use`), or
+   and it was never placed, kept, pinned (thread header, new-thread composer, Settings or `use`), or
    given a thread while `autoSwitch` was off (key `handled-projects`). A
    project that already carries a variable this plugin set is never new.
 2. **A known project** moves only when its account is **measured** unable
