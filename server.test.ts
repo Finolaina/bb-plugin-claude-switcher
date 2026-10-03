@@ -2984,6 +2984,30 @@ describe("the account shown in each thread's header", () => {
     expect(h.retries[0]?.reason).toBe("Switched to account spare");
   });
 
+  it("announces a change again once a pick has measured an account that had no login", async () => {
+    let loggedIn = false;
+    const h = await host({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => (loggedIn ? Response.json(payload(5, 20)) : new Response(null, { status: 401 })),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // claude login run outside the plugin, then work picked by hand.
+    loggedIn = true;
+    const changes = () =>
+      h.harness.realtimeSignals.filter((s) => s.channel === "accounts-changed").length;
+    const before = changes();
+    const state = (await h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-1",
+      account: "work",
+    })) as State;
+    expect(state.accounts.find((a) => a.name === "work")?.problem ?? null).toBeNull();
+    // The change itself, then the measure: a view's read set off by the first
+    // can predate the measure, so the views read again.
+    expect(changes() - before).toBe(2);
+  });
+
   it("names a best account once a reset has passed, without measuring again", async () => {
     let clock = NOW;
     const h = await host(

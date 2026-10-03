@@ -972,8 +972,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       if (
         picked !== undefined &&
         collector.get(toName)?.problem?.kind === "unauthenticated"
-      )
+      ) {
         await collector.collect(picked);
+        // The views read again on the change above, maybe before this.
+        bb.realtime.publish(CHANGED, { at: deps.now() });
+      }
       if (!cannotRun(toName))
         recentSwitches.set(projectId, {
           at: deps.now(),
