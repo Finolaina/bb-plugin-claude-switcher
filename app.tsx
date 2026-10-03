@@ -7,7 +7,7 @@
 // And, in a Claude Code thread's header, the project's account with a menu
 // to change it (an experimental bb slot, registered only when the host has it);
 // the same control in the new-thread composer, for the project picked there.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   definePluginApp,
   useComposer,
@@ -43,6 +43,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useIsCompactViewport } from "@/components/ui/hooks/use-compact-viewport";
 import { Icon } from "@/components/ui/icon";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -828,9 +829,12 @@ function ThreadAccountMenu({
   projectId,
   isCompactViewport,
   newThread = false,
+  focusComposer,
 }: {
   projectId: string;
   isCompactViewport: boolean;
+  /** Puts the caret back in the draft once the menu closes. */
+  focusComposer?: () => void;
   /**
    * In the new-thread composer: name the best account beside the button when
    * it is another one, and let a pick of the shown account keep it.
@@ -844,6 +848,7 @@ function ThreadAccountMenu({
     readProject,
     setProjectAccount,
   } = useAccounts();
+  const helpId = useId();
   // A project made a moment ago can be missing from the list the views
   // share: asked for by name, and again after a failed read (bb busy).
   const missing =
@@ -870,6 +875,7 @@ function ThreadAccountMenu({
   const pace = picked === null ? null : forecastLine(picked[1], now);
   const toValue = (account: string) =>
     account === state.defaultAccountName ? null : account;
+  const keepsHelp = newThread && state.autoSwitch && !status.external;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -880,7 +886,7 @@ function ThreadAccountMenu({
           className="h-7 gap-1.5 px-2 text-xs"
           aria-busy={busy}
           aria-label={`Claude account: ${name}, ${TONE_TEXT[status.tone]}${
-            newThread && status.canSwitch ? `, best now: ${status.best}` : ""
+            newThread && status.canSwitch ? `, best: ${status.best}` : ""
           }${error === null ? "" : ", the last change failed"}`}
         >
           <span
@@ -914,12 +920,29 @@ function ThreadAccountMenu({
         align="start"
         className="w-72"
         mobileTitle="Claude account"
+        // Read out with the menu: the arrow keys never reach a label.
+        aria-describedby={keepsHelp ? helpId : undefined}
+        // bb's composer form takes a mousedown that is not on a button for a
+        // click on its draft, and React passes it up through the portal.
+        onMouseDown={newThread ? (event) => event.stopPropagation() : undefined}
+        // As bb's own composer menu does; unless something else took focus.
+        // On a phone bb hides the keyboard when a menu closes: left so.
+        onCloseAutoFocus={
+          focusComposer === undefined
+            ? undefined
+            : (event) => {
+                const active = document.activeElement;
+                if (active !== null && active !== document.body) return;
+                event.preventDefault();
+                focusComposer();
+              }
+        }
       >
         <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
           Claude account for this project, used by all its threads from their
           next turn
-          {newThread && state.autoSwitch && !status.external ? (
-            <span className="block">
+          {keepsHelp ? (
+            <span id={helpId} className="block">
               Pick one, even the current one, before you send to keep it:
               otherwise a new project moves to the best account after its
               first turn.
@@ -1010,6 +1033,9 @@ const readComposer = composerReader(
 function NewThreadAccount() {
   const composer = useComposer();
   const { scope, compact } = readComposer(composer);
+  // The composer only reports its collapsed layout, where bb hides plugin
+  // actions anyway: the screen width is what keeps the button short.
+  const narrow = useIsCompactViewport();
   // The pickers, on hosts that report them (see composerProject).
   const selection = (
     composer as { selection?: { providerId?: string } | null }
@@ -1020,8 +1046,9 @@ function NewThreadAccount() {
     <ThreadAccountMenu
       key={projectId}
       projectId={projectId}
-      isCompactViewport={compact}
+      isCompactViewport={compact || narrow}
       newThread
+      focusComposer={() => composer.focus()}
     />
   );
 }

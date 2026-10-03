@@ -20,7 +20,7 @@ project uses [Semantic Versioning](https://semver.org/).
   account; the pick still applies to the next turns. On bb 0.45 and later it shows
   only when Claude Code is the picked provider; bb 0.44 does not tell
   plugins which provider is picked, so there it shows for every provider.
-  A project made a moment ago shows at once: a view that needs a project
+  On a phone it shows once the composer is open. A project made a moment ago shows at once: a view that needs a project
   missing from the list the views share reads it again.
 
 ## [0.2.8] - 2026-10-02

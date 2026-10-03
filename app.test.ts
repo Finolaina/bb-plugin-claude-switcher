@@ -35,7 +35,17 @@ describe("the new-thread account control", () => {
   it("lets a pick of the shown account keep it, follows the compact layout and asks for a missing project", async () => {
     const source = await readFile(new URL("./app.tsx", import.meta.url), "utf8");
     expect(source).toContain("picksOnSelect(account.name, status.account, newThread)");
-    expect(source).toContain("isCompactViewport={compact}");
+    expect(source).toContain("isCompactViewport={compact || narrow}");
+    expect(source).toContain("const narrow = useIsCompactViewport();");
+    // Back to the draft when the menu closes, and the host form's mousedown
+    // kept out of the menu.
+    expect(source).toContain("focusComposer={() => composer.focus()}");
+    expect(source).toContain(`                if (active !== null && active !== document.body) return;
+                event.preventDefault();
+                focusComposer();`);
+    expect(source).toContain("onMouseDown={newThread ? (event) => event.stopPropagation() : undefined}");
+    expect(source).toContain("aria-describedby={keepsHelp ? helpId : undefined}");
+    expect(source).toContain('<span id={helpId} className="block">');
     // ...and again after a failed read (askForProject, src/ui.test.ts): the
     // whole effect, its condition and its dependencies.
     expect(source).toContain(`    if (!missing) return;
@@ -55,7 +65,7 @@ describe("the new-thread account control", () => {
     // The composer sits in bb's <form>, and the mobile menu trigger sets no
     // type of its own: without this, opening the menu sends the draft.
     expect(source).toMatch(/<DropdownMenuTrigger asChild>\s+<Button\s+type="button"/);
-    expect(source).toContain("newThread && state.autoSwitch && !status.external");
+    expect(source).toContain("const keepsHelp = newThread && state.autoSwitch && !status.external;");
     expect(source).toContain("key={projectId}");
     expect(source).toContain('rpc.call("accounts_list", { project })');
     expect(source).not.toContain("account.name !== status.account)");

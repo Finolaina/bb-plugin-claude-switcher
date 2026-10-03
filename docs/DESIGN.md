@@ -444,6 +444,12 @@ The refresh token rotates on every refresh, so the plugin:
   input lock (`setInputLock`) only stops typing, and neither Enter nor the
   Send button checks it (bb 0.44, read 2026-10-03). The pick still lands:
   the next turns run on the picked account.
+- **On a phone the new-thread control shows once the composer is open.**
+  bb leaves plugin actions out of its collapsed one-line composer (bb 0.44,
+  read 2026-10-03); a tap on the draft brings the control back.
+- **With four or more plugins adding composer actions**, bb shows three of
+  them in the row and the rest under "More plugin actions" (bb 0.44, read
+  2026-10-03), so the control can open from inside that menu. Not tried.
 - **A refresh race can log an account out.** If a running `claude` session
   of the same account refreshes between the plugin's read and its write,
   or bb stops while a rotated login is only in memory, that account needs
