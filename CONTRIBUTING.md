@@ -11,7 +11,7 @@ Thanks for helping. Bug reports, fixes and ideas are all welcome.
 
 ## Development setup
 
-You need Node.js 24, npm and the `bb` CLI (bb 0.44 or later).
+You need Node.js 24, npm and the `bb` CLI (bb 0.45 or later).
 
 ```sh
 git clone https://github.com/Finolaina/bb-plugin-claude-switcher.git
