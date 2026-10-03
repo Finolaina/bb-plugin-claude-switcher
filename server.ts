@@ -945,12 +945,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   ): Promise<void> {
     // applyAccount announces the change before the pick has written all it
     // writes (its history row, a new measure): the views read again once the
-    // pick is over, or a read they made in between can stand.
+    // pick is over, or a read they made in between can stand. Not for a pick
+    // that changed nothing: that read would clear the error Settings shows.
+    let applied = false;
     try {
       await inProjectQueue(projectId, async () => {
         await discover();
         const from = await projectAccount(projectId);
         const to = choose(findAccount);
+        applied = true;
         await applyAccount(projectId, to, from);
         await markHandled(projectId);
         const fromName = from.account ?? current.defaultAccountName;
@@ -989,7 +992,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         else recentSwitches.delete(projectId);
       });
     } finally {
-      bb.realtime.publish(CHANGED, { at: deps.now() });
+      if (applied) bb.realtime.publish(CHANGED, { at: deps.now() });
     }
   }
 

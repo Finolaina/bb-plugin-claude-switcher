@@ -3025,6 +3025,24 @@ describe("the account shown in each thread's header", () => {
     expect(lastChangeAt(h)).toBeGreaterThan(measuredAt);
   });
 
+  it("announces nothing for a pick that changed nothing (an account that does not exist)", async () => {
+    const h = await host({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => Response.json(payload(5, 20)),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const changes = () =>
+      h.harness.realtimeSignals.filter((s) => s.channel === "accounts-changed").length;
+    const before = changes();
+    await expect(
+      h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "nope" }),
+    ).rejects.toThrow();
+    // A view would read again and clear the error Settings shows for it.
+    expect(changes()).toBe(before);
+  });
+
   it("announces a pick once it is all written, after its history row", async () => {
     let clock = NOW;
     const h = await host(
