@@ -17,7 +17,8 @@ project uses [Semantic Versioning](https://semver.org/).
   to the best account after its first turn. On bb 0.45 and later it shows
   only when Claude Code is the picked provider; bb 0.44 does not tell
   plugins which provider is picked, so there it shows for every provider.
-  A project made a moment ago shows up within about 30 seconds.
+  A project made a moment ago shows at once: a view that needs a project
+  missing from the list the views share reads it again.
 
 ## [0.2.8] - 2026-10-02
 
