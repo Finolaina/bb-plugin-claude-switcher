@@ -193,7 +193,7 @@ export function retryDelayMs(attempt: number): number {
 
 /**
  * Asks for a project missing from the views' list (`read` says whether the
- * read worked), and after a failed read calls `onFailed` once the back-off
+ * read worked; a throw is a failure), and after a failed read calls `onFailed` once the back-off
  * for `failedReads` failures has passed, so its view asks again. Returns the
  * cleanup: nothing is called once the view is gone.
  */
@@ -204,10 +204,12 @@ export function askForProject(
 ): () => void {
   let alive = true;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  void read().then((worked) => {
-    if (!worked && alive)
-      timer = setTimeout(onFailed, retryDelayMs(failedReads));
-  });
+  void read()
+    .catch(() => false)
+    .then((worked) => {
+      if (!worked && alive)
+        timer = setTimeout(onFailed, retryDelayMs(failedReads));
+    });
   return () => {
     alive = false;
     clearTimeout(timer);

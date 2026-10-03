@@ -399,6 +399,14 @@ describe("askForProject", () => {
     expect(failed).toHaveBeenCalledTimes(1);
   });
 
+  it("takes a read that throws for a failed one", async () => {
+    vi.useFakeTimers();
+    const failed = vi.fn();
+    askForProject(() => Promise.reject(new Error("HTTP 503")), 0, failed);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(failed).toHaveBeenCalledTimes(1);
+  });
+
   it("calls for nothing once its view is gone, before or after the read fails", async () => {
     vi.useFakeTimers();
     let fail = (_: boolean) => {};
