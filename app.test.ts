@@ -36,7 +36,11 @@ describe("the new-thread account control", () => {
     const source = await readFile(new URL("./app.tsx", import.meta.url), "utf8");
     expect(source).toContain("picksOnSelect(account.name, status.account, newThread)");
     expect(source).toContain("isCompactViewport={compact}");
-    expect(source).toContain("readProject(projectId);");
+    // ...and again after a failed read (askForProject, src/ui.test.ts).
+    expect(source).toContain("() => readProject(projectId),");
+    expect(source).toContain("() => setFailedReads((n) => n + 1),");
+    expect(source).toContain("lockInput={composer.setInputLock}");
+    expect(source).toContain("lockInput(true);");
     expect(source).toContain("newThread && state.autoSwitch && !status.external");
     expect(source).toContain("key={projectId}");
     expect(source).toContain('rpc.call("accounts_list", { project })');

@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  askForProject,
   composerProject,
   composerReader,
   picksOnSelect,
@@ -370,5 +371,50 @@ describe("picksOnSelect", () => {
   it("in the new-thread composer, a click on the shown account picks it too", () => {
     expect(picksOnSelect("main", "main", true)).toBe(true);
     expect(picksOnSelect("work", "main", true)).toBe(true);
+  });
+});
+
+describe("askForProject", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("asks once, and nothing more when the read worked", async () => {
+    vi.useFakeTimers();
+    const read = vi.fn(async () => true);
+    const failed = vi.fn();
+    askForProject(read, 0, failed);
+    await vi.runAllTimersAsync();
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(failed).not.toHaveBeenCalled();
+  });
+
+  it("after a failed read, calls for another once the back-off for that many failures has passed", async () => {
+    vi.useFakeTimers();
+    const failed = vi.fn();
+    askForProject(async () => false, 1, failed);
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(failed).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(failed).toHaveBeenCalledTimes(1);
+  });
+
+  it("calls for nothing once its view is gone, before or after the read fails", async () => {
+    vi.useFakeTimers();
+    let fail = (_: boolean) => {};
+    const failed = vi.fn();
+    const stop = askForProject(
+      () => new Promise<boolean>((resolve) => (fail = resolve)),
+      0,
+      failed,
+    );
+    stop();
+    fail(false);
+    await vi.runAllTimersAsync();
+    const later = askForProject(async () => false, 0, failed);
+    await vi.advanceTimersByTimeAsync(1_000);
+    later();
+    await vi.runAllTimersAsync();
+    expect(failed).not.toHaveBeenCalled();
   });
 });

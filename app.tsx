@@ -18,6 +18,7 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import type { rpcContract, State } from "./server";
 import {
+  askForProject,
   composerProject,
   composerReader,
   forecastLine,
@@ -107,14 +108,23 @@ function useAccounts() {
     };
   }, [refetch]);
   useRealtime("accounts-changed", refetch);
-  /** A list that must include this project (see sharedProjects in server.ts). */
+  /**
+   * A list that must include this project (see sharedProjects in server.ts);
+   * false when the read failed.
+   */
   const readProject = useCallback(
-    (project: string) => {
-      rpc.call("accounts_list", { project }).then((next) => {
-        keep(next);
-        setError(null);
-      }, report);
-    },
+    (project: string) =>
+      rpc.call("accounts_list", { project }).then(
+        (next) => {
+          keep(next);
+          setError(null);
+          return true;
+        },
+        (cause: unknown) => {
+          report(cause);
+          return false;
+        },
+      ),
     [rpc, report, keep],
   );
   const run = useCallback(
@@ -809,9 +819,12 @@ function ThreadAccountMenu({
   projectId,
   isCompactViewport,
   newThread = false,
+  lockInput,
 }: {
   projectId: string;
   isCompactViewport: boolean;
+  /** The composer's input lock, held while a pick is on its way. */
+  lockInput?: (locked: boolean) => void;
   /**
    * In the new-thread composer: name the best account beside the button when
    * it is another one, and let a pick of the shown account keep it.
@@ -826,15 +839,25 @@ function ThreadAccountMenu({
     setProjectAccount,
   } = useAccounts();
   // A project made a moment ago can be missing from the list the views
-  // share: asked for once, by name.
+  // share: asked for by name, and again after a failed read (bb busy).
   const missing =
     state !== null && headerStatus(state, projectId, Date.now()) === null;
-  const asked = useRef<string | null>(null);
+  const [failedReads, setFailedReads] = useState(0);
   useEffect(() => {
-    if (!missing || asked.current === projectId) return;
-    asked.current = projectId;
-    readProject(projectId);
-  }, [missing, projectId, readProject]);
+    if (!missing) return;
+    return askForProject(
+      () => readProject(projectId),
+      failedReads,
+      () => setFailedReads((n) => n + 1),
+    );
+  }, [missing, projectId, readProject, failedReads]);
+  // In the composer, a message sent while a pick is on its way starts on
+  // the old account: the draft is locked (Enter included) until it lands.
+  useEffect(() => {
+    if (lockInput === undefined || !busy) return;
+    lockInput(true);
+    return () => lockInput(false);
+  }, [busy, lockInput]);
   if (state === null) return null;
   const now = Date.now();
   const status = headerStatus(state, projectId, now);
@@ -999,6 +1022,7 @@ function NewThreadAccount() {
       projectId={projectId}
       isCompactViewport={compact}
       newThread
+      lockInput={composer.setInputLock}
     />
   );
 }
