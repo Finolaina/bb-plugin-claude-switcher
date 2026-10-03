@@ -69,5 +69,5 @@ may not collect, store or intermediate Claude.ai credentials or session
 tokens, so Anthropic could regard this plugin as outside its terms. It is
 an independent, MIT-licensed project, not affiliated with Anthropic; use it
 at your own risk.
-Setup and troubleshooting:
+Details and setup:
 [README](https://github.com/Finolaina/bb-plugin-claude-switcher#readme).
