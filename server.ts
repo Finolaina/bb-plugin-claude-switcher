@@ -946,15 +946,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // applyAccount announces the change before the pick has written all it
     // writes (its history row, a new measure): the views read again once the
     // pick is over, or a read they made in between can stand. Not for a pick
-    // that changed nothing: that read would clear the error Settings shows.
+    // that applied nothing (refused, or failed before): that read would clear
+    // the error Settings shows for it.
     let applied = false;
     try {
       await inProjectQueue(projectId, async () => {
         await discover();
         const from = await projectAccount(projectId);
         const to = choose(findAccount);
-        applied = true;
         await applyAccount(projectId, to, from);
+        applied = true;
         await markHandled(projectId);
         const fromName = from.account ?? current.defaultAccountName;
         const toName = to?.name ?? current.defaultAccountName;

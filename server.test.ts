@@ -3043,6 +3043,31 @@ describe("the account shown in each thread's header", () => {
     expect(changes()).toBe(before);
   });
 
+  it("announces nothing for a pick bb refused to write, or of a variable set outside the plugin", async () => {
+    const accounts = {
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => Response.json(payload(5, 20)),
+    };
+    for (const options of [
+      { failSet: ["proj-1"] },
+      { presetEnv: { "proj-1": [{ name: ENV_VAR, note: "set by hand", secret: true, value: null }] } },
+    ]) {
+      const h = await host(accounts, options);
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      const changes = () =>
+        h.harness.realtimeSignals.filter((s) => s.channel === "accounts-changed").length;
+      const before = changes();
+      await expect(
+        h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "work" }),
+      ).rejects.toThrow();
+      expect(changes()).toBe(before);
+      await h.harness.dispose();
+      dispose = null;
+    }
+  });
+
   it("announces a pick once it is all written, after its history row", async () => {
     let clock = NOW;
     const h = await host(
