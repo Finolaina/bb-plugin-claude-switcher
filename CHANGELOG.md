@@ -8,7 +8,7 @@ project uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- **Needs bb 0.45 or later** (plugin SDK 0.6.16). The new-thread control
+- **Needs bb 0.45 or later** (plugin SDK 0.6.15). The new-thread control
   now reads the composer bb 0.45 gives plugins, and hides while another
   provider is picked. On bb 0.44, `bb plugin update` keeps 0.2.9 and lists
   this release as blocked until bb is updated.

@@ -12,7 +12,7 @@ When a turn hits a subscription limit, the project moves to a free account and t
 [![check](https://github.com/Finolaina/bb-plugin-claude-switcher/actions/workflows/check.yml/badge.svg)](https://github.com/Finolaina/bb-plugin-claude-switcher/actions/workflows/check.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![bb ≥ 0.45](https://img.shields.io/badge/bb-%E2%89%A5%200.45-0d9488)](https://github.com/get-bb/bb)
-[![Plugin SDK ≥ 0.6.16](https://img.shields.io/badge/plugin%20sdk-%E2%89%A5%200.6.16-2563eb)](https://www.npmjs.com/package/@get-bb/plugin-sdk)
+[![Plugin SDK ≥ 0.6.15](https://img.shields.io/badge/plugin%20sdk-%E2%89%A5%200.6.15-2563eb)](https://www.npmjs.com/package/@get-bb/plugin-sdk)
 [![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-lightgrey)](#install)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=white)](tsconfig.json)
 
@@ -200,7 +200,7 @@ bb plugin install .  # bb builds the plugin at install time
 
 **Requirements**
 
-- **bb 0.45 or later** (plugin SDK 0.6.16 or later) running on the machine
+- **bb 0.45 or later** (plugin SDK 0.6.15 or later) running on the machine
   that holds the Claude Code logins: macOS (keychain) or Linux
   (credentials file). The plugin runs inside bb's server process.
 - **Threads that run on that same machine.** `CLAUDE_CONFIG_DIR` is set as

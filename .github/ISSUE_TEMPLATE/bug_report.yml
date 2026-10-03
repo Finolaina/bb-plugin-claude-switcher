@@ -32,7 +32,7 @@ body:
     id: versions
     attributes:
       label: Versions
-      placeholder: "bb 0.44.0, plugin 0.2.0, Claude Code 2.1.x"
+      placeholder: "bb 0.45.0, plugin 0.2.10, Claude Code 2.1.x"
     validations:
       required: true
   - type: dropdown

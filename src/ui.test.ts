@@ -324,6 +324,10 @@ describe("composerProject", () => {
         undefined,
       ),
     ).toBeNull();
+    // A composer kind a later bb adds, even one naming a project.
+    expect(
+      composerProject({ kind: "side-chat", projectId: "proj_a" } as never, undefined),
+    ).toBeNull();
   });
 
   it("is null when the composer says the new thread is not a Claude Code one", () => {

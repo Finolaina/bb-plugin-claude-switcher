@@ -29,7 +29,7 @@
   ],
   "engines": {
     "bb": ">=0.45",
-    "bbPluginSdk": ">=0.6.16"
+    "bbPluginSdk": ">=0.6.15"
   },
   "bb": {
     "name": "Claude Switcher",
@@ -52,7 +52,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@get-bb/plugin-sdk": "0.6.16",
+    "@get-bb/plugin-sdk": "0.6.15",
     "@radix-ui/react-dropdown-menu": "^2.1.20",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^26.6.4",
