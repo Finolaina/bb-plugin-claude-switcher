@@ -49,7 +49,7 @@ describe("the new-thread account control", () => {
     expect(source).not.toContain("setInputLock");
     // The composer sits in bb's <form>, and the mobile menu trigger sets no
     // type of its own: without this, opening the menu sends the draft.
-    expect(source).toMatch(/<Button\s+type="button"\s+variant="ghost"\s+size="sm"\s+className="h-7 gap-1\.5 px-2 text-xs"/);
+    expect(source).toMatch(/<DropdownMenuTrigger asChild>\s+<Button\s+type="button"/);
     expect(source).toContain("newThread && state.autoSwitch && !status.external");
     expect(source).toContain("key={projectId}");
     expect(source).toContain('rpc.call("accounts_list", { project })');
