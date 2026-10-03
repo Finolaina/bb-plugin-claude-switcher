@@ -7,7 +7,7 @@ moves projects between them.
 
 - **Every account in Provider usage.** Each account's 5-hour session,
   weekly and per-model weekly windows, with a forecast of when each weekly
-  window runs out at your pace. Refreshed every few minutes and on
+  window runs out at your pace. Refreshed every few minutes or on
   demand.
 - **Automatic switching.** When a turn fails with a subscription-window rate
   limit, or the account refuses it, the plugin retries it at once on the best
@@ -24,8 +24,8 @@ moves projects between them.
   Code thread's header and the new-thread composer show the project's
   account with a dot for what it has left (the composer adds the best one)
   and a menu to switch. Picked in the composer and saved before you send,
-  an account holds from the first message unless it is out of your
-  preferred model.
+  an account is where the project starts; automatic switching, if on, can
+  still move it.
 - **Accounts and projects in Settings.** Choose the account each project
   runs with or let the plugin manage it, add an account by name (the plugin
   runs Claude Code's own login), and see every move with its reason. The
