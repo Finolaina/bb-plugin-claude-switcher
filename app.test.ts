@@ -36,9 +36,15 @@ describe("the new-thread account control", () => {
     const source = await readFile(new URL("./app.tsx", import.meta.url), "utf8");
     expect(source).toContain("picksOnSelect(account.name, status.account, newThread)");
     expect(source).toContain("isCompactViewport={compact}");
-    // ...and again after a failed read (askForProject, src/ui.test.ts).
-    expect(source).toContain("() => readProject(projectId),");
-    expect(source).toContain("() => setFailedReads((n) => n + 1),");
+    // ...and again after a failed read (askForProject, src/ui.test.ts): the
+    // whole effect, its condition and its dependencies.
+    expect(source).toContain(`    if (!missing) return;
+    return askForProject(
+      () => readProject(projectId),
+      failedReads,
+      () => setFailedReads((n) => n + 1),
+    );
+  }, [missing, projectId, readProject, failedReads]);`);
     // bb's input lock only stops typing, not a send: not used (DESIGN).
     expect(source).not.toContain("setInputLock");
     // The composer sits in bb's <form>, and the mobile menu trigger sets no
