@@ -39,8 +39,8 @@ describe("the new-thread account control", () => {
     // ...and again after a failed read (askForProject, src/ui.test.ts).
     expect(source).toContain("() => readProject(projectId),");
     expect(source).toContain("() => setFailedReads((n) => n + 1),");
-    expect(source).toContain("lockInput={composer.setInputLock}");
-    expect(source).toContain("lockInput(true);");
+    // bb's input lock only stops typing, not a send: not used (DESIGN).
+    expect(source).not.toContain("setInputLock");
     // The composer sits in bb's <form>, and the mobile menu trigger sets no
     // type of its own: without this, opening the menu sends the draft.
     expect(source).toMatch(/<Button\s+type="button"\s+variant="ghost"\s+size="sm"\s+className="h-7 gap-1\.5 px-2 text-xs"/);

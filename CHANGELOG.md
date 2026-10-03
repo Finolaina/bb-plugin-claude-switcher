@@ -16,8 +16,8 @@ project uses [Semantic Versioning](https://semver.org/).
   keeps the project on it from the first message, unless that account is
   out of your preferred model when the thread is created; without a pick,
   a new project still moves to the best account after its first turn.
-  While a pick is being saved the draft is locked, so Enter waits for it
-  (a plugin cannot hold bb's Send button). On bb 0.45 and later it shows
+  A message sent while a pick is still being saved can start on the old
+  account; the pick still applies to the next turns. On bb 0.45 and later it shows
   only when Claude Code is the picked provider; bb 0.44 does not tell
   plugins which provider is picked, so there it shows for every provider.
   A project made a moment ago shows at once: a view that needs a project

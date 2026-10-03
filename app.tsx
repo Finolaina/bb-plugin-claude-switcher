@@ -819,12 +819,9 @@ function ThreadAccountMenu({
   projectId,
   isCompactViewport,
   newThread = false,
-  lockInput,
 }: {
   projectId: string;
   isCompactViewport: boolean;
-  /** The composer's input lock, held while a pick is on its way. */
-  lockInput?: (locked: boolean) => void;
   /**
    * In the new-thread composer: name the best account beside the button when
    * it is another one, and let a pick of the shown account keep it.
@@ -851,13 +848,6 @@ function ThreadAccountMenu({
       () => setFailedReads((n) => n + 1),
     );
   }, [missing, projectId, readProject, failedReads]);
-  // In the composer, a message sent while a pick is on its way starts on
-  // the old account: the draft is locked (Enter included) until it lands.
-  useEffect(() => {
-    if (lockInput === undefined || !busy) return;
-    lockInput(true);
-    return () => lockInput(false);
-  }, [busy, lockInput]);
   if (state === null) return null;
   const now = Date.now();
   const status = headerStatus(state, projectId, now);
@@ -1023,7 +1013,6 @@ function NewThreadAccount() {
       projectId={projectId}
       isCompactViewport={compact}
       newThread
-      lockInput={composer.setInputLock}
     />
   );
 }
