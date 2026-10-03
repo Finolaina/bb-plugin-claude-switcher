@@ -434,11 +434,6 @@ The refresh token rotates on every refresh, so the plugin:
 
 ## Known limits
 
-- **On bb 0.44 the new-thread control shows for every provider.** That bb
-  does not tell a composer action which provider is picked, so the control
-  also shows while Codex or another provider is picked; the account it
-  names applies to the project's Claude Code threads only. bb 0.45 reports
-  the pickers and the control hides for other providers.
 - **A message sent while a composer pick is being saved** can start the
   thread on the old account. bb gives plugins no way to hold a send: its
   input lock (`setInputLock`) only stops typing, and neither Enter nor the

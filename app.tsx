@@ -11,7 +11,6 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   definePluginApp,
   useComposer,
-  useComposerView,
   useRealtime,
   useRpc,
   useSdk,
@@ -20,7 +19,6 @@ import type { rpcContract, State } from "./server";
 import {
   askForProject,
   composerProject,
-  composerReader,
   forecastLine,
   headerStatus,
   newestFirst,
@@ -1020,13 +1018,6 @@ function ThreadAccountMenu({
   );
 }
 
-// bb 0.44 reports the composer's scope and layout reactively through
-// useComposerView (useComposer's copy can stay at "project unresolved");
-// later hosts dropped that hook and made useComposer() itself reactive.
-const readComposer = composerReader(
-  typeof useComposerView === "function" ? useComposerView : undefined,
-);
-
 /**
  * The account control in the new-thread composer: the account the picked
  * project is on, the best one beside it when it is another, and the menu to
@@ -1034,21 +1025,16 @@ const readComposer = composerReader(
  */
 function NewThreadAccount() {
   const composer = useComposer();
-  const { scope, compact } = readComposer(composer);
   // The composer only reports its collapsed layout, where bb hides plugin
   // actions anyway: the screen width is what keeps the button short.
   const narrow = useIsCompactViewport();
-  // The pickers, on hosts that report them (see composerProject).
-  const selection = (
-    composer as { selection?: { providerId?: string } | null }
-  ).selection;
-  const projectId = composerProject(scope, selection);
+  const projectId = composerProject(composer.scope, composer.selection);
   if (projectId === null) return null;
   return (
     <ThreadAccountMenu
       key={projectId}
       projectId={projectId}
-      isCompactViewport={compact || narrow}
+      isCompactViewport={composer.layout === "compact" || narrow}
       newThread
       focusComposer={() => composer.focus()}
     />

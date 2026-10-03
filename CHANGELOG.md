@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.10] - 2026-10-03
+
+### Changed
+
+- **Needs bb 0.45 or later** (plugin SDK 0.6.16). The new-thread control
+  now reads the composer bb 0.45 gives plugins, and hides while another
+  provider is picked. On bb 0.44, `bb plugin update` keeps 0.2.9 and lists
+  this release as blocked until bb is updated.
+- The listing and the overview mention the account control in the
+  new-thread composer.
+- `@types/better-sqlite3` back to 7.x, the range the plugin SDK declares.
+
 ## [0.2.9] - 2026-10-03
 
 ### Added
@@ -73,7 +85,7 @@ project uses [Semantic Versioning](https://semver.org/).
   the provider refuses the turn before reporting the limit reached
   ("rate limit rejected; type seven_day_overage_included"), that report is
   still a warning and the plugin left the turn failed (`ignored
-  (no-rate-limit-state)`). A `rate-limit` failure under a `warning` report
+(no-rate-limit-state)`). A `rate-limit` failure under a `warning` report
   is now judged like one under `blocked`; when no other account can run
   the turn, the failed account is waited for until the window that
   warned resets, not the one that resets last.
@@ -122,13 +134,13 @@ project uses [Semantic Versioning](https://semver.org/).
   - **When a turn fails on a limit**, it is judged against the model its
     thread was last sent with: an Opus thread switches to an account with
     Opus left, or waits for Opus.
-  A thread sent with the preferred model is decided by that model, as
-  before: when no account can run it, the project stays and the retry
-  waits for it. A thread bb has not sent a message for since the plugin
-  started is judged by the preferred model. The plugin never changes a
-  thread's model: it only chooses the account. With `preferredModel`
-  empty, a thread's own model now counts too, and the reasons name it
-  (`Waiting for Fable on work`).
+    A thread sent with the preferred model is decided by that model, as
+    before: when no account can run it, the project stays and the retry
+    waits for it. A thread bb has not sent a message for since the plugin
+    started is judged by the preferred model. The plugin never changes a
+    thread's model: it only chooses the account. With `preferredModel`
+    empty, a thread's own model now counts too, and the reasons name it
+    (`Waiting for Fable on work`).
 
 ## [0.2.4] - 2026-09-30
 
@@ -301,6 +313,13 @@ First public release.
 - macOS keychain and Linux credentials-file support; rotated OAuth tokens
   are written back and verified by reading them again.
 
+[0.2.10]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.10
+[0.2.9]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.9
+[0.2.8]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.8
+[0.2.7]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.7
+[0.2.6]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.6
+[0.2.5]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.5
+[0.2.4]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.4
 [0.2.3]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.3
 [0.2.2]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.2
 [0.2.1]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.1

@@ -4,7 +4,6 @@ import {
   newestFirst,
   projectRead,
   composerProject,
-  composerReader,
   picksOnSelect,
   forecastLine,
   headerStatus,
@@ -319,16 +318,14 @@ describe("composerProject", () => {
 
   it("is null in any composer that is not the new-thread one", () => {
     expect(composerProject({ kind: "thread", threadId: "thr_a" }, undefined)).toBeNull();
-    // A side chat names its project too, and is still not a new thread.
     expect(
       composerProject(
-        { kind: "side-chat", projectId: "proj_a", parentThreadId: "thr_a", tabId: "tab_a", childThreadId: null },
+        { kind: "queued-message", threadId: "thr_a", queuedMessageId: "qm_a" },
         undefined,
       ),
     ).toBeNull();
   });
 
-  // bb 0.45 hosts expose the composer's pickers; 0.44 hosts do not.
   it("is null when the composer says the new thread is not a Claude Code one", () => {
     expect(
       composerProject(newThread("proj_a"), { providerId: "codex" }),
@@ -341,24 +338,6 @@ describe("composerProject", () => {
     ).toBe("proj_a");
     expect(composerProject(newThread("proj_a"), {})).toBe("proj_a");
     expect(composerProject(newThread("proj_a"), null)).toBe("proj_a");
-  });
-});
-
-describe("composerReader", () => {
-  const scope = { kind: "new-thread", projectId: "proj_a" } as const;
-  const composer = { scope: { kind: "new-thread", projectId: "proj_stale" } as const, layout: "expanded" };
-
-  // bb 0.44: useComposer()'s scope can stay unresolved; the view is the live one.
-  it("reads the scope and the layout from the view hook when the host has it", () => {
-    const read = composerReader(() => ({ scope, layout: "compact" }));
-    expect(read(composer)).toEqual({ scope, compact: true });
-  });
-
-  // bb 0.45 dropped useComposerView and made useComposer() itself live.
-  it("reads them from the composer when the host has no view hook", () => {
-    const read = composerReader(undefined);
-    expect(read(composer)).toEqual({ scope: composer.scope, compact: false });
-    expect(read({ ...composer, layout: "compact" })).toEqual({ scope: composer.scope, compact: true });
   });
 });
 

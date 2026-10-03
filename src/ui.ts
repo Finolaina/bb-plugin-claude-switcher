@@ -250,8 +250,7 @@ export function askForProject(
 /**
  * The project whose account the new-thread composer shows: the one picked
  * there, once resolved. Null in any other composer, and when the composer
- * reports a provider other than Claude Code (bb 0.45 hosts report their
- * pickers; 0.44 hosts do not, and the control shows for every provider).
+ * has picked a provider other than Claude Code.
  */
 export function composerProject(
   scope: PluginComposerScope,
@@ -261,33 +260,6 @@ export function composerProject(
   const provider = selection?.providerId;
   if (provider !== undefined && provider !== CLAUDE_CODE_PROVIDER) return null;
   return scope.projectId ?? null;
-}
-
-type ComposerScope = PluginComposerScope;
-
-/**
- * How the new-thread control reads its composer, chosen once per host: bb
- * 0.44 keeps the live scope and layout in `useComposerView()` (the
- * composer's own `scope` can stay at "project unresolved"); later hosts
- * dropped that hook and made `useComposer()` itself live. `viewHook` is
- * that hook, or undefined on a host without it; the returned reader calls
- * the same hooks on every render.
- */
-export function composerReader(
-  viewHook: (() => { scope: ComposerScope; layout: string }) | undefined,
-): (composer: { scope: ComposerScope; layout?: string }) => {
-  scope: ComposerScope;
-  compact: boolean;
-} {
-  if (viewHook !== undefined)
-    return () => {
-      const view = viewHook();
-      return { scope: view.scope, compact: view.layout === "compact" };
-    };
-  return (composer) => ({
-    scope: composer.scope,
-    compact: composer.layout === "compact",
-  });
 }
 
 /**

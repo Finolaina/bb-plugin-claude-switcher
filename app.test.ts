@@ -35,7 +35,9 @@ describe("the new-thread account control", () => {
   it("lets a pick of the shown account keep it, follows the compact layout and asks for a missing project", async () => {
     const source = await readFile(new URL("./app.tsx", import.meta.url), "utf8");
     expect(source).toContain("picksOnSelect(account.name, status.account, newThread)");
-    expect(source).toContain("isCompactViewport={compact || narrow}");
+    expect(source).toContain('isCompactViewport={composer.layout === "compact" || narrow}');
+    // The composer's pickers decide whether the control shows (another provider hides it).
+    expect(source).toContain("composerProject(composer.scope, composer.selection)");
     expect(source).toContain("const narrow = useIsCompactViewport();");
     // Back to the draft when the menu closes, and the host form's mousedown
     // kept out of the menu.

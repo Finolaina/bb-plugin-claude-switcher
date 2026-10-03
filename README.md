@@ -11,8 +11,8 @@ When a turn hits a subscription limit, the project moves to a free account and t
 
 [![check](https://github.com/Finolaina/bb-plugin-claude-switcher/actions/workflows/check.yml/badge.svg)](https://github.com/Finolaina/bb-plugin-claude-switcher/actions/workflows/check.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![bb ≥ 0.44](https://img.shields.io/badge/bb-%E2%89%A5%200.44-0d9488)](https://github.com/get-bb/bb)
-[![Plugin SDK ≥ 0.5.29](https://img.shields.io/badge/plugin%20sdk-%E2%89%A5%200.5.29-2563eb)](https://www.npmjs.com/package/@get-bb/plugin-sdk)
+[![bb ≥ 0.45](https://img.shields.io/badge/bb-%E2%89%A5%200.45-0d9488)](https://github.com/get-bb/bb)
+[![Plugin SDK ≥ 0.6.16](https://img.shields.io/badge/plugin%20sdk-%E2%89%A5%200.6.16-2563eb)](https://www.npmjs.com/package/@get-bb/plugin-sdk)
 [![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-lightgrey)](#install)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=white)](tsconfig.json)
 
@@ -200,7 +200,7 @@ bb plugin install .  # bb builds the plugin at install time
 
 **Requirements**
 
-- **bb 0.44 or later** (plugin SDK 0.5.29 or later) running on the machine
+- **bb 0.45 or later** (plugin SDK 0.6.16 or later) running on the machine
   that holds the Claude Code logins: macOS (keychain) or Linux
   (credentials file). The plugin runs inside bb's server process.
 - **Threads that run on that same machine.** `CLAUDE_CONFIG_DIR` is set as
@@ -289,7 +289,7 @@ starts on a fresh account runs without your settings, hooks and
 | Where                                                | What                                                                                                                                                       |
 | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **A Claude Code thread's header**                    | The project's account with a dot (green: room, amber: running low, red: out or not logged in, grey: not measured), and a menu with the forecast of its window, to switch now to the best account or pick any other. |
-| **The new-thread composer**                          | The same control for the project picked there, before the first message, with the best account beside it when it is another one. A pick there before you send, even of the account shown, keeps the project on it from the first message, unless that account is out of your preferred model when the thread is created. Send after the pick is saved: a message sent in that moment can start on the old account. On a phone it shows once the composer is open. On bb 0.44 it shows for every provider (that bb does not tell plugins which one is picked). |
+| **The new-thread composer**                          | The same control for the project picked there, before the first message, with the best account beside it when it is another one. A pick there before you send, even of the account shown, keeps the project on it from the first message, unless that account is out of your preferred model when the thread is created. Send after the pick is saved: a message sent in that moment can start on the old account. On a phone it shows once the composer is open. It hides while another provider is picked. |
 | **Settings → Claude Switcher**                       | The nine settings, a card per account with its windows and their forecast, **Add account** and **Log in**, the account each project runs on (with a picker), **Refresh usage**, and the history of moves. |
 | **Settings → Provider usage** (and its sidebar card) | Pick **Claude accounts** in the source menu to see every account's session, weekly and per-model windows.                                                  |
 | **A thread's retry reason**                          | `Switched to account <name>`, `Waiting for <name>` or `Retrying on account <name>`, wherever bb shows why a turn was retried.                              |
@@ -452,8 +452,7 @@ component, and the `experimental_discoverable` and `experimental_description`
 options of the Provider usage source. The thread header control is registered only when
 the host offers that slot, so a bb without it keeps the Settings section.
 The new-thread control is registered only when the host offers
-`composer.customize`; it reads the composer through `useComposerView` on
-bb 0.44 and through `useComposer` on later bb, which dropped that hook.
+`composer.customize`, and reads the composer through `useComposer`.
 Outside bb's SDK, a login you start from Settings runs the `claude`
 executable (`claude auth login`) as a child process of bb's server.
 
@@ -467,7 +466,7 @@ executable (`claude auth login`) as a child process of bb's server.
 | `threads.retry` and queued messages                              | Retries the failed turn now, or at a reset, and reuses the retry provider-retry queued.    |
 | Settings and a settings section                                  | The nine settings, plus the per-project picker, the account cards, the login and the history. |
 | `experimental_threadHeaderAction` slot and `threads.get`         | The account control in a Claude Code thread's header. Experimental in bb: it may change.   |
-| `composer.customize` (a new-thread action), `useComposer` and `useComposerView` | The account control in the new-thread composer, for the project picked there. |
+| `composer.customize` (a new-thread action) and `useComposer` | The account control in the new-thread composer, for the project picked there. |
 | CLI registration                                                 | `bb claude-switcher list`, `refresh`, `history`, `use` and `release`.                      |
 | Background service, key-value storage, realtime signals, logging | Periodic usage refresh, the history of moves, the usage samples behind the forecast, the install time and the new projects already handled, live updates of the section, and a log. |
 
