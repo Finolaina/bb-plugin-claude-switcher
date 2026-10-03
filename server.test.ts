@@ -2331,6 +2331,13 @@ describe("placement: the cases the first review found", () => {
       ["proj-1", "proj-2", "proj-3", "proj-4", "personal"],
     ]);
     expect(h.envReads).toHaveLength(5);
+    // A project bb does not list is read for once per shared read, not on
+    // every ask.
+    h.envReads.length = 0;
+    expect(ids(await list({ project: "ghost" }))).not.toContain("ghost");
+    expect(h.envReads).toHaveLength(5);
+    expect(ids(await list({ project: "ghost" }))).not.toContain("ghost");
+    expect(h.envReads).toHaveLength(5);
   });
 
   it("a list after the accounts change names each project's account by the new set, not by the shared read", async () => {

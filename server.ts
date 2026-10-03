@@ -361,6 +361,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   let projectsRead: {
     at: number;
     value: Promise<State["projects"]>;
+    /** The project a view needed when this read was made for it. */
+    need?: string;
   } | null = null;
   /** When each account last refused a turn (in memory: a reload forgets it). */
   const refusedAt = new Map<string, number>();
@@ -755,18 +757,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const kept = projectsRead;
     if (kept === null || deps.now() - kept.at >= PROJECTS_FRESH_MS)
       return readProjects();
-    if (need === undefined) return kept.value;
+    // Already read again for this project (one bb does not list): no more.
+    if (need === undefined || kept.need === need) return kept.value;
     return kept.value.then((projects) => {
       if (projects.some((p) => p.id === need)) return projects;
       // Another view already read again for the same reason: share it.
       if (projectsRead !== null && projectsRead !== kept)
         return projectsRead.value;
-      return readProjects();
+      return readProjects(need);
     });
   }
 
-  /** A fresh read, which the views' next lists share. */
-  function readProjects(): Promise<State["projects"]> {
+  /** A fresh read, which the views' next lists share; `need`, see sharedProjects. */
+  function readProjects(need?: string): Promise<State["projects"]> {
     const now = deps.now();
     const value = (async () => {
       // The personal project too: a variable set there must be visible and releasable.
@@ -779,7 +782,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         })),
       );
     })();
-    const read = { at: now, value };
+    const read = { at: now, value, need };
     projectsRead = read;
     // A failed read is not kept; its callers still see the failure.
     value.catch(() => {
