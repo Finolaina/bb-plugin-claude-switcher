@@ -2,9 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   composerProject,
   composerReader,
-  MISSING_PROJECT_RETRY_MS,
   picksOnSelect,
-  PROJECTS_FRESH_MS,
   forecastLine,
   headerStatus,
   noLoginFound,
@@ -372,14 +370,5 @@ describe("picksOnSelect", () => {
   it("in the new-thread composer, a click on the shown account picks it too", () => {
     expect(picksOnSelect("main", "main", true)).toBe(true);
     expect(picksOnSelect("work", "main", true)).toBe(true);
-  });
-});
-
-describe("MISSING_PROJECT_RETRY_MS", () => {
-  // A project created after the views' shared read is missing from it until
-  // that read expires: the one retry must come after it.
-  it("comes after the shared read of the projects has expired", () => {
-    expect(PROJECTS_FRESH_MS).toBe(30_000);
-    expect(MISSING_PROJECT_RETRY_MS).toBe(31_000);
   });
 });

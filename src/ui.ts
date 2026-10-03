@@ -248,8 +248,3 @@ export function picksOnSelect(
 ): boolean {
   return newThread || clicked !== shown;
 }
-
-/** How long the views' shared read keeps the projects' accounts (server.ts). */
-export const PROJECTS_FRESH_MS = 30_000;
-/** One more read for a project missing from that list, once it has expired. */
-export const MISSING_PROJECT_RETRY_MS = PROJECTS_FRESH_MS + 1_000;

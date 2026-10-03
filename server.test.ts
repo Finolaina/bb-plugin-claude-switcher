@@ -2286,6 +2286,35 @@ describe("placement: the cases the first review found", () => {
     expect(proj1(await list())).toMatchObject({ account: null, owned: false });
   });
 
+  it("a view asking for a project the shared read lacks gets a fresh read, which the next lists share", async () => {
+    let clock = NOW;
+    const h = await host(ALL_FREE, { clock: () => clock });
+    dispose = () => h.harness.dispose();
+    const list = (input: { project: string } | null = null) =>
+      h.harness.behavior.callRpc("accounts_list", input) as Promise<State>;
+    const ids = (state: State) => state.projects.map((p) => p.id);
+    await list();
+    // A project made a moment later, picked in the new-thread composer.
+    h.harness.sdk.stub("projects.list", async () => [
+      { id: "proj-1", name: "Website" },
+      { id: "proj-2", name: "Other" },
+      { id: "proj-3", name: "New" },
+      { id: "personal", name: "Personal" },
+    ]);
+    clock = NOW + 5_000;
+    h.envReads.length = 0;
+    expect(ids(await list())).not.toContain("proj-3");
+    // Asked for a project the read has: still shared.
+    expect(ids(await list({ project: "proj-1" }))).not.toContain("proj-3");
+    expect(h.envReads).toEqual([]);
+    // Asked for the one it lacks: read again.
+    expect(ids(await list({ project: "proj-3" }))).toContain("proj-3");
+    expect(h.envReads).toHaveLength(4);
+    // The next lists share that read.
+    expect(ids(await list())).toContain("proj-3");
+    expect(h.envReads).toHaveLength(4);
+  });
+
   it("a list after the accounts change names each project's account by the new set, not by the shared read", async () => {
     let dirs = ["work"];
     const h = await host(ALL_FREE, {

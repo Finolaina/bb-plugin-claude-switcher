@@ -22,7 +22,6 @@ import {
   composerReader,
   forecastLine,
   headerStatus,
-  MISSING_PROJECT_RETRY_MS,
   noLoginFound,
   picksOnSelect,
   projectName,
@@ -108,6 +107,16 @@ function useAccounts() {
     };
   }, [refetch]);
   useRealtime("accounts-changed", refetch);
+  /** A list that must include this project (see sharedProjects in server.ts). */
+  const readProject = useCallback(
+    (project: string) => {
+      rpc.call("accounts_list", { project }).then((next) => {
+        keep(next);
+        setError(null);
+      }, report);
+    },
+    [rpc, report, keep],
+  );
   const run = useCallback(
     async (work: () => Promise<State>) => {
       setBusy(true);
@@ -131,6 +140,7 @@ function useAccounts() {
     changeError,
     busy,
     refetch,
+    readProject,
     refresh: () => run(() => rpc.call("accounts_refresh", null)),
     setProjectAccount: (projectId: string, account: string | null) =>
       run(() => rpc.call("project_set_account", { projectId, account })),
@@ -812,22 +822,19 @@ function ThreadAccountMenu({
     state,
     changeError: error,
     busy,
-    refetch,
+    readProject,
     setProjectAccount,
   } = useAccounts();
-  // A project made a moment ago can be missing from bb's project list, which
-  // the server keeps for PROJECTS_FRESH_MS: read once more after it expires.
+  // A project made a moment ago can be missing from the list the views
+  // share: asked for once, by name.
   const missing =
     state !== null && headerStatus(state, projectId, Date.now()) === null;
-  const retried = useRef<string | null>(null);
+  const asked = useRef<string | null>(null);
   useEffect(() => {
-    if (!missing || retried.current === projectId) return;
-    const timer = setTimeout(() => {
-      retried.current = projectId;
-      refetch();
-    }, MISSING_PROJECT_RETRY_MS);
-    return () => clearTimeout(timer);
-  }, [missing, projectId, refetch]);
+    if (!missing || asked.current === projectId) return;
+    asked.current = projectId;
+    readProject(projectId);
+  }, [missing, projectId, readProject]);
   if (state === null) return null;
   const now = Date.now();
   const status = headerStatus(state, projectId, now);

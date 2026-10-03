@@ -67,12 +67,7 @@ import {
   usageSourceRpcContract,
 } from "./src/usage-source-contract.js";
 import { toMeasurement, toResource } from "./src/usage-source.js";
-import {
-  forecastLine,
-  PROJECTS_FRESH_MS,
-  projectName,
-  sharedWith,
-} from "./src/ui.js";
+import { forecastLine, projectName, sharedWith } from "./src/ui.js";
 
 export const ENV_VAR = "CLAUDE_CONFIG_DIR";
 /** Realtime channel app.tsx listens on after any state change. */
@@ -83,6 +78,8 @@ export const CHANGED = "accounts-changed";
  * inside this window is one of those: retried as is, no second switch.
  */
 export const SWITCH_GRACE_MS = 60_000;
+/** How long a list keeps the projects' accounts it read (see sharedProjects). */
+export const PROJECTS_FRESH_MS = 30_000;
 /**
  * An account that refused a turn (its organization turned subscription access
  * off, or its login stopped working) is chosen for nothing this long, though
@@ -231,7 +228,11 @@ export type State = z.infer<typeof stateSchema>;
 export type SwitchRecord = z.infer<typeof switchRecordSchema>;
 
 export const rpcContract = defineRpcContract({
-  accounts_list: { input: z.null(), output: stateSchema },
+  /** `project`: a view's project, read fresh when the shared read lacks it. */
+  accounts_list: {
+    input: z.object({ project: z.string() }).nullable(),
+    output: stateSchema,
+  },
   accounts_refresh: { input: z.null(), output: stateSchema },
   project_set_account: {
     input: z.object({ projectId: z.string(), account: z.string().nullable() }),
@@ -747,15 +748,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   // refetches on the same event. The views' lists share one read, kept
   // PROJECTS_FRESH_MS; a change made here drops it, one made in bb's own
   // settings shows within that time. Everything else reads fresh, and
-  // decisions read projectAccount directly.
-  function sharedProjects(): Promise<State["projects"]> {
-    if (
-      projectsRead !== null &&
-      deps.now() - projectsRead.at < PROJECTS_FRESH_MS
-    ) {
-      return projectsRead.value;
-    }
-    return readProjects();
+  // decisions read projectAccount directly. A view that needs a project the
+  // shared read lacks (made a moment ago, picked in the new-thread composer)
+  // gets a fresh read, which the next lists share.
+  function sharedProjects(need?: string): Promise<State["projects"]> {
+    const kept = projectsRead;
+    if (kept === null || deps.now() - kept.at >= PROJECTS_FRESH_MS)
+      return readProjects();
+    if (need === undefined) return kept.value;
+    return kept.value.then((projects) =>
+      projects.some((p) => p.id === need) ? projects : readProjects(),
+    );
   }
 
   /** A fresh read, which the views' next lists share. */
@@ -847,10 +850,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     });
   }
 
-  /** `shared`: the views' list, which may reuse a recent read (see sharedProjects). */
-  async function state({ shared = false } = {}): Promise<State> {
+  /**
+   * `shared`: the views' list, which may reuse a recent read (see
+   * sharedProjects); `need`, a project that list must have.
+   */
+  async function state({
+    shared = false,
+    need,
+  }: { shared?: boolean; need?: string } = {}): Promise<State> {
     if (accounts.length === 0) await discover();
-    const projects = await (shared ? sharedProjects() : readProjects());
+    const projects = await (shared ? sharedProjects(need) : readProjects());
     return {
       accounts: accounts.map((account) => {
         const m = collector.get(account.name);
@@ -998,7 +1007,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
 
   // ---- Page RPC ---------------------------------------------------------
   bb.rpc.register(rpcContract, {
-    accounts_list: () => state({ shared: true }),
+    accounts_list: (input) => state({ shared: true, need: input?.project }),
     async accounts_refresh() {
       await refreshAll();
       return state();
