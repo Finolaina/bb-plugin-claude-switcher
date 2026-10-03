@@ -442,8 +442,10 @@ The refresh token rotates on every refresh, so the plugin:
 - **A message sent while a composer pick is being saved** can start the
   thread on the old account. bb gives plugins no way to hold a send: its
   input lock (`setInputLock`) only stops typing, and neither Enter nor the
-  Send button checks it (bb 0.44, read 2026-10-03). The pick still lands:
-  the next turns run on the picked account.
+  Send button checks it (bb 0.44, read 2026-10-03). The pick still lands
+  for the next turns, unless that first turn's own placement writes over it
+  (see "an account picked by hand during the one read a placement
+  before a turn makes" below).
 - **On a phone the new-thread control shows once the composer is open.**
   bb leaves plugin actions out of its collapsed one-line composer (bb 0.44,
   read 2026-10-03); a tap on the draft brings the control back.

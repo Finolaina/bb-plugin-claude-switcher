@@ -17,7 +17,7 @@ project uses [Semantic Versioning](https://semver.org/).
   out of your preferred model when the thread is created; without a pick,
   a new project still moves to the best account after its first turn.
   A message sent while a pick is still being saved can start on the old
-  account; the pick still applies to the next turns. On bb 0.45 and later it shows
+  account, and that turn's own placement can then write over the pick. On bb 0.45 and later it shows
   only when Claude Code is the picked provider; bb 0.44 does not tell
   plugins which provider is picked, so there it shows for every provider.
   On a phone it shows once the composer is open. A project made a moment ago shows at once: a view that needs a project
