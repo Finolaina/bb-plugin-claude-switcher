@@ -67,7 +67,12 @@ import {
   usageSourceRpcContract,
 } from "./src/usage-source-contract.js";
 import { toMeasurement, toResource } from "./src/usage-source.js";
-import { forecastLine, projectName, sharedWith } from "./src/ui.js";
+import {
+  forecastLine,
+  PROJECTS_FRESH_MS,
+  projectName,
+  sharedWith,
+} from "./src/ui.js";
 
 export const ENV_VAR = "CLAUDE_CONFIG_DIR";
 /** Realtime channel app.tsx listens on after any state change. */
@@ -78,8 +83,6 @@ export const CHANGED = "accounts-changed";
  * inside this window is one of those: retried as is, no second switch.
  */
 export const SWITCH_GRACE_MS = 60_000;
-/** How long a list keeps the projects' accounts it read (see sharedProjects). */
-export const PROJECTS_FRESH_MS = 30_000;
 /**
  * An account that refused a turn (its organization turned subscription access
  * off, or its login stopped working) is chosen for nothing this long, though

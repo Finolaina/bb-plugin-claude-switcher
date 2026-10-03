@@ -29,6 +29,18 @@ describe("the thread header's reads", () => {
   });
 });
 
+// The new-thread control (0.2.9): no DOM tests here either, so these guard
+// its wiring to the helpers tested in src/ui.test.ts.
+describe("the new-thread account control", () => {
+  it("lets a pick of the shown account keep it, follows the compact layout and reads a missing project again", async () => {
+    const source = await readFile(new URL("./app.tsx", import.meta.url), "utf8");
+    expect(source).toContain("picksOnSelect(account.name, status.account, newThread)");
+    expect(source).toContain("isCompactViewport={compact}");
+    expect(source).toContain("}, MISSING_PROJECT_RETRY_MS);");
+    expect(source).not.toContain("account.name !== status.account)");
+  });
+});
+
 // The host hands setup() an `app` whose slots are functions; a host that
 // predates (or drops) an experimental slot simply lacks that member.
 async function register(slotNames: string[], withComposer = false) {

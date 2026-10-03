@@ -206,3 +206,50 @@ export function composerProject(
   if (provider !== undefined && provider !== CLAUDE_CODE_PROVIDER) return null;
   return scope.projectId ?? null;
 }
+
+type ComposerScope = PluginComposerScope;
+
+/**
+ * How the new-thread control reads its composer, chosen once per host: bb
+ * 0.44 keeps the live scope and layout in `useComposerView()` (the
+ * composer's own `scope` can stay at "project unresolved"); later hosts
+ * dropped that hook and made `useComposer()` itself live. `viewHook` is
+ * that hook, or undefined on a host without it; the returned reader calls
+ * the same hooks on every render.
+ */
+export function composerReader(
+  viewHook: (() => { scope: ComposerScope; layout: string }) | undefined,
+): (composer: { scope: ComposerScope; layout?: string }) => {
+  scope: ComposerScope;
+  compact: boolean;
+} {
+  if (viewHook !== undefined)
+    return () => {
+      const view = viewHook();
+      return { scope: view.scope, compact: view.layout === "compact" };
+    };
+  return (composer) => ({
+    scope: composer.scope,
+    compact: composer.layout === "compact",
+  });
+}
+
+/**
+ * Whether a click on an account in the account menu changes the project.
+ * In a thread's header a click on the project's own account does nothing.
+ * In the new-thread composer it picks it as well: a pick marks the project
+ * as placed, so a new project stays there instead of moving to the best
+ * account after its first turn.
+ */
+export function picksOnSelect(
+  clicked: string,
+  shown: string | null,
+  newThread: boolean,
+): boolean {
+  return newThread || clicked !== shown;
+}
+
+/** How long the views' shared read keeps the projects' accounts (server.ts). */
+export const PROJECTS_FRESH_MS = 30_000;
+/** One more read for a project missing from that list, once it has expired. */
+export const MISSING_PROJECT_RETRY_MS = PROJECTS_FRESH_MS + 1_000;

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   composerProject,
+  composerReader,
+  MISSING_PROJECT_RETRY_MS,
+  picksOnSelect,
+  PROJECTS_FRESH_MS,
   forecastLine,
   headerStatus,
   noLoginFound,
@@ -336,5 +340,46 @@ describe("composerProject", () => {
     ).toBe("proj_a");
     expect(composerProject(newThread("proj_a"), {})).toBe("proj_a");
     expect(composerProject(newThread("proj_a"), null)).toBe("proj_a");
+  });
+});
+
+describe("composerReader", () => {
+  const scope = { kind: "new-thread", projectId: "proj_a" } as const;
+  const composer = { scope: { kind: "new-thread", projectId: "proj_stale" } as const, layout: "expanded" };
+
+  // bb 0.44: useComposer()'s scope can stay unresolved; the view is the live one.
+  it("reads the scope and the layout from the view hook when the host has it", () => {
+    const read = composerReader(() => ({ scope, layout: "compact" }));
+    expect(read(composer)).toEqual({ scope, compact: true });
+  });
+
+  // bb 0.45 dropped useComposerView and made useComposer() itself live.
+  it("reads them from the composer when the host has no view hook", () => {
+    const read = composerReader(undefined);
+    expect(read(composer)).toEqual({ scope: composer.scope, compact: false });
+    expect(read({ ...composer, layout: "compact" })).toEqual({ scope: composer.scope, compact: true });
+  });
+});
+
+describe("picksOnSelect", () => {
+  it("in a thread's header, a click on the project's own account does nothing", () => {
+    expect(picksOnSelect("main", "main", false)).toBe(false);
+    expect(picksOnSelect("work", "main", false)).toBe(true);
+  });
+
+  // A new project left unpicked moves to the best account after its first
+  // turn; picking the shown account in the composer keeps it there.
+  it("in the new-thread composer, a click on the shown account picks it too", () => {
+    expect(picksOnSelect("main", "main", true)).toBe(true);
+    expect(picksOnSelect("work", "main", true)).toBe(true);
+  });
+});
+
+describe("MISSING_PROJECT_RETRY_MS", () => {
+  // A project created after the views' shared read is missing from it until
+  // that read expires: the one retry must come after it.
+  it("comes after the shared read of the projects has expired", () => {
+    expect(PROJECTS_FRESH_MS).toBe(30_000);
+    expect(MISSING_PROJECT_RETRY_MS).toBe(31_000);
   });
 });

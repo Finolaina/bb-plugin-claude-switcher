@@ -16,13 +16,15 @@ import {
   useRpc,
   useSdk,
 } from "@get-bb/plugin-sdk/app";
-import type { PluginComposerApi } from "@get-bb/plugin-sdk/app";
 import type { rpcContract, State } from "./server";
 import {
   composerProject,
+  composerReader,
   forecastLine,
   headerStatus,
+  MISSING_PROJECT_RETRY_MS,
   noLoginFound,
+  picksOnSelect,
   projectName,
   retryDelayMs,
   sharedWith,
@@ -796,14 +798,36 @@ function ThreadAccount({
 function ThreadAccountMenu({
   projectId,
   isCompactViewport,
-  showBest = false,
+  newThread = false,
 }: {
   projectId: string;
   isCompactViewport: boolean;
-  /** Name the best account beside the button when it is another one. */
-  showBest?: boolean;
+  /**
+   * In the new-thread composer: name the best account beside the button when
+   * it is another one, and let a pick of the shown account keep it.
+   */
+  newThread?: boolean;
 }) {
-  const { state, changeError: error, busy, setProjectAccount } = useAccounts();
+  const {
+    state,
+    changeError: error,
+    busy,
+    refetch,
+    setProjectAccount,
+  } = useAccounts();
+  // A project made a moment ago can be missing from bb's project list, which
+  // the server keeps for PROJECTS_FRESH_MS: read once more after it expires.
+  const missing =
+    state !== null && headerStatus(state, projectId, Date.now()) === null;
+  const retried = useRef<string | null>(null);
+  useEffect(() => {
+    if (!missing || retried.current === projectId) return;
+    const timer = setTimeout(() => {
+      retried.current = projectId;
+      refetch();
+    }, MISSING_PROJECT_RETRY_MS);
+    return () => clearTimeout(timer);
+  }, [missing, projectId, refetch]);
   if (state === null) return null;
   const now = Date.now();
   const status = headerStatus(state, projectId, now);
@@ -826,7 +850,7 @@ function ThreadAccountMenu({
           className="h-7 gap-1.5 px-2 text-xs"
           aria-busy={busy}
           aria-label={`Claude account: ${name}, ${TONE_TEXT[status.tone]}${
-            showBest && status.canSwitch ? `, best now: ${status.best}` : ""
+            newThread && status.canSwitch ? `, best now: ${status.best}` : ""
           }${error === null ? "" : ", the last change failed"}`}
         >
           <span
@@ -839,7 +863,7 @@ function ThreadAccountMenu({
           {isCompactViewport ? null : (
             <span className="max-w-32 truncate">{name}</span>
           )}
-          {showBest && status.canSwitch && !isCompactViewport ? (
+          {newThread && status.canSwitch && !isCompactViewport ? (
             <span className="max-w-32 truncate text-muted-foreground">
               · best: {status.best}
             </span>
@@ -864,6 +888,12 @@ function ThreadAccountMenu({
         <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
           Claude account for this project, used by all its threads from their
           next turn
+          {newThread ? (
+            <span className="block">
+              Pick one, even the current one, to keep it: otherwise a new
+              project moves to the best account after its first turn.
+            </span>
+          ) : null}
           {picked === null || pace === null ? null : (
             <span className="block text-foreground">
               {picked[0] === "weekly" ? "Weekly" : picked[0]}: {pace}
@@ -899,7 +929,10 @@ function ThreadAccountMenu({
                 aria-checked={account.name === status.account}
                 disabled={busy}
                 onSelect={() => {
-                  if (!busy && account.name !== status.account)
+                  if (
+                    !busy &&
+                    picksOnSelect(account.name, status.account, newThread)
+                  )
                     setProjectAccount(projectId, toValue(account.name));
                 }}
               >
@@ -931,24 +964,21 @@ function ThreadAccountMenu({
   );
 }
 
-// bb 0.44 reports the composer's scope reactively through useComposerView
-// (useComposer's copy can stay at "project unresolved"); later hosts dropped
-// that hook and made useComposer() itself reactive. Chosen once per host.
-const useComposerScope: (
-  composer: PluginComposerApi,
-) => PluginComposerApi["scope"] =
-  typeof useComposerView === "function"
-    ? () => useComposerView().scope
-    : (composer) => composer.scope;
+// bb 0.44 reports the composer's scope and layout reactively through
+// useComposerView (useComposer's copy can stay at "project unresolved");
+// later hosts dropped that hook and made useComposer() itself reactive.
+const readComposer = composerReader(
+  typeof useComposerView === "function" ? useComposerView : undefined,
+);
 
 /**
  * The account control in the new-thread composer: the account the picked
- * project will start on, the best one beside it when it is another, and the
- * menu to change it before the first turn.
+ * project is on, the best one beside it when it is another, and the menu to
+ * pick one before the first turn.
  */
 function NewThreadAccount() {
   const composer = useComposer();
-  const scope = useComposerScope(composer);
+  const { scope, compact } = readComposer(composer);
   // The pickers, on hosts that report them (see composerProject).
   const selection = (
     composer as { selection?: { providerId?: string } | null }
@@ -956,7 +986,11 @@ function NewThreadAccount() {
   const projectId = composerProject(scope, selection);
   if (projectId === null) return null;
   return (
-    <ThreadAccountMenu projectId={projectId} isCompactViewport={false} showBest />
+    <ThreadAccountMenu
+      projectId={projectId}
+      isCompactViewport={compact}
+      newThread
+    />
   );
 }
 
