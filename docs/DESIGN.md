@@ -439,7 +439,7 @@ The refresh token rotates on every refresh, so the plugin:
   also shows while Codex or another provider is picked; the account it
   names applies to the project's Claude Code threads only. bb 0.45 reports
   the pickers and the control hides for other providers.
-- **A click on Send while a composer pick is being saved** starts the
+- **A click on Send while a composer pick is being saved** can start the
   thread on the old account. The plugin locks the draft for that moment,
   which stops Enter, but bb gives plugins no way to hold the Send button.
   The pick still lands: the next turns run on the picked account.
