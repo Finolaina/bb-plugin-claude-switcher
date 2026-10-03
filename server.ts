@@ -943,50 +943,54 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     projectId: string,
     choose: (find: (name: string) => Account) => Account | null,
   ): Promise<void> {
-    await inProjectQueue(projectId, async () => {
-      await discover();
-      const from = await projectAccount(projectId);
-      const to = choose(findAccount);
-      await applyAccount(projectId, to, from);
-      await markHandled(projectId);
-      const fromName = from.account ?? current.defaultAccountName;
-      const toName = to?.name ?? current.defaultAccountName;
-      if (toName === fromName) return;
-      bb.log.info(
-        `project ${projectId}: picked by hand, ${fromName} → ${toName}`,
-      );
-      await addHistory({
-        at: deps.now(),
-        threadId: "",
-        projectId,
-        from: fromName,
-        to: toName,
-        reason: "Picked by hand",
-      });
-      // A turn already running on the old account fails there after the
-      // pick: like after a switch, it runs again once on the picked account.
-      // The pick is the user's, so it holds unless the account cannot run a
-      // turn (see cannotRun); its own failure is judged.
-      // A login made after the last measurement: look again before judging.
-      const picked = accounts.find((a) => a.name === toName);
-      if (
-        picked !== undefined &&
-        collector.get(toName)?.problem?.kind === "unauthenticated"
-      ) {
-        await collector.collect(picked);
-        // The views read again on the change above, maybe before this.
-        bb.realtime.publish(CHANGED, { at: deps.now() });
-      }
-      if (!cannotRun(toName))
-        recentSwitches.set(projectId, {
+    // applyAccount announces the change before the pick has written all it
+    // writes (its history row, a new measure): the views read again once the
+    // pick is over, or a read they made in between can stand.
+    try {
+      await inProjectQueue(projectId, async () => {
+        await discover();
+        const from = await projectAccount(projectId);
+        const to = choose(findAccount);
+        await applyAccount(projectId, to, from);
+        await markHandled(projectId);
+        const fromName = from.account ?? current.defaultAccountName;
+        const toName = to?.name ?? current.defaultAccountName;
+        if (toName === fromName) return;
+        bb.log.info(
+          `project ${projectId}: picked by hand, ${fromName} → ${toName}`,
+        );
+        await addHistory({
           at: deps.now(),
+          threadId: "",
+          projectId,
+          from: fromName,
           to: toName,
-          threadId: null,
-          sendAt: undefined,
-          graced: new Set(),
+          reason: "Picked by hand",
         });
-      else recentSwitches.delete(projectId);
-    });
+        // A turn already running on the old account fails there after the
+        // pick: like after a switch, it runs again once on the picked account.
+        // The pick is the user's, so it holds unless the account cannot run a
+        // turn (see cannotRun); its own failure is judged.
+        // A login made after the last measurement: look again before judging.
+        const picked = accounts.find((a) => a.name === toName);
+        if (
+          picked !== undefined &&
+          collector.get(toName)?.problem?.kind === "unauthenticated"
+        )
+          await collector.collect(picked);
+        if (!cannotRun(toName))
+          recentSwitches.set(projectId, {
+            at: deps.now(),
+            to: toName,
+            threadId: null,
+            sendAt: undefined,
+            graced: new Set(),
+          });
+        else recentSwitches.delete(projectId);
+      });
+    } finally {
+      bb.realtime.publish(CHANGED, { at: deps.now() });
+    }
   }
 
   // ---- Provider usage panel source -------------------------------------

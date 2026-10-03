@@ -322,6 +322,12 @@ interface HostOptions {
   accountEntries?: () => { name: string; directory: boolean }[];
 }
 
+/** When the last accounts-changed was announced (its payload's at). */
+function lastChangeAt(h: { harness: { realtimeSignals: readonly { channel: string; payload: unknown }[] } }): number {
+  const changes = h.harness.realtimeSignals.filter((s) => s.channel === "accounts-changed");
+  return (changes.at(-1)?.payload as { at: number } | undefined)?.at ?? 0;
+}
+
 async function host(
   usage: Record<string, () => Response>,
   options: HostOptions = {},
@@ -2986,11 +2992,20 @@ describe("the account shown in each thread's header", () => {
 
   it("announces a change again once a pick has measured an account that had no login", async () => {
     let loggedIn = false;
-    const h = await host({
-      main: () => Response.json(payload(100, 40)),
-      spare: () => Response.json(payload(10, 60)),
-      work: () => (loggedIn ? Response.json(payload(5, 20)) : new Response(null, { status: 401 })),
-    });
+    let clock = NOW;
+    let measuredAt = 0;
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => {
+          if (!loggedIn) return new Response(null, { status: 401 });
+          measuredAt = clock;
+          return Response.json(payload(5, 20));
+        },
+      },
+      { clock: () => (clock += 1) },
+    );
     dispose = () => h.harness.dispose();
     await h.harness.behavior.callRpc("accounts_refresh", null);
     // claude login run outside the plugin, then work picked by hand.
@@ -3004,8 +3019,33 @@ describe("the account shown in each thread's header", () => {
     })) as State;
     expect(state.accounts.find((a) => a.name === "work")?.problem ?? null).toBeNull();
     // The change itself, then the measure: a view's read set off by the first
-    // can predate the measure, so the views read again.
+    // can predate the measure, so the views read again after it.
     expect(changes() - before).toBe(2);
+    expect(measuredAt).toBeGreaterThan(0);
+    expect(lastChangeAt(h)).toBeGreaterThan(measuredAt);
+  });
+
+  it("announces a pick once it is all written, after its history row", async () => {
+    let clock = NOW;
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { clock: () => (clock += 1) },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const state = (await h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-1",
+      account: "work",
+    })) as State;
+    const row = state.history.find((r) => r.reason === "Picked by hand");
+    expect(row).toBeDefined();
+    // A view that read on the announcement made when the account was applied
+    // can predate the row; its answer would then hide the pick's own.
+    expect(lastChangeAt(h)).toBeGreaterThan(row!.at);
   });
 
   it("names a best account once a reset has passed, without measuring again", async () => {
