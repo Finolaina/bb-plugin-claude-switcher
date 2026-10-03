@@ -65,6 +65,7 @@ describe("the new-thread account control", () => {
     expect(source).toContain(`      const ticket = answers.start();
       try {
         keep(ticket, await work());`);
+    expect(source).toContain("const shown = keep(ticket, next);");
     expect(source).toContain("return projectRead(next, shown, project);");
     expect(source).toContain("const shown = answers.accept(ticket, next);");
     // The composer sits in bb's <form>, and the mobile menu trigger sets no
