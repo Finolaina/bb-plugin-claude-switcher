@@ -31,7 +31,7 @@ describe("the thread header's reads", () => {
 
 // The host hands setup() an `app` whose slots are functions; a host that
 // predates (or drops) an experimental slot simply lacks that member.
-async function register(slotNames: string[]) {
+async function register(slotNames: string[], withComposer = false) {
   const { default: definition } = await import("./app.tsx");
   const registered: { slot: string; id: string; title: string; component: unknown }[] = [];
   const slots = Object.fromEntries(
@@ -48,8 +48,20 @@ async function register(slotNames: string[]) {
     ]),
   );
   const setup = (definition as unknown as { setup: (app: unknown) => void }).setup;
-  setup({ slots });
-  return { registered };
+  // The composer's customizations, as the host receives them.
+  const customized: { id: string; scopes: unknown; actions: { id: string; component: unknown }[] }[] = [];
+  const composer = withComposer
+    ? {
+        customize: (r: { id: string; scopes?: unknown; actions?: { id: string; component: unknown }[] }) =>
+          customized.push({
+            id: r.id,
+            scopes: r.scopes,
+            actions: (r.actions ?? []).map((a) => ({ id: a.id, component: (a.component as { name?: string }).name })),
+          }),
+      }
+    : undefined;
+  setup({ slots, composer });
+  return { registered, customized };
 }
 
 describe("the plugin's frontend registration", () => {
@@ -59,6 +71,19 @@ describe("the plugin's frontend registration", () => {
       { slot: "settingsSection", id: "claude-switcher", title: "Claude Switcher", component: "AccountsSection" },
       { slot: "experimental_threadHeaderAction", id: "claude-account", title: "Claude account", component: "ThreadAccount" },
     ]);
+  });
+
+  it("puts the account control in the new-thread composer, and only there", async () => {
+    const { customized } = await register(["settingsSection"], true);
+    expect(customized).toEqual([
+      { id: "claude-account", scopes: ["new-thread"], actions: [{ id: "claude-account", component: "NewThreadAccount" }] },
+    ]);
+  });
+
+  it("keeps the other controls on a host without composer customization", async () => {
+    const { registered, customized } = await register(["settingsSection", "experimental_threadHeaderAction"]);
+    expect(customized).toEqual([]);
+    expect(registered.map((r) => r.slot)).toEqual(["settingsSection", "experimental_threadHeaderAction"]);
   });
 
   it("keeps the Settings section on a host without the experimental thread header slot", async () => {

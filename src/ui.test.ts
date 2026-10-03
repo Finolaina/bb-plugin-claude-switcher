@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  composerProject,
   forecastLine,
   headerStatus,
   noLoginFound,
@@ -296,5 +297,44 @@ describe("retryDelayMs", () => {
     expect([0, 1, 2, 3, 4, 5, 50].map(retryDelayMs)).toEqual([
       2_000, 5_000, 15_000, 30_000, 60_000, 60_000, 60_000,
     ]);
+  });
+});
+
+describe("composerProject", () => {
+  const newThread = (projectId: string | null) =>
+    ({ kind: "new-thread", projectId }) as const;
+
+  it("is the project picked in the new-thread composer", () => {
+    expect(composerProject(newThread("proj_a"), undefined)).toBe("proj_a");
+  });
+
+  it("is null until the composer has resolved its project", () => {
+    expect(composerProject(newThread(null), undefined)).toBeNull();
+  });
+
+  it("is null in any composer that is not the new-thread one", () => {
+    expect(composerProject({ kind: "thread", threadId: "thr_a" }, undefined)).toBeNull();
+    // A side chat names its project too, and is still not a new thread.
+    expect(
+      composerProject(
+        { kind: "side-chat", projectId: "proj_a", parentThreadId: "thr_a", tabId: "tab_a", childThreadId: null },
+        undefined,
+      ),
+    ).toBeNull();
+  });
+
+  // bb 0.45 hosts expose the composer's pickers; 0.44 hosts do not.
+  it("is null when the composer says the new thread is not a Claude Code one", () => {
+    expect(
+      composerProject(newThread("proj_a"), { providerId: "codex" }),
+    ).toBeNull();
+  });
+
+  it("stays when the composer has picked Claude Code, has no provider yet, or no pickers", () => {
+    expect(
+      composerProject(newThread("proj_a"), { providerId: "claude-code" }),
+    ).toBe("proj_a");
+    expect(composerProject(newThread("proj_a"), {})).toBe("proj_a");
+    expect(composerProject(newThread("proj_a"), null)).toBe("proj_a");
   });
 });

@@ -1,4 +1,6 @@
 // Pure helpers of the settings page (app.tsx has no DOM tests; these do).
+import type { PluginComposerScope } from "@get-bb/plugin-sdk/app";
+import { CLAUDE_CODE_PROVIDER } from "./switch.js";
 
 /** The notice "No Claude Code login found" applies when no listed account has a login. */
 export function noLoginFound(
@@ -187,4 +189,20 @@ export function windowForecast(
  */
 export function retryDelayMs(attempt: number): number {
   return [2_000, 5_000, 15_000, 30_000][attempt] ?? 60_000;
+}
+
+/**
+ * The project whose account the new-thread composer shows: the one picked
+ * there, once resolved. Null in any other composer, and when the composer
+ * reports a provider other than Claude Code (bb 0.45 hosts report their
+ * pickers; 0.44 hosts do not, and the control shows for every provider).
+ */
+export function composerProject(
+  scope: PluginComposerScope,
+  selection: { providerId?: string } | null | undefined,
+): string | null {
+  if (scope.kind !== "new-thread") return null;
+  const provider = selection?.providerId;
+  if (provider !== undefined && provider !== CLAUDE_CODE_PROVIDER) return null;
+  return scope.projectId ?? null;
 }

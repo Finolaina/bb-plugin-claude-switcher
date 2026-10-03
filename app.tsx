@@ -5,16 +5,21 @@
 // project runs on (with a picker to change it), and the history of moves. The windows themselves are ALSO published to bb's
 // Provider usage panel through server.ts; this section is where you act.
 // And, in a Claude Code thread's header, the project's account with a menu
-// to change it (an experimental bb slot, registered only when the host has it).
+// to change it (an experimental bb slot, registered only when the host has it);
+// the same control in the new-thread composer, for the project picked there.
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   definePluginApp,
+  useComposer,
+  useComposerView,
   useRealtime,
   useRpc,
   useSdk,
 } from "@get-bb/plugin-sdk/app";
+import type { PluginComposerApi } from "@get-bb/plugin-sdk/app";
 import type { rpcContract, State } from "./server";
 import {
+  composerProject,
   forecastLine,
   headerStatus,
   noLoginFound,
@@ -791,9 +796,12 @@ function ThreadAccount({
 function ThreadAccountMenu({
   projectId,
   isCompactViewport,
+  showBest = false,
 }: {
   projectId: string;
   isCompactViewport: boolean;
+  /** Name the best account beside the button when it is another one. */
+  showBest?: boolean;
 }) {
   const { state, changeError: error, busy, setProjectAccount } = useAccounts();
   if (state === null) return null;
@@ -818,8 +826,8 @@ function ThreadAccountMenu({
           className="h-7 gap-1.5 px-2 text-xs"
           aria-busy={busy}
           aria-label={`Claude account: ${name}, ${TONE_TEXT[status.tone]}${
-            error === null ? "" : ", the last change failed"
-          }`}
+            showBest && status.canSwitch ? `, best now: ${status.best}` : ""
+          }${error === null ? "" : ", the last change failed"}`}
         >
           <span
             aria-hidden
@@ -831,6 +839,11 @@ function ThreadAccountMenu({
           {isCompactViewport ? null : (
             <span className="max-w-32 truncate">{name}</span>
           )}
+          {showBest && status.canSwitch && !isCompactViewport ? (
+            <span className="max-w-32 truncate text-muted-foreground">
+              · best: {status.best}
+            </span>
+          ) : null}
           {error === null ? null : (
             <span aria-hidden className="font-semibold text-destructive">
               !
@@ -918,6 +931,35 @@ function ThreadAccountMenu({
   );
 }
 
+// bb 0.44 reports the composer's scope reactively through useComposerView
+// (useComposer's copy can stay at "project unresolved"); later hosts dropped
+// that hook and made useComposer() itself reactive. Chosen once per host.
+const useComposerScope: (
+  composer: PluginComposerApi,
+) => PluginComposerApi["scope"] =
+  typeof useComposerView === "function"
+    ? () => useComposerView().scope
+    : (composer) => composer.scope;
+
+/**
+ * The account control in the new-thread composer: the account the picked
+ * project will start on, the best one beside it when it is another, and the
+ * menu to change it before the first turn.
+ */
+function NewThreadAccount() {
+  const composer = useComposer();
+  const scope = useComposerScope(composer);
+  // The pickers, on hosts that report them (see composerProject).
+  const selection = (
+    composer as { selection?: { providerId?: string } | null }
+  ).selection;
+  const projectId = composerProject(scope, selection);
+  if (projectId === null) return null;
+  return (
+    <ThreadAccountMenu projectId={projectId} isCompactViewport={false} showBest />
+  );
+}
+
 export default definePluginApp((app) => {
   app.slots.settingsSection({
     id: "claude-switcher",
@@ -933,5 +975,11 @@ export default definePluginApp((app) => {
       id: "claude-account",
       title: "Claude account",
       component: ThreadAccount,
+    });
+  if (typeof app.composer?.customize === "function")
+    app.composer.customize({
+      id: "claude-account",
+      scopes: ["new-thread"],
+      actions: [{ id: "claude-account", component: NewThreadAccount }],
     });
 });
