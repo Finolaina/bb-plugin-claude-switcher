@@ -23,6 +23,7 @@ import {
   composerReader,
   forecastLine,
   headerStatus,
+  newestFirst,
   noLoginFound,
   picksOnSelect,
   projectName,
@@ -55,6 +56,9 @@ type Window = NonNullable<AccountState["usage"]>["session"];
 // The last list any view received: a header mounting for another thread
 // shows it at once while its own read is under way (bb can take seconds).
 let lastSeen: State | null = null;
+// Shared by every view, as lastSeen is: a read started before a pick that
+// lands after it must not show the account the project had before.
+const answers = newestFirst<State>();
 // Whether each thread is a Claude Code thread: a thread keeps its provider.
 const claudeThreads = new Map<string, boolean>();
 
@@ -68,9 +72,10 @@ function useAccounts() {
   const report = useCallback((cause: unknown) => {
     setError(cause instanceof Error ? cause.message : String(cause));
   }, []);
-  const keep = useCallback((next: State) => {
-    lastSeen = next;
-    setState(next);
+  const keep = useCallback((ticket: number, next: State) => {
+    const shown = answers.accept(ticket, next);
+    lastSeen = shown;
+    setState(shown);
   }, []);
   // A failed read is tried again (bb busy or restarting) rather than leaving
   // the view empty until the next change; one pending retry per view.
@@ -81,10 +86,11 @@ function useAccounts() {
   }>({ alive: true, attempt: 0 });
   const refetch = useCallback(() => {
     clearTimeout(retry.current.timer);
+    const ticket = answers.start();
     rpc.call("accounts_list", null).then(
       (next) => {
         retry.current.attempt = 0;
-        keep(next);
+        keep(ticket, next);
         setError(null);
       },
       (cause) => {
@@ -113,10 +119,11 @@ function useAccounts() {
    * false when the read failed.
    */
   const readProject = useCallback(
-    (project: string) =>
-      rpc.call("accounts_list", { project }).then(
+    (project: string) => {
+      const ticket = answers.start();
+      return rpc.call("accounts_list", { project }).then(
         (next) => {
-          keep(next);
+          keep(ticket, next);
           setError(null);
           return true;
         },
@@ -124,7 +131,8 @@ function useAccounts() {
           report(cause);
           return false;
         },
-      ),
+      );
+    },
     [rpc, report, keep],
   );
   const run = useCallback(
@@ -132,8 +140,9 @@ function useAccounts() {
       setBusy(true);
       // Cleared first, so a repeated failure is announced again.
       setChangeError(null);
+      const ticket = answers.start();
       try {
-        keep(await work());
+        keep(ticket, await work());
         setError(null);
       } catch (cause) {
         report(cause);

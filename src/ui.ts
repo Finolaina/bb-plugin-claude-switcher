@@ -192,6 +192,24 @@ export function retryDelayMs(attempt: number): number {
 }
 
 /**
+ * Answers to requests that can come back out of order (a slow read started
+ * before a change can land after it): an answer to a request older than the
+ * one shown gives back the one shown.
+ */
+export function newestFirst<T>() {
+  let started = 0;
+  let shown: { ticket: number; value: T } | null = null;
+  return {
+    start: () => ++started,
+    accept(ticket: number, value: T): T {
+      if (shown !== null && ticket < shown.ticket) return shown.value;
+      shown = { ticket, value };
+      return value;
+    },
+  };
+}
+
+/**
  * Asks for a project missing from the views' list (`read` says whether the
  * read worked; a throw is a failure), and after a failed read calls `onFailed` once the back-off
  * for `failedReads` failures has passed, so its view asks again. Returns the

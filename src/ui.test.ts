@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   askForProject,
+  newestFirst,
   composerProject,
   composerReader,
   picksOnSelect,
@@ -424,5 +425,26 @@ describe("askForProject", () => {
     later();
     await vi.runAllTimersAsync();
     expect(failed).not.toHaveBeenCalled();
+  });
+});
+
+describe("newestFirst", () => {
+  it("shows the answer to the newest request, whatever order the answers come in", () => {
+    const answers = newestFirst<string>();
+    const older = answers.start();
+    const newer = answers.start();
+    expect(answers.accept(newer, "B")).toBe("B");
+    // The older request answers last, with what was there when it started.
+    expect(answers.accept(older, "A")).toBe("B");
+    const latest = answers.start();
+    expect(answers.accept(latest, "C")).toBe("C");
+  });
+
+  it("takes an answer when nothing newer has answered yet", () => {
+    const answers = newestFirst<string>();
+    const first = answers.start();
+    const second = answers.start();
+    expect(answers.accept(first, "A")).toBe("A");
+    expect(answers.accept(second, "B")).toBe("B");
   });
 });

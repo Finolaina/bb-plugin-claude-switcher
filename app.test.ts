@@ -21,7 +21,7 @@ describe("the thread header's reads", () => {
   it("starts from the last list any view saw, and retries a failed read instead of staying empty", async () => {
     const source = await readFile(new URL("./app.tsx", import.meta.url), "utf8");
     expect(source).toContain("useState<State | null>(lastSeen)");
-    expect(source).toContain("lastSeen = next;");
+    expect(source).toContain("lastSeen = shown;");
     // accounts_list and threads.get both try again after a failure.
     expect(source.split("retryDelayMs(")).toHaveLength(3);
     // A thread keeps its provider: asked once per thread.
@@ -47,6 +47,11 @@ describe("the new-thread account control", () => {
   }, [missing, projectId, readProject, failedReads]);`);
     // bb's input lock only stops typing, not a send: not used (DESIGN).
     expect(source).not.toContain("setInputLock");
+    // Every read and change takes a ticket, so a late answer to an older
+    // request cannot put back the account a project had before a pick.
+    expect(source.split("const ticket = answers.start();")).toHaveLength(4);
+    expect(source.split("keep(ticket, ")).toHaveLength(4);
+    expect(source).toContain("const shown = answers.accept(ticket, next);");
     // The composer sits in bb's <form>, and the mobile menu trigger sets no
     // type of its own: without this, opening the menu sends the draft.
     expect(source).toMatch(/<DropdownMenuTrigger asChild>\s+<Button\s+type="button"/);
