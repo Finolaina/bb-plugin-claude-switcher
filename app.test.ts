@@ -37,6 +37,8 @@ describe("the new-thread account control", () => {
     expect(source).toContain("picksOnSelect(account.name, status.account, newThread)");
     expect(source).toContain("isCompactViewport={compact}");
     expect(source).toContain("readProject(projectId);");
+    expect(source).toContain("newThread && state.autoSwitch && !status.external");
+    expect(source).toContain("key={projectId}");
     expect(source).toContain('rpc.call("accounts_list", { project })');
     expect(source).not.toContain("account.name !== status.account)");
   });

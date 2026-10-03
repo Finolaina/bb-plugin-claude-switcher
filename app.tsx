@@ -895,10 +895,11 @@ function ThreadAccountMenu({
         <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
           Claude account for this project, used by all its threads from their
           next turn
-          {newThread ? (
+          {newThread && state.autoSwitch && !status.external ? (
             <span className="block">
-              Pick one, even the current one, to keep it: otherwise a new
-              project moves to the best account after its first turn.
+              Pick one, even the current one, before you send to keep it:
+              otherwise a new project moves to the best account after its
+              first turn.
             </span>
           ) : null}
           {picked === null || pace === null ? null : (
@@ -994,6 +995,7 @@ function NewThreadAccount() {
   if (projectId === null) return null;
   return (
     <ThreadAccountMenu
+      key={projectId}
       projectId={projectId}
       isCompactViewport={compact}
       newThread
