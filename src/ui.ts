@@ -210,6 +210,19 @@ export function newestFirst<T>() {
 }
 
 /**
+ * Whether a read asked for a project is done: its own answer is shown, or the
+ * newer list shown in its place has the project. Otherwise it is asked again
+ * (askForProject); a project bb does not list is not asked for again.
+ */
+export function projectRead(
+  sent: { projects: readonly { id: string }[] },
+  shown: { projects: readonly { id: string }[] },
+  project: string,
+): boolean {
+  return shown === sent || shown.projects.some((p) => p.id === project);
+}
+
+/**
  * Asks for a project missing from the views' list (`read` says whether the
  * read worked; a throw is a failure), and after a failed read calls `onFailed` once the back-off
  * for `failedReads` failures has passed, so its view asks again. Returns the

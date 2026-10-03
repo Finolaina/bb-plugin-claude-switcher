@@ -27,6 +27,7 @@ import {
   noLoginFound,
   picksOnSelect,
   projectName,
+  projectRead,
   retryDelayMs,
   sharedWith,
   windowForecast,
@@ -77,6 +78,7 @@ function useAccounts() {
     const shown = answers.accept(ticket, next);
     lastSeen = shown;
     setState(shown);
+    return shown;
   }, []);
   // A failed read is tried again (bb busy or restarting) rather than leaving
   // the view empty until the next change; one pending retry per view.
@@ -117,16 +119,16 @@ function useAccounts() {
   useRealtime("accounts-changed", refetch);
   /**
    * A list that must include this project (see sharedProjects in server.ts);
-   * false when the read failed.
+   * false when the read failed, or a newer list without it hid its answer.
    */
   const readProject = useCallback(
     (project: string) => {
       const ticket = answers.start();
       return rpc.call("accounts_list", { project }).then(
         (next) => {
-          keep(ticket, next);
+          const shown = keep(ticket, next);
           setError(null);
-          return true;
+          return projectRead(next, shown, project);
         },
         (cause: unknown) => {
           report(cause);

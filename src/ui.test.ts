@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   askForProject,
   newestFirst,
+  projectRead,
   composerProject,
   composerReader,
   picksOnSelect,
@@ -446,5 +447,30 @@ describe("newestFirst", () => {
     const second = answers.start();
     expect(answers.accept(first, "A")).toBe("A");
     expect(answers.accept(second, "B")).toBe("B");
+  });
+});
+
+describe("projectRead", () => {
+  const list = (...ids: string[]) => ({ projects: ids.map((id) => ({ id })) });
+
+  it("asks again when a newer list without the project hid the answer that had it", () => {
+    // The composer asks for a new project; another view's plain list starts
+    // after it but answers first, from a read made before the project.
+    const answers = newestFirst<ReturnType<typeof list>>();
+    const asked = answers.start();
+    const plain = answers.start();
+    answers.accept(plain, list("old"));
+    const sent = list("old", "new");
+    const shown = answers.accept(asked, sent);
+    expect(projectRead(sent, shown, "new")).toBe(false);
+  });
+
+  it("is done when its answer is shown, even without the project (bb does not list it)", () => {
+    const sent = list("old");
+    expect(projectRead(sent, sent, "ghost")).toBe(true);
+  });
+
+  it("is done when the newer list shown has the project", () => {
+    expect(projectRead(list("old"), list("old", "new"), "new")).toBe(true);
   });
 });

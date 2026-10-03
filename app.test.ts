@@ -61,6 +61,11 @@ describe("the new-thread account control", () => {
     // request cannot put back the account a project had before a pick.
     expect(source.split("const ticket = answers.start();")).toHaveLength(4);
     expect(source.split("keep(ticket, ")).toHaveLength(4);
+    // The ticket is taken before the change is sent, not after it answers.
+    expect(source).toContain(`      const ticket = answers.start();
+      try {
+        keep(ticket, await work());`);
+    expect(source).toContain("return projectRead(next, shown, project);");
     expect(source).toContain("const shown = answers.accept(ticket, next);");
     // The composer sits in bb's <form>, and the mobile menu trigger sets no
     // type of its own: without this, opening the menu sends the draft.
