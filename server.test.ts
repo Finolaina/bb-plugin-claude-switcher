@@ -2313,6 +2313,24 @@ describe("placement: the cases the first review found", () => {
     // The next lists share that read.
     expect(ids(await list())).toContain("proj-3");
     expect(h.envReads).toHaveLength(4);
+    // Two views asking at once for a project the read lacks share one read.
+    h.harness.sdk.stub("projects.list", async () => [
+      { id: "proj-1", name: "Website" },
+      { id: "proj-2", name: "Other" },
+      { id: "proj-3", name: "New" },
+      { id: "proj-4", name: "Newer" },
+      { id: "personal", name: "Personal" },
+    ]);
+    h.envReads.length = 0;
+    const both = await Promise.all([
+      list({ project: "proj-4" }),
+      list({ project: "proj-4" }),
+    ]);
+    expect(both.map(ids)).toEqual([
+      ["proj-1", "proj-2", "proj-3", "proj-4", "personal"],
+      ["proj-1", "proj-2", "proj-3", "proj-4", "personal"],
+    ]);
+    expect(h.envReads).toHaveLength(5);
   });
 
   it("a list after the accounts change names each project's account by the new set, not by the shared read", async () => {

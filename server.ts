@@ -756,9 +756,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (kept === null || deps.now() - kept.at >= PROJECTS_FRESH_MS)
       return readProjects();
     if (need === undefined) return kept.value;
-    return kept.value.then((projects) =>
-      projects.some((p) => p.id === need) ? projects : readProjects(),
-    );
+    return kept.value.then((projects) => {
+      if (projects.some((p) => p.id === need)) return projects;
+      // Another view already read again for the same reason: share it.
+      if (projectsRead !== null && projectsRead !== kept)
+        return projectsRead.value;
+      return readProjects();
+    });
   }
 
   /** A fresh read, which the views' next lists share. */
