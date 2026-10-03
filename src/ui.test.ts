@@ -410,7 +410,7 @@ describe("askForProject", () => {
 
   it("calls for nothing once its view is gone, before or after the read fails", async () => {
     vi.useFakeTimers();
-    let fail = (_: boolean) => {};
+    let fail: (worked: boolean) => void = () => {};
     const failed = vi.fn();
     const stop = askForProject(
       () => new Promise<boolean>((resolve) => (fail = resolve)),
