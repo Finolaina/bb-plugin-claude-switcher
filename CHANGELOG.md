@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.9] - 2026-10-03
+
+### Added
+
+- **The account is in the new-thread composer too.** Before the first
+  message, the composer shows the account the picked project will start
+  on, with the same coloured dot as a thread's header, the best account
+  beside it when it is another one, and the same menu to switch to it or
+  to any other. On bb 0.45 and later it shows only when Claude Code is the
+  picked provider; bb 0.44 does not tell plugins which provider is picked,
+  so there it shows for every provider.
+
 ## [0.2.8] - 2026-10-02
 
 ### Fixed

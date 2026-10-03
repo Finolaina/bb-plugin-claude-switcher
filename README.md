@@ -48,7 +48,7 @@ first.
 | Start a new project on an account that works   |           ❌            |  ✅ when its thread opens   |
 | Wait for the account that frees first          |           ❌            | ✅ within your maximum wait |
 | Stick to a model, like Fable                   |            n/a            |     ✅ preferred model      |
-| Choose the account of each project by hand     |           ❌            | ✅ thread header, picker and CLI |
+| Choose the account of each project by hand     |           ❌            | ✅ new thread, thread header, picker and CLI |
 | Know when a weekly window runs out at your pace |           ❌            |  ✅ forecast per window     |
 | Move before the limit instead of after a failure |           ❌            | ✅ opt-in, after a turn ends |
 | Add and log in an account without a terminal   |           ❌            |      ✅ from Settings       |
@@ -107,7 +107,7 @@ model instead.
 
 A **Claude Switcher** section in Settings with the account cards, a
 per-project account picker and a refresh button, the account in every
-thread's header, plus a `bb claude-switcher` CLI.
+thread's header and in the new-thread composer, plus a `bb claude-switcher` CLI.
 
 </td>
 <td valign="top">
@@ -289,6 +289,7 @@ starts on a fresh account runs without your settings, hooks and
 | Where                                                | What                                                                                                                                                       |
 | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **A Claude Code thread's header**                    | The project's account with a dot (green: room, amber: running low, red: out or not logged in, grey: not measured), and a menu with the forecast of its window, to switch now to the best account or pick any other. |
+| **The new-thread composer**                          | The same control for the project picked there, before the first message, with the best account beside it when it is another one. On bb 0.44 it shows for every provider (that bb does not tell plugins which one is picked). |
 | **Settings → Claude Switcher**                       | The nine settings, a card per account with its windows and their forecast, **Add account** and **Log in**, the account each project runs on (with a picker), **Refresh usage**, and the history of moves. |
 | **Settings → Provider usage** (and its sidebar card) | Pick **Claude accounts** in the source menu to see every account's session, weekly and per-model windows.                                                  |
 | **A thread's retry reason**                          | `Switched to account <name>`, `Waiting for <name>` or `Retrying on account <name>`, wherever bb shows why a turn was retried.                              |
@@ -462,6 +463,7 @@ executable (`claude auth login`) as a child process of bb's server.
 | `threads.retry` and queued messages                              | Retries the failed turn now, or at a reset, and reuses the retry provider-retry queued.    |
 | Settings and a settings section                                  | The nine settings, plus the per-project picker, the account cards, the login and the history. |
 | `experimental_threadHeaderAction` slot and `threads.get`         | The account control in a Claude Code thread's header. Experimental in bb: it may change.   |
+| `composer.customize` (a new-thread action) and `useComposerView` | The account control in the new-thread composer, for the project picked there.              |
 | CLI registration                                                 | `bb claude-switcher list`, `refresh`, `history`, `use` and `release`.                      |
 | Background service, key-value storage, realtime signals, logging | Periodic usage refresh, the history of moves, the usage samples behind the forecast, the install time and the new projects already handled, live updates of the section, and a log. |
 
@@ -711,7 +713,8 @@ bb plugin logs claude-switcher
 
 ```
 server.ts        wires the plugin to bb: settings, usage source, thread.created, turn.failed, CLI, RPC
-app.tsx          the Claude Switcher section in Settings and the thread header control
+app.tsx          the Claude Switcher section in Settings, the thread header control and
+                 the same control in the new-thread composer
 src/             discovery, credentials, usage, the collector, the policy and the switch
 components/ lib/ the small UI kit the settings section and the thread
                  header use (from bb's own component registry)

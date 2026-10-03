@@ -20,9 +20,9 @@ moves projects between them.
   created after the plugin first ran moves to the best account, and one
   whose account is already out moves to another. If the first turn still
   runs on the old account and fails there, it is retried once on the new one.
-- **The account in every thread.** A Claude Code thread's header shows the
-  project's account with a coloured dot for how much it has left, and a menu
-  to switch now to the best account or to any other.
+- **The account in every thread.** A Claude Code thread's header and the
+  new-thread composer show the project's account with a dot for what it
+  has left, and a menu to switch to the best one or another.
 - **Accounts and projects in Settings.** Choose the account each project
   runs with or let the plugin manage it, add an account by name (the plugin
   sets it up and runs Claude Code's own login), and see every move with its

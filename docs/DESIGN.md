@@ -40,7 +40,7 @@ created (below).
 | `src/login.ts`       | A `claude auth login` run for one account directory: its phases, the fallback address and code, the timeout, and what a new directory shares with `~/.claude`.          |
 | `bin/open-login.sh`  | The `BROWSER` of that login: opens an `https://` address in a private Chrome window, or the default browser.                                                            |
 | `server.ts`          | Wires it to bb: settings, the Provider usage source, `thread.created`, `turn.failed`, `thread.idle`, project variables, retries, the history, CLI, realtime updates.     |
-| `app.tsx`            | The Claude Switcher section in Settings, and the account control in a Claude Code thread's header.                                                                      |
+| `app.tsx`            | The Claude Switcher section in Settings, and the account control in a Claude Code thread's header and in the new-thread composer.                                       |
 
 The policy and the decision are pure functions of their inputs (usage,
 the failure, `now`, a random number), so every rule below has a unit test
@@ -433,6 +433,11 @@ The refresh token rotates on every refresh, so the plugin:
 
 ## Known limits
 
+- **On bb 0.44 the new-thread control shows for every provider.** That bb
+  does not tell a composer action which provider is picked, so the control
+  also shows while Codex or another provider is picked; the account it
+  names applies to the project's Claude Code threads only. bb 0.45 reports
+  the pickers and the control hides for other providers.
 - **A refresh race can log an account out.** If a running `claude` session
   of the same account refreshes between the plugin's read and its write,
   or bb stops while a rotated login is only in memory, that account needs
