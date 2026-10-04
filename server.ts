@@ -114,7 +114,7 @@ export function accountFromNote(note: string | null): string | null {
 const KV_LAST_SWITCH = "last-switch";
 /** Every move (automatic, ahead of the limit, or by hand), latest first. */
 const KV_HISTORY = "switch-history";
-/** Retries cancelled by hand, per thread: the chain (first request) they were of. */
+/** Retries cancelled by hand, per thread: the thread's latest turn at the time. */
 const KV_CANCELLED = "cancelled-retries";
 /** Usage samples per account and window, for the forecast. */
 const KV_SERIES = "usage-series";
@@ -1747,7 +1747,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
 
   /**
    * Retries the user cancelled by hand (from bb's queued card or `bb thread
-   * queue`), per thread: the chain they were of. bb's only word of that
+   * queue`), per thread: the thread's latest turn at the time (a turn the
+   * user then retries by hand, and fails, is a new one: judged). bb's only
+   * word of that
    * removal is `message.cancelled`, which this plugin's own deletions fire
    * too (`ownDeletes` tells them apart). The rescue leaves such a thread
    * alone until a new turn of it (Codex r7, IR7-004). Kept in storage: a
@@ -1765,7 +1767,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
 
   async function cancelledByHand(entry: CancelledEntry): Promise<void> {
     if (entry.payload.kind !== "retry") return;
-    cancelled.set(entry.threadId, entry.payload.retryOfTurnRequestId);
+    let turn: Awaited<ReturnType<typeof latestTurn>>;
+    try {
+      turn = await latestTurn(entry.threadId);
+    } catch (error) {
+      // Without the turn, the mark cannot be keyed: the thread is judged
+      // again (the user can cancel again) rather than left for dead.
+      bb.log.warn(
+        `thread ${entry.threadId}: its queued retry was cancelled by hand, but its latest turn could not be read (${error instanceof Error ? error.message : String(error)}); judged again on the next refresh`,
+      );
+      return;
+    }
+    if (turn === null) return;
+    cancelled.set(entry.threadId, turn.requestId);
     bb.log.info(
       `thread ${entry.threadId}: its queued retry was cancelled by hand; not judged again until a new turn of it`,
     );
@@ -2074,7 +2088,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return;
     const turn = await latestTurn(threadId);
     if (turn === null) return;
-    if (cancelled.get(threadId) === turn.original) {
+    if (cancelled.get(threadId) === turn.requestId) {
       bb.log.debug(
         `thread ${threadId}: left in error (its retry was cancelled by hand)`,
       );

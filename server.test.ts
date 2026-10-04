@@ -6022,6 +6022,56 @@ describe("a wait another account can end sooner", () => {
       expect(again.retries.map((r) => r.threadId)).toEqual(["thread-2"]);
     });
 
+    it("judges a turn the user retried by hand after cancelling its retry, once that fails too", async () => {
+      // code-reviewer r8 (M3): keyed by the chain, the mark outlived bb's
+      // own Retry button, and the thread was never rescued again.
+      const log: Record<string, LoggedEvent[]> = {
+        "thread-1": failedLog("thread-1", "creq_1", FABLE_ID),
+      };
+      const h = await host(MAIN_OUT, {
+        settings: FABLE,
+        threads: { "thread-1": { status: "error" } },
+        threadEvents: log,
+      });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("message.cancelled", {
+        entry: {
+          id: "pr-1",
+          threadId: "thread-1",
+          sendAt: NOW + HOUR,
+          payload: { kind: "retry", attempt: 2, reason: "provider-retry", retryOfTurnRequestId: "creq_1" },
+        } as never,
+      });
+      await onePass(h);
+      expect(h.retries).toEqual([]);
+      log["thread-1"] = failedLog("thread-1", "creq_1r", FABLE_ID, { retry: { of: "creq_1", attempt: 2 } });
+      await onePass(h);
+      expect(h.retries.map((r) => r.turnRequestId)).toEqual(["creq_1r"]);
+    });
+
+    it("judges the thread again when the cancelled retry's turn cannot be read", async () => {
+      // Rather than left for dead: the user can cancel again.
+      const h = await host(MAIN_OUT, {
+        ...stuck(failedLog("thread-1", "creq_1", FABLE_ID)),
+        threadEventsError: "bb hiccup",
+      });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("message.cancelled", {
+        entry: {
+          id: "pr-1",
+          threadId: "thread-1",
+          sendAt: NOW + HOUR,
+          payload: { kind: "retry", attempt: 2, reason: "provider-retry", retryOfTurnRequestId: "creq_1" },
+        } as never,
+      });
+      expect(await h.bb.storage.kv.get("cancelled-retries")).toBeUndefined();
+      expect(
+        h.harness.logEntries.some(
+          (entry) => entry.level === "warn" && /latest turn could not be read/.test(entry.message),
+        ),
+      ).toBe(true);
+    });
+
     it("forgets a cancellation by hand, in storage too, when its thread is archived", async () => {
       // Codex r8 (IR8-004): the stored list only grew; forgotten in memory,
       // the mark came back at the next restart.
