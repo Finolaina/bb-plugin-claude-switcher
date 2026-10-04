@@ -59,6 +59,7 @@ import {
   decidePlacement,
   decideSwitch,
   isRefusal,
+  MAX_ATTEMPTS,
   modelFamily,
 } from "./src/switch.js";
 import {
@@ -1545,10 +1546,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** The latest `thread.active` of each thread still reading its account. */
   const starting = new Map<string, number>();
   let starts = 0;
+  /**
+   * The project's moves (`movesOf().epoch`) when bb asked to send each
+   * thread's message: bb reads the account as it starts the turn and
+   * announces `thread.active` after, so a move completed in between is
+   * not where the turn runs (Codex IR16-001).
+   */
+  const dispatchEpoch = new Map<string, number>();
   /** From here the thread's turn is no leftover of any account. */
   function forgetStart(threadId: string): void {
     startedOn.delete(threadId);
     starting.delete(threadId);
+    dispatchEpoch.delete(threadId);
   }
   bb.events.on("thread.active", async ({ thread }) => {
     if (
@@ -1558,13 +1567,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return;
     // The previous turn's start is not this turn's, read or still being
     // read (code-reviewer r13).
+    const anchor = dispatchEpoch.get(thread.id);
     forgetStart(thread.id);
     const token = ++starts;
     starting.set(thread.id, token);
     // Unknown until read: a failure meanwhile is nobody's (Codex IR15-002).
     startedOn.set(thread.id, null);
     const move = movesOf(thread.projectId);
-    const epochBefore = move.epoch;
+    // Since bb was asked to send the turn, when it asked (Codex IR16-001).
+    const epochBefore = anchor ?? move.epoch;
     const busy = move.inFlight > 0;
     let account: string | null | undefined;
     try {
@@ -1587,6 +1598,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       (busy || move.inFlight > 0 || move.epoch !== epochBefore)
     )
       account = null;
+    if (account === null)
+      bb.log.debug(
+        `thread ${thread.id}: where its turn started is unknown (the project moved, or its account could not be read)`,
+      );
     if (account !== undefined) startedOn.set(thread.id, account);
   });
   bb.events.on("thread.idle", ({ thread }) => {
@@ -1712,17 +1727,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   // has not finished after DISPATCH_LIMIT_MS is given up.
   bb.experimental_hooks.on("message.dispatch", async (ctx) => {
     const { thread } = ctx;
-    const model = modelFamily(ctx.requestedExecution.model);
     if (
-      model === null ||
       // Queued behind a turn: bb asks again when it sends the message.
       TURN_UNDER_WAY.has(thread.status) ||
       thread.providerId !== CLAUDE_CODE_PROVIDER ||
       notTheUsersThread(thread) !== null
     )
       return { action: "proceed" };
-    threadModel.set(thread.id, model);
-    if (current.autoSwitch && ctx.attempt === "start-turn") {
+    const model = modelFamily(ctx.requestedExecution.model);
+    if (model !== null) threadModel.set(thread.id, model);
+    if (model !== null && current.autoSwitch && ctx.attempt === "start-turn") {
       const turn = { abandoned: false };
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
@@ -1743,6 +1757,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         clearTimeout(timer);
       }
     }
+    // Where the project stands as the turn is sent, for `thread.active`.
+    dispatchEpoch.set(thread.id, movesOf(thread.projectId).epoch);
     return { action: "proceed" };
   });
 
@@ -1955,8 +1971,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       markRefused(failedOn, now, event);
     } else if (refusal && !stuck) {
       bb.log.info(
-        `thread ${event.threadId}: refused by an account unknown (its project moved as its turn started); none marked`,
+        `thread ${event.threadId}: refused by an account unknown (where its turn started could not be read); none marked`,
       );
+      // No account marked, the retry may be refused the same way: this
+      // failure gets MAX_ATTEMPTS like any other, then the thread is left
+      // in error for the rescue to judge (Codex IR16-002).
+      if (event.attemptNumber >= MAX_ATTEMPTS) {
+        bb.log.info(
+          `thread ${event.threadId}: no switch (every retry spent on refusals by an account unknown; judged again on the next refresh)`,
+        );
+        return;
+      }
     } else if (refusal) {
       // Found in the log on a rescue: bb masks the account in its log and
       // this plugin's history of moves cannot date a turn against a move
