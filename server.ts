@@ -1724,7 +1724,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   ): Promise<void> {
     const fromName = from.account ?? current.defaultAccountName;
     const refusal = isRefusal(event);
-    if (refusal && !stuck) {
+    // Found on a rescue pass too (once per refusal, not once per pass): the
+    // account that refused is not chosen again, so the thread does not bounce
+    // between two accounts that refuse it (code-reviewer r6, M1).
+    const marked = refusedAt.get(fromName);
+    if (
+      refusal &&
+      (!stuck || marked === undefined || now - marked >= REFUSAL_MS)
+    ) {
       refusedAt.set(fromName, now);
       bb.log.warn(
         `account ${fromName} refused a turn (HTTP ${event.errorInfo?.httpStatusCode ?? "?"}): chosen for nothing for ${REFUSAL_MS / 3_600_000} h`,
@@ -1756,7 +1763,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const reason =
       decision.kind === "switch"
         ? `Switched to account ${decision.account}${decision.model === null ? "" : ` (${decision.model})`}${refusal ? `: ${fromName} refused the turn` : ""}`
-        : decision.reason;
+        : decision.kind === "retry"
+          ? `Retrying on account ${decision.account}${decision.model === null ? "" : ` (${decision.model})`}: it has room now`
+          : decision.reason;
     const sendAt = decision.kind === "wait" ? decision.sendAt : undefined;
     if (decision.account !== fromName) {
       await applyAccount(projectId, accountOrDefault(decision.account), from);

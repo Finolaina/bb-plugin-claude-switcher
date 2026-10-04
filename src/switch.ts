@@ -32,6 +32,8 @@ export type DeclineReason =
 
 export type SwitchDecision =
   | { kind: "switch"; account: string; model: string | null }
+  /** The project's own account has room now (a thread left in error): no move. */
+  | { kind: "retry"; account: string; model: string | null }
   | { kind: "wait"; account: string; sendAt: number; reason: string }
   | { kind: "decline"; reason: DeclineReason };
 
@@ -133,10 +135,24 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
   const rateLimits = input.failure.rateLimits;
 
   const accounts = input.accounts.map((a) => settle(a, input.now));
+  const stuck = input.stuck === true;
+  const options = { preferredModel: input.preferredModel };
+  // A failure just reported rules its account out. Left in error, the thread
+  // is judged on the measurements: the project may have moved since, and its
+  // log reports the account it failed on, not the one it sits on now.
+  if (stuck) {
+    const own = accounts.filter((a) => a.name === input.currentAccount);
+    const here = chooseAccount(own, options);
+    if (here !== null) {
+      return {
+        kind: "retry",
+        account: here.account,
+        model: here.model === "" ? null : here.model,
+      };
+    }
+  }
   const others = accounts.filter((a) => a.name !== input.currentAccount);
-  const choice = chooseAccount(others, {
-    preferredModel: input.preferredModel,
-  });
+  const choice = chooseAccount(others, options);
   if (choice !== null) {
     return {
       kind: "switch",
@@ -167,7 +183,7 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
   let earliest: { account: string; at: number } | null = null;
   for (const account of accounts) {
     let at = freeAt(account, input.preferredModel);
-    if (account.name === input.currentAccount) {
+    if (account.name === input.currentAccount && !stuck) {
       at =
         at === null || failedFreeAt === null
           ? null

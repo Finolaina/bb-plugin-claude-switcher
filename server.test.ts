@@ -5481,6 +5481,12 @@ describe("a wait another account can end sooner", () => {
         });
       return rows;
     }
+    /** Every account with room for Fable (ALL_FREE has main's session spent). */
+    const ROOM_EVERYWHERE = {
+      main: () => Response.json(payload(10, 10, 10)),
+      spare: () => Response.json(payload(10, 60, 10)),
+      work: () => Response.json(payload(5, 20, 10)),
+    };
     const stuck = (log: LoggedEvent[]): HostOptions => ({
       settings: FABLE,
       threads: { "thread-1": { status: "error" } },
@@ -5499,6 +5505,126 @@ describe("a wait another account can end sooner", () => {
           reason: "Switched to account spare (Fable)",
         },
       ]);
+    });
+
+    it("retries it on the project's own account when that one has room now, without moving", async () => {
+      // Codex r6 (IR6-001): its log reports main blocked, but that report is
+      // of the failure; measured now, main has room.
+      const h = await host(ROOM_EVERYWHERE, stuck(failedLog("thread-1", "creq_1", FABLE_ID)));
+      dispose = () => h.harness.dispose();
+      await onePass(h);
+      expect(h.envSet).toEqual([]);
+      expect(h.retries).toEqual([
+        {
+          threadId: "thread-1",
+          turnRequestId: "creq_1",
+          reason: "Retrying on account main (Fable): it has room now",
+        },
+      ]);
+    });
+
+    it("runs the project's second stuck thread where the first one moved it", async () => {
+      // Codex r6 (IR6-001): the first moves the project to spare; the second
+      // is judged with spare as its own account, not as the one that failed.
+      const h = await host(MAIN_OUT, {
+        settings: FABLE,
+        threads: { "thread-1": { status: "error" }, "thread-2": { status: "error" } },
+        threadEvents: {
+          "thread-1": failedLog("thread-1", "creq_1", FABLE_ID),
+          "thread-2": failedLog("thread-2", "creq_2", FABLE_ID),
+        },
+      });
+      dispose = () => h.harness.dispose();
+      await onePass(h);
+      expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+      expect(h.retries).toEqual([
+        {
+          threadId: "thread-1",
+          turnRequestId: "creq_1",
+          reason: "Switched to account spare (Fable)",
+        },
+        {
+          threadId: "thread-2",
+          turnRequestId: "creq_2",
+          reason: "Retrying on account spare (Fable): it has room now",
+        },
+      ]);
+    });
+
+    it("retries it on its own account when no limit was reported and the others are out", async () => {
+      // Codex r6 (IR6-001): without a report the current account was left out
+      // of the wait altogether, even as the only one with room.
+      const only = {
+        main: () => Response.json(payload(10, 10, 10)),
+        spare: () => Response.json(payload(100, 60, 100)),
+        work: () => Response.json(payload(100, 20, 100)),
+      };
+      const h = await host(
+        only,
+        stuck(failedLog("thread-1", "creq_1", FABLE_ID, { reported: false })),
+      );
+      dispose = () => h.harness.dispose();
+      await onePass(h);
+      expect(h.envSet).toEqual([]);
+      expect(h.retries.map((r) => r.reason)).toEqual([
+        "Retrying on account main (Fable): it has room now",
+      ]);
+    });
+
+    it("waits for its own account by what is measured now, not by the reset its old report named", async () => {
+      // Codex r6 (IR6-001): all out; main's session resets in 2 h by its
+      // numbers, the log's report (of some failure) said 5 h.
+      const log = failedLog("thread-1", "creq_1", FABLE_ID);
+      const report = log[2]!.data.rateLimits as { windows: Array<Record<string, unknown>> };
+      report.windows = report.windows.map((w) => ({ ...w, resetsAtMs: NOW + 5 * HOUR }));
+      const out = {
+        main: () => Response.json(payload(100, 40, 10)),
+        spare: () => Response.json(payload(100, 60, 100)),
+        work: () => Response.json(payload(100, 20, 100)),
+      };
+      const h = await host(out, stuck(log));
+      dispose = () => h.harness.dispose();
+      await onePass(h);
+      expect(h.envSet).toEqual([]);
+      expect(h.retries.map((r) => r.reason)).toEqual(["Waiting for Fable on main"]);
+      expect(h.retries[0]?.sendAt).toBeLessThan(NOW + 5 * HOUR);
+    });
+
+    it("marks the account a refusal in its log came from, so it does not bounce back there", async () => {
+      // code-reviewer r6 (M1): two accounts with a dead login; without the
+      // mark the thread moved between them on every refresh.
+      const log: Record<string, LoggedEvent[]> = {
+        "thread-1": failedLog("thread-1", "creq_1", FABLE_ID, {
+          category: "unauthorized",
+          reported: false,
+        }),
+      };
+      // Only main and spare have Fable: with main marked, nowhere to bounce to.
+      const h = await host(
+        { ...ROOM_EVERYWHERE, work: () => Response.json(payload(5, 20, 100)) },
+        { settings: FABLE, threads: { "thread-1": { status: "error" } }, threadEvents: log },
+      );
+      dispose = () => h.harness.dispose();
+      await onePass(h);
+      expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+      expect(
+        h.harness.logEntries.filter(
+          (entry) => entry.level === "warn" && /account main refused a turn/.test(entry.message),
+        ),
+      ).toHaveLength(1);
+      // Refused on spare too; main is still marked.
+      log["thread-1"] = failedLog("thread-1", "creq_2", FABLE_ID, {
+        category: "unauthorized",
+        reported: false,
+        retry: { of: "creq_1", attempt: 2 },
+      });
+      await onePass(h);
+      // Wherever it goes now (work's reset, at worst), not back to main.
+      expect(h.envSet.slice(1).map((e) => e.value)).not.toContain(`${ACCOUNTS}/main`);
+      expect(h.retries.slice(1).map((r) => r.reason)).not.toContain(
+        "Switched to account main (Fable)",
+      );
+      expect(h.envSet.slice(1).map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
     });
 
     it("judges it however many attempts failed: the cap stops a loop, not a thread left for dead", async () => {
