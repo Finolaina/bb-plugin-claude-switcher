@@ -291,15 +291,15 @@ interface HostOptions {
   /** Rows already queued (e.g. by provider-retry) when the plugin acts. */
   queued?: QueuedRow[];
   /** What threads.retry does: default queues a row; "conflict" throws like bb's 409; "fail-once" fails the first call (a 5xx); "fail" fails every call. */
-  retryBehaviour?: "queue" | "conflict" | "fail-once" | "fail";
+  retryBehaviour?: "queue" | "conflict" | "fail-once" | "fail" | "answer-lost";
   /** threads.retry throws this, shaped like bb's BbHttpError. */
   retryError?: { message: string; code?: string; status?: number };
   /** queuedMessages.send throws this, shaped like bb's BbHttpError: `code` apart from the message. */
   sendError?: { message: string; code?: string; status?: number };
   /** deleteMachineEnvironmentVariable throws for these projects (deleted meanwhile, or a bb hiccup). */
   failDelete?: string[];
-  /** queuedMessages.delete throws this (the row left the queue between list and delete). */
-  deleteRowError?: { message: string; code?: string; status?: number };
+  /** queuedMessages.delete throws this (the row left the queue between list and delete); `landed`: bb removed the row first, and only its answer was lost. */
+  deleteRowError?: { message: string; code?: string; status?: number; landed?: boolean };
   dirs?: () => string[];
   clock?: () => number;
   /** What threads.get answers per thread, over a visible Claude Code thread of the user. */
@@ -412,6 +412,42 @@ async function host(
             const { message, ...rest } = options.retryError;
             throw Object.assign(new Error(message), rest);
           }
+          // Like bb (retryFailedTurn): one queued retry per chain, keyed by its first request.
+          const logged = (options.threadEvents?.[args.threadId] ?? []).find(
+            (row) =>
+              row.type === "client/turn/requested" &&
+              row.data.requestId === args.turnRequestId,
+          );
+          const original =
+            (logged?.data.retryOfRequestId as string | undefined) ??
+            args.turnRequestId;
+          if (
+            queued.some(
+              (row) =>
+                row.threadId === args.threadId &&
+                row.payload.kind === "retry" &&
+                row.payload.retryOfTurnRequestId === original,
+            )
+          )
+            throw Object.assign(
+              new Error(
+                `HTTP 409: Turn ${original} already has a retry waiting on thread ${args.threadId}.`,
+              ),
+              { code: "retry_already_queued", status: 409 },
+            );
+          if (options.retryBehaviour === "answer-lost") {
+            // The first lands (dispatched: the thread no longer has a failed turn), its answer lost.
+            if (retryFailures++ === 0) {
+              retries.push(args);
+              throw new Error("socket hang up");
+            }
+            throw Object.assign(
+              new Error(
+                `HTTP 409: Thread ${args.threadId} has no failed turn to retry: it is running.`,
+              ),
+              { code: "no_failed_turn", status: 409 },
+            );
+          }
           if (options.retryBehaviour === "conflict") {
             throw new Error(
               `Turn ${args.turnRequestId} already has a retry waiting on thread ${args.threadId}.`,
@@ -475,7 +511,12 @@ async function host(
           },
           delete: async ({ queuedMessageId }: { queuedMessageId: string }) => {
             if (options.deleteRowError !== undefined) {
-              const { message, ...rest } = options.deleteRowError;
+              const { message, landed, ...rest } = options.deleteRowError;
+              if (landed === true) {
+                deleted.push(queuedMessageId);
+                const at = queued.findIndex((row) => row.id === queuedMessageId);
+                if (at !== -1) queued.splice(at, 1);
+              }
               throw Object.assign(new Error(message), rest);
             }
             deleted.push(queuedMessageId);
@@ -5118,6 +5159,10 @@ describe("a wait another account can end sooner", () => {
     dispose = () => h.harness.dispose();
     await onePass(h);
     expect(h.retries).toEqual([]);
+    expect(h.queued.map((r) => r.id)).toEqual(["r1"]);
+    expect(
+      h.harness.logEntries.filter((entry) => entry.level === "error"),
+    ).toEqual([]);
     expect(
       h.harness.logEntries
         .filter((entry) => entry.level === "warn")
@@ -5136,6 +5181,114 @@ describe("a wait another account can end sooner", () => {
     expect(h.retries.map((r) => r.reason)).not.toContain(
       "Retrying on account spare",
     );
+  });
+
+  it("still has bb retry the turn when the wait was removed but bb's answer was lost", async () => {
+    // Codex r3 (IR-001): bb deletes the row before it answers; a lost answer
+    // must not lose the wait with it.
+    const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")], {
+      deleteRowError: { message: "socket hang up", landed: true },
+    });
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.deleted).toEqual(["r1"]);
+    expect(h.retries).toEqual([retriedNow("thread-1", "creq_r1")]);
+    expect(
+      h.harness.logEntries.filter((entry) => entry.level === "error"),
+    ).toEqual([]);
+  });
+
+  it("does not call a wait lost when bb took the retry and only its answer was lost", async () => {
+    const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")], {
+      retryBehaviour: "answer-lost",
+    });
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.retries).toEqual([retriedNow("thread-1", "creq_r1")]);
+    expect(h.queued).toEqual([]);
+    expect(
+      h.harness.logEntries.filter((entry) => entry.level === "error"),
+    ).toEqual([]);
+  });
+
+  it("judges afresh a thread whose wait bb was already sending when the project moved for it", async () => {
+    // Not released by the plugin: only the move's cause says its next
+    // failure is the new account's.
+    const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")], {
+      // Gone from the queue: bb is sending it.
+      deleteRowError: {
+        message: "HTTP 404: Queued message not found",
+        status: 404,
+        landed: true,
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+    expect(h.retries).toEqual([]);
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ requestId: "creq_r1", attemptNumber: 2 }),
+    );
+    expect(h.retries.map((r) => r.reason)).not.toContain(
+      "Retrying on account spare",
+    );
+  });
+
+  it("judges afresh every thread released by a move, not only the one that caused it", async () => {
+    // Codex r3 (IR-002): the second wait of the project, released in the
+    // same pass, ran on the new account: a failure of it within the minute
+    // is the new account's, not a leftover of the old one.
+    const h = await waitingHost(MAIN_OUT, [
+      waiting("r1", "thread-1"),
+      waiting("r2", "thread-2"),
+    ]);
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.retries.map((r) => r.threadId)).toEqual(["thread-1", "thread-2"]);
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ threadId: "thread-2", requestId: "creq_r2", attemptNumber: 2 }),
+    );
+    expect(h.retries.map((r) => r.reason)).not.toContain(
+      "Retrying on account spare",
+    );
+  });
+
+  it("never retries a wait on a hand-picked account without a login: it moves to one that can run it, or keeps waiting", async () => {
+    // Codex r3 (IR-003): an account without a login is not measured, but it
+    // is known unable to run anything.
+    const noLogin = {
+      main: () => Response.json(payload(10, 40, 20)),
+      spare: () => Response.json(payload(10, 60, 20)),
+      work: () => new Response(null, { status: 401 }),
+    };
+    const h = await waitingHost(noLogin, [waiting("r1", "thread-1")]);
+    await h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-1",
+      account: "work",
+    });
+    await onePass(h);
+    expect(h.retries).toEqual([
+      {
+        threadId: "thread-1",
+        turnRequestId: "creq_r1",
+        reason: expect.stringMatching(/^Moved to account (main|spare),.*work is not logged in$/),
+      },
+    ]);
+    h.harness.dispose();
+    const nowhere = await waitingHost(
+      { ...noLogin, main: MAIN_OUT.main, spare: MAIN_OUT.main },
+      [waiting("r1", "thread-1")],
+    );
+    dispose = () => nowhere.harness.dispose();
+    await nowhere.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-1",
+      account: "work",
+    });
+    await onePass(nowhere);
+    expect(nowhere.retries).toEqual([]);
+    expect(nowhere.queued.map((r) => r.id)).toEqual(["r1"]);
   });
 
   it("judges a wait by the model its retry runs with, not by the model the thread used last", async () => {

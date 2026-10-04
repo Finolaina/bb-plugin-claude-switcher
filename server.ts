@@ -1921,10 +1921,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const now = deps.now();
     const measured = measuredAccounts(model);
     const here = measured.find((a) => a.name === fromName);
+    // Not measured, but known unable to run anything.
+    const noLogin =
+      collector.get(fromName)?.problem?.kind === "unauthenticated";
     if (
-      here === undefined ||
-      here.unknown === true ||
-      bestAccount([here], model, now) === fromName
+      !noLogin &&
+      (here === undefined ||
+        here.unknown === true ||
+        bestAccount([here], model, now) === fromName)
     ) {
       // It waited on the account the project was on before.
       const changed = accountChangedAt.get(projectId);
@@ -1934,6 +1938,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       )
         await releaseWait(
           threadId,
+          projectId,
           wait,
           turn.requestId,
           `Retrying on account ${fromName}, where the project is now`,
@@ -1948,14 +1953,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (to === null) return;
     await applyAccount(projectId, accountOrDefault(to), from);
     await markHandled(projectId);
-    const reason = `Moved to account ${to}, which can run the waiting turn now: ${fromName} ${whyOut(fromName, model)}`;
+    const reason = `Moved to account ${to}, which can run the waiting turn now: ${fromName} ${noLogin ? "is not logged in" : whyOut(fromName, model)}`;
     bb.log.info(`thread ${threadId}: ${reason}`);
     await recordMove(
       { at: now, threadId, projectId, from: fromName, to, reason },
       threadId,
     );
     if (!current.autoSwitch) return;
-    await releaseWait(threadId, wait, turn.requestId, reason);
+    await releaseWait(threadId, projectId, wait, turn.requestId, reason);
   }
 
   /**
@@ -1963,10 +1968,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * checkpoint: sending the queued row would be an explicit send, which
    * skips them. If bb does not take it, the timed one is queued again as it
    * was, unless bb already has a retry of the turn or the turn is no longer
-   * the failed one.
+   * the failed one. bb keeps one queued retry per turn: a retry it refuses
+   * for that never doubles a wait.
    */
   async function releaseWait(
     threadId: string,
+    projectId: string,
     wait: { id: string; reason: string; sendAt: number | null },
     turnRequestId: string,
     reason: string,
@@ -1977,22 +1984,28 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         queuedMessageId: wait.id,
       });
     } catch (error) {
-      if (!alreadyOnItsWay(error)) throw error;
-      bb.log.info(`thread ${threadId}: its waiting retry is already on its way`);
-      return;
+      if (alreadyOnItsWay(error)) {
+        bb.log.info(
+          `thread ${threadId}: its waiting retry is already on its way`,
+        );
+        return;
+      }
+      // bb may have removed it and lost only its answer: without the retry
+      // below, the wait would be gone. Still queued, bb refuses the retry.
+      bb.log.warn(
+        `thread ${threadId}: could not remove its wait (${error instanceof Error ? error.message : String(error)}); retrying the turn anyway`,
+      );
     }
-    putBack.delete(wait.id);
+    // It runs on the project's account now: a failure of it within the
+    // grace window is that account's, judged afresh.
+    recentSwitches.get(projectId)?.graced.add(threadId);
     try {
       await bb.sdk.threads.retry({ threadId, turnRequestId, reason });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const code =
-        typeof error === "object" && error !== null && "code" in error
-          ? error.code
-          : undefined;
-      if (code === "retry_already_queued" || code === "no_failed_turn") {
+      if (bbHasTheTurn(error)) {
         bb.log.info(
-          `thread ${threadId}: its wait is not queued again (${message})`,
+          `thread ${threadId}: bb did not take the retry (${message}); nothing is queued again`,
         );
         return;
       }
@@ -2008,11 +2021,31 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         });
         if (back.delivery === "queued") putBack.add(back.queuedMessageId);
       } catch (restoreError) {
+        const restore =
+          restoreError instanceof Error
+            ? restoreError.message
+            : String(restoreError);
+        // The first retry landed and only its answer was lost.
+        if (bbHasTheTurn(restoreError)) {
+          bb.log.info(
+            `thread ${threadId}: its wait is not queued again: bb has the turn (${restore})`,
+          );
+          return;
+        }
         bb.log.error(
-          `thread ${threadId}: its wait is lost (${message}; queuing it again failed too: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}); retry the turn by hand`,
+          `thread ${threadId}: its wait is lost (${message}; queuing it again failed too: ${restore}); retry the turn by hand`,
         );
       }
     }
+  }
+
+  /** bb's 409s on a retry: it already has one of the turn, or the turn is no longer the failed one. */
+  function bbHasTheTurn(error: unknown): boolean {
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? error.code
+        : undefined;
+    return code === "retry_already_queued" || code === "no_failed_turn";
   }
 
   // A login must not outlive the plugin that runs it (reload, disable, shutdown).
