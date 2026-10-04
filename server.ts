@@ -1523,6 +1523,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       notTheUsersThread(thread) !== null
     )
       return;
+    // The previous turn's start is not this turn's, read or still being
+    // read (code-reviewer r13).
+    forgetStart(thread.id);
     const token = ++starts;
     starting.set(thread.id, token);
     let account: string | null;
@@ -1698,14 +1701,26 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   });
 
   // ---- Automatic switch on subscription limit ---------------------------
+  /** `name` refused a turn (no login): chosen for nothing for a while. */
+  function markRefused(
+    name: string,
+    now: number,
+    event: PluginTurnFailedEvent,
+  ): void {
+    refusedAt.set(name, now);
+    bb.log.warn(
+      `account ${name} refused a turn (HTTP ${event.errorInfo?.httpStatusCode ?? "?"}): chosen for nothing for ${REFUSAL_MS / 3_600_000} h`,
+    );
+  }
+
+  /** `started`: the account the failed turn started on, when known. */
   async function handleFailure(
     event: PluginTurnFailedEvent,
     projectId: string,
+    started: string | undefined,
   ): Promise<void> {
     const now = deps.now();
     const recent = recentSwitches.get(projectId);
-    const started = startedOn.get(event.threadId);
-    forgetStart(event.threadId);
     if (
       recent !== undefined &&
       now - recent.at <= SWITCH_GRACE_MS &&
@@ -1721,6 +1736,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // for the same reset. Once per thread: a second failure in the window
       // means the new account fails as well, and is judged below.
       recent.graced.add(event.threadId);
+      if (started !== undefined && isRefusal(event))
+        markRefused(started, now, event);
       const reason = `Retrying on account ${recent.to}`;
       bb.log.info(
         `thread ${event.threadId}: ${reason} (switched ${now - recent.at} ms ago)`,
@@ -1738,6 +1755,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         // reset when the project's latest move was a wait on that account.
         // Unless the project's account cannot run it either (a hand pick of
         // an account without a login, or out): then it is judged below.
+        // Its refusal is the old account's, wherever it runs again.
+        if (isRefusal(event)) markRefused(started, now, event);
         const sendAt =
           recent !== undefined &&
           recent.to === currentName &&
@@ -1875,10 +1894,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const failedOn = ranOn ?? fromName;
     const refusal = isRefusal(event);
     if (refusal && !stuck) {
-      refusedAt.set(failedOn, now);
-      bb.log.warn(
-        `account ${failedOn} refused a turn (HTTP ${event.errorInfo?.httpStatusCode ?? "?"}): chosen for nothing for ${REFUSAL_MS / 3_600_000} h`,
-      );
+      markRefused(failedOn, now, event);
     } else if (refusal) {
       // Found in the log on a rescue: bb masks the account in its log and
       // this plugin's history of moves cannot date a turn against a move
@@ -1972,6 +1988,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
 
   bb.events.on("turn.failed", async (event) => {
+    // Where its turn started, read now and forgotten whatever comes of the
+    // failure: a failure declined below ends the turn as well, with no
+    // `thread.idle` (Codex IR13-001, code-reviewer r13).
+    const started = startedOn.get(event.threadId);
+    forgetStart(event.threadId);
     if (!current.autoSwitch) return;
     // Pure guards first: another provider's limit must not query every account.
     const declined = declineReason(event);
@@ -1992,7 +2013,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     try {
       await inProjectQueue(thread.projectId, () =>
-        handleFailure(event, thread.projectId),
+        handleFailure(event, thread.projectId, started),
       );
     } catch (error) {
       // A retry of the turn is already on its way (queued by another plugin,
