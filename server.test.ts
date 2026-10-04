@@ -1513,10 +1513,11 @@ describe("claude accounts plugin", () => {
 
   it("a refusal of a leftover marks the account its turn ran on, not the project's current account", async () => {
     let clock = NOW;
+    let mainSession = 100;
     let workSession = 5;
     const h = await host(
       {
-        main: () => Response.json(payload(100, 40)),
+        main: () => Response.json(payload(mainSession, 40)),
         spare: () => Response.json(payload(10, 60)),
         work: () => Response.json(payload(workSession, 20)),
       },
@@ -1546,9 +1547,11 @@ describe("claude accounts plugin", () => {
         rateLimits: null,
       }),
     );
-    // work has room again: a new project goes there (spare if work had
-    // been marked as the refusing account).
+    // work has room again and main measures best: a new project goes to
+    // work (spare if work had been marked as the refusing account; main if
+    // main had not).
     workSession = 5;
+    mainSession = 1;
     await h.harness.behavior.callRpc("accounts_refresh", null);
     await h.harness.behavior.emitThreadEvent("thread.created", {
       thread: thread({ id: "thr-new", projectId: "proj-3" }),
@@ -1556,6 +1559,45 @@ describe("claude accounts plugin", () => {
     expect(h.envSet.at(-1)).toEqual(
       expect.objectContaining({ projectId: "proj-3", value: `${ACCOUNTS}/work` }),
     );
+  });
+
+  it("forgets where a turn ran once it ends: a later failure with no new turn announced is the project's account's", async () => {
+    // A turn that ran on main ended; the project moved to work; the next
+    // turn is refused at the door (no `thread.active`) and fails with work's
+    // report. Not a leftover of main: work's failure, so the project moves
+    // to main, which has room (code-reviewer r11).
+    let clock = NOW;
+    let mainSession = 100;
+    let workSession = 5;
+    const h = await host(
+      {
+        main: () => Response.json(payload(mainSession, 40)),
+        spare: () => Response.json(payload(100, 60)),
+        work: () => Response.json(payload(workSession, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    clock = NOW + 5 * 60_000;
+    workSession = 100;
+    mainSession = 5;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const late = failure({ threadId: "thread-3", requestId: "creq_9" });
+    late.rateLimits!.windows[0]!.resetsAtMs = NOW + 3 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", late);
+    expect(h.retries[1]).toEqual({
+      threadId: "thread-3",
+      turnRequestId: "creq_9",
+      reason: "Switched to account main",
+    });
   });
 
   it("retries a straggler blind once: its retry failing at the door is judged", async () => {
