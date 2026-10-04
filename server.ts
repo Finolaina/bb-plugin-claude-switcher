@@ -1735,20 +1735,34 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     model: string,
     now: number,
     stuck: boolean,
+    ranOn: string | null = null,
   ): Promise<void> {
     const fromName = from.account ?? current.defaultAccountName;
     const refusal = isRefusal(event);
-    // Found on a rescue pass too, once per failed turn (not once per pass,
-    // nor again when the mark expires: the thread is then retried there,
-    // and a fresh refusal marks the account afresh): the account that
-    // refused is not chosen again, so the thread does not bounce between
-    // two accounts that refuse it (code-reviewer r6 M1, r7).
+    // The account that refused: on a failure, the project's; on a rescue,
+    // the one the project sat on when the turn was sent (`ranOn`, from this
+    // plugin's own history of moves: bb masks the account in its log), or
+    // none when the history does not reach back that far. Marked once per
+    // failed turn (not once per pass, nor again when the mark expires: the
+    // thread is then retried there, and a fresh refusal marks the account
+    // afresh), so the thread does not bounce between two accounts that
+    // refuse it, and a refusal of one account does not veto the account the
+    // project moved to since (code-reviewer r6 M1, r7; Codex r7 IR7-001).
+    const refuser = stuck ? ranOn : fromName;
     const refusalKey = `${event.threadId}/${event.requestId}`;
-    if (refusal && (!stuck || !refusalsMarked.has(refusalKey))) {
+    if (refusal && refuser === null) {
+      bb.log.info(
+        `thread ${event.threadId}: left in error: refused by an account this plugin cannot name; none marked`,
+      );
+    } else if (
+      refusal &&
+      refuser !== null &&
+      (!stuck || !refusalsMarked.has(refusalKey))
+    ) {
       refusalsMarked.add(refusalKey);
-      refusedAt.set(fromName, now);
+      refusedAt.set(refuser, now);
       bb.log.warn(
-        `account ${fromName} refused a turn (HTTP ${event.errorInfo?.httpStatusCode ?? "?"}): chosen for nothing for ${REFUSAL_MS / 3_600_000} h`,
+        `account ${refuser} refused a turn (HTTP ${event.errorInfo?.httpStatusCode ?? "?"}): chosen for nothing for ${REFUSAL_MS / 3_600_000} h`,
       );
     }
     const decision = decideSwitch({
@@ -1776,7 +1790,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     const reason =
       decision.kind === "switch"
-        ? `Switched to account ${decision.account}${decision.model === null ? "" : ` (${decision.model})`}${refusal ? `: ${fromName} refused the turn` : ""}`
+        ? `Switched to account ${decision.account}${decision.model === null ? "" : ` (${decision.model})`}${refusal ? `: ${(stuck ? ranOn : fromName) ?? "an earlier account"} refused the turn` : ""}`
         : decision.kind === "retry"
           ? `Retrying on account ${decision.account}${decision.model === null ? "" : ` (${decision.model})`}: it has room now`
           : decision.reason;
@@ -2029,7 +2043,37 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       turn.model ?? current.preferredModel,
       deps.now(),
       true,
+      accountAt(
+        thread.projectId,
+        turn.at,
+        from.account ?? current.defaultAccountName,
+      ),
     );
+  }
+
+  /**
+   * The account the project sat on at `at`, from this plugin's history of
+   * moves (latest first): the last move before `at`, else the account the
+   * first move after it left (`current` when it never moved), or null when
+   * the history, full, may have been cut short of `at` (nothing is known).
+   */
+  function accountAt(
+    projectId: string,
+    at: number,
+    current: string,
+  ): string | null {
+    const own = history.filter((r) => r.projectId === projectId);
+    const before = own.find((r) => r.at <= at);
+    if (before !== undefined) return before.to;
+    const oldest = history[history.length - 1];
+    if (
+      oldest !== undefined &&
+      oldest.at > at &&
+      history.length >= HISTORY_LIMIT
+    )
+      return null;
+    const after = own[own.length - 1];
+    return after === undefined ? current : after.from;
   }
 
   /** What bb's failure event says of a turn rejected at the door (bb 0.45, `doorRejectionErrorInfo`). */
@@ -2098,6 +2142,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (row?.type !== "client/turn/requested") return null;
     return {
       seq: row.seq,
+      at: row.createdAt,
       requestId: row.data.requestId,
       // bb keys a retry by the first request of its chain, and counts from 1.
       original: row.data.retryOfRequestId ?? row.data.requestId,

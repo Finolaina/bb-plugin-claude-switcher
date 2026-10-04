@@ -12,7 +12,7 @@ import type {
 } from "@get-bb/plugin-sdk";
 
 type ThreadResponse = PluginThreadEventPayloads["thread.created"]["thread"];
-import { createPlugin, ENV_VAR, type State } from "./server.js";
+import { createPlugin, ENV_VAR, HISTORY_LIMIT, type State } from "./server.js";
 import type { AccountsIo } from "./src/accounts.js";
 import type { CredentialIo } from "./src/credentials.js";
 import type { LoginIo, LoginProcess } from "./src/login.js";
@@ -5468,10 +5468,15 @@ describe("a wait another account can end sooner", () => {
         reported?: boolean;
         /** bb refused the turn at the door for this reason: no provider error in the log. */
         rejected?: string;
+        /** When the turn was sent (default an hour before NOW). */
+        at?: number;
       } = {},
     ): LoggedEvent[] {
       const rows: LoggedEvent[] = [
-        turnRequested(threadId, requestId, model, opts.retry),
+        {
+          ...turnRequested(threadId, requestId, model, opts.retry),
+          ...(opts.at === undefined ? {} : { createdAt: opts.at }),
+        },
         opts.rejected !== undefined
           ? {
               seq: 2,
@@ -5642,6 +5647,7 @@ describe("a wait another account can end sooner", () => {
         category: "unauthorized",
         reported: false,
         retry: { of: "creq_1", attempt: 2 },
+        at: NOW + 1,
       });
       await onePass(h);
       // Wherever it goes now (work's reset, at worst), not back to main.
@@ -5650,6 +5656,66 @@ describe("a wait another account can end sooner", () => {
         "Switched to account main (Fable)",
       );
       expect(h.envSet.slice(1).map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    });
+
+    it("attributes a refusal in the log to the account the project sat on when the turn was sent", async () => {
+      // Codex r7 (IR7-001): after a restart, a thread refused on main before
+      // the project moved to spare must not veto spare, where it has room.
+      const h = await host(ROOM_EVERYWHERE, {
+        ...stuck(failedLog("thread-1", "creq_1", FABLE_ID, { category: "unauthorized", reported: false })),
+        presetEnv: {
+          "proj-1": [{ name: ENV_VAR, note: ownNote("spare"), secret: true, value: null }],
+        },
+        kvPreset: {
+          "switch-history": [
+            {
+              at: NOW - 30 * 60_000,
+              threadId: "thread-9",
+              projectId: "proj-1",
+              from: "main",
+              to: "spare",
+              reason: "Switched to account spare",
+            },
+          ],
+        },
+      });
+      dispose = () => h.harness.dispose();
+      await onePass(h);
+      const warned = h.harness.logEntries
+        .filter((entry) => entry.level === "warn" && /refused a turn/.test(entry.message))
+        .map((entry) => entry.message);
+      expect(warned).toHaveLength(1);
+      expect(warned[0]).toMatch(/^account main refused a turn/);
+      expect(h.envSet).toEqual([]);
+      expect(h.retries.map((r) => r.reason)).toEqual([
+        "Retrying on account spare (Fable): it has room now",
+      ]);
+    });
+
+    it("marks no account for a refusal older than its history of moves reaches", async () => {
+      // Codex r7 (IR7-001): the history was cut short of the turn; the
+      // project's account is judged on its measurements instead.
+      const h = await host(ROOM_EVERYWHERE, {
+        ...stuck(failedLog("thread-1", "creq_1", FABLE_ID, { category: "unauthorized", reported: false })),
+        kvPreset: {
+          "switch-history": Array.from({ length: HISTORY_LIMIT }, (_, i) => ({
+            at: NOW - 30 * 60_000 + i,
+            threadId: "thread-9",
+            projectId: "proj-2",
+            from: i % 2 === 0 ? "main" : "spare",
+            to: i % 2 === 0 ? "spare" : "main",
+            reason: "Switched",
+          })),
+        },
+      });
+      dispose = () => h.harness.dispose();
+      await onePass(h);
+      expect(
+        h.harness.logEntries.filter((entry) => entry.level === "warn" && /refused a turn/.test(entry.message)),
+      ).toEqual([]);
+      expect(h.retries.map((r) => r.reason)).toEqual([
+        "Retrying on account main (Fable): it has room now",
+      ]);
     });
 
     it("tries the account that refused again once its mark expires, instead of marking it afresh from the same old failure", async () => {
