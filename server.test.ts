@@ -310,6 +310,8 @@ interface HostOptions {
   queueAfterList?: QueuedRow[];
   /** Runs before threads.events.list answers (a toggle flipped while the pass reads). */
   beforeEvents?: () => Promise<void>;
+  /** Runs as queuedMessages.delete starts, before it lands or fails (bb's events meanwhile). */
+  beforeDelete?: () => Promise<void>;
   /** bb's raw log per thread, as threads.events.list answers it. */
   threadEvents?: Record<string, LoggedEvent[]>;
   /** threads.events.list throws this (a bb hiccup). */
@@ -547,6 +549,7 @@ async function host(
             return { ok: true };
           },
           delete: async ({ queuedMessageId }: { queuedMessageId: string }) => {
+            await options.beforeDelete?.();
             if (options.deleteRowError !== undefined) {
               const { message, landed, ...rest } = options.deleteRowError;
               if (landed === true) {
@@ -6058,6 +6061,57 @@ describe("a wait another account can end sooner", () => {
         } as never,
       });
       expect(await h.bb.storage.kv.get("cancelled-retries")).toBeUndefined();
+    });
+
+    it("does not take bb's cancellation for its own deletion for the user's, though it comes before bb's answer", async () => {
+      // Codex r8 (IR8-002): bb fires the event before the deletion answers.
+      let h: Awaited<ReturnType<typeof host>> | null = null;
+      h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")], {
+        beforeDelete: async () => {
+          await h?.harness.behavior.emitThreadEvent("message.cancelled", {
+            entry: {
+              id: "r1",
+              threadId: "thread-1",
+              sendAt: NOW + 2 * HOUR,
+              payload: { kind: "retry", attempt: 2, reason: "Waiting", retryOfTurnRequestId: "creq_r1" },
+            } as never,
+          });
+        },
+      });
+      dispose = () => h?.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "thread-1", projectId: "proj-1" }),
+      });
+      await onePass(h);
+      expect(h.deleted).toEqual(["r1"]);
+      expect(await h.bb.storage.kv.get("cancelled-retries")).toBeUndefined();
+    });
+
+    it("reads a cancellation come while its own deletion failed (the row was gone before) as the user's", async () => {
+      // Codex r8 (IR8-002), code-reviewer r8 (M1): the user removed the wait
+      // as this plugin went to replace it; its event, come before bb's 404,
+      // was swallowed as this plugin's own and the thread was rescued again.
+      let h: Awaited<ReturnType<typeof host>> | null = null;
+      h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")], {
+        deleteRowError: { message: "queued message not found", status: 404 },
+        beforeDelete: async () => {
+          await h?.harness.behavior.emitThreadEvent("message.cancelled", {
+            entry: {
+              id: "r1",
+              threadId: "thread-1",
+              sendAt: NOW + 2 * HOUR,
+              payload: { kind: "retry", attempt: 2, reason: "Waiting", retryOfTurnRequestId: "creq_r1" },
+            } as never,
+          });
+        },
+      });
+      dispose = () => h?.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "thread-1", projectId: "proj-1" }),
+      });
+      await onePass(h);
+      expect(h.retries).toEqual([]);
+      expect(await h.bb.storage.kv.get("cancelled-retries")).toEqual({ "thread-1": "creq_r1" });
     });
 
     it("leaves a thread whose failure was not a limit", async () => {

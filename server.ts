@@ -121,6 +121,8 @@ const KV_SERIES = "usage-series";
 const HISTORY_LIMIT = 100;
 /** A thread as bb reports it (the SDK does not export the type by name). */
 type ThreadResponse = PluginThreadEventPayloads["thread.created"]["thread"];
+/** A queued row bb removed, as `message.cancelled` reports it. */
+type CancelledEntry = PluginThreadEventPayloads["message.cancelled"]["entry"];
 /** When this plugin first ran: a project created later is new. */
 const KV_INSTALLED_AT = "installed-at";
 /** New projects already placed, kept, or pinned by the user: no longer new. */
@@ -427,7 +429,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   let installedAt: number | null = null;
   const handled = new Set<string>();
   const cancelled = new Map<string, string>();
-  const ownDeletes = new Set<string>();
+  /**
+   * Removals of queued rows by this plugin, under way or landed without
+   * bb's word yet, by row id: bb's `message.cancelled` for one of them is
+   * this plugin's own, unless the removal fails because the row was gone
+   * before (the user's, then; `held` keeps the event until the removal
+   * answers) (Codex r8, IR8-002).
+   */
+  const ownDeletes = new Map<
+    string,
+    { done: boolean; held: CancelledEntry | null }
+  >();
   try {
     const stored = await bb.storage.kv.get<unknown>(KV_INSTALLED_AT);
     if (typeof stored === "number") {
@@ -1200,14 +1212,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         await sendQueued(threadId, existing.id);
         return;
       }
-      ownDeletes.add(existing.id);
       try {
-        await bb.sdk.threads.queuedMessages.delete({
-          threadId,
-          queuedMessageId: existing.id,
-        });
+        await deleteOwn(threadId, existing.id);
       } catch (error) {
-        ownDeletes.delete(existing.id);
         // Sent between the list and this delete (bb would refuse a retry
         // of a thread that is running again), or removed by the user:
         // nothing to replace.
@@ -1747,14 +1754,46 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * restart must not turn a cancellation into an abandoned thread.
    */
   bb.events.on("message.cancelled", async ({ entry }) => {
-    if (ownDeletes.delete(entry.id)) return;
+    const own = ownDeletes.get(entry.id);
+    if (own !== undefined) {
+      if (own.done) ownDeletes.delete(entry.id);
+      else own.held = entry;
+      return;
+    }
+    await cancelledByHand(entry);
+  });
+
+  async function cancelledByHand(entry: CancelledEntry): Promise<void> {
     if (entry.payload.kind !== "retry") return;
     cancelled.set(entry.threadId, entry.payload.retryOfTurnRequestId);
     bb.log.info(
       `thread ${entry.threadId}: its queued retry was cancelled by hand; not judged again until a new turn of it`,
     );
     await storeCancelled(entry.threadId);
-  });
+  }
+
+  /**
+   * Removes a queued row of this plugin's own; throws as bb's delete does.
+   * bb's cancellation for it is this plugin's own, whenever it comes,
+   * unless the removal fails: the row was gone before, so a cancellation
+   * come meanwhile was the user's.
+   */
+  async function deleteOwn(threadId: string, id: string): Promise<void> {
+    const own = { done: false, held: null as CancelledEntry | null };
+    ownDeletes.set(id, own);
+    try {
+      await bb.sdk.threads.queuedMessages.delete({
+        threadId,
+        queuedMessageId: id,
+      });
+    } catch (error) {
+      ownDeletes.delete(id);
+      if (own.held !== null) await cancelledByHand(own.held);
+      throw error;
+    }
+    if (own.held !== null) ownDeletes.delete(id);
+    else own.done = true;
+  }
 
   /** The cancellations by hand, to storage; a failure is logged, not thrown. */
   async function storeCancelled(threadId: string): Promise<void> {
@@ -2266,14 +2305,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // It runs on the project's account from here: its failure is not a
     // leftover of the account its turn started on.
     startedOn.delete(threadId);
-    ownDeletes.add(wait.id);
     try {
-      await bb.sdk.threads.queuedMessages.delete({
-        threadId,
-        queuedMessageId: wait.id,
-      });
+      await deleteOwn(threadId, wait.id);
     } catch (error) {
-      ownDeletes.delete(wait.id);
       if (alreadyOnItsWay(error)) {
         bb.log.info(
           `thread ${threadId}: its waiting retry is already on its way`,
