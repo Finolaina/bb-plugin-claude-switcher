@@ -43,8 +43,10 @@ export interface SwitchInput {
   /**
    * The account the failed turn ran on, when the project has moved since
    * (a leftover that outlived the grace): the provider's report is that
-   * account's, which is never chosen, and the current account is judged on
-   * its measurements alone. Default: the current account.
+   * account's, which is never switched to (a wait may still move the
+   * project there, when its reported reset is the earliest), and the
+   * current account is judged on its measurements alone. Default: the
+   * current account.
    */
   failedAccount?: string;
   /** Every account with measured usage, the current one included. */

@@ -413,6 +413,36 @@ describe("decideSwitch", () => {
         accounts: [...moved.accounts, account("spare")],
       }),
     ).toEqual({ kind: "switch", account: "spare", model: null });
+    // The report's reset the earliest of all: the project waits there.
+    expect(
+      decideSwitch({
+        ...moved,
+        accounts: [
+          account("main"),
+          account("work", {
+            session: { usedPercent: 100, resetsAt: NOW + 3 * HOUR },
+          }),
+        ],
+      }),
+    ).toEqual({
+      kind: "wait",
+      account: "main",
+      sendAt: NOW + 2 * HOUR + BUFFER,
+      reason: "Waiting for main",
+    });
+    // The current account usable (measured since the leftover was turned
+    // away): waited for at once, not "switched" to.
+    expect(
+      decideSwitch({
+        ...moved,
+        accounts: [account("main"), account("work")],
+      }),
+    ).toEqual({
+      kind: "wait",
+      account: "work",
+      sendAt: NOW + BUFFER,
+      reason: "Waiting for work",
+    });
   });
 });
 

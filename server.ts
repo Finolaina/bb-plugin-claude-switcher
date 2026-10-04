@@ -1523,6 +1523,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       startedOn.delete(thread.id);
     }
   });
+  bb.events.on("thread.idle", ({ thread }) => {
+    // Its turn ended there: a later failure that no new `thread.active`
+    // announces (a turn refused at the door) is the project's account's,
+    // not a leftover of the account this turn ran on (code-reviewer r11).
+    startedOn.delete(thread.id);
+  });
   bb.events.on("thread.archived", async ({ thread }) => {
     startedOn.delete(thread.id);
     threadModel.delete(thread.id);
