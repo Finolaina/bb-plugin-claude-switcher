@@ -5470,6 +5470,8 @@ describe("a wait another account can end sooner", () => {
         rejected?: string;
         /** When the turn was sent (default an hour before NOW). */
         at?: number;
+        /** The status of the limit report in the log (default blocked). */
+        reportStatus?: string;
       } = {},
     ): LoggedEvent[] {
       const rows: LoggedEvent[] = [
@@ -5506,7 +5508,10 @@ describe("a wait another account can end sooner", () => {
           data: {
             providerThreadId: "p",
             threadId,
-            rateLimits: failure().rateLimits,
+            rateLimits: {
+              ...failure().rateLimits,
+              ...(opts.reportStatus === undefined ? {} : { status: opts.reportStatus }),
+            },
           },
         });
       return rows;
@@ -5953,6 +5958,19 @@ describe("a wait another account can end sooner", () => {
       };
       await onePass(h);
       expect(h.retries).toEqual([]);
+    });
+
+    it("judges it on the measurements when the report in its log is an earlier turn's that was allowed", async () => {
+      // Codex r7 (IR7-003): a turn refused at the door leaves the previous
+      // report (allowed) as the thread's latest; with accounts free it was
+      // declined on every pass.
+      const h = await host(
+        MAIN_OUT,
+        stuck(failedLog("thread-1", "creq_1", FABLE_ID, { rejected: "rate_limited", reportStatus: "allowed" })),
+      );
+      dispose = () => h.harness.dispose();
+      await onePass(h);
+      expect(h.retries.map((r) => r.reason)).toEqual(["Switched to account spare (Fable)"]);
     });
 
     it("leaves a thread whose failure was not a limit", async () => {

@@ -80,8 +80,14 @@ export function declineReason(
   const rateLimits = failure.rateLimits;
   if (rateLimits === null) return stuck ? null : "no-rate-limit-state";
   // bb sends the thread's latest stored report: when the provider refuses a
-  // turn before reporting the limit reached, that is still a warning.
-  if (rateLimits.status !== "blocked" && rateLimits.status !== "warning")
+  // turn before reporting the limit reached, that is still a warning. Left
+  // in error, that report may be an earlier turn's (allowed, unknown): the
+  // measurements decide, as when there is none.
+  if (
+    !stuck &&
+    rateLimits.status !== "blocked" &&
+    rateLimits.status !== "warning"
+  )
     return "no-rate-limit-state";
   if (rateLimits.kind !== "subscription-window")
     return "not-subscription-window";
