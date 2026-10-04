@@ -432,9 +432,8 @@ describe("a turn the account refused", () => {
     expect(
       decideSwitch(input({ failure: refused(), accounts: [account("main")] })),
     ).toEqual({ kind: "decline", reason: "no-account-usable" });
-    expect(declineReason(refused({ attemptNumber: ATTEMPTS }))).toBe(
-      "attempts-exhausted",
-    );
+    // Whatever the attempt: the account must be marked (code-reviewer r9).
+    expect(declineReason(refused({ attemptNumber: ATTEMPTS }))).toBeNull();
   });
 });
 

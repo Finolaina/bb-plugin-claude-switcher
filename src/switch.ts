@@ -73,9 +73,12 @@ export function declineReason(
   failure: PluginTurnFailedEvent,
   stuck = false,
 ): DeclineReason | null {
+  // A refusal (no login) is judged whatever the attempt: the account must
+  // be marked, or a thread left in error and retried there on each refresh
+  // would be refused there for good (code-reviewer r9).
+  if (isRefusal(failure)) return null;
   if (!stuck && failure.attemptNumber >= MAX_ATTEMPTS)
     return "attempts-exhausted";
-  if (isRefusal(failure)) return null;
   if (failure.errorInfo?.category !== "rate-limit") return "not-rate-limit";
   const rateLimits = failure.rateLimits;
   if (rateLimits === null) return stuck ? null : "no-rate-limit-state";

@@ -5745,6 +5745,33 @@ describe("a wait another account can end sooner", () => {
       expect(h.retries.at(-1)?.reason).toBe("Retrying on account spare (Fable): it has room now");
     });
 
+    it("marks the account that refuses a rescued thread at its last attempt too", async () => {
+      // code-reviewer r9 (high): the rescue has no attempt cap, the failure
+      // handler had one before the mark, so a thread refused at attempt 5+
+      // was retried on the same account on every refresh, for good.
+      const h = await host(
+        { ...ROOM_EVERYWHERE, work: () => Response.json(payload(5, 20, 100)) },
+        stuck(failedLog("thread-1", "creq_1", FABLE_ID, { category: "unauthorized", reported: false })),
+      );
+      dispose = () => h.harness.dispose();
+      await onePass(h);
+      expect(h.retries.map((r) => r.reason)).toEqual([
+        "Retrying on account main (Fable): it has room now",
+      ]);
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({
+          requestId: "creq_5",
+          attemptNumber: 5,
+          errorInfo: { category: "unauthorized", providerCode: null, httpStatusCode: 401 },
+        }),
+      );
+      expect(
+        h.harness.logEntries.filter((entry) => entry.level === "warn" && /account main refused a turn/.test(entry.message)),
+      ).toHaveLength(1);
+      expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+    });
+
     it("tries the account that refused again once its mark expires", async () => {
       // code-reviewer r7: with one account, a thread refused at 02:00 must
       // be retried once the user may have logged in again, not re-marked on
