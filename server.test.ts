@@ -5973,6 +5973,59 @@ describe("a wait another account can end sooner", () => {
       expect(h.retries.map((r) => r.reason)).toEqual(["Switched to account spare (Fable)"]);
     });
 
+    it("leaves alone a thread whose queued retry the user cancelled by hand, across a restart", async () => {
+      // Codex r7 (IR7-004): bb's queued card deletes the row and leaves the
+      // thread in error; the rescue took that for a thread left for dead.
+      const theirs = {
+        id: "pr-1",
+        threadId: "thread-1",
+        sendAt: NOW + HOUR,
+        payload: { kind: "retry", attempt: 2, reason: "provider-retry", retryOfTurnRequestId: "creq_1" },
+      };
+      const h = await host(MAIN_OUT, stuck(failedLog("thread-1", "creq_1", FABLE_ID)));
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("message.cancelled", { entry: theirs as never });
+      await onePass(h);
+      expect(h.retries).toEqual([]);
+      expect(await h.bb.storage.kv.get("cancelled-retries")).toEqual({ "thread-1": "creq_1" });
+      // Loaded again (a restart): still left alone; a thread whose cancelled
+      // retry was of an earlier chain is judged.
+      const again = await host(MAIN_OUT, {
+        settings: FABLE,
+        threads: { "thread-1": { status: "error" }, "thread-2": { status: "error" } },
+        threadEvents: {
+          "thread-1": failedLog("thread-1", "creq_1", FABLE_ID),
+          "thread-2": failedLog("thread-2", "creq_9", FABLE_ID),
+        },
+        kvPreset: { "cancelled-retries": { "thread-1": "creq_1", "thread-2": "creq_2" } },
+      });
+      h.harness.dispose();
+      dispose = () => again.harness.dispose();
+      await onePass(again);
+      expect(again.retries.map((r) => r.threadId)).toEqual(["thread-2"]);
+    });
+
+    it("does not take its own deletion of a wait for a cancellation by hand", async () => {
+      // Codex r7 (IR7-004): releasing a wait deletes its row, and bb fires
+      // the same event for that.
+      const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")]);
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "thread-1", projectId: "proj-1" }),
+      });
+      await onePass(h);
+      expect(h.deleted).toEqual(["r1"]);
+      await h.harness.behavior.emitThreadEvent("message.cancelled", {
+        entry: {
+          id: "r1",
+          threadId: "thread-1",
+          sendAt: NOW + 2 * HOUR,
+          payload: { kind: "retry", attempt: 2, reason: "Waiting", retryOfTurnRequestId: "creq_r1" },
+        } as never,
+      });
+      expect(await h.bb.storage.kv.get("cancelled-retries")).toBeUndefined();
+    });
+
     it("leaves a thread whose failure was not a limit", async () => {
       const h = await host(
         MAIN_OUT,

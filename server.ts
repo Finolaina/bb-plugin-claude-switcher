@@ -114,6 +114,8 @@ export function accountFromNote(note: string | null): string | null {
 const KV_LAST_SWITCH = "last-switch";
 /** Every move (automatic, ahead of the limit, or by hand), latest first. */
 const KV_HISTORY = "switch-history";
+/** Retries cancelled by hand, per thread: the chain (first request) they were of. */
+const KV_CANCELLED = "cancelled-retries";
 /** Usage samples per account and window, for the forecast. */
 const KV_SERIES = "usage-series";
 export const HISTORY_LIMIT = 100;
@@ -424,6 +426,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   let installedAt: number | null = null;
   const handled = new Set<string>();
+  const cancelled = new Map<string, string>();
+  const ownDeletes = new Set<string>();
   try {
     const stored = await bb.storage.kv.get<unknown>(KV_INSTALLED_AT);
     if (typeof stored === "number") {
@@ -438,6 +442,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     else if (raw !== undefined && raw !== null)
       bb.log.warn(
         "the list of projects already placed is unreadable; starting it again",
+      );
+    const rawCancelled = await bb.storage.kv.get<unknown>(KV_CANCELLED);
+    const byHand = z.record(z.string(), z.string()).safeParse(rawCancelled);
+    if (byHand.success)
+      for (const [threadId, chain] of Object.entries(byHand.data))
+        cancelled.set(threadId, chain);
+    else if (rawCancelled !== undefined && rawCancelled !== null)
+      bb.log.warn(
+        "the list of retries cancelled by hand is unreadable; starting it again",
       );
   } catch (error) {
     installedAt = null;
@@ -1187,12 +1200,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         await sendQueued(threadId, existing.id);
         return;
       }
+      ownDeletes.add(existing.id);
       try {
         await bb.sdk.threads.queuedMessages.delete({
           threadId,
           queuedMessageId: existing.id,
         });
       } catch (error) {
+        ownDeletes.delete(existing.id);
         // Sent between the list and this delete (bb would refuse a retry
         // of a thread that is running again), or removed by the user:
         // nothing to replace.
@@ -1504,6 +1519,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   bb.events.on("thread.archived", ({ thread }) => {
     startedOn.delete(thread.id);
     threadModel.delete(thread.id);
+    cancelled.delete(thread.id);
   });
 
   bb.events.on("thread.created", async ({ thread }) => {
@@ -1727,6 +1743,30 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   /** Failed turns (thread/request) whose refusal a rescue pass already marked. */
   const refusalsMarked = new Set<string>();
+
+  /**
+   * Retries the user cancelled by hand (from bb's queued card or `bb thread
+   * queue`), per thread: the chain they were of. bb's only word of that
+   * removal is `message.cancelled`, which this plugin's own deletions fire
+   * too (`ownDeletes` tells them apart). The rescue leaves such a thread
+   * alone until a new turn of it (Codex r7, IR7-004). Kept in storage: a
+   * restart must not turn a cancellation into an abandoned thread.
+   */
+  bb.events.on("message.cancelled", async ({ entry }) => {
+    if (ownDeletes.delete(entry.id)) return;
+    if (entry.payload.kind !== "retry") return;
+    cancelled.set(entry.threadId, entry.payload.retryOfTurnRequestId);
+    bb.log.info(
+      `thread ${entry.threadId}: its queued retry was cancelled by hand; not judged again until a new turn of it`,
+    );
+    try {
+      await bb.storage.kv.set(KV_CANCELLED, Object.fromEntries(cancelled));
+    } catch (error) {
+      bb.log.warn(
+        `thread ${entry.threadId}: the cancellation could not be stored (a restart would judge the thread again): ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  });
 
   async function judge(
     event: PluginTurnFailedEvent,
@@ -1995,6 +2035,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return;
     const turn = await latestTurn(threadId);
     if (turn === null) return;
+    if (cancelled.get(threadId) === turn.original) {
+      bb.log.debug(
+        `thread ${threadId}: left in error (its retry was cancelled by hand)`,
+      );
+      return;
+    }
     // The failure of that turn, not an older one's (a turn sent by hand
     // after a limit fails on its own account): bb reads it the same way.
     // A turn bb refused at the door leaves no provider error, only the
@@ -2252,12 +2298,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // It runs on the project's account from here: its failure is not a
     // leftover of the account its turn started on.
     startedOn.delete(threadId);
+    ownDeletes.add(wait.id);
     try {
       await bb.sdk.threads.queuedMessages.delete({
         threadId,
         queuedMessageId: wait.id,
       });
     } catch (error) {
+      ownDeletes.delete(wait.id);
       if (alreadyOnItsWay(error)) {
         bb.log.info(
           `thread ${threadId}: its waiting retry is already on its way`,
