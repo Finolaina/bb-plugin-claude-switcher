@@ -2024,6 +2024,180 @@ describe("claude accounts plugin", () => {
     );
   });
 
+  it("a move completed between the send of a turn and its announcement makes the start unknown: the refusal marks nobody", async () => {
+    // Codex IR16-001: bb reads the account as it starts the turn and
+    // announces `thread.active` after; another thread's limit moved the
+    // project in between, so the announcement reads the new account, which
+    // is not where the turn runs. Anchored to the project's state when bb
+    // asked to send the message, the start is unknown: the new account is
+    // not marked for the refusal, and the thread runs again there.
+    let clock = NOW;
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: "thread-3", projectId: "proj-1" }),
+        requestedExecution: { providerId: "claude-code", model: "claude-fable-5-1" },
+        attempt: "start-turn",
+      }),
+    );
+    // thread-1's limit moves the project to work before bb announces thread-3.
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    clock = NOW + 5 * 60_000;
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({
+        threadId: "thread-3",
+        requestId: "creq_9",
+        errorInfo: {
+          category: "unauthorized",
+          providerCode: null,
+          httpStatusCode: 403,
+        },
+        rateLimits: null,
+      }),
+    );
+    expect(h.retries[1]).toEqual({
+      threadId: "thread-3",
+      turnRequestId: "creq_9",
+      // The send named the model: the retry does too.
+      reason: "Retrying on account work (Fable): it has room now",
+    });
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    expect(
+      h.harness.logEntries.filter((entry) => entry.level === "warn").map((e) => e.message),
+    ).not.toContainEqual(expect.stringContaining("refused a turn"));
+    expect(h.harness.logEntries.map((e) => e.message)).toContainEqual(
+      expect.stringContaining("refused by an account unknown"),
+    );
+  });
+
+  it("a refusal by an account unknown gets the usual retries, then leaves the thread in error", async () => {
+    // Codex IR16-002: nobody marked, the retry on the project's account may
+    // be refused the same way, and refusals are exempt from the attempt cap
+    // (the account marked is what bounds them). When no account can be
+    // marked, the cap applies: the 4th failure is retried, the 5th is not.
+    let pending: EnvGate | null = null;
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, 40)),
+        spare: () => Response.json(payload(100, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { beforeEnvRead: () => takeGate() },
+    );
+    const takeGate = () => {
+      const gate = pending;
+      pending = null;
+      if (gate === null) return Promise.resolve();
+      gate.captured();
+      return gate.held;
+    };
+    dispose = () => h.harness.dispose();
+    const refusedWhileRead = async (attemptNumber: number, requestId: string) => {
+      const gate = envGate();
+      pending = gate;
+      const active = h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "thread-3", projectId: "proj-1" }),
+      });
+      await gate.reached;
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({
+          threadId: "thread-3",
+          requestId,
+          attemptNumber,
+          errorInfo: {
+            category: "unauthorized",
+            providerCode: null,
+            httpStatusCode: 403,
+          },
+          rateLimits: null,
+        }),
+      );
+      gate.release();
+      await active;
+    };
+    // MAX_ATTEMPTS is 5: the attempt before it is retried.
+    await refusedWhileRead(4, "creq_4");
+    expect(h.retries).toEqual([
+      {
+        threadId: "thread-3",
+        turnRequestId: "creq_4",
+        reason: "Retrying on account main: it has room now",
+      },
+    ]);
+    await refusedWhileRead(5, "creq_5");
+    expect(h.retries).toHaveLength(1);
+    expect(h.envSet).toEqual([]);
+    expect(
+      h.harness.logEntries.filter((entry) => entry.level === "warn").map((e) => e.message),
+    ).not.toContainEqual(expect.stringContaining("refused a turn"));
+    expect(h.harness.logEntries.map((e) => e.message)).toContainEqual(
+      expect.stringContaining("every retry spent on refusals by an account unknown"),
+    );
+  });
+
+  it("a start whose account could not be read is unknown: the refusal marks nobody", async () => {
+    // A bb hiccup on the read as the turn is announced: the start is
+    // unknown, not missing; a missing start would make the refusal the
+    // project's account's (code-reviewer r16).
+    let hiccup = true;
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, 40)),
+        spare: () => Response.json(payload(100, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      {
+        beforeEnvRead: () => {
+          if (!hiccup) return Promise.resolve();
+          hiccup = false;
+          return Promise.reject(new Error("bb hiccup"));
+        },
+      },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({
+        threadId: "thread-3",
+        requestId: "creq_9",
+        errorInfo: {
+          category: "unauthorized",
+          providerCode: null,
+          httpStatusCode: 403,
+        },
+        rateLimits: null,
+      }),
+    );
+    expect(h.retries[0]).toEqual({
+      threadId: "thread-3",
+      turnRequestId: "creq_9",
+      reason: "Retrying on account main: it has room now",
+    });
+    expect(
+      h.harness.logEntries.filter((entry) => entry.level === "warn").map((e) => e.message),
+    ).not.toContainEqual(expect.stringContaining("refused a turn"));
+    expect(h.harness.logEntries.map((e) => e.message)).toContainEqual(
+      expect.stringContaining("refused by an account unknown"),
+    );
+  });
+
   it("a refusal while the start is still being read marks no account", async () => {
     // Codex IR15-002: with no entry yet, the failure read "no start seen"
     // and the refusal marked the project's account; now the start is
