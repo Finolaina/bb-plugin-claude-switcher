@@ -12,7 +12,7 @@ import type {
 } from "@get-bb/plugin-sdk";
 
 type ThreadResponse = PluginThreadEventPayloads["thread.created"]["thread"];
-import { createPlugin, ENV_VAR, HISTORY_LIMIT, type State } from "./server.js";
+import { createPlugin, ENV_VAR, type State } from "./server.js";
 import type { AccountsIo } from "./src/accounts.js";
 import type { CredentialIo } from "./src/credentials.js";
 import type { LoginIo, LoginProcess } from "./src/login.js";
@@ -5634,108 +5634,60 @@ describe("a wait another account can end sooner", () => {
       expect(h.retries[0]?.sendAt).toBeLessThan(NOW + 5 * HOUR);
     });
 
-    it("marks the account a refusal in its log came from, so it does not bounce back there", async () => {
-      // code-reviewer r6 (M1): two accounts with a dead login; without the
-      // mark the thread moved between them on every refresh.
+    it("marks no account for a refusal in its log: the one that refuses again marks itself", async () => {
+      // code-reviewer r6 (M1), Codex r8 (IR8-001, IR8-005): neither bb's log
+      // nor this plugin's history can say which account refused, so the
+      // thread is retried where the project sits; a fresh refusal there
+      // marks that account, and two accounts without a login are marked one
+      // after the other, not bounced between.
       const log: Record<string, LoggedEvent[]> = {
         "thread-1": failedLog("thread-1", "creq_1", FABLE_ID, {
           category: "unauthorized",
           reported: false,
         }),
       };
-      // Only main and spare have Fable: with main marked, nowhere to bounce to.
+      // Only main and spare have Fable.
       const h = await host(
         { ...ROOM_EVERYWHERE, work: () => Response.json(payload(5, 20, 100)) },
         { settings: FABLE, threads: { "thread-1": { status: "error" } }, threadEvents: log },
       );
       dispose = () => h.harness.dispose();
       await onePass(h);
-      expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
-      expect(
-        h.harness.logEntries.filter(
-          (entry) => entry.level === "warn" && /account main refused a turn/.test(entry.message),
-        ),
-      ).toHaveLength(1);
-      // Refused on spare too; main is still marked.
-      log["thread-1"] = failedLog("thread-1", "creq_2", FABLE_ID, {
-        category: "unauthorized",
-        reported: false,
-        retry: { of: "creq_1", attempt: 2 },
-        at: NOW + 1,
-      });
-      await onePass(h);
-      // Wherever it goes now (work's reset, at worst), not back to main.
-      expect(h.envSet.slice(1).map((e) => e.value)).not.toContain(`${ACCOUNTS}/main`);
-      expect(h.retries.slice(1).map((r) => r.reason)).not.toContain(
-        "Switched to account main (Fable)",
-      );
-      expect(h.envSet.slice(1).map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
-    });
-
-    it("attributes a refusal in the log to the account the project sat on when the turn was sent", async () => {
-      // Codex r7 (IR7-001): after a restart, a thread refused on main before
-      // the project moved to spare must not veto spare, where it has room.
-      const h = await host(ROOM_EVERYWHERE, {
-        ...stuck(failedLog("thread-1", "creq_1", FABLE_ID, { category: "unauthorized", reported: false })),
-        presetEnv: {
-          "proj-1": [{ name: ENV_VAR, note: ownNote("spare"), secret: true, value: null }],
-        },
-        kvPreset: {
-          "switch-history": [
-            {
-              at: NOW - 30 * 60_000,
-              threadId: "thread-9",
-              projectId: "proj-1",
-              from: "main",
-              to: "spare",
-              reason: "Switched to account spare",
-            },
-          ],
-        },
-      });
-      dispose = () => h.harness.dispose();
-      await onePass(h);
-      const warned = h.harness.logEntries
-        .filter((entry) => entry.level === "warn" && /refused a turn/.test(entry.message))
-        .map((entry) => entry.message);
-      expect(warned).toHaveLength(1);
-      expect(warned[0]).toMatch(/^account main refused a turn/);
       expect(h.envSet).toEqual([]);
-      expect(h.retries.map((r) => r.reason)).toEqual([
-        "Retrying on account spare (Fable): it has room now",
-      ]);
-    });
-
-    it("marks no account for a refusal older than its history of moves reaches", async () => {
-      // Codex r7 (IR7-001): the history was cut short of the turn; the
-      // project's account is judged on its measurements instead.
-      const h = await host(ROOM_EVERYWHERE, {
-        ...stuck(failedLog("thread-1", "creq_1", FABLE_ID, { category: "unauthorized", reported: false })),
-        kvPreset: {
-          "switch-history": Array.from({ length: HISTORY_LIMIT }, (_, i) => ({
-            at: NOW - 30 * 60_000 + i,
-            threadId: "thread-9",
-            projectId: "proj-2",
-            from: i % 2 === 0 ? "main" : "spare",
-            to: i % 2 === 0 ? "spare" : "main",
-            reason: "Switched",
-          })),
-        },
-      });
-      dispose = () => h.harness.dispose();
-      await onePass(h);
-      expect(
-        h.harness.logEntries.filter((entry) => entry.level === "warn" && /refused a turn/.test(entry.message)),
-      ).toEqual([]);
       expect(h.retries.map((r) => r.reason)).toEqual([
         "Retrying on account main (Fable): it has room now",
       ]);
+      const warned = () =>
+        h.harness.logEntries.filter(
+          (entry) => entry.level === "warn" && /refused a turn/.test(entry.message),
+        ).length;
+      expect(warned()).toBe(0);
+      // It refuses again: that failure marks main and moves the project.
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({
+          requestId: "creq_2",
+          attemptNumber: 2,
+          errorInfo: { category: "unauthorized", providerCode: null, httpStatusCode: 401 },
+        }),
+      );
+      expect(warned()).toBe(1);
+      expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+      // Left in error on spare: retried there, not moved back to main.
+      log["thread-1"] = failedLog("thread-1", "creq_3", FABLE_ID, {
+        category: "unauthorized",
+        reported: false,
+        retry: { of: "creq_1", attempt: 3 },
+      });
+      await onePass(h);
+      expect(h.envSet).toHaveLength(1);
+      expect(h.retries.at(-1)?.reason).toBe("Retrying on account spare (Fable): it has room now");
     });
 
-    it("tries the account that refused again once its mark expires, instead of marking it afresh from the same old failure", async () => {
-      // code-reviewer r7: with one account, a thread refused at 02:00 was
-      // re-marked on every pass after 08:00 and never retried after the
-      // user logged in again.
+    it("tries the account that refused again once its mark expires", async () => {
+      // code-reviewer r7: with one account, a thread refused at 02:00 must
+      // be retried once the user may have logged in again, not re-marked on
+      // every pass from the same old failure.
       let clock = NOW;
       const h = await host(ROOM_EVERYWHERE, {
         ...stuck(failedLog("thread-1", "creq_1", FABLE_ID, { category: "unauthorized", reported: false })),
@@ -5743,6 +5695,11 @@ describe("a wait another account can end sooner", () => {
         clock: () => clock,
       });
       dispose = () => h.harness.dispose();
+      // The refusal itself marks main (the handler).
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ errorInfo: { category: "unauthorized", providerCode: null, httpStatusCode: 401 } }),
+      );
       // One account: a pass is one usage call.
       const pass = async () => {
         const before = h.usageCalls.length;
@@ -5852,12 +5809,11 @@ describe("a wait another account can end sooner", () => {
       dispose = () => h.harness.dispose();
       await onePass(h);
       expect(
-        h.harness.logEntries.some(
-          (entry) => entry.level === "warn" && /account main refused a turn/.test(entry.message),
-        ),
-      ).toBe(true);
-      expect(h.envSet.map((e) => e.value)).not.toContain(`${ACCOUNTS}/main`);
-      expect(h.retries).toHaveLength(1);
+        h.harness.logEntries.filter((entry) => entry.level === "warn" && /refused a turn/.test(entry.message)),
+      ).toEqual([]);
+      expect(h.retries.map((r) => r.reason)).toEqual([
+        "Retrying on account main (Fable): it has room now",
+      ]);
     });
 
     it("leaves it when, by the time its project's turn comes, it is no longer in error", async () => {
