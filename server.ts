@@ -875,6 +875,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     } finally {
       // Also after a failure: a delete may have landed before it.
       projectsRead = null;
+      applied += 1;
     }
     const toName = account === null ? current.defaultAccountName : account.name;
     if (toName !== (from.account ?? current.defaultAccountName))
@@ -1507,8 +1508,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * The account each thread's turn started on (read when it turned active):
    * a turn that started before its project moved runs on the old account,
    * and its failure, however long after the move, is not the new account's.
+   * Null: unknown, a project moved while the account was read (Codex
+   * IR14-001): that turn's failure is no leftover, its report is nobody's
+   * and a refusal marks no account.
    */
-  const startedOn = new Map<string, string>();
+  const startedOn = new Map<string, string | null>();
+  /** Moves applied so far (applyAccount), to date a read against them. */
+  let applied = 0;
   /** The latest `thread.active` of each thread still reading its account. */
   const starting = new Map<string, number>();
   let starts = 0;
@@ -1528,20 +1534,24 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     forgetStart(thread.id);
     const token = ++starts;
     starting.set(thread.id, token);
-    let account: string | null;
+    const appliedBefore = applied;
+    let account: string | null | undefined;
     try {
       const at = await projectAccount(thread.projectId);
       account = at.external
-        ? null
+        ? undefined
         : (at.account ?? current.defaultAccountName);
     } catch {
-      account = null;
+      account = undefined;
     }
     // The turn ended, or a newer one started, while the account was read:
     // what that said stands, not this stale read (code-reviewer r12).
     if (starting.get(thread.id) !== token) return;
     forgetStart(thread.id);
-    if (account !== null) startedOn.set(thread.id, account);
+    // A project moved meanwhile: the read says where the project is now, not
+    // where the turn started. Unknown, rather than the new account's.
+    if (account !== undefined && applied !== appliedBefore) account = null;
+    if (account !== undefined) startedOn.set(thread.id, account);
   });
   bb.events.on("thread.idle", ({ thread }) => {
     // Its turn ended there: a later failure that no new `thread.active`
@@ -1713,11 +1723,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     );
   }
 
-  /** `started`: the account the failed turn started on, when known. */
+  /**
+   * `started`: the account the failed turn started on; null when unknown
+   * (see `startedOn`), undefined when no start was recorded.
+   */
   async function handleFailure(
     event: PluginTurnFailedEvent,
     projectId: string,
-    started: string | undefined,
+    started: string | null | undefined,
   ): Promise<void> {
     const now = deps.now();
     const recent = recentSwitches.get(projectId);
@@ -1726,6 +1739,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       now - recent.at <= SWITCH_GRACE_MS &&
       recent.threadId !== event.threadId &&
       !recent.graced.has(event.threadId) &&
+      // Started on the account the project moved to: no leftover, that
+      // account's failure, judged below (code-reviewer r14).
+      started !== recent.to &&
       // Measured since as unable to run a turn (a wait keeps its grace:
       // the account is out by definition until its reset): judged below.
       (recent.sendAt !== undefined || !cannotRun(recent.to))
@@ -1736,7 +1752,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // for the same reset. Once per thread: a second failure in the window
       // means the new account fails as well, and is judged below.
       recent.graced.add(event.threadId);
-      if (started !== undefined && isRefusal(event))
+      if (typeof started === "string" && isRefusal(event))
         markRefused(started, now, event);
       const reason = `Retrying on account ${recent.to}`;
       bb.log.info(
@@ -1745,7 +1761,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       await retryTurn(event, reason, recent.sendAt);
       return;
     }
-    if (started !== undefined) {
+    if (typeof started === "string") {
       const at = await projectAccount(projectId);
       const currentName = at.account ?? current.defaultAccountName;
       if (!at.external && started !== currentName && !cannotRun(currentName)) {
@@ -1880,6 +1896,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * `rescueStuck`), not on its failure. `ranOn`: the account the turn ran
    * on when it is not the project's (a leftover the project's account cannot
    * run either): the failure, its report and a refusal are that account's.
+   * Null: unknown (see `startedOn`): the report is nobody's, no account is
+   * marked and the measurements decide.
    */
   async function judge(
     event: PluginTurnFailedEvent,
@@ -1888,13 +1906,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     model: string,
     now: number,
     stuck: boolean,
-    ranOn?: string,
+    ranOn?: string | null,
   ): Promise<void> {
     const fromName = from.account ?? current.defaultAccountName;
-    const failedOn = ranOn ?? fromName;
+    const failedOn = ranOn === undefined ? fromName : ranOn;
     const refusal = isRefusal(event);
-    if (refusal && !stuck) {
+    if (refusal && !stuck && failedOn !== null) {
       markRefused(failedOn, now, event);
+    } else if (refusal && !stuck) {
+      bb.log.info(
+        `thread ${event.threadId}: refused by an account unknown (its project moved as its turn started); none marked`,
+      );
     } else if (refusal) {
       // Found in the log on a rescue: bb masks the account in its log and
       // this plugin's history of moves cannot date a turn against a move
@@ -1932,7 +1954,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     const reason =
       decision.kind === "switch"
-        ? `Switched to account ${decision.account}${decision.model === null ? "" : ` (${decision.model})`}${refusal ? `: ${failedOn} refused the turn` : ""}`
+        ? `Switched to account ${decision.account}${decision.model === null ? "" : ` (${decision.model})`}${refusal && failedOn !== null ? `: ${failedOn} refused the turn` : ""}`
         : decision.kind === "retry"
           ? `Retrying on account ${decision.account}${decision.model === null ? "" : ` (${decision.model})`}: it has room now`
           : decision.reason;
