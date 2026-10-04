@@ -1725,6 +1725,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * is queued. `stuck`: judged on a refresh for a thread left in error (see
    * `rescueStuck`), not on its failure.
    */
+  /** Failed turns (thread/request) whose refusal a rescue pass already marked. */
+  const refusalsMarked = new Set<string>();
+
   async function judge(
     event: PluginTurnFailedEvent,
     projectId: string,
@@ -1735,14 +1738,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   ): Promise<void> {
     const fromName = from.account ?? current.defaultAccountName;
     const refusal = isRefusal(event);
-    // Found on a rescue pass too (once per refusal, not once per pass): the
-    // account that refused is not chosen again, so the thread does not bounce
-    // between two accounts that refuse it (code-reviewer r6, M1).
-    const marked = refusedAt.get(fromName);
-    if (
-      refusal &&
-      (!stuck || marked === undefined || now - marked >= REFUSAL_MS)
-    ) {
+    // Found on a rescue pass too, once per failed turn (not once per pass,
+    // nor again when the mark expires: the thread is then retried there,
+    // and a fresh refusal marks the account afresh): the account that
+    // refused is not chosen again, so the thread does not bounce between
+    // two accounts that refuse it (code-reviewer r6 M1, r7).
+    const refusalKey = `${event.threadId}/${event.requestId}`;
+    if (refusal && (!stuck || !refusalsMarked.has(refusalKey))) {
+      refusalsMarked.add(refusalKey);
       refusedAt.set(fromName, now);
       bb.log.warn(
         `account ${fromName} refused a turn (HTTP ${event.errorInfo?.httpStatusCode ?? "?"}): chosen for nothing for ${REFUSAL_MS / 3_600_000} h`,

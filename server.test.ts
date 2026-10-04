@@ -5652,6 +5652,41 @@ describe("a wait another account can end sooner", () => {
       expect(h.envSet.slice(1).map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
     });
 
+    it("tries the account that refused again once its mark expires, instead of marking it afresh from the same old failure", async () => {
+      // code-reviewer r7: with one account, a thread refused at 02:00 was
+      // re-marked on every pass after 08:00 and never retried after the
+      // user logged in again.
+      let clock = NOW;
+      const h = await host(ROOM_EVERYWHERE, {
+        ...stuck(failedLog("thread-1", "creq_1", FABLE_ID, { category: "unauthorized", reported: false })),
+        dirs: () => ["main"],
+        clock: () => clock,
+      });
+      dispose = () => h.harness.dispose();
+      // One account: a pass is one usage call.
+      const pass = async () => {
+        const before = h.usageCalls.length;
+        const run = h.harness.behavior.runService("usage-refresh");
+        await vi.waitFor(() => {
+          expect(h.usageCalls).toHaveLength(before + 1);
+        });
+        run.controller.abort();
+        await run.done;
+      };
+      await pass();
+      expect(h.retries).toEqual([]);
+      clock = NOW + 6 * HOUR + 60_000;
+      await pass();
+      expect(h.retries.map((r) => r.reason)).toEqual([
+        "Retrying on account main (Fable): it has room now",
+      ]);
+      expect(
+        h.harness.logEntries.filter(
+          (entry) => entry.level === "warn" && /account main refused a turn/.test(entry.message),
+        ),
+      ).toHaveLength(1);
+    });
+
     it("judges it however many attempts failed: the cap stops a loop, not a thread left for dead", async () => {
       const h = await host(
         MAIN_OUT,
@@ -5751,6 +5786,18 @@ describe("a wait another account can end sooner", () => {
       const h = await host(MAIN_OUT, {
         ...stuck(failedLog("thread-1", "creq_1", FABLE_ID)),
         threadsLive: { "thread-1": { status: "active" } },
+      });
+      dispose = () => h.harness.dispose();
+      await onePass(h);
+      expect(h.retries).toEqual([]);
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("leaves it when it has moved to another project since it was listed", async () => {
+      // code-reviewer r7: the next pass lists it under its new project.
+      const h = await host(MAIN_OUT, {
+        ...stuck(failedLog("thread-1", "creq_1", FABLE_ID)),
+        threadsLive: { "thread-1": { projectId: "proj-2" } },
       });
       dispose = () => h.harness.dispose();
       await onePass(h);
