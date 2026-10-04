@@ -442,6 +442,8 @@ async function host(
                 retryOfTurnRequestId: args.turnRequestId ?? "",
               },
               sendAt: args.sendAt ?? null,
+              waitingOn: { kind: "time" },
+              createdAt: (options.clock ?? (() => NOW))(),
             });
           return {
             ok: true,
@@ -4977,6 +4979,165 @@ describe("a wait another account can end sooner", () => {
     ).toEqual([]);
   });
 
+  it("leaves a wait whose thread was archived after the look, before its project's turn came", async () => {
+    let reads = 0;
+    const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")]);
+    dispose = () => h.harness.dispose();
+    h.harness.sdk.stub("threads.get", async (args: { threadId: string }) =>
+      thread({
+        id: args.threadId,
+        projectId: "proj-1",
+        status: "error",
+        archivedAt: ++reads > 1 ? NOW : null,
+      }),
+    );
+    await onePass(h);
+    expect(h.envSet).toEqual([]);
+    expect(h.deleted).toEqual([]);
+    expect(h.retries).toEqual([]);
+  });
+
+  it("does not count a wait on the same account as a switch: an older wait there keeps waiting", async () => {
+    // Codex r2 (R2-02): every account blocked, so a second thread waits on
+    // main; then main measures as able again, and nothing moved.
+    let blocked = true;
+    const out = () => Response.json(payload(100, 40, 20));
+    const h = await waitingHost(
+      {
+        main: () => (blocked ? out() : Response.json(payload(10, 40, 20))),
+        spare: out,
+        work: out,
+      },
+      [waiting("r1", "thread-1")],
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ threadId: "thread-7", requestId: "creq_7" }),
+    );
+    // A wait on main itself: nothing moved.
+    expect(h.envSet).toEqual([]);
+    expect(h.retries.map((r) => r.sendAt)).toEqual([expect.any(Number)]);
+    blocked = false;
+    await onePass(h);
+    expect(h.deleted).toEqual([]);
+    expect(h.queued.map((r) => r.id)).toContain("r1");
+  });
+
+  it("does not count picking by hand the account the project is already on as a switch", async () => {
+    const h = await waitingHost(
+      { ...MAIN_OUT, main: () => Response.json(payload(10, 40, 20)) },
+      [waiting("r1", "thread-1")],
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-1",
+      account: null,
+    });
+    await onePass(h);
+    expect(h.deleted).toEqual([]);
+  });
+
+  it("looks again in a later pass at a wait queued back after bb did not take its retry", async () => {
+    // Codex r2 (R2-03): the wait put back is newer than the move, but it is
+    // still the one that waited on the old account.
+    const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")], {
+      retryBehaviour: "fail-once",
+    });
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    const [back] = h.queued;
+    expect(back?.sendAt).toBe(NOW + 2 * HOUR + BUFFER);
+    await onePass(h);
+    expect(h.deleted).toEqual(["r1", back?.id]);
+    expect(h.retries.at(-1)).toEqual({
+      threadId: "thread-1",
+      turnRequestId: "creq_r1",
+      reason: expect.stringMatching(/spare/),
+    });
+    expect(h.queued).toEqual([]);
+  });
+
+  it("puts nothing back when bb already has a retry of the turn, or the thread no longer has a failed turn", async () => {
+    for (const code of ["retry_already_queued", "no_failed_turn"]) {
+      const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")], {
+        retryError: { message: "HTTP 409: Conflict", code, status: 409 },
+      });
+      await onePass(h);
+      expect(h.deleted).toEqual(["r1"]);
+      expect(h.harness.sdk.callsTo("threads.retry")).toHaveLength(1);
+      expect(
+        h.harness.logEntries.filter((entry) => entry.level === "warn"),
+      ).toEqual([]);
+      h.harness.dispose();
+    }
+  });
+
+  it("says loudly that a wait is lost when bb takes neither the retry nor the wait put back", async () => {
+    const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")], {
+      retryBehaviour: "fail",
+    });
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.queued).toEqual([]);
+    const errors = h.harness.logEntries.filter(
+      (entry) => entry.level === "error",
+    );
+    expect(errors.map((entry) => entry.message)).toEqual([
+      expect.stringMatching(/thread-1.*by hand/),
+    ]);
+  });
+
+  it("leaves an older wait alone once the project's account variable is set outside the plugin, even after a move", async () => {
+    let failThread3 = true;
+    const h = await waitingHost(MAIN_OUT, [
+      waiting("r1", "thread-1"),
+      waiting("r3", "thread-3"),
+    ]);
+    dispose = () => h.harness.dispose();
+    h.harness.sdk.stub("threads.get", async (args: { threadId: string }) => {
+      if (args.threadId === "thread-3" && failThread3) {
+        failThread3 = false;
+        throw new Error("HTTP 503: bb is busy");
+      }
+      return thread({ id: args.threadId, projectId: "proj-1", status: "error" });
+    });
+    await onePass(h);
+    expect(h.deleted).toEqual(["r1"]);
+    h.env.set("proj-1", [
+      { name: ENV_VAR, note: "set by hand", secret: true, value: null },
+    ]);
+    await onePass(h);
+    expect(h.deleted).toEqual(["r1"]);
+  });
+
+  it("warns and retries nothing when the wait cannot be removed", async () => {
+    const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")], {
+      deleteRowError: { message: "HTTP 500: internal error", status: 500 },
+    });
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.retries).toEqual([]);
+    expect(
+      h.harness.logEntries
+        .filter((entry) => entry.level === "warn")
+        .map((entry) => entry.message),
+    ).toEqual([expect.stringMatching(/thread-1.*HTTP 500/)]);
+  });
+
+  it("judges afresh a released turn that fails again within the minute: its own move gives it no grace", async () => {
+    const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")]);
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ requestId: "creq_r1", attemptNumber: 2 }),
+    );
+    expect(h.retries.map((r) => r.reason)).not.toContain(
+      "Retrying on account spare",
+    );
+  });
+
   it("judges a wait by the model its retry runs with, not by the model the thread used last", async () => {
     // main is out of Fable only: it can still run Opus.
     const fableOut = {
@@ -5117,8 +5278,8 @@ describe("a wait another account can end sooner", () => {
     }
   });
 
-  it("leaves a wait about to run anyway (within the reset buffer and its jitter), and not one just past it", async () => {
-    const edge = NOW + BUFFER + 30_000;
+  it("leaves a wait due within two minutes (about to run anyway, or a provider-retry backoff), and not one just past it", async () => {
+    const edge = NOW + 2 * 60_000;
     const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1", edge)]);
     await onePass(h);
     expect(h.envSet).toEqual([]);
@@ -5159,6 +5320,9 @@ describe("a wait another account can end sooner", () => {
       ],
       // bb retries only a thread whose latest turn failed.
       [row, { threads: { "thread-1": { status: "idle" } } }, 1],
+      // bb refuses to retry an archived thread: its wait would be lost.
+      [row, { threads: { "thread-1": { status: "error", archivedAt: NOW } } }, 1],
+      [row, { threads: { "thread-1": { status: "error", deletedAt: NOW } } }, 1],
     ];
     for (const [queued, options, reads] of cases) {
       const h = await waitingHost(MAIN_OUT, [queued], options);
@@ -5224,7 +5388,9 @@ describe("a wait another account can end sooner", () => {
     expect(h.deleted).toEqual([]);
     expect(h.retries).toEqual([]);
     // The second wait is not even looked at.
-    expect(h.harness.sdk.callsTo("threads.get")).toHaveLength(1);
+    expect(JSON.stringify(h.harness.sdk.callsTo("threads.get"))).not.toContain(
+      "thr-2",
+    );
   });
 
   it("does not retry a wait when automatic switching is turned off while the project moves", async () => {
