@@ -1171,6 +1171,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     event: PluginTurnFailedEvent,
     reason: string,
     sendAt?: number,
+    stuck = false,
   ): Promise<void> {
     const threadId = event.threadId;
     const existing = await queuedRetry(event);
@@ -1178,6 +1179,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       bb.log.info(
         `thread ${threadId}: a retry of the turn is already queued ("${existing.reason}"${existing.sendAt === null ? "" : `, for ${new Date(existing.sendAt).toISOString()}`})`,
       );
+      // On a rescue it is left to whoever queued it: another plugin may be
+      // holding it, and an explicit send would skip that hold (Codex r6,
+      // IR6-002).
+      if (stuck) return;
       if (sendAt === undefined) {
         await sendQueued(threadId, existing.id);
         return;
@@ -1209,6 +1214,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // Raced with another retry of the same turn between the list and ours.
       const raced = await queuedRetry(event);
       if (raced !== null) {
+        if (stuck) {
+          bb.log.info(
+            `thread ${threadId}: another retry was queued first; leaving it`,
+          );
+          return;
+        }
         if (sendAt === undefined) {
           await sendQueued(threadId, raced.id);
         } else {
@@ -1767,6 +1778,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           ? `Retrying on account ${decision.account}${decision.model === null ? "" : ` (${decision.model})`}: it has room now`
           : decision.reason;
     const sendAt = decision.kind === "wait" ? decision.sendAt : undefined;
+    // A rescue runs between reads: switched off meanwhile, it stops before
+    // moving and before retrying (Codex r6, IR6-006).
+    if (stuck && !current.autoSwitch) return;
     if (decision.account !== fromName) {
       await applyAccount(projectId, accountOrDefault(decision.account), from);
       await recordMove(
@@ -1793,15 +1807,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         graced: new Set(),
       });
     }
+    if (stuck && !current.autoSwitch) return;
     if (decision.kind === "wait") {
       bb.log.info(
         `thread ${event.threadId}: ${how}${reason} until ${new Date(decision.sendAt).toISOString()}`,
       );
-      await retryTurn(event, reason, decision.sendAt);
+      await retryTurn(event, reason, decision.sendAt, stuck);
       return;
     }
     bb.log.info(`thread ${event.threadId}: ${how}${reason}`);
-    await retryTurn(event, reason);
+    await retryTurn(event, reason, undefined, stuck);
   }
 
   bb.events.on("turn.failed", async (event) => {
@@ -1905,22 +1920,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
 
   /**
-   * Threads in error with no retry queued, as the queue stood when the pass
-   * began: bb's provider-retry gives up after five attempts and so does the
-   * failure handler, so nothing would look at them again. Each is judged
-   * from bb's log on every refresh, until a retry of it is queued.
+   * Threads in error with nothing queued, as the queue stood when the pass
+   * began (a queued message of any kind runs when its time comes and takes
+   * the thread out of error): bb's provider-retry gives up after five
+   * attempts and so does the failure handler, so nothing would look at them
+   * again. Each is judged from bb's log on every refresh, until something is
+   * queued for it.
    */
   async function rescueStuck(
     queue: Array<{ threadId: string; payload: { kind: string } }>,
   ): Promise<void> {
-    const retrying = new Set(
-      queue
-        .filter((row) => row.payload.kind === "retry")
-        .map((row) => row.threadId),
-    );
+    const queuedFor = new Set(queue.map((row) => row.threadId));
     for (const thread of await errorThreads()) {
       if (!current.autoSwitch) return;
-      if (retrying.has(thread.id)) continue;
+      if (queuedFor.has(thread.id)) continue;
       try {
         await inProjectQueue(thread.projectId, () => rescueThread(thread));
       } catch (error) {
@@ -1954,6 +1967,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** The thread's failure as bb logged it, judged as a failure would be. */
   async function rescueThread(thread: ListedThread): Promise<void> {
     const threadId = thread.id;
+    // Read again in the project's queue: archived, running again, moved or
+    // retried meanwhile (Codex r6, IR6-005).
+    if (!current.autoSwitch) return;
+    const live = await bb.sdk.threads.get({ threadId });
+    if (!waitingThread(live) || live.projectId !== thread.projectId) return;
+    if ((await bb.sdk.threads.queuedMessages.list({ threadId })).length > 0)
+      return;
     const turn = await latestTurn(threadId);
     if (turn === null) return;
     // The failure of that turn, not an older one's (a turn sent by hand

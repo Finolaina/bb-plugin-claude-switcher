@@ -304,6 +304,12 @@ interface HostOptions {
   clock?: () => number;
   /** What threads.get answers per thread, over a visible Claude Code thread of the user. */
   threads?: Record<string, Partial<ThreadResponse>>;
+  /** What threads.get answers on top of `threads`, while threads.list still lists them as `threads` says (changed meanwhile). */
+  threadsLive?: Record<string, Partial<ThreadResponse>>;
+  /** Rows another plugin queues once threads.list has answered (while the pass runs). */
+  queueAfterList?: QueuedRow[];
+  /** Runs before threads.events.list answers (a toggle flipped while the pass reads). */
+  beforeEvents?: () => Promise<void>;
   /** bb's raw log per thread, as threads.events.list answers it. */
   threadEvents?: Record<string, LoggedEvent[]>;
   /** threads.events.list throws this (a bb hiccup). */
@@ -386,16 +392,22 @@ async function host(
             id: threadId,
             projectId: threadId === "thr-2" ? "proj-2" : "proj-1",
             ...options.threads?.[threadId],
+            ...options.threadsLive?.[threadId],
           }),
         // Like bb: every thread, as threads.get answers for it.
-        list: async () =>
-          Object.keys(options.threads ?? {}).map((threadId) =>
+        list: async () => {
+          if (options.queueAfterList !== undefined) {
+            queued.push(...options.queueAfterList);
+            options.queueAfterList = undefined;
+          }
+          return Object.keys(options.threads ?? {}).map((threadId) =>
             thread({
               id: threadId,
               projectId: threadId === "thr-2" ? "proj-2" : "proj-1",
               ...options.threads?.[threadId],
             }),
-          ),
+          );
+        },
         events: {
           // Like bb: only the asked types, oldest first unless desc, then the limit.
           list: async (args: {
@@ -407,6 +419,7 @@ async function host(
           }) => {
             if (options.threadEventsError !== undefined)
               throw new Error(options.threadEventsError);
+            await options.beforeEvents?.();
             const rows = (options.threadEvents?.[args.threadId] ?? [])
               .filter(
                 (row) => args.types === undefined || args.types.includes(row.type),
@@ -5682,7 +5695,7 @@ describe("a wait another account can end sooner", () => {
       expect(h.retries[0]?.sendAt).toBeGreaterThanOrEqual(NOW + BUFFER);
     });
 
-    it("leaves it alone while a retry of it is queued: the wait is judged, not doubled", async () => {
+    it("leaves it alone while anything is queued for it: a wait is judged, not doubled", async () => {
       const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")], {
         threadEvents: {
           "thread-1": failedLog("thread-1", "creq_r1", FABLE_ID),
@@ -5730,6 +5743,94 @@ describe("a wait another account can end sooner", () => {
       ).toBe(true);
       expect(h.envSet.map((e) => e.value)).not.toContain(`${ACCOUNTS}/main`);
       expect(h.retries).toHaveLength(1);
+    });
+
+    it("leaves it when, by the time its project's turn comes, it is no longer in error", async () => {
+      // Codex r6 (IR6-005): listed in error, running again (or archived)
+      // once the pass reaches it.
+      const h = await host(MAIN_OUT, {
+        ...stuck(failedLog("thread-1", "creq_1", FABLE_ID)),
+        threadsLive: { "thread-1": { status: "active" } },
+      });
+      dispose = () => h.harness.dispose();
+      await onePass(h);
+      expect(h.retries).toEqual([]);
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("leaves a retry another plugin queued while the pass ran, without sending it", async () => {
+      // Codex r6 (IR6-002, IR6-005): queued after the pass took its snapshot,
+      // maybe held by that plugin; an explicit send would skip its hold.
+      const h = await host(MAIN_OUT, {
+        ...stuck(failedLog("thread-1", "creq_1", FABLE_ID)),
+        queueAfterList: [
+          {
+            id: "theirs",
+            threadId: "thread-1",
+            sendAt: null,
+            payload: { kind: "retry", attempt: 2, reason: "Theirs", retryOfTurnRequestId: "creq_1" },
+          },
+        ],
+      });
+      dispose = () => h.harness.dispose();
+      await onePass(h);
+      expect(h.retries).toEqual([]);
+      expect(h.sent).toEqual([]);
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("leaves a retry queued between its reads and its own, without sending it", async () => {
+      // Codex r6 (IR6-002): past the queue's re-read, another plugin queues
+      // (and may hold) a retry; the rescue neither sends nor replaces it.
+      const options = stuck(failedLog("thread-1", "creq_1", FABLE_ID));
+      let theirs: QueuedRow[] = [];
+      options.beforeEvents = async () => {
+        h.queued.push(...theirs);
+        theirs = [];
+      };
+      const h = await host(MAIN_OUT, options);
+      dispose = () => h.harness.dispose();
+      theirs = [
+        {
+          id: "theirs",
+          threadId: "thread-1",
+          sendAt: null,
+          payload: { kind: "retry", attempt: 2, reason: "Theirs", retryOfTurnRequestId: "creq_1" },
+        },
+      ];
+      await onePass(h);
+      expect(h.retries).toEqual([]);
+      expect(h.sent).toEqual([]);
+      expect(h.deleted).toEqual([]);
+    });
+
+    it("stops when auto-switch is turned off while it reads", async () => {
+      // Codex r6 (IR6-006).
+      const options = stuck(failedLog("thread-1", "creq_1", FABLE_ID));
+      let off: () => Promise<void> = async () => {};
+      options.beforeEvents = () => off();
+      const h = await host(MAIN_OUT, options);
+      dispose = () => h.harness.dispose();
+      off = async () => {
+        await h.harness.behavior.setSettings({ autoSwitch: false });
+      };
+      await onePass(h);
+      expect(h.retries).toEqual([]);
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("does not retry when auto-switch is turned off as it moves the project", async () => {
+      // Codex r6 (IR6-006): off between the move and the retry.
+      const options = stuck(failedLog("thread-1", "creq_1", FABLE_ID));
+      let off: () => Promise<void> = async () => {};
+      options.beforeSet = () => off();
+      const h = await host(MAIN_OUT, options);
+      dispose = () => h.harness.dispose();
+      off = async () => {
+        await h.harness.behavior.setSettings({ autoSwitch: false });
+      };
+      await onePass(h);
+      expect(h.retries).toEqual([]);
     });
 
     it("leaves a thread whose failure was not a limit", async () => {
