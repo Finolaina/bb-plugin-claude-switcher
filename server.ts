@@ -1812,10 +1812,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         event.threadId,
         sendAt,
       );
-    } else {
+    } else if (decision.kind !== "retry") {
       // A wait on this same account is still the project's latest move: a
       // leftover thread follows it (waits for the same reset) instead of
-      // being retried at once on an account just found blocked.
+      // being retried at once on an account just found blocked. A retry on
+      // the project's own account is no move at all: the latest move stands,
+      // with its cause, time and graced threads (Codex r7, IR7-002).
       recentSwitches.set(projectId, {
         at: now,
         to: decision.account,

@@ -5579,6 +5579,15 @@ describe("a wait another account can end sooner", () => {
           reason: "Retrying on account spare (Fable): it has room now",
         },
       ]);
+      // Codex r7 (IR7-002): the second rescue is no move; the first thread's
+      // own failure on spare, within the grace of its move, is judged, not
+      // retried at once as a leftover of the move that it itself caused.
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ threadId: "thread-1", requestId: "creq_1b", attemptNumber: 2 }),
+      );
+      expect(h.retries).toHaveLength(3);
+      expect(h.retries[2]?.reason).not.toBe("Retrying on account spare");
     });
 
     it("retries it on its own account when no limit was reported and the others are out", async () => {
