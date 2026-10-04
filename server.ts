@@ -1956,13 +1956,24 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const threadId = thread.id;
     const turn = await latestTurn(threadId);
     if (turn === null) return;
+    // The failure of that turn, not an older one's (a turn sent by hand
+    // after a limit fails on its own account): bb reads it the same way.
+    // A turn bb refused at the door leaves no provider error, only the
+    // reason it was rejected for, as bb's own failure event translates it.
     const [failed] = await bb.sdk.threads.events.list({
       threadId,
-      types: ["provider/error"],
+      types: ["provider/error", "client/turn/rejected"],
       order: "desc",
       limit: "1",
+      afterSeq: String(turn.seq),
     });
-    if (failed?.type !== "provider/error") return;
+    const errorInfo =
+      failed?.type === "provider/error"
+        ? (failed.data.errorInfo ?? null)
+        : failed?.type === "client/turn/rejected"
+          ? rejectedErrorInfo(failed.data.reason)
+          : undefined;
+    if (errorInfo === undefined) return;
     const [reported] = await bb.sdk.threads.events.list({
       threadId,
       types: ["provider/rateLimits/updated"],
@@ -1973,8 +1984,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       threadId,
       requestId: turn.requestId,
       turnId: null,
-      errorInfo: failed.data.errorInfo ?? null,
-      inputAccepted: true,
+      errorInfo,
+      inputAccepted: failed.type === "provider/error",
       rateLimits:
         reported?.type === "provider/rateLimits/updated"
           ? reported.data.rateLimits
@@ -1996,6 +2007,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       deps.now(),
       true,
     );
+  }
+
+  /** What bb's failure event says of a turn rejected at the door (bb 0.45, `doorRejectionErrorInfo`). */
+  function rejectedErrorInfo(
+    reason: string,
+  ): PluginTurnFailedEvent["errorInfo"] {
+    switch (reason) {
+      case "rate_limited":
+        return { category: "rate-limit", providerCode: null, httpStatusCode: null };
+      case "auth_required":
+        return { category: "unauthorized", providerCode: null, httpStatusCode: null };
+      default:
+        return null;
+    }
   }
 
   /** A timed retry not due soon, that no other plugin holds. */
@@ -2049,6 +2074,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     });
     if (row?.type !== "client/turn/requested") return null;
     return {
+      seq: row.seq,
       requestId: row.data.requestId,
       // bb keys a retry by the first request of its chain, and counts from 1.
       original: row.data.retryOfRequestId ?? row.data.requestId,

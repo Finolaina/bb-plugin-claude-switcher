@@ -403,12 +403,16 @@ async function host(
             types?: readonly string[];
             order?: "asc" | "desc";
             limit?: string;
+            afterSeq?: string;
           }) => {
             if (options.threadEventsError !== undefined)
               throw new Error(options.threadEventsError);
             const rows = (options.threadEvents?.[args.threadId] ?? [])
               .filter(
                 (row) => args.types === undefined || args.types.includes(row.type),
+              )
+              .filter(
+                (row) => args.afterSeq === undefined || row.seq > Number(args.afterSeq),
               )
               .sort((a, b) => (args.order === "desc" ? b.seq - a.seq : a.seq - b.seq));
             return args.limit === undefined
@@ -5449,11 +5453,19 @@ describe("a wait another account can end sooner", () => {
         retry?: { of: string; attempt: number };
         category?: string;
         reported?: boolean;
+        /** bb refused the turn at the door for this reason: no provider error in the log. */
+        rejected?: string;
       } = {},
     ): LoggedEvent[] {
       const rows: LoggedEvent[] = [
         turnRequested(threadId, requestId, model, opts.retry),
-        {
+        opts.rejected !== undefined
+          ? {
+              seq: 2,
+              type: "client/turn/rejected",
+              data: { requestId, reason: opts.rejected },
+            }
+          : {
           seq: 2,
           type: "provider/error",
           data: {
@@ -5679,6 +5691,45 @@ describe("a wait another account can end sooner", () => {
       dispose = () => h.harness.dispose();
       await onePass(h);
       expect(h.retries).toEqual([retriedNow("thread-1", "creq_r1")]);
+    });
+
+    it("judges the failure of its latest turn, not an older limit in its log", async () => {
+      // Codex r6 (IR6-004): the limit was creq_1's; creq_2, sent by hand
+      // later, failed for something that left no provider error.
+      const log = failedLog("thread-1", "creq_1", FABLE_ID);
+      log.push({ ...turnRequested("thread-1", "creq_2", FABLE_ID), seq: 9 });
+      const h = await host(MAIN_OUT, stuck(log));
+      dispose = () => h.harness.dispose();
+      await onePass(h);
+      expect(h.retries).toEqual([]);
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("rescues a turn bb refused at the door for a limit, which leaves no provider error", async () => {
+      // Codex r6 (IR6-003): bb's own failure event reads the rejection.
+      const h = await host(
+        MAIN_OUT,
+        stuck(failedLog("thread-1", "creq_1", FABLE_ID, { rejected: "rate_limited" })),
+      );
+      dispose = () => h.harness.dispose();
+      await onePass(h);
+      expect(h.retries.map((r) => r.reason)).toEqual(["Switched to account spare (Fable)"]);
+    });
+
+    it("reads a turn refused at the door for its login as a refusal", async () => {
+      const h = await host(
+        ROOM_EVERYWHERE,
+        stuck(failedLog("thread-1", "creq_1", FABLE_ID, { rejected: "auth_required", reported: false })),
+      );
+      dispose = () => h.harness.dispose();
+      await onePass(h);
+      expect(
+        h.harness.logEntries.some(
+          (entry) => entry.level === "warn" && /account main refused a turn/.test(entry.message),
+        ),
+      ).toBe(true);
+      expect(h.envSet.map((e) => e.value)).not.toContain(`${ACCOUNTS}/main`);
+      expect(h.retries).toHaveLength(1);
     });
 
     it("leaves a thread whose failure was not a limit", async () => {
