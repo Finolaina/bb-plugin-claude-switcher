@@ -6076,6 +6076,70 @@ describe("a wait another account can end sooner", () => {
       expect(h.retries.map((r) => r.turnRequestId)).toEqual(["creq_1r"]);
     });
 
+    it("keys the cancellation to the failed turn itself, at a later attempt too", async () => {
+      // code-reviewer r9 (medium 4): at attempt 2+, the turn's request is
+      // not its chain's first; the mark must still match it, and only it.
+      const log: Record<string, LoggedEvent[]> = {
+        "thread-1": failedLog("thread-1", "creq_1b", FABLE_ID, { retry: { of: "creq_1", attempt: 2 } }),
+      };
+      const h = await host(MAIN_OUT, {
+        settings: FABLE,
+        threads: { "thread-1": { status: "error" } },
+        threadEvents: log,
+      });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("message.cancelled", {
+        entry: {
+          id: "pr-1",
+          threadId: "thread-1",
+          sendAt: NOW + HOUR,
+          payload: { kind: "retry", attempt: 3, reason: "provider-retry", retryOfTurnRequestId: "creq_1" },
+        } as never,
+      });
+      expect(await h.bb.storage.kv.get("cancelled-retries")).toEqual({ "thread-1": "creq_1b" });
+      await onePass(h);
+      expect(h.retries).toEqual([]);
+      log["thread-1"] = failedLog("thread-1", "creq_1c", FABLE_ID, { retry: { of: "creq_1", attempt: 3 } });
+      await onePass(h);
+      expect(h.retries.map((r) => r.turnRequestId)).toEqual(["creq_1c"]);
+    });
+
+    it("marks nothing for a cancelled retry of an earlier turn than the thread's latest", async () => {
+      // code-reviewer r9 (medium 2): a retry row of T1 may outlive a message
+      // the user sent by hand (T2); cancelling it must not protect T2.
+      const h = await host(MAIN_OUT, stuck(failedLog("thread-1", "creq_2", FABLE_ID)));
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("message.cancelled", {
+        entry: {
+          id: "pr-1",
+          threadId: "thread-1",
+          sendAt: NOW + HOUR,
+          payload: { kind: "retry", attempt: 2, reason: "provider-retry", retryOfTurnRequestId: "creq_1" },
+        } as never,
+      });
+      expect(await h.bb.storage.kv.get("cancelled-retries")).toBeUndefined();
+      await onePass(h);
+      expect(h.retries.map((r) => r.turnRequestId)).toEqual(["creq_2"]);
+    });
+
+    it("marks nothing for a cancelled retry of a thread archived meanwhile", async () => {
+      // code-reviewer r9 (low): the mark would outlive the thread in storage.
+      const h = await host(MAIN_OUT, {
+        ...stuck(failedLog("thread-1", "creq_1", FABLE_ID)),
+        threads: { "thread-1": { status: "error", archivedAt: NOW } },
+      });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("message.cancelled", {
+        entry: {
+          id: "pr-1",
+          threadId: "thread-1",
+          sendAt: NOW + HOUR,
+          payload: { kind: "retry", attempt: 2, reason: "provider-retry", retryOfTurnRequestId: "creq_1" },
+        } as never,
+      });
+      expect(await h.bb.storage.kv.get("cancelled-retries")).toBeUndefined();
+    });
+
     it("judges the thread again when the cancelled retry's turn cannot be read", async () => {
       // Rather than left for dead: the user can cancel again.
       const h = await host(MAIN_OUT, {

@@ -458,8 +458,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const rawCancelled = await bb.storage.kv.get<unknown>(KV_CANCELLED);
     const byHand = z.record(z.string(), z.string()).safeParse(rawCancelled);
     if (byHand.success)
-      for (const [threadId, chain] of Object.entries(byHand.data))
-        cancelled.set(threadId, chain);
+      for (const [threadId, requestId] of Object.entries(byHand.data))
+        cancelled.set(threadId, requestId);
     else if (rawCancelled !== undefined && rawCancelled !== null)
       bb.log.warn(
         "the list of retries cancelled by hand is unreadable; starting it again",
@@ -1749,11 +1749,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * Retries the user cancelled by hand (from bb's queued card or `bb thread
    * queue`), per thread: the thread's latest turn at the time (a turn the
    * user then retries by hand, and fails, is a new one: judged). bb's only
-   * word of that
-   * removal is `message.cancelled`, which this plugin's own deletions fire
-   * too (`ownDeletes` tells them apart). The rescue leaves such a thread
-   * alone until a new turn of it (Codex r7, IR7-004). Kept in storage: a
-   * restart must not turn a cancellation into an abandoned thread.
+   * word of that removal is `message.cancelled`, which this plugin's own
+   * deletions fire too (`ownDeletes` tells them apart). The rescue leaves
+   * such a thread alone until a new turn of it (Codex r7, IR7-004). Kept
+   * in storage: a restart must not turn a cancellation into an abandoned
+   * thread.
    */
   bb.events.on("message.cancelled", async ({ entry }) => {
     const own = ownDeletes.get(entry.id);
@@ -1768,8 +1768,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   async function cancelledByHand(entry: CancelledEntry): Promise<void> {
     if (entry.payload.kind !== "retry") return;
     let turn: Awaited<ReturnType<typeof latestTurn>>;
+    let archived: boolean;
     try {
       turn = await latestTurn(entry.threadId);
+      archived =
+        (await bb.sdk.threads.get({ threadId: entry.threadId })).archivedAt !==
+        null;
     } catch (error) {
       // Without the turn, the mark cannot be keyed: the thread is judged
       // again (the user can cancel again) rather than left for dead.
@@ -1778,7 +1782,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
       return;
     }
-    if (turn === null) return;
+    // Of an earlier turn's chain (a message sent by hand since made a new
+    // turn, which the rescue judges on its own), or of a thread archived
+    // meanwhile (its mark would outlive it in storage): nothing to mark.
+    if (
+      turn === null ||
+      turn.original !== entry.payload.retryOfTurnRequestId ||
+      archived
+    )
+      return;
     cancelled.set(entry.threadId, turn.requestId);
     bb.log.info(
       `thread ${entry.threadId}: its queued retry was cancelled by hand; not judged again until a new turn of it`,
