@@ -1851,6 +1851,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         sendAt,
         graced: new Set(),
       });
+    } else {
+      // Retried on the project's own account: it runs there from here, so
+      // a failure of it within the grace of the project's latest move is
+      // that account's, judged afresh, not retried at once as a leftover
+      // of the account its turn started on (Codex r8, IR8-003).
+      recentSwitches.get(projectId)?.graced.add(event.threadId);
+      startedOn.delete(event.threadId);
     }
     if (stuck && !current.autoSwitch) return;
     if (decision.kind === "wait") {

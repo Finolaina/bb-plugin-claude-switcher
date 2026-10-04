@@ -5595,6 +5595,64 @@ describe("a wait another account can end sooner", () => {
       expect(h.retries[2]?.reason).not.toBe("Retrying on account spare");
     });
 
+    it("judges the failure of its second stuck thread on the account the first one moved it to", async () => {
+      // Codex r8 (IR8-003): the second thread runs on spare from its rescue
+      // on: its own failure there, within the grace of the first thread's
+      // move, is spare's, not a leftover of main to run again at once.
+      const h = await host(MAIN_OUT, {
+        settings: FABLE,
+        threads: { "thread-1": { status: "error" }, "thread-2": { status: "error" } },
+        threadEvents: {
+          "thread-1": failedLog("thread-1", "creq_1", FABLE_ID),
+          "thread-2": failedLog("thread-2", "creq_2", FABLE_ID),
+        },
+      });
+      dispose = () => h.harness.dispose();
+      await onePass(h);
+      expect(h.retries.map((r) => r.reason)).toEqual([
+        "Switched to account spare (Fable)",
+        "Retrying on account spare (Fable): it has room now",
+      ]);
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ threadId: "thread-2", requestId: "creq_2b", attemptNumber: 2 }),
+      );
+      expect(h.retries).toHaveLength(3);
+      expect(h.retries[2]?.reason).not.toBe("Retrying on account spare");
+    });
+
+    it("judges the failure of a thread it retried on the project's account, though its turn started elsewhere", async () => {
+      // Codex r8 (IR8-003): a thread started on main before the project was
+      // moved to spare by hand, left in error and rescued on spare; its
+      // failure on spare is spare's, not a leftover of main.
+      let clock = NOW;
+      const threads: Record<string, Partial<ThreadResponse>> = { "thread-1": { status: "running" } };
+      const h = await host(ROOM_EVERYWHERE, {
+        settings: FABLE,
+        threads,
+        threadEvents: { "thread-1": failedLog("thread-1", "creq_1", FABLE_ID) },
+        clock: () => clock,
+      });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "thread-1", projectId: "proj-1" }),
+      });
+      await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "spare" });
+      // Long after the grace of that move, the thread is found in error.
+      clock += HOUR;
+      threads["thread-1"] = { status: "error" };
+      await onePass(h);
+      expect(h.retries.map((r) => r.reason)).toEqual([
+        "Retrying on account spare (Fable): it has room now",
+      ]);
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ requestId: "creq_1b", attemptNumber: 2 }),
+      );
+      expect(h.retries).toHaveLength(2);
+      expect(h.retries[1]?.reason).not.toBe("Retrying on account spare");
+    });
+
     it("retries it on its own account when no limit was reported and the others are out", async () => {
       // Codex r6 (IR6-001): without a report the current account was left out
       // of the wait altogether, even as the only one with room.
