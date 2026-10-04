@@ -162,8 +162,10 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
   const options = { preferredModel: input.preferredModel };
   // A failure just reported rules its account out. Left in error, the thread
   // is judged on the measurements: the project may have moved since, and its
-  // log reports the account it failed on, not the one it sits on now.
-  if (stuck) {
+  // log reports the account it failed on, not the one it sits on now. The
+  // same when the account it ran on is unknown: the current account first,
+  // on its measurements (code-reviewer r15).
+  if (stuck || failedOn === null) {
     const own = accounts.filter((a) => a.name === input.currentAccount);
     const here = chooseAccount(own, options);
     if (here !== null) {

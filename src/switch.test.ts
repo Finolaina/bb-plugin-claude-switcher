@@ -465,6 +465,15 @@ describe("decideSwitch", () => {
       sendAt: NOW + HOUR + BUFFER,
       reason: "Waiting for work",
     });
+    // Unknown and the current account measured with room: it runs again
+    // there, no move to another account (code-reviewer r15).
+    expect(
+      decideSwitch({
+        ...moved,
+        failedAccount: null,
+        accounts: [account("main"), account("work")],
+      }),
+    ).toEqual({ kind: "retry", account: "work", model: null });
   });
 });
 

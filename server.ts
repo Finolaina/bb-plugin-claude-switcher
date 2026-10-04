@@ -844,6 +844,21 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return { account: null, owned: false, external: inherited };
   }
 
+  /**
+   * The moves of each project's account by this plugin, under way and
+   * done: a read of the project's account that overlaps or crosses one says
+   * nothing about where a turn started (Codex IR15-001).
+   */
+  const moves = new Map<string, { epoch: number; inFlight: number }>();
+  function movesOf(projectId: string): { epoch: number; inFlight: number } {
+    let move = moves.get(projectId);
+    if (move === undefined) {
+      move = { epoch: 0, inFlight: 0 };
+      moves.set(projectId, move);
+    }
+    return move;
+  }
+
   /** Point the project at `account` (null = default). Refuses an external variable. */
   async function applyAccount(
     projectId: string,
@@ -854,6 +869,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       throw new Error(
         `${ENV_VAR} on project ${projectId} was set outside this plugin; change it in the project's machine environment`,
       );
+    }
+    const toName = account === null ? current.defaultAccountName : account.name;
+    // A move for real (another account name): counted before the write
+    // starts and once it is over, landed or not.
+    const move =
+      toName === (from.account ?? current.defaultAccountName)
+        ? null
+        : movesOf(projectId);
+    if (move !== null) {
+      move.inFlight += 1;
+      move.epoch += 1;
     }
     try {
       if (account === null || account.configDir === null) {
@@ -875,9 +901,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     } finally {
       // Also after a failure: a delete may have landed before it.
       projectsRead = null;
-      applied += 1;
+      if (move !== null) {
+        move.inFlight -= 1;
+        move.epoch += 1;
+      }
     }
-    const toName = account === null ? current.defaultAccountName : account.name;
     if (toName !== (from.account ?? current.defaultAccountName))
       accountChangedAt.set(projectId, deps.now());
     bb.realtime.publish(CHANGED, { at: deps.now() });
@@ -1508,13 +1536,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * The account each thread's turn started on (read when it turned active):
    * a turn that started before its project moved runs on the old account,
    * and its failure, however long after the move, is not the new account's.
-   * Null: unknown, a project moved while the account was read (Codex
-   * IR14-001): that turn's failure is no leftover, its report is nobody's
-   * and a refusal marks no account.
+   * Null: unknown: the account is still being read, the read failed, or
+   * the project moved while it was read (Codex IR14-001, IR15-001/002).
+   * That turn's failure is no leftover, its report is nobody's and a
+   * refusal marks no account.
    */
   const startedOn = new Map<string, string | null>();
-  /** Moves applied so far (applyAccount), to date a read against them. */
-  let applied = 0;
   /** The latest `thread.active` of each thread still reading its account. */
   const starting = new Map<string, number>();
   let starts = 0;
@@ -1534,7 +1561,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     forgetStart(thread.id);
     const token = ++starts;
     starting.set(thread.id, token);
-    const appliedBefore = applied;
+    // Unknown until read: a failure meanwhile is nobody's (Codex IR15-002).
+    startedOn.set(thread.id, null);
+    const move = movesOf(thread.projectId);
+    const epochBefore = move.epoch;
+    const busy = move.inFlight > 0;
     let account: string | null | undefined;
     try {
       const at = await projectAccount(thread.projectId);
@@ -1542,15 +1573,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         ? undefined
         : (at.account ?? current.defaultAccountName);
     } catch {
-      account = undefined;
+      account = null;
     }
     // The turn ended, or a newer one started, while the account was read:
     // what that said stands, not this stale read (code-reviewer r12).
     if (starting.get(thread.id) !== token) return;
     forgetStart(thread.id);
-    // A project moved meanwhile: the read says where the project is now, not
-    // where the turn started. Unknown, rather than the new account's.
-    if (account !== undefined && applied !== appliedBefore) account = null;
+    // The project was being moved, or moved, while its account was read: the
+    // read says where the project is (or was) going, not where the turn
+    // started. Unknown, rather than the new account's.
+    if (
+      account !== undefined &&
+      (busy || move.inFlight > 0 || move.epoch !== epochBefore)
+    )
+      account = null;
     if (account !== undefined) startedOn.set(thread.id, account);
   });
   bb.events.on("thread.idle", ({ thread }) => {
@@ -1740,8 +1776,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       recent.threadId !== event.threadId &&
       !recent.graced.has(event.threadId) &&
       // Started on the account the project moved to: no leftover, that
-      // account's failure, judged below (code-reviewer r14).
-      started !== recent.to &&
+      // account's failure, judged below (code-reviewer r14). Started on an
+      // account unknown: judged below too, on the measurements (IR15-004).
+      started !== null &&
+      // Unless the move was a wait: the account is out until its reset,
+      // whatever the leftover's turn ran on (code-reviewer r15).
+      (started !== recent.to || recent.sendAt !== undefined) &&
       // Measured since as unable to run a turn (a wait keeps its grace:
       // the account is out by definition until its reset): judged below.
       (recent.sendAt !== undefined || !cannotRun(recent.to))

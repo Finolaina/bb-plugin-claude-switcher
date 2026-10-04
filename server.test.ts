@@ -326,6 +326,8 @@ interface HostOptions {
   failSet?: string[];
   /** Runs as each setMachineEnvironmentVariable starts, before it lands. */
   beforeSet?: () => Promise<unknown>;
+  /** Runs once each setMachineEnvironmentVariable has landed, before bb answers. */
+  afterSet?: () => Promise<unknown>;
   /** machineEnvironment throws for these projects (a bb hiccup), or never answers. */
   failEnvRead?: string[];
   hangEnvRead?: string[];
@@ -627,6 +629,7 @@ async function host(
               value: null,
             },
           ]);
+          if (options.afterSet) await options.afterSet();
           return envList(args.projectId);
         },
         deleteMachineEnvironmentVariable: async (args: EnvCall) => {
@@ -1393,6 +1396,51 @@ describe("claude accounts plugin", () => {
     expect(h.usageCalls).toHaveLength(6);
   });
 
+  it("a thread that started on the account the project is waiting on keeps the wait's grace: out until the reset, nothing to judge", async () => {
+    // code-reviewer r15: with "started on the account the project moved to
+    // is no leftover" alone, every such thread was judged afresh (a full
+    // refresh each) to end up waiting for the same reset.
+    let clock = NOW;
+    let workFree = true;
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(100, 60)),
+        work: () => Response.json(payload(workFree ? 5 : 100, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    workFree = false;
+    clock = NOW + 1_000;
+    const again = failure({ requestId: "creq_1r", attemptNumber: 2 });
+    again.rateLimits!.windows[0]!.resetsAtMs = NOW + HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", again);
+    expect(h.retries[1]).toMatchObject({
+      threadId: "thread-1",
+      reason: "Waiting for work",
+      sendAt: NOW + 2 * HOUR + BUFFER,
+    });
+    // thread-3's turn started on work (the project's account, waiting).
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    clock = NOW + 2_000;
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ threadId: "thread-3", requestId: "creq_3" }),
+    );
+    expect(h.retries[2]).toEqual({
+      threadId: "thread-3",
+      turnRequestId: "creq_3",
+      reason: "Retrying on account work",
+      sendAt: NOW + 2 * HOUR + BUFFER,
+    });
+    expect(h.usageCalls).toHaveLength(6);
+  });
+
   it("prefers an account that can still run the preferred model", async () => {
     const h = await host(
       {
@@ -1826,10 +1874,14 @@ describe("claude accounts plugin", () => {
         rateLimits: null,
       }),
     );
-    expect(h.retries[1]).toMatchObject({
+    // The current account measured with room: runs again there, and the
+    // project stays (code-reviewer r15).
+    expect(h.retries[1]).toEqual({
       threadId: "thread-3",
       turnRequestId: "creq_9",
+      reason: "Retrying on account work: it has room now",
     });
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
     expect(
       h.harness.logEntries.filter((entry) => entry.level === "warn").map((e) => e.message),
     ).not.toContainEqual(expect.stringContaining("refused a turn"));
@@ -1970,6 +2022,162 @@ describe("claude accounts plugin", () => {
     expect(h.retries[1]?.reason).toBe(
       "Switched to account spare: work refused the turn",
     );
+  });
+
+  it("a refusal while the start is still being read marks no account", async () => {
+    // Codex IR15-002: with no entry yet, the failure read "no start seen"
+    // and the refusal marked the project's account; now the start is
+    // unknown until read.
+    let pending: EnvGate | null = null;
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, 40)),
+        spare: () => Response.json(payload(100, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { beforeEnvRead: () => takeGate() },
+    );
+    const takeGate = () => {
+      const gate = pending;
+      pending = null;
+      if (gate === null) return Promise.resolve();
+      gate.captured();
+      return gate.held;
+    };
+    dispose = () => h.harness.dispose();
+    const gate = envGate();
+    pending = gate;
+    const active = h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    await gate.reached;
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({
+        threadId: "thread-3",
+        requestId: "creq_9",
+        errorInfo: {
+          category: "unauthorized",
+          providerCode: null,
+          httpStatusCode: 403,
+        },
+        rateLimits: null,
+      }),
+    );
+    expect(h.retries[0]).toMatchObject({ threadId: "thread-3" });
+    expect(
+      h.harness.logEntries.filter((entry) => entry.level === "warn").map((e) => e.message),
+    ).not.toContainEqual(expect.stringContaining("refused a turn"));
+    expect(h.harness.logEntries.map((e) => e.message)).toContainEqual(
+      expect.stringContaining("refused by an account unknown"),
+    );
+    gate.release();
+    await active;
+  });
+
+  it("a start read while the project's move is still being written is unknown", async () => {
+    // Codex IR15-001: bb had applied main → work but not answered yet; a
+    // turn announced then read "work", and its refusal marked work. The
+    // move under way makes the start unknown: no account marked.
+    let clock = NOW;
+    let pendingWrite: EnvGate | null = null;
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      {
+        clock: () => clock,
+        afterSet: () => {
+          const gate = pendingWrite;
+          pendingWrite = null;
+          if (gate === null) return Promise.resolve();
+          gate.captured();
+          return gate.held;
+        },
+      },
+    );
+    dispose = () => h.harness.dispose();
+    const write = envGate();
+    pendingWrite = write;
+    const moving = h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    await write.reached;
+    // The variable already says work; the plugin is still writing.
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    write.release();
+    await moving;
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    clock = NOW + 5 * 60_000;
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({
+        threadId: "thread-3",
+        requestId: "creq_9",
+        errorInfo: {
+          category: "unauthorized",
+          providerCode: null,
+          httpStatusCode: 403,
+        },
+        rateLimits: null,
+      }),
+    );
+    expect(
+      h.harness.logEntries.filter((entry) => entry.level === "warn").map((e) => e.message),
+    ).not.toContainEqual(expect.stringContaining("refused a turn"));
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent("thread.created", {
+      thread: thread({ id: "thr-new", projectId: "proj-3" }),
+    });
+    expect(h.envSet.at(-1)).toEqual(
+      expect.objectContaining({ projectId: "proj-3", value: `${ACCOUNTS}/work` }),
+    );
+  });
+
+  it("a start unknown gets no grace retry: judged on the measurements at once", async () => {
+    // Codex IR15-004: inside the grace, an unknown start was retried blind
+    // on the new account (or made to wait for another thread's reset).
+    let clock = NOW;
+    let pending: EnvGate | null = null;
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(100, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { clock: () => clock, beforeEnvRead: () => takeGate() },
+    );
+    const takeGate = () => {
+      const gate = pending;
+      pending = null;
+      if (gate === null) return Promise.resolve();
+      gate.captured();
+      return gate.held;
+    };
+    dispose = () => h.harness.dispose();
+    const gate = envGate();
+    pending = gate;
+    const active = h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    await gate.reached;
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    gate.release();
+    await active;
+    clock = NOW + 10_000;
+    const late = failure({ threadId: "thread-3", requestId: "creq_9" });
+    late.rateLimits!.windows[0]!.resetsAtMs = NOW + 3 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", late);
+    // Nobody's report, work measured with room: runs again there, not
+    // "Retrying on account work (switched … ago)" by the grace.
+    expect(h.retries[1]).toEqual({
+      threadId: "thread-3",
+      turnRequestId: "creq_9",
+      reason: "Retrying on account work: it has room now",
+    });
   });
 
   it("another thread's turn ending does not forget where this thread's turn started", async () => {
