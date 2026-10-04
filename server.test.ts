@@ -6019,6 +6019,26 @@ describe("a wait another account can end sooner", () => {
       expect(again.retries.map((r) => r.threadId)).toEqual(["thread-2"]);
     });
 
+    it("forgets a cancellation by hand, in storage too, when its thread is archived", async () => {
+      // Codex r8 (IR8-004): the stored list only grew; forgotten in memory,
+      // the mark came back at the next restart.
+      const h = await host(MAIN_OUT, stuck(failedLog("thread-1", "creq_1", FABLE_ID)));
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("message.cancelled", {
+        entry: {
+          id: "pr-1",
+          threadId: "thread-1",
+          sendAt: NOW + HOUR,
+          payload: { kind: "retry", attempt: 2, reason: "provider-retry", retryOfTurnRequestId: "creq_1" },
+        } as never,
+      });
+      expect(await h.bb.storage.kv.get("cancelled-retries")).toEqual({ "thread-1": "creq_1" });
+      await h.harness.behavior.emitThreadEvent("thread.archived", {
+        thread: thread({ id: "thread-1", projectId: "proj-1", status: "error" }),
+      });
+      expect(await h.bb.storage.kv.get("cancelled-retries")).toEqual({});
+    });
+
     it("does not take its own deletion of a wait for a cancellation by hand", async () => {
       // Codex r7 (IR7-004): releasing a wait deletes its row, and bb fires
       // the same event for that.

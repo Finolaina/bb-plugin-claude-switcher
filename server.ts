@@ -1516,10 +1516,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       startedOn.delete(thread.id);
     }
   });
-  bb.events.on("thread.archived", ({ thread }) => {
+  bb.events.on("thread.archived", async ({ thread }) => {
     startedOn.delete(thread.id);
     threadModel.delete(thread.id);
-    cancelled.delete(thread.id);
+    // Forgotten in storage too, or the stored list only grows (Codex r8,
+    // IR8-004).
+    if (cancelled.delete(thread.id)) await storeCancelled(thread.id);
   });
 
   bb.events.on("thread.created", async ({ thread }) => {
@@ -1751,14 +1753,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     bb.log.info(
       `thread ${entry.threadId}: its queued retry was cancelled by hand; not judged again until a new turn of it`,
     );
+    await storeCancelled(entry.threadId);
+  });
+
+  /** The cancellations by hand, to storage; a failure is logged, not thrown. */
+  async function storeCancelled(threadId: string): Promise<void> {
     try {
       await bb.storage.kv.set(KV_CANCELLED, Object.fromEntries(cancelled));
     } catch (error) {
       bb.log.warn(
-        `thread ${entry.threadId}: the cancellation could not be stored (a restart would judge the thread again): ${error instanceof Error ? error.message : String(error)}`,
+        `thread ${threadId}: the cancellations by hand could not be stored (a restart would read the list as it was): ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-  });
+  }
 
   /**
    * Where the failed turn runs again: the project moves there and the retry
