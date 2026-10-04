@@ -86,7 +86,7 @@ turn runs again there.
 
 When no account is free, the project moves to the account that frees
 first and the retry is queued for that reset, within a maximum wait you
-choose.
+choose. If another account can run it sooner, the turn moves there.
 
 </td>
 <td valign="top">
@@ -414,6 +414,22 @@ and `Picked by hand` for your own picks. Every one goes to
 `bb claude-switcher history`; the reason
 stored with a retry this plugin created is shown wherever bb shows a
 retry's reason.
+
+A queued wait is looked at again after every usage refresh: an account
+that could not be measured when the wait was chosen may have room now.
+When the project's account is measured unable to run the waiting turn's
+model, has no login, or refused a turn in the last six hours, and another
+account can run it, the project moves there
+(`Moved to account <name>, which can run the waiting turn now: <old> cannot run <model>`,
+or `is out of usage`, `is not logged in`, `refused a turn`) and the timed
+retry is replaced by one bb dispatches at once, through the same checks as
+any message, other plugins' included. A wait queued before the project
+last changed account is retried the same way
+(`Retrying on account <name>, where the project is now`). Left as they
+are: a wait due within two minutes, one another plugin holds, a retry of
+an earlier turn, one of an archived or deleted thread, and one whose
+account may still run it. If bb does not take the retry, the wait is
+queued again as it was and looked at again in the next pass.
 
 A turn that started on the project's old account (the plugin notes the
 account when a thread turns active) is retried once on the new one

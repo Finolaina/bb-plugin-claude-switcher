@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.11] - 2026-10-04
+
+### Fixed
+
+- **A turn no longer waits hours for a reset when another account can run
+  it.** A wait is chosen with the measurements at hand, and an account
+  that could not be measured then may have room soon after. Every queued
+  wait is now looked at again after each usage refresh: when the
+  project's account is measured unable to run the waiting turn's model,
+  has no login, or refused a turn in the last six hours, and another
+  account can run it, the project moves there and bb retries the turn at
+  once, through the same checks as any message, other plugins' included.
+  A wait queued before the project last changed account is retried the
+  same way. Left as they are: a wait due within two minutes, one another
+  plugin holds, a retry of an earlier turn, one of an archived or deleted
+  thread, and one whose account may still run it. If bb does not take the
+  retry, the wait is queued again as it was and looked at again in the
+  next pass; if that fails too, the plugin's log says so as an error.
+
 ## [0.2.10] - 2026-10-03
 
 ### Changed
@@ -313,6 +332,7 @@ First public release.
 - macOS keychain and Linux credentials-file support; rotated OAuth tokens
   are written back and verified by reading them again.
 
+[0.2.11]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.11
 [0.2.10]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.10
 [0.2.9]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.9
 [0.2.8]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.8
