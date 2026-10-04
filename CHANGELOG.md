@@ -4,6 +4,42 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.13] - 2026-10-04
+
+### Fixed
+
+- **A leftover's limit report is the old account's.** A turn that started
+  before its project moved runs on the old account, and its failure, however
+  long after the move, carries that account's reset. When the project's new
+  account could not run it either, the plugin read the report as the new
+  account's and waited for the later of the two resets, on the new account,
+  with the new account free an hour before (a thread of 2026-10-04 waited
+  from 3 am to its old account's reset while its project's account freed at
+  2 am). The report now belongs to the account the turn ran on: that account
+  is never switched to (a wait may still move the project there when its
+  reported reset is the earliest), its refusal (no login) marks it and not
+  the project's account, and the project's account is judged on its
+  measurements alone.
+- Where a turn ran is forgotten once it ends (`thread.idle`) or fails,
+  whatever the plugin makes of the failure: a later failure that no new turn
+  announced (a turn refused at the door) is the project's account's. A start
+  read that outlives its turn, or that a newer turn's read overtakes, writes
+  nothing.
+- A leftover refused (no login) by the account it ran on marks that account,
+  also when the leftover is retried on the project's account: before, the
+  refusing account stayed eligible for other projects.
+- Where a turn started is read when bb announces it, and bb announces it
+  after reading the account for it: a move of the project completed in
+  between made the start the new account's, and a refusal of that turn set
+  a healthy account aside for 6 hours. The project's state is now anchored
+  when bb asks to send the message; a start read across a move since, or
+  while the project moves, or that could not be read, is unknown: its
+  failure's report belongs to nobody, its refusal marks no account, and
+  such a refusal is retried as many times as any other failure, then left
+  for the periodic rescue. A turn that bb sends past that checkpoint (a
+  queued message sent by hand with "Send now") is unknown too; the retries
+  the plugin sends itself anchor the project's state right before sending.
+
 ## [0.2.12] - 2026-10-04
 
 ### Fixed
@@ -366,6 +402,7 @@ First public release.
 - macOS keychain and Linux credentials-file support; rotated OAuth tokens
   are written back and verified by reading them again.
 
+[0.2.13]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.13
 [0.2.12]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.12
 [0.2.11]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.11
 [0.2.10]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.10
