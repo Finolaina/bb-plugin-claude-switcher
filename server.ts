@@ -1509,28 +1509,45 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * and its failure, however long after the move, is not the new account's.
    */
   const startedOn = new Map<string, string>();
+  /** The latest `thread.active` of each thread still reading its account. */
+  const starting = new Map<string, number>();
+  let starts = 0;
+  /** From here the thread's turn is no leftover of any account. */
+  function forgetStart(threadId: string): void {
+    startedOn.delete(threadId);
+    starting.delete(threadId);
+  }
   bb.events.on("thread.active", async ({ thread }) => {
     if (
       thread.providerId !== CLAUDE_CODE_PROVIDER ||
       notTheUsersThread(thread) !== null
     )
       return;
+    const token = ++starts;
+    starting.set(thread.id, token);
+    let account: string | null;
     try {
       const at = await projectAccount(thread.projectId);
-      if (at.external) startedOn.delete(thread.id);
-      else startedOn.set(thread.id, at.account ?? current.defaultAccountName);
+      account = at.external
+        ? null
+        : (at.account ?? current.defaultAccountName);
     } catch {
-      startedOn.delete(thread.id);
+      account = null;
     }
+    // The turn ended, or a newer one started, while the account was read:
+    // what that said stands, not this stale read (code-reviewer r12).
+    if (starting.get(thread.id) !== token) return;
+    forgetStart(thread.id);
+    if (account !== null) startedOn.set(thread.id, account);
   });
   bb.events.on("thread.idle", ({ thread }) => {
     // Its turn ended there: a later failure that no new `thread.active`
     // announces (a turn refused at the door) is the project's account's,
     // not a leftover of the account this turn ran on (code-reviewer r11).
-    startedOn.delete(thread.id);
+    forgetStart(thread.id);
   });
   bb.events.on("thread.archived", async ({ thread }) => {
-    startedOn.delete(thread.id);
+    forgetStart(thread.id);
     threadModel.delete(thread.id);
     // Forgotten in storage too, or the stored list only grows (Codex r8,
     // IR8-004).
@@ -1688,7 +1705,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const now = deps.now();
     const recent = recentSwitches.get(projectId);
     const started = startedOn.get(event.threadId);
-    startedOn.delete(event.threadId);
+    forgetStart(event.threadId);
     if (
       recent !== undefined &&
       now - recent.at <= SWITCH_GRACE_MS &&
@@ -1940,7 +1957,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // that account's, judged afresh, not retried at once as a leftover
       // of the account its turn started on (Codex r8, IR8-003).
       recentSwitches.get(projectId)?.graced.add(event.threadId);
-      startedOn.delete(event.threadId);
+      forgetStart(event.threadId);
     }
     if (stuck && !current.autoSwitch) return;
     if (decision.kind === "wait") {
@@ -2341,7 +2358,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   ): Promise<void> {
     // It runs on the project's account from here: its failure is not a
     // leftover of the account its turn started on.
-    startedOn.delete(threadId);
+    forgetStart(threadId);
     try {
       await deleteOwn(threadId, wait.id);
     } catch (error) {

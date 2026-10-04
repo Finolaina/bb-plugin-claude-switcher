@@ -329,6 +329,8 @@ interface HostOptions {
   /** machineEnvironment throws for these projects (a bb hiccup), or never answers. */
   failEnvRead?: string[];
   hangEnvRead?: string[];
+  /** Runs as each machineEnvironment read starts, before it answers. */
+  beforeEnvRead?: (projectId: string) => Promise<unknown>;
   /** The plugin process's environment, as the login inherits it. */
   env?: Record<string, string>;
   /** What the accounts directory holds, links and files included; default: dirs() as directories. */
@@ -581,6 +583,7 @@ async function host(
             throw new Error(`HTTP 503: could not read ${projectId}`);
           if (options.hangEnvRead?.includes(projectId))
             await new Promise(() => {});
+          await options.beforeEnvRead?.(projectId);
           return envList(projectId);
         },
         get: async ({ projectId }: { projectId: string }) => ({
@@ -1597,6 +1600,86 @@ describe("claude accounts plugin", () => {
       threadId: "thread-3",
       turnRequestId: "creq_9",
       reason: "Switched to account main",
+    });
+  });
+
+  it("a turn announced while its account was still being read, then ended, is forgotten: the late read writes nothing", async () => {
+    // bb says `thread.active`, the plugin asks for the project's account,
+    // and the turn ends (`thread.idle`) before the answer arrives. The
+    // answer must not revive the start: the next failure, with no new turn
+    // announced, is the project's account's (code-reviewer r12).
+    let clock = NOW;
+    let mainSession = 100;
+    let workSession = 5;
+    let hold: Promise<unknown> | null = null;
+    const h = await host(
+      {
+        main: () => Response.json(payload(mainSession, 40)),
+        spare: () => Response.json(payload(100, 60)),
+        work: () => Response.json(payload(workSession, 20)),
+      },
+      { clock: () => clock, beforeEnvRead: () => hold ?? Promise.resolve() },
+    );
+    dispose = () => h.harness.dispose();
+    let release!: () => void;
+    hold = new Promise<void>((resolve) => (release = resolve));
+    const active = h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    hold = null;
+    release();
+    await active;
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    clock = NOW + 5 * 60_000;
+    workSession = 100;
+    mainSession = 5;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const late = failure({ threadId: "thread-3", requestId: "creq_9" });
+    late.rateLimits!.windows[0]!.resetsAtMs = NOW + 3 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", late);
+    expect(h.retries[1]).toEqual({
+      threadId: "thread-3",
+      turnRequestId: "creq_9",
+      reason: "Switched to account main",
+    });
+  });
+
+  it("another thread's turn ending does not forget where this thread's turn started", async () => {
+    // thread-3 and thread-4 both start on main; thread-4 ends; the project
+    // moves to work; thread-3 fails after the grace as a leftover of main:
+    // retried on work (judged as work's, it would wait for main's reset).
+    let clock = NOW;
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(100, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    for (const id of ["thread-3", "thread-4"]) {
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id, projectId: "proj-1" }),
+      });
+    }
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "thread-4", projectId: "proj-1" }),
+    });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    clock = NOW + 5 * 60_000;
+    const late = failure({ threadId: "thread-3", requestId: "creq_9" });
+    late.rateLimits!.windows[0]!.resetsAtMs = NOW + 3 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", late);
+    expect(h.retries[1]).toEqual({
+      threadId: "thread-3",
+      turnRequestId: "creq_9",
+      reason: "Retrying on account work",
     });
   });
 
