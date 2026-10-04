@@ -129,7 +129,9 @@ const KV_HANDLED_PROJECTS = "handled-projects";
  * for it would surprise the user, and its owner decides about it. A visible
  * thread is the user's work even when a plugin's composer opened it.
  */
-function notTheUsersThread(thread: ThreadResponse): string | null {
+function notTheUsersThread(
+  thread: Pick<ThreadResponse, "visibility" | "originPluginId">,
+): string | null {
   if (thread.visibility !== "hidden") return null;
   return typeof thread.originPluginId === "string"
     ? `hidden thread of plugin ${thread.originPluginId}`
@@ -1173,6 +1175,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const threadId = event.threadId;
     const existing = await queuedRetry(event);
     if (existing !== null) {
+      bb.log.info(
+        `thread ${threadId}: a retry of the turn is already queued ("${existing.reason}"${existing.sendAt === null ? "" : `, for ${new Date(existing.sendAt).toISOString()}`})`,
+      );
       if (sendAt === undefined) {
         await sendQueued(threadId, existing.id);
         return;
@@ -1697,18 +1702,34 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
       return;
     }
+    const model =
+      threadModel.get(event.threadId) ??
+      (await loggedModel(event.threadId)) ??
+      current.preferredModel;
+    await judge(event, projectId, from, model, now, false);
+  }
+
+  /**
+   * Where the failed turn runs again: the project moves there and the retry
+   * is queued. `stuck`: judged on a refresh for a thread left in error (see
+   * `rescueStuck`), not on its failure.
+   */
+  async function judge(
+    event: PluginTurnFailedEvent,
+    projectId: string,
+    from: ProjectAccount,
+    model: string,
+    now: number,
+    stuck: boolean,
+  ): Promise<void> {
     const fromName = from.account ?? current.defaultAccountName;
     const refusal = isRefusal(event);
-    if (refusal) {
+    if (refusal && !stuck) {
       refusedAt.set(fromName, now);
       bb.log.warn(
         `account ${fromName} refused a turn (HTTP ${event.errorInfo?.httpStatusCode ?? "?"}): chosen for nothing for ${REFUSAL_MS / 3_600_000} h`,
       );
     }
-    const model =
-      threadModel.get(event.threadId) ??
-      (await loggedModel(event.threadId)) ??
-      current.preferredModel;
     const decision = decideSwitch({
       failure: event,
       currentAccount: fromName,
@@ -1720,12 +1741,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           : null,
       now,
       random: deps.random(),
+      stuck,
     });
+    const how = stuck ? "left in error: " : "";
     if (decision.kind === "decline") {
       // The account the project sits on is no good either: a leftover
       // thread must be judged too, not retried there at once.
       recentSwitches.delete(projectId);
-      bb.log.info(`thread ${event.threadId}: no switch (${decision.reason})`);
+      bb.log.info(
+        `thread ${event.threadId}: ${how}no switch (${decision.reason})`,
+      );
       return;
     }
     const reason =
@@ -1761,12 +1786,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     if (decision.kind === "wait") {
       bb.log.info(
-        `thread ${event.threadId}: ${reason} until ${new Date(decision.sendAt).toISOString()}`,
+        `thread ${event.threadId}: ${how}${reason} until ${new Date(decision.sendAt).toISOString()}`,
       );
       await retryTurn(event, reason, decision.sendAt);
       return;
     }
-    bb.log.info(`thread ${event.threadId}: ${reason}`);
+    bb.log.info(`thread ${event.threadId}: ${how}${reason}`);
     await retryTurn(event, reason);
   }
 
@@ -1789,9 +1814,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       bb.log.debug(`thread ${event.threadId}: ignored (${skipped})`);
       return;
     }
-    await inProjectQueue(thread.projectId, () =>
-      handleFailure(event, thread.projectId),
-    );
+    try {
+      await inProjectQueue(thread.projectId, () =>
+        handleFailure(event, thread.projectId),
+      );
+    } catch (error) {
+      // A retry of the turn is already on its way (queued by another plugin,
+      // or being sent): nothing to add.
+      if (!bbHasTheTurn(error)) throw error;
+      bb.log.info(
+        `thread ${event.threadId}: bb already has a retry of the turn (${error instanceof Error ? error.message : String(error)})`,
+      );
+    }
   });
 
   // ---- A wait another account can end sooner -----------------------------
@@ -1858,6 +1892,101 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         );
       }
     }
+    await rescueStuck(all);
+  }
+
+  /**
+   * Threads in error with no retry queued, as the queue stood when the pass
+   * began: bb's provider-retry gives up after five attempts and so does the
+   * failure handler, so nothing would look at them again. Each is judged
+   * from bb's log on every refresh, until a retry of it is queued.
+   */
+  async function rescueStuck(
+    queue: Array<{ threadId: string; payload: { kind: string } }>,
+  ): Promise<void> {
+    const retrying = new Set(
+      queue
+        .filter((row) => row.payload.kind === "retry")
+        .map((row) => row.threadId),
+    );
+    for (const thread of await errorThreads()) {
+      if (!current.autoSwitch) return;
+      if (retrying.has(thread.id)) continue;
+      try {
+        await inProjectQueue(thread.projectId, () => rescueThread(thread));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (bbHasTheTurn(error))
+          bb.log.info(
+            `thread ${thread.id}: bb already has a retry of the turn (${message})`,
+          );
+        else
+          bb.log.warn(`thread ${thread.id}: not judged again: ${message}`);
+      }
+    }
+  }
+
+  type ListedThread = Awaited<ReturnType<typeof bb.sdk.threads.list>>[number];
+  /** The user's Claude Code threads in error, not archived. */
+  async function errorThreads(): Promise<ListedThread[]> {
+    const PAGE = 200;
+    const found: ListedThread[] = [];
+    for (let offset = 0; ; offset += PAGE) {
+      const page = await bb.sdk.threads.list({
+        archived: false,
+        limit: PAGE,
+        offset,
+      });
+      found.push(...page.filter(waitingThread));
+      if (page.length < PAGE) return found;
+    }
+  }
+
+  /** The thread's failure as bb logged it, judged as a failure would be. */
+  async function rescueThread(thread: ListedThread): Promise<void> {
+    const threadId = thread.id;
+    const turn = await latestTurn(threadId);
+    if (turn === null) return;
+    const [failed] = await bb.sdk.threads.events.list({
+      threadId,
+      types: ["provider/error"],
+      order: "desc",
+      limit: "1",
+    });
+    if (failed?.type !== "provider/error") return;
+    const [reported] = await bb.sdk.threads.events.list({
+      threadId,
+      types: ["provider/rateLimits/updated"],
+      order: "desc",
+      limit: "1",
+    });
+    const failure: PluginTurnFailedEvent = {
+      threadId,
+      requestId: turn.requestId,
+      turnId: null,
+      errorInfo: failed.data.errorInfo ?? null,
+      inputAccepted: true,
+      rateLimits:
+        reported?.type === "provider/rateLimits/updated"
+          ? reported.data.rateLimits
+          : null,
+      attemptNumber: turn.attempt,
+    };
+    const declined = declineReason(failure, true);
+    if (declined !== null) {
+      bb.log.debug(`thread ${threadId}: left in error (${declined})`);
+      return;
+    }
+    const from = await projectAccount(thread.projectId);
+    if (from.external) return;
+    await judge(
+      failure,
+      thread.projectId,
+      from,
+      turn.model ?? current.preferredModel,
+      deps.now(),
+      true,
+    );
   }
 
   /** A timed retry not due soon, that no other plugin holds. */
@@ -1881,7 +2010,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * The user's Claude Code thread with a failed turn bb can retry: not
    * archived or deleted (bb refuses those, and the wait would be lost).
    */
-  function waitingThread(thread: ThreadResponse): boolean {
+  function waitingThread(
+    thread: Pick<
+      ThreadResponse,
+      | "providerId"
+      | "visibility"
+      | "originPluginId"
+      | "status"
+      | "archivedAt"
+      | "deletedAt"
+    >,
+  ): boolean {
     return (
       thread.providerId === CLAUDE_CODE_PROVIDER &&
       notTheUsersThread(thread) === null &&
@@ -2005,6 +2144,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     turnRequestId: string,
     reason: string,
   ): Promise<void> {
+    // It runs on the project's account from here: its failure is not a
+    // leftover of the account its turn started on.
+    startedOn.delete(threadId);
     try {
       await bb.sdk.threads.queuedMessages.delete({
         threadId,

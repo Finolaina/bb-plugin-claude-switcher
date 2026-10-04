@@ -45,6 +45,12 @@ export interface SwitchInput {
   maximumWaitMs: number | null;
   now: number;
   random: number;
+  /**
+   * Judged on a refresh for a thread left in error, not on its failure: the
+   * refresh paces the retries, so the attempt cap does not apply, and a log
+   * without a limit report is judged on the measurements alone.
+   */
+  stuck?: boolean;
 }
 
 /**
@@ -63,17 +69,17 @@ export function isRefusal(failure: PluginTurnFailedEvent): boolean {
  */
 export function declineReason(
   failure: PluginTurnFailedEvent,
+  stuck = false,
 ): DeclineReason | null {
-  if (failure.attemptNumber >= MAX_ATTEMPTS) return "attempts-exhausted";
+  if (!stuck && failure.attemptNumber >= MAX_ATTEMPTS)
+    return "attempts-exhausted";
   if (isRefusal(failure)) return null;
   if (failure.errorInfo?.category !== "rate-limit") return "not-rate-limit";
   const rateLimits = failure.rateLimits;
+  if (rateLimits === null) return stuck ? null : "no-rate-limit-state";
   // bb sends the thread's latest stored report: when the provider refuses a
   // turn before reporting the limit reached, that is still a warning.
-  if (
-    rateLimits === null ||
-    (rateLimits.status !== "blocked" && rateLimits.status !== "warning")
-  )
+  if (rateLimits.status !== "blocked" && rateLimits.status !== "warning")
     return "no-rate-limit-state";
   if (rateLimits.kind !== "subscription-window")
     return "not-subscription-window";
@@ -122,7 +128,7 @@ function freeAt(account: AccountUsage, model: string): number | null {
 }
 
 export function decideSwitch(input: SwitchInput): SwitchDecision {
-  const declined = declineReason(input.failure);
+  const declined = declineReason(input.failure, input.stuck === true);
   if (declined !== null) return { kind: "decline", reason: declined };
   const rateLimits = input.failure.rateLimits;
 

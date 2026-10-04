@@ -387,6 +387,15 @@ async function host(
             projectId: threadId === "thr-2" ? "proj-2" : "proj-1",
             ...options.threads?.[threadId],
           }),
+        // Like bb: every thread, as threads.get answers for it.
+        list: async () =>
+          Object.keys(options.threads ?? {}).map((threadId) =>
+            thread({
+              id: threadId,
+              projectId: threadId === "thr-2" ? "proj-2" : "proj-1",
+              ...options.threads?.[threadId],
+            }),
+          ),
         events: {
           // Like bb: only the asked types, oldest first unless desc, then the limit.
           list: async (args: {
@@ -762,6 +771,34 @@ describe("claude accounts plugin", () => {
         refresh: false,
       }),
     ).rejects.toThrow(/no longer exists/);
+  });
+
+  it("takes bb's word when it already has a retry of the failed turn, instead of failing the handler", async () => {
+    // 2026-10-04: a retry of each failed turn was on its way before this
+    // plugin judged the failure; bb answered 409 and the handler failed.
+    const h = await host(ALL_FREE, {
+      retryError: {
+        message:
+          "HTTP 409: Turn creq_1 already has a retry waiting on thread thread-1.",
+        code: "retry_already_queued",
+        status: 409,
+      },
+    });
+    dispose = () => h.harness.dispose();
+    const { errors } = await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure(),
+    );
+    expect(errors).toEqual([]);
+    expect(
+      h.harness.logEntries.filter((entry) => entry.level === "error"),
+    ).toEqual([]);
+    expect(
+      h.harness.logEntries.some(
+        (entry) =>
+          entry.level === "info" && /already has a retry of the turn/.test(entry.message),
+      ),
+    ).toBe(true);
   });
 
   it("moves the project to the best other account and retries the turn at once", async () => {
@@ -5356,6 +5393,178 @@ describe("a wait another account can end sooner", () => {
     await onePass(nowhere);
     expect(nowhere.retries).toEqual([]);
     expect(nowhere.queued.map((r) => r.id)).toEqual(["r1"]);
+  });
+
+  it("names the retry it finds already queued for the failed turn", async () => {
+    // Who queued it (its reason) is the trace of whoever retries ahead of
+    // this plugin.
+    const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")]);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ threadId: "thread-1", requestId: "creq_r1" }),
+    );
+    expect(
+      h.harness.logEntries.some(
+        (entry) =>
+          entry.level === "info" &&
+          entry.message ===
+            `thread thread-1: a retry of the turn is already queued ("Waiting for the session of main", for ${new Date(NOW + 2 * HOUR + BUFFER).toISOString()})`,
+      ),
+    ).toBe(true);
+  });
+
+  it("judges afresh a released thread whose turn had started on the old account", async () => {
+    // Codex r5 (IR5-001): released on spare, its failure there is spare's,
+    // not a leftover of main to retry on spare at once.
+    const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")]);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-1", projectId: "proj-1" }),
+    });
+    await onePass(h);
+    expect(h.retries).toEqual([retriedNow("thread-1", "creq_r1")]);
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ threadId: "thread-1", requestId: "creq_r1", attemptNumber: 2 }),
+    );
+    expect(h.retries.map((r) => r.reason)).not.toContain(
+      "Retrying on account spare",
+    );
+  });
+
+  describe("a thread stuck in error", () => {
+    // 2026-10-04: nine threads failed on a session limit at 02:04 and each
+    // burnt its five attempts in three minutes (something retried them at
+    // once); after the fifth, neither provider-retry nor this plugin looked
+    // at them again, and they sat in error all night while two accounts had
+    // room from 03:40. A thread in error with no retry queued is judged again
+    // on every refresh, from bb's log alone (it survives a restart).
+    /** bb's log of a thread whose turn failed on a limit: the request, the error and (unless `reported: false`) the limit report. */
+    function failedLog(
+      threadId: string,
+      requestId: string,
+      model: string,
+      opts: {
+        retry?: { of: string; attempt: number };
+        category?: string;
+        reported?: boolean;
+      } = {},
+    ): LoggedEvent[] {
+      const rows: LoggedEvent[] = [
+        turnRequested(threadId, requestId, model, opts.retry),
+        {
+          seq: 2,
+          type: "provider/error",
+          data: {
+            providerThreadId: "p",
+            threadId,
+            message: "Provider error",
+            detail: "You've hit your session limit",
+            errorInfo: {
+              category: opts.category ?? "rate-limit",
+              providerCode: "rate_limit_event",
+              httpStatusCode: 429,
+            },
+          },
+        },
+      ];
+      if (opts.reported !== false)
+        rows.push({
+          seq: 3,
+          type: "provider/rateLimits/updated",
+          data: {
+            providerThreadId: "p",
+            threadId,
+            rateLimits: failure().rateLimits,
+          },
+        });
+      return rows;
+    }
+    const stuck = (log: LoggedEvent[]): HostOptions => ({
+      settings: FABLE,
+      threads: { "thread-1": { status: "error" } },
+      threadEvents: { "thread-1": log },
+    });
+
+    it("retries it on an account that can run it, from bb's log alone", async () => {
+      const h = await host(MAIN_OUT, stuck(failedLog("thread-1", "creq_1", FABLE_ID)));
+      dispose = () => h.harness.dispose();
+      await onePass(h);
+      expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+      expect(h.retries).toEqual([
+        {
+          threadId: "thread-1",
+          turnRequestId: "creq_1",
+          reason: "Switched to account spare (Fable)",
+        },
+      ]);
+    });
+
+    it("judges it however many attempts failed: the cap stops a loop, not a thread left for dead", async () => {
+      const h = await host(
+        MAIN_OUT,
+        stuck(
+          failedLog("thread-1", "creq_7", FABLE_ID, {
+            retry: { of: "creq_1", attempt: 7 },
+          }),
+        ),
+      );
+      dispose = () => h.harness.dispose();
+      await onePass(h);
+      expect(h.retries).toEqual([
+        {
+          threadId: "thread-1",
+          turnRequestId: "creq_7",
+          reason: "Switched to account spare (Fable)",
+        },
+      ]);
+    });
+
+    it("waits for the earliest reset when no account can run it now, even with no limit report in its log", async () => {
+      const out = {
+        main: () => Response.json(payload(100, 40, 100)),
+        spare: () => Response.json(payload(100, 60, 100)),
+        work: () => Response.json(payload(100, 20, 100)),
+      };
+      const h = await host(
+        out,
+        stuck(failedLog("thread-1", "creq_1", FABLE_ID, { reported: false })),
+      );
+      dispose = () => h.harness.dispose();
+      await onePass(h);
+      expect(h.retries).toEqual([
+        {
+          threadId: "thread-1",
+          turnRequestId: "creq_1",
+          reason: expect.stringMatching(/^Waiting for Fable on /),
+          sendAt: expect.any(Number),
+        },
+      ]);
+      expect(h.retries[0]?.sendAt).toBeGreaterThanOrEqual(NOW + BUFFER);
+    });
+
+    it("leaves it alone while a retry of it is queued: the wait is judged, not doubled", async () => {
+      const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")], {
+        threadEvents: {
+          "thread-1": failedLog("thread-1", "creq_r1", FABLE_ID),
+        },
+      });
+      dispose = () => h.harness.dispose();
+      await onePass(h);
+      expect(h.retries).toEqual([retriedNow("thread-1", "creq_r1")]);
+    });
+
+    it("leaves a thread whose failure was not a limit", async () => {
+      const h = await host(
+        MAIN_OUT,
+        stuck(failedLog("thread-1", "creq_1", FABLE_ID, { category: "unknown" })),
+      );
+      dispose = () => h.harness.dispose();
+      await onePass(h);
+      expect(h.retries).toEqual([]);
+      expect(h.envSet).toEqual([]);
+    });
   });
 
   it("judges a wait by the model its retry runs with, not by the model the thread used last", async () => {
