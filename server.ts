@@ -1793,34 +1793,31 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * the turn failed; an account that could not be measured then may have
    * room now (2026-10-04: a thread waited three hours for a session while
    * another account was free). After each refresh, a project whose account
-   * is MEASURED unable to run a waiting thread's model moves to an account
-   * that can, and the wait is sent. Left as they are: a wait about to run
-   * anyway, one another plugin holds, and one whose account may still run
-   * (it waits for something else, such as a backoff).
+   * is MEASURED unable to run a waiting retry's model moves to an account
+   * that can, and the wait is replaced by a retry bb dispatches at once; so
+   * is a wait queued before its project's latest switch, on an account that
+   * can run it. Left as they are: a wait about to run anyway, one another
+   * plugin holds, a retry of an earlier turn, and one whose account may
+   * still run (it waits for something else, such as a backoff).
    */
   async function revisitWaits(): Promise<void> {
     if (!current.autoSwitch) return;
-    const now = deps.now();
-    const rows = (await bb.sdk.threads.queue.list()).filter(
-      (row) =>
-        row.payload.kind === "retry" &&
-        row.sendAt !== null &&
-        row.sendAt - now > RESET_BUFFER_MS + RESET_JITTER_MS &&
-        (row.waitingOn == null || row.waitingOn.kind === "time"),
+    const rows = (await bb.sdk.threads.queue.list()).filter((row) =>
+      longWait(row, deps.now()),
     );
-    /** Projects moved in this pass, to the account each went to. */
-    const moved = new Map<string, string>();
     for (const row of rows) {
+      // Switched off meanwhile: the rest of the pass stops too.
+      if (!current.autoSwitch) return;
       try {
         const thread = await bb.sdk.threads.get({ threadId: row.threadId });
         if (
           thread.providerId !== CLAUDE_CODE_PROVIDER ||
-          notTheUsersThread(thread) !== null
+          notTheUsersThread(thread) !== null ||
+          // bb retries only a thread whose latest turn failed.
+          thread.status !== "error"
         )
           continue;
-        await inProjectQueue(thread.projectId, () =>
-          moveUpWait(thread, row.id, moved),
-        );
+        await inProjectQueue(thread.projectId, () => moveUpWait(thread, row.id));
       } catch (error) {
         bb.log.warn(
           `thread ${row.threadId}: its wait was not looked at again: ${error instanceof Error ? error.message : String(error)}`,
@@ -1829,19 +1826,66 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
   }
 
+  /** A timed retry not about to run anyway, that no other plugin holds. */
+  function longWait(
+    row: {
+      payload: { kind: string };
+      sendAt: number | null;
+      waitingOn: { kind: string } | null;
+    },
+    now: number,
+  ): boolean {
+    return (
+      row.payload.kind === "retry" &&
+      row.sendAt !== null &&
+      row.sendAt - now > RESET_BUFFER_MS + RESET_JITTER_MS &&
+      (row.waitingOn === null || row.waitingOn.kind === "time")
+    );
+  }
+
+  /** The thread's latest turn in bb's log: the one bb retries. */
+  async function latestTurn(threadId: string) {
+    const [row] = await bb.sdk.threads.events.list({
+      threadId,
+      types: ["client/turn/requested"],
+      order: "desc",
+      limit: "1",
+    });
+    if (row?.type !== "client/turn/requested") return null;
+    return {
+      requestId: row.data.requestId,
+      // bb keys a retry by the first request of its chain, and counts from 1.
+      original: row.data.retryOfRequestId ?? row.data.requestId,
+      attempt: row.data.retryAttempt ?? 1,
+      model: modelFamily(row.data.execution?.model ?? null),
+    };
+  }
+
   async function moveUpWait(
     thread: ThreadResponse,
     rowId: string,
-    moved: Map<string, string>,
   ): Promise<void> {
+    const threadId = thread.id;
     const projectId = thread.projectId;
+    // Read again in the project's queue: sent, replaced or held meanwhile.
+    const row = (await bb.sdk.threads.queuedMessages.list({ threadId })).find(
+      (r) => r.id === rowId,
+    );
+    if (row?.payload.kind !== "retry" || !longWait(row, deps.now())) return;
+    const wait = { id: row.id, reason: row.payload.reason, sendAt: row.sendAt };
+    const turn = await latestTurn(threadId);
+    if (
+      turn === null ||
+      turn.original !== row.payload.retryOfTurnRequestId ||
+      turn.attempt + 1 !== row.payload.attempt
+    )
+      return;
+    // The model the retry runs with: bb copies the failed turn's.
+    const model = modelFamily(row.model) ?? turn.model ?? current.preferredModel;
+    // Read last: nothing is awaited between this read and the move below.
     const from = await projectAccount(projectId);
-    if (from.external) return;
+    if (from.external || !current.autoSwitch) return;
     const fromName = from.account ?? current.defaultAccountName;
-    const model =
-      threadModel.get(thread.id) ??
-      (await loggedModel(thread.id)) ??
-      current.preferredModel;
     const now = deps.now();
     const measured = measuredAccounts(model);
     const here = measured.find((a) => a.name === fromName);
@@ -1850,8 +1894,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       here.unknown === true ||
       bestAccount([here], model, now) === fromName
     ) {
-      // Moved here in this pass for another of its waits: this one runs too.
-      if (moved.get(projectId) === fromName) await sendQueued(thread.id, rowId);
+      // Queued before the project's latest switch (a move for another of
+      // its waits, a placement): it waited on what the project was before.
+      const latest = recentSwitches.get(projectId);
+      if (latest !== undefined && row.createdAt < latest.at)
+        await releaseWait(
+          threadId,
+          wait,
+          turn.requestId,
+          `Retrying on account ${fromName}, where the project is now`,
+        );
       return;
     }
     const to = bestAccount(
@@ -1862,16 +1914,60 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (to === null) return;
     await applyAccount(projectId, accountOrDefault(to), from);
     await markHandled(projectId);
-    moved.set(projectId, to);
     const reason = `Moved to account ${to}, which can run the waiting turn now: ${fromName} ${whyOut(fromName, model)}`;
-    bb.log.info(`thread ${thread.id}: ${reason}`);
+    bb.log.info(`thread ${threadId}: ${reason}`);
     await recordMove(
-      { at: now, threadId: thread.id, projectId, from: fromName, to, reason },
-      thread.id,
+      { at: now, threadId, projectId, from: fromName, to, reason },
+      threadId,
     );
-    await sendQueued(thread.id, rowId);
+    if (!current.autoSwitch) return;
+    await releaseWait(threadId, wait, turn.requestId, reason);
   }
 
+  /**
+   * Replace a timed retry with one bb dispatches now, through every plugin's
+   * checkpoint: sending the queued row would be an explicit send, which
+   * skips them. If bb does not take it, the timed one is queued again as it
+   * was.
+   */
+  async function releaseWait(
+    threadId: string,
+    wait: { id: string; reason: string; sendAt: number | null },
+    turnRequestId: string,
+    reason: string,
+  ): Promise<void> {
+    try {
+      await bb.sdk.threads.queuedMessages.delete({
+        threadId,
+        queuedMessageId: wait.id,
+      });
+    } catch (error) {
+      if (!alreadyOnItsWay(error)) throw error;
+      bb.log.info(`thread ${threadId}: its waiting retry is already on its way`);
+      return;
+    }
+    try {
+      await bb.sdk.threads.retry({ threadId, turnRequestId, reason });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      bb.log.warn(
+        `thread ${threadId}: could not retry the turn now (${message}); its wait is queued again`,
+      );
+      try {
+        await bb.sdk.threads.retry({
+          threadId,
+          turnRequestId,
+          reason: wait.reason,
+          ...(wait.sendAt === null ? {} : { sendAt: wait.sendAt }),
+        });
+      } catch (restoreError) {
+        throw new Error(
+          `${message}; queuing its wait again failed too: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
+          { cause: error },
+        );
+      }
+    }
+  }
   // A login must not outlive the plugin that runs it (reload, disable, shutdown).
   bb.onDispose(() => login.cancel());
 

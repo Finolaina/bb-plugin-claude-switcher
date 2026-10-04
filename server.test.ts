@@ -280,6 +280,9 @@ interface QueuedRow {
   sendAt: number | null;
   /** What the row waits on, as bb says it; a plugin's hold names the plugin. */
   waitingOn?: { kind: "time" } | { kind: "plugin"; pluginId: string; reason: string } | null;
+  createdAt?: number;
+  /** The model the row runs with (a retry: the failed turn's). */
+  model?: string;
 }
 
 interface HostOptions {
@@ -4761,15 +4764,23 @@ describe("a wait another account can end sooner", () => {
   // account's session while another account had been free since 00:45 (it
   // could not be measured when the wait was chosen). After each refresh, a
   // project whose account is measured out for a waiting thread's model moves
-  // to an account that can run it now, and the wait is sent.
+  // to an account that can run it now, and the wait is replaced by a retry
+  // bb dispatches at once, through every plugin's checkpoint.
   const FABLE = { preferredModel: "Fable" };
+  const FABLE_ID = "claude-fable-5-1";
+  const OPUS_ID = "claude-opus-5-5";
   /** main (the project's account) is out until its session resets; spare has Fable; work has none left. */
   const MAIN_OUT = {
     main: () => Response.json(payload(100, 40, 20)),
     spare: () => Response.json(payload(10, 60, 20)),
     work: () => Response.json(payload(5, 20, 100)),
   };
-  function waiting(id: string, threadId: string, sendAt = NOW + 2 * HOUR + BUFFER): QueuedRow {
+  /** A timed retry of the thread's failed turn `creq_<id>`, queued an hour ago. */
+  function waiting(
+    id: string,
+    threadId: string,
+    sendAt = NOW + 2 * HOUR + BUFFER,
+  ): QueuedRow {
     return {
       id,
       threadId,
@@ -4781,20 +4792,81 @@ describe("a wait another account can end sooner", () => {
       },
       sendAt,
       waitingOn: { kind: "time" },
+      createdAt: NOW - HOUR,
+      model: FABLE_ID,
     };
+  }
+  /** A turn as bb logs it: its request, and the retry chain it belongs to. */
+  function turnRequested(
+    threadId: string,
+    requestId: string,
+    model: string,
+    retry?: { of: string; attempt: number },
+  ): LoggedEvent {
+    return {
+      id: `evt_${requestId}`,
+      scope: { kind: "thread" },
+      threadId,
+      seq: 1,
+      createdAt: NOW - HOUR,
+      type: "client/turn/requested",
+      data: {
+        requestId,
+        ...(retry === undefined
+          ? {}
+          : { retryOfRequestId: retry.of, retryAttempt: retry.attempt }),
+        execution: { model },
+      },
+    };
+  }
+  /** Each row's thread as bb leaves it after a failed turn: in error, its latest turn the one the row retries. */
+  function waitingHost(
+    usage: Record<string, () => Response>,
+    rows: QueuedRow[],
+    extra: HostOptions = {},
+  ) {
+    const threads: Record<string, Partial<ThreadResponse>> = {};
+    const threadEvents: Record<string, LoggedEvent[]> = {};
+    for (const row of rows) {
+      threads[row.threadId] = { status: "error" };
+      if (row.payload.kind === "retry")
+        threadEvents[row.threadId] = [
+          turnRequested(
+            row.threadId,
+            row.payload.retryOfTurnRequestId,
+            row.model ?? FABLE_ID,
+          ),
+        ];
+    }
+    return host(usage, {
+      settings: FABLE,
+      queued: rows,
+      ...extra,
+      threads: { ...threads, ...extra.threads },
+      threadEvents: { ...threadEvents, ...extra.threadEvents },
+    });
   }
   /** One pass of the background refresh, to its end. */
   async function onePass(h: Awaited<ReturnType<typeof host>>) {
+    const before = h.usageCalls.length;
     const run = h.harness.behavior.runService("usage-refresh");
     await vi.waitFor(() => {
-      expect(h.usageCalls).toHaveLength(3);
+      expect(h.usageCalls).toHaveLength(before + 3);
     });
     run.controller.abort();
     await run.done;
   }
+  /** The retry bb dispatches at once for a released wait. */
+  function retriedNow(threadId: string, turnRequestId: string) {
+    return {
+      threadId,
+      turnRequestId,
+      reason: expect.stringMatching(/spare/),
+    };
+  }
 
-  it("moves the project to an account that can run the thread now and sends the wait", async () => {
-    const h = await host(MAIN_OUT, { settings: FABLE, queued: [waiting("r1", "thread-1")] });
+  it("moves the project to an account that can run the thread now and has bb retry the turn at once, never sending the row itself", async () => {
+    const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")]);
     dispose = () => h.harness.dispose();
     await onePass(h);
     expect(h.envSet).toEqual([
@@ -4805,8 +4877,14 @@ describe("a wait another account can end sooner", () => {
         note: ownNote("spare"),
       },
     ]);
-    expect(h.sent).toEqual(["r1"]);
-    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(h.deleted).toEqual(["r1"]);
+    expect(h.retries).toEqual([retriedNow("thread-1", "creq_r1")]);
+    expect(h.sent).toEqual([]);
+    expect(h.queued).toEqual([]);
+    const state = (await h.harness.behavior.callRpc(
+      "accounts_list",
+      null,
+    )) as State;
     expect(state.lastSwitch).toMatchObject({
       projectId: "proj-1",
       threadId: "thread-1",
@@ -4814,40 +4892,208 @@ describe("a wait another account can end sooner", () => {
       to: "spare",
     });
     expect(state.lastSwitch?.reason).toMatch(/spare/);
+    expect(await h.bb.storage.kv.get("handled-projects")).toEqual(["proj-1"]);
   });
 
-  it("moves a project once for all its waiting threads and sends every wait", async () => {
-    const h = await host(MAIN_OUT, {
-      settings: FABLE,
-      queued: [waiting("r1", "thread-1"), waiting("r3", "thread-3")],
+  it("moves a project once for all its waiting threads and retries every one", async () => {
+    const h = await waitingHost(MAIN_OUT, [
+      waiting("r1", "thread-1"),
+      waiting("r3", "thread-3"),
+    ]);
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+    expect(h.deleted).toEqual(["r1", "r3"]);
+    expect(h.retries).toEqual([
+      retriedNow("thread-1", "creq_r1"),
+      retriedNow("thread-3", "creq_r3"),
+    ]);
+  });
+
+  it("retries in a later pass a wait queued before the project moved, but not one queued after", async () => {
+    let failThread3 = true;
+    const h = await waitingHost(MAIN_OUT, [
+      waiting("r1", "thread-1"),
+      waiting("r3", "thread-3"),
+      { ...waiting("r5", "thread-5"), createdAt: NOW },
+    ]);
+    dispose = () => h.harness.dispose();
+    h.harness.sdk.stub("threads.get", async (args: { threadId: string }) => {
+      if (args.threadId === "thread-3" && failThread3) {
+        failThread3 = false;
+        throw new Error("HTTP 503: bb is busy");
+      }
+      return thread({ id: args.threadId, projectId: "proj-1", status: "error" });
+    });
+    await onePass(h);
+    expect(h.deleted).toEqual(["r1"]);
+    // Next pass: main is still out, the project is on spare since the move.
+    await onePass(h);
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+    expect(h.deleted).toEqual(["r1", "r3"]);
+    expect(h.retries.map((r) => r.turnRequestId)).toEqual([
+      "creq_r1",
+      "creq_r3",
+    ]);
+    // Queued the very moment the project moved: it waits for something else.
+    expect(h.queued.map((r) => r.id)).toEqual(["r5"]);
+  });
+
+  it("leaves a wait that left the queue or that another plugin took hold of after the look, and one already on its way when it is replaced", async () => {
+    const answers: Array<(rows: QueuedRow[]) => QueuedRow[]> = [
+      () => [],
+      (rows) =>
+        rows.map((r) => ({
+          ...r,
+          waitingOn: { kind: "plugin", pluginId: "limiter", reason: "budget" },
+        })),
+    ];
+    for (const answer of answers) {
+      const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")]);
+      h.harness.sdk.stub(
+        "threads.queuedMessages.list",
+        async (args: { threadId: string }) =>
+          answer(h.queued.filter((r) => r.threadId === args.threadId)),
+      );
+      await onePass(h);
+      expect(h.envSet).toEqual([]);
+      expect(h.deleted).toEqual([]);
+      expect(h.retries).toEqual([]);
+      h.harness.dispose();
+    }
+    // Sent between the look and the delete: bb has it, nothing to retry.
+    const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")], {
+      deleteRowError: {
+        message: "HTTP 404: Queued message not found",
+        status: 404,
+      },
     });
     dispose = () => h.harness.dispose();
     await onePass(h);
     expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
-    expect(h.sent).toEqual(["r1", "r3"]);
+    expect(h.retries).toEqual([]);
+    expect(
+      h.harness.logEntries.filter((entry) => entry.level === "warn"),
+    ).toEqual([]);
+  });
+
+  it("judges a wait by the model its retry runs with, not by the model the thread used last", async () => {
+    // main is out of Fable only: it can still run Opus.
+    const fableOut = {
+      ...MAIN_OUT,
+      main: () => Response.json(payload(10, 40, 100)),
+    };
+    const opus = await waitingHost(
+      fableOut,
+      [{ ...waiting("r1", "thread-1"), model: OPUS_ID }],
+      {
+        threadEvents: {
+          "thread-1": [turnRequested("thread-1", "creq_r1", FABLE_ID)],
+        },
+      },
+    );
+    await onePass(opus);
+    expect(opus.envSet).toEqual([]);
+    expect(opus.retries).toEqual([]);
+    opus.harness.dispose();
+    const fable = await waitingHost(fableOut, [waiting("r1", "thread-1")], {
+      settings: { preferredModel: "Opus" },
+      threadEvents: {
+        "thread-1": [turnRequested("thread-1", "creq_r1", OPUS_ID)],
+      },
+    });
+    dispose = () => fable.harness.dispose();
+    await onePass(fable);
+    expect(fable.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+    expect(fable.retries).toEqual([retriedNow("thread-1", "creq_r1")]);
+  });
+
+  it("retries a wait of a retry that failed again by that retry's own request", async () => {
+    const row: QueuedRow = {
+      ...waiting("r1", "thread-1"),
+      payload: {
+        kind: "retry",
+        attempt: 3,
+        reason: "Waiting for the session of main",
+        retryOfTurnRequestId: "creq_r1",
+      },
+    };
+    const h = await waitingHost(MAIN_OUT, [row], {
+      threadEvents: {
+        "thread-1": [
+          turnRequested("thread-1", "creq_r1b", FABLE_ID, {
+            of: "creq_r1",
+            attempt: 2,
+          }),
+        ],
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.retries).toEqual([retriedNow("thread-1", "creq_r1b")]);
+  });
+
+  it("leaves a retry of an earlier turn: the user wrote meanwhile, or its chain has moved on", async () => {
+    const latest = [
+      // The user's message after it failed too: bb would retry that one.
+      turnRequested("thread-1", "creq_new", FABLE_ID),
+      // The same chain, already one attempt further.
+      turnRequested("thread-1", "creq_r1c", FABLE_ID, {
+        of: "creq_r1",
+        attempt: 2,
+      }),
+    ];
+    for (const event of latest) {
+      const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")], {
+        threadEvents: { "thread-1": [event] },
+      });
+      await onePass(h);
+      expect(h.envSet).toEqual([]);
+      expect(h.deleted).toEqual([]);
+      expect(h.retries).toEqual([]);
+      h.harness.dispose();
+    }
+  });
+
+  it("queues the wait again as it was when bb does not take the retry", async () => {
+    const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")], {
+      retryBehaviour: "fail-once",
+    });
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.deleted).toEqual(["r1"]);
+    expect(h.retries).toEqual([
+      {
+        threadId: "thread-1",
+        turnRequestId: "creq_r1",
+        reason: "Waiting for the session of main",
+        sendAt: NOW + 2 * HOUR + BUFFER,
+      },
+    ]);
+    expect(h.queued.map((r) => r.sendAt)).toEqual([NOW + 2 * HOUR + BUFFER]);
   });
 
   it("leaves the wait when no other account can run the thread's model: a Fable wait never moves to an account out of Fable", async () => {
-    const h = await host(
+    const h = await waitingHost(
       { ...MAIN_OUT, spare: () => Response.json(payload(10, 60, 100)) },
-      { settings: FABLE, queued: [waiting("r1", "thread-1")] },
+      [waiting("r1", "thread-1")],
     );
     dispose = () => h.harness.dispose();
     await onePass(h);
     expect(h.envSet).toEqual([]);
-    expect(h.sent).toEqual([]);
+    expect(h.deleted).toEqual([]);
     expect(h.queued.map((r) => r.id)).toEqual(["r1"]);
   });
 
-  it("leaves a wait whose account can run: it waits for something else (a backoff), not for a limit", async () => {
-    const h = await host(
+  it("leaves a wait whose account can run and has not moved since: it waits for something else (a backoff), not for a limit", async () => {
+    const h = await waitingHost(
       { ...MAIN_OUT, main: () => Response.json(payload(10, 40, 20)) },
-      { settings: FABLE, queued: [waiting("r1", "thread-1")] },
+      [waiting("r1", "thread-1")],
     );
     dispose = () => h.harness.dispose();
     await onePass(h);
     expect(h.envSet).toEqual([]);
-    expect(h.sent).toEqual([]);
+    expect(h.deleted).toEqual([]);
   });
 
   it("leaves a wait whose account could not be measured or answered without its windows: nothing says it is out", async () => {
@@ -4861,92 +5107,147 @@ describe("a wait another account can end sooner", () => {
         }),
     ];
     for (const main of answers) {
-      const h = await host(
-        { ...MAIN_OUT, main },
-        { settings: FABLE, queued: [waiting("r1", "thread-1")] },
-      );
+      const h = await waitingHost({ ...MAIN_OUT, main }, [
+        waiting("r1", "thread-1"),
+      ]);
       await onePass(h);
       expect(h.envSet).toEqual([]);
-      expect(h.sent).toEqual([]);
+      expect(h.deleted).toEqual([]);
       h.harness.dispose();
     }
   });
 
   it("leaves a wait about to run anyway (within the reset buffer and its jitter), and not one just past it", async () => {
     const edge = NOW + BUFFER + 30_000;
-    const h = await host(MAIN_OUT, {
-      settings: FABLE,
-      queued: [waiting("r1", "thread-1", edge)],
-    });
+    const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1", edge)]);
     await onePass(h);
     expect(h.envSet).toEqual([]);
-    expect(h.sent).toEqual([]);
+    expect(h.deleted).toEqual([]);
     h.harness.dispose();
-    const later = await host(MAIN_OUT, {
-      settings: FABLE,
-      queued: [waiting("r1", "thread-1", edge + 1)],
-    });
+    const later = await waitingHost(MAIN_OUT, [
+      waiting("r1", "thread-1", edge + 1),
+    ]);
     dispose = () => later.harness.dispose();
     await onePass(later);
-    expect(later.sent).toEqual(["r1"]);
+    expect(later.deleted).toEqual(["r1"]);
   });
 
-  it("does nothing with automatic switching off, an untimed or non-retry row, a row another plugin holds, or a thread that is not the user's Claude Code thread", async () => {
-    const cases: HostOptions[] = [
-      { settings: { ...FABLE, autoSwitch: false }, queued: [waiting("r1", "thread-1")] },
-      { settings: FABLE, queued: [{ ...waiting("r1", "thread-1"), sendAt: null }] },
-      { settings: FABLE, queued: [{ ...waiting("r1", "thread-1"), payload: { kind: "inline" } }] },
-      {
-        settings: FABLE,
-        queued: [
-          {
-            ...waiting("r1", "thread-1"),
-            waitingOn: { kind: "plugin", pluginId: "limiter", reason: "budget" },
-          },
-        ],
-      },
-      {
-        settings: FABLE,
-        queued: [waiting("r1", "thread-1")],
-        threads: { "thread-1": { providerId: "codex" } },
-      },
-      {
-        settings: FABLE,
-        queued: [waiting("r1", "thread-1")],
-        threads: { "thread-1": { visibility: "hidden" } },
-      },
+  it("does nothing with automatic switching off, an untimed or non-retry row, a row another plugin holds, or a thread that is not the user's failed Claude Code thread", async () => {
+    const row = waiting("r1", "thread-1");
+    // The last field: how often the thread is read (the first rows are dropped at the look).
+    const cases: Array<[QueuedRow, HostOptions, number]> = [
+      [row, { settings: { ...FABLE, autoSwitch: false } }, 0],
+      [{ ...row, sendAt: null }, {}, 0],
+      [{ ...row, payload: { kind: "inline" } }, {}, 0],
+      [
+        {
+          ...row,
+          waitingOn: { kind: "plugin", pluginId: "limiter", reason: "budget" },
+        },
+        {},
+        0,
+      ],
+      [
+        row,
+        { threads: { "thread-1": { status: "error", providerId: "codex" } } },
+        1,
+      ],
+      [
+        row,
+        { threads: { "thread-1": { status: "error", visibility: "hidden" } } },
+        1,
+      ],
+      // bb retries only a thread whose latest turn failed.
+      [row, { threads: { "thread-1": { status: "idle" } } }, 1],
     ];
-    for (const options of cases) {
-      const h = await host(MAIN_OUT, options);
+    for (const [queued, options, reads] of cases) {
+      const h = await waitingHost(MAIN_OUT, [queued], options);
       await onePass(h);
+      expect(h.harness.sdk.callsTo("threads.get")).toHaveLength(reads);
+      // Switched off: not even the queue is read.
+      if (options.settings?.autoSwitch === false)
+        expect(h.harness.sdk.callsTo("threads.queue.list")).toEqual([]);
       expect(h.envSet).toEqual([]);
-      expect(h.sent).toEqual([]);
+      expect(h.deleted).toEqual([]);
+      expect(h.retries).toEqual([]);
       h.harness.dispose();
     }
   });
 
   it("never touches a project whose account variable was set outside the plugin", async () => {
-    const h = await host(MAIN_OUT, {
-      settings: FABLE,
-      queued: [waiting("r1", "thread-1")],
+    const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")], {
       presetEnv: {
-        "proj-1": [{ name: ENV_VAR, note: "set by hand", secret: true, value: null }],
+        "proj-1": [
+          { name: ENV_VAR, note: "set by hand", secret: true, value: null },
+        ],
       },
     });
     dispose = () => h.harness.dispose();
     await onePass(h);
     expect(h.envSet).toEqual([]);
-    expect(h.sent).toEqual([]);
+    expect(h.deleted).toEqual([]);
+  });
+
+  it("decides on the project's account as it is after reading the thread, not as it was before", async () => {
+    const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")]);
+    dispose = () => h.harness.dispose();
+    h.harness.sdk.stub(
+      "threads.events.list",
+      async () => {
+        // Moved to spare meanwhile (by another turn's placement, or by hand).
+        h.env.set("proj-1", [
+          { name: ENV_VAR, note: ownNote("spare"), secret: true, value: null },
+        ]);
+        return [turnRequested("thread-1", "creq_r1", FABLE_ID)];
+      },
+    );
+    await onePass(h);
+    expect(h.envSet).toEqual([]);
+    expect(h.deleted).toEqual([]);
+  });
+
+  it("stops when automatic switching is turned off during the pass: nothing moved, nothing retried", async () => {
+    const h = await waitingHost(MAIN_OUT, [
+      waiting("r1", "thread-1"),
+      waiting("r2", "thr-2"),
+    ]);
+    dispose = () => h.harness.dispose();
+    h.harness.sdk.stub(
+      "threads.queuedMessages.list",
+      async (args: { threadId: string }) => {
+        await h.harness.behavior.setSettings({ autoSwitch: false });
+        return h.queued.filter((r) => r.threadId === args.threadId);
+      },
+    );
+    await onePass(h);
+    expect(h.envSet).toEqual([]);
+    expect(h.deleted).toEqual([]);
+    expect(h.retries).toEqual([]);
+    // The second wait is not even looked at.
+    expect(h.harness.sdk.callsTo("threads.get")).toHaveLength(1);
+  });
+
+  it("does not retry a wait when automatic switching is turned off while the project moves", async () => {
+    let off: (() => Promise<unknown>) | null = null;
+    const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")], {
+      beforeSet: () => off?.() ?? Promise.resolve(),
+    });
+    dispose = () => h.harness.dispose();
+    off = () => h.harness.behavior.setSettings({ autoSwitch: false });
+    await onePass(h);
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+    expect(h.deleted).toEqual([]);
+    expect(h.retries).toEqual([]);
   });
 
   it("a failed look at the queue leaves everything as it was and the refresh goes on", async () => {
-    const h = await host(MAIN_OUT, { settings: FABLE, queued: [waiting("r1", "thread-1")] });
+    const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")]);
     dispose = () => h.harness.dispose();
     h.harness.sdk.stub("threads.queue.list", async () => {
       throw new Error("HTTP 503: bb is restarting");
     });
     await onePass(h);
     expect(h.envSet).toEqual([]);
-    expect(h.sent).toEqual([]);
+    expect(h.deleted).toEqual([]);
   });
 });
