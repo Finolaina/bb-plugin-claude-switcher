@@ -60,6 +60,8 @@ import {
   decideSwitch,
   isRefusal,
   modelFamily,
+  RESET_BUFFER_MS,
+  RESET_JITTER_MS,
 } from "./src/switch.js";
 import {
   usageFetchMethod,
@@ -1785,6 +1787,91 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     );
   });
 
+  // ---- A wait another account can end sooner -----------------------------
+  /**
+   * A timed retry waits for the reset of the account its project was on when
+   * the turn failed; an account that could not be measured then may have
+   * room now (2026-10-04: a thread waited three hours for a session while
+   * another account was free). After each refresh, a project whose account
+   * is MEASURED unable to run a waiting thread's model moves to an account
+   * that can, and the wait is sent. Left as they are: a wait about to run
+   * anyway, one another plugin holds, and one whose account may still run
+   * (it waits for something else, such as a backoff).
+   */
+  async function revisitWaits(): Promise<void> {
+    if (!current.autoSwitch) return;
+    const now = deps.now();
+    const rows = (await bb.sdk.threads.queue.list()).filter(
+      (row) =>
+        row.payload.kind === "retry" &&
+        row.sendAt !== null &&
+        row.sendAt - now > RESET_BUFFER_MS + RESET_JITTER_MS &&
+        (row.waitingOn == null || row.waitingOn.kind === "time"),
+    );
+    /** Projects moved in this pass, to the account each went to. */
+    const moved = new Map<string, string>();
+    for (const row of rows) {
+      try {
+        const thread = await bb.sdk.threads.get({ threadId: row.threadId });
+        if (
+          thread.providerId !== CLAUDE_CODE_PROVIDER ||
+          notTheUsersThread(thread) !== null
+        )
+          continue;
+        await inProjectQueue(thread.projectId, () =>
+          moveUpWait(thread, row.id, moved),
+        );
+      } catch (error) {
+        bb.log.warn(
+          `thread ${row.threadId}: its wait was not looked at again: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  }
+
+  async function moveUpWait(
+    thread: ThreadResponse,
+    rowId: string,
+    moved: Map<string, string>,
+  ): Promise<void> {
+    const projectId = thread.projectId;
+    const from = await projectAccount(projectId);
+    if (from.external) return;
+    const fromName = from.account ?? current.defaultAccountName;
+    const model =
+      threadModel.get(thread.id) ??
+      (await loggedModel(thread.id)) ??
+      current.preferredModel;
+    const now = deps.now();
+    const measured = measuredAccounts(model);
+    const here = measured.find((a) => a.name === fromName);
+    if (
+      here === undefined ||
+      here.unknown === true ||
+      bestAccount([here], model, now) === fromName
+    ) {
+      // Moved here in this pass for another of its waits: this one runs too.
+      if (moved.get(projectId) === fromName) await sendQueued(thread.id, rowId);
+      return;
+    }
+    const to = bestAccount(
+      measured.filter((a) => a.name !== fromName),
+      model,
+      now,
+    );
+    if (to === null) return;
+    await applyAccount(projectId, accountOrDefault(to), from);
+    await markHandled(projectId);
+    moved.set(projectId, to);
+    const reason = `Moved to account ${to}, which can run the waiting turn now: ${fromName} ${whyOut(fromName, model)}`;
+    bb.log.info(`thread ${thread.id}: ${reason}`);
+    await recordMove(
+      { at: now, threadId: thread.id, projectId, from: fromName, to, reason },
+      thread.id,
+    );
+    await sendQueued(thread.id, rowId);
+  }
+
   // A login must not outlive the plugin that runs it (reload, disable, shutdown).
   bb.onDispose(() => login.cancel());
 
@@ -1797,6 +1884,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         } catch (error) {
           bb.log.warn(
             `usage refresh failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        try {
+          await revisitWaits();
+        } catch (error) {
+          bb.log.warn(
+            `the waiting turns were not looked at again: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
         await sleep(Math.max(1, current.refreshMinutes) * 60_000, signal);

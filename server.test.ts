@@ -278,6 +278,8 @@ interface QueuedRow {
         retryOfTurnRequestId: string;
       };
   sendAt: number | null;
+  /** What the row waits on, as bb says it; a plugin's hold names the plugin. */
+  waitingOn?: { kind: "time" } | { kind: "plugin"; pluginId: string; reason: string } | null;
 }
 
 interface HostOptions {
@@ -447,6 +449,10 @@ async function host(
             waitingOn: null,
             sendAt: args.sendAt ?? null,
           };
+        },
+        queue: {
+          // Like bb with no filter: every live row in the workspace.
+          list: async () => [...queued],
         },
         queuedMessages: {
           list: async ({ threadId }: { threadId: string }) =>
@@ -4747,5 +4753,200 @@ describe("an account that refuses the turn", () => {
     expect(h.retries).toEqual([]);
     expect(h.usageCalls).toEqual([]);
     expect(h.envSet).toEqual([]);
+  });
+});
+
+describe("a wait another account can end sooner", () => {
+  // 2026-10-04: the «bots» mother thread waited until 03:00 for its
+  // account's session while another account had been free since 00:45 (it
+  // could not be measured when the wait was chosen). After each refresh, a
+  // project whose account is measured out for a waiting thread's model moves
+  // to an account that can run it now, and the wait is sent.
+  const FABLE = { preferredModel: "Fable" };
+  /** main (the project's account) is out until its session resets; spare has Fable; work has none left. */
+  const MAIN_OUT = {
+    main: () => Response.json(payload(100, 40, 20)),
+    spare: () => Response.json(payload(10, 60, 20)),
+    work: () => Response.json(payload(5, 20, 100)),
+  };
+  function waiting(id: string, threadId: string, sendAt = NOW + 2 * HOUR + BUFFER): QueuedRow {
+    return {
+      id,
+      threadId,
+      payload: {
+        kind: "retry",
+        attempt: 2,
+        reason: "Waiting for the session of main",
+        retryOfTurnRequestId: `creq_${id}`,
+      },
+      sendAt,
+      waitingOn: { kind: "time" },
+    };
+  }
+  /** One pass of the background refresh, to its end. */
+  async function onePass(h: Awaited<ReturnType<typeof host>>) {
+    const run = h.harness.behavior.runService("usage-refresh");
+    await vi.waitFor(() => {
+      expect(h.usageCalls).toHaveLength(3);
+    });
+    run.controller.abort();
+    await run.done;
+  }
+
+  it("moves the project to an account that can run the thread now and sends the wait", async () => {
+    const h = await host(MAIN_OUT, { settings: FABLE, queued: [waiting("r1", "thread-1")] });
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.envSet).toEqual([
+      {
+        projectId: "proj-1",
+        name: ENV_VAR,
+        value: `${ACCOUNTS}/spare`,
+        note: ownNote("spare"),
+      },
+    ]);
+    expect(h.sent).toEqual(["r1"]);
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.lastSwitch).toMatchObject({
+      projectId: "proj-1",
+      threadId: "thread-1",
+      from: "main",
+      to: "spare",
+    });
+    expect(state.lastSwitch?.reason).toMatch(/spare/);
+  });
+
+  it("moves a project once for all its waiting threads and sends every wait", async () => {
+    const h = await host(MAIN_OUT, {
+      settings: FABLE,
+      queued: [waiting("r1", "thread-1"), waiting("r3", "thread-3")],
+    });
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+    expect(h.sent).toEqual(["r1", "r3"]);
+  });
+
+  it("leaves the wait when no other account can run the thread's model: a Fable wait never moves to an account out of Fable", async () => {
+    const h = await host(
+      { ...MAIN_OUT, spare: () => Response.json(payload(10, 60, 100)) },
+      { settings: FABLE, queued: [waiting("r1", "thread-1")] },
+    );
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.envSet).toEqual([]);
+    expect(h.sent).toEqual([]);
+    expect(h.queued.map((r) => r.id)).toEqual(["r1"]);
+  });
+
+  it("leaves a wait whose account can run: it waits for something else (a backoff), not for a limit", async () => {
+    const h = await host(
+      { ...MAIN_OUT, main: () => Response.json(payload(10, 40, 20)) },
+      { settings: FABLE, queued: [waiting("r1", "thread-1")] },
+    );
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.envSet).toEqual([]);
+    expect(h.sent).toEqual([]);
+  });
+
+  it("leaves a wait whose account could not be measured or answered without its windows: nothing says it is out", async () => {
+    const answers = [
+      () => new Response("busy", { status: 429 }),
+      () =>
+        Response.json({
+          limits: [],
+          five_hour: { locked_reason: null },
+          seven_day: { locked_reason: null },
+        }),
+    ];
+    for (const main of answers) {
+      const h = await host(
+        { ...MAIN_OUT, main },
+        { settings: FABLE, queued: [waiting("r1", "thread-1")] },
+      );
+      await onePass(h);
+      expect(h.envSet).toEqual([]);
+      expect(h.sent).toEqual([]);
+      h.harness.dispose();
+    }
+  });
+
+  it("leaves a wait about to run anyway (within the reset buffer and its jitter), and not one just past it", async () => {
+    const edge = NOW + BUFFER + 30_000;
+    const h = await host(MAIN_OUT, {
+      settings: FABLE,
+      queued: [waiting("r1", "thread-1", edge)],
+    });
+    await onePass(h);
+    expect(h.envSet).toEqual([]);
+    expect(h.sent).toEqual([]);
+    h.harness.dispose();
+    const later = await host(MAIN_OUT, {
+      settings: FABLE,
+      queued: [waiting("r1", "thread-1", edge + 1)],
+    });
+    dispose = () => later.harness.dispose();
+    await onePass(later);
+    expect(later.sent).toEqual(["r1"]);
+  });
+
+  it("does nothing with automatic switching off, an untimed or non-retry row, a row another plugin holds, or a thread that is not the user's Claude Code thread", async () => {
+    const cases: HostOptions[] = [
+      { settings: { ...FABLE, autoSwitch: false }, queued: [waiting("r1", "thread-1")] },
+      { settings: FABLE, queued: [{ ...waiting("r1", "thread-1"), sendAt: null }] },
+      { settings: FABLE, queued: [{ ...waiting("r1", "thread-1"), payload: { kind: "inline" } }] },
+      {
+        settings: FABLE,
+        queued: [
+          {
+            ...waiting("r1", "thread-1"),
+            waitingOn: { kind: "plugin", pluginId: "limiter", reason: "budget" },
+          },
+        ],
+      },
+      {
+        settings: FABLE,
+        queued: [waiting("r1", "thread-1")],
+        threads: { "thread-1": { providerId: "codex" } },
+      },
+      {
+        settings: FABLE,
+        queued: [waiting("r1", "thread-1")],
+        threads: { "thread-1": { visibility: "hidden" } },
+      },
+    ];
+    for (const options of cases) {
+      const h = await host(MAIN_OUT, options);
+      await onePass(h);
+      expect(h.envSet).toEqual([]);
+      expect(h.sent).toEqual([]);
+      h.harness.dispose();
+    }
+  });
+
+  it("never touches a project whose account variable was set outside the plugin", async () => {
+    const h = await host(MAIN_OUT, {
+      settings: FABLE,
+      queued: [waiting("r1", "thread-1")],
+      presetEnv: {
+        "proj-1": [{ name: ENV_VAR, note: "set by hand", secret: true, value: null }],
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.envSet).toEqual([]);
+    expect(h.sent).toEqual([]);
+  });
+
+  it("a failed look at the queue leaves everything as it was and the refresh goes on", async () => {
+    const h = await host(MAIN_OUT, { settings: FABLE, queued: [waiting("r1", "thread-1")] });
+    dispose = () => h.harness.dispose();
+    h.harness.sdk.stub("threads.queue.list", async () => {
+      throw new Error("HTTP 503: bb is restarting");
+    });
+    await onePass(h);
+    expect(h.envSet).toEqual([]);
+    expect(h.sent).toEqual([]);
   });
 });
