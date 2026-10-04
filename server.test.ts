@@ -1468,6 +1468,96 @@ describe("claude accounts plugin", () => {
     expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
   });
 
+  it("judges a leftover the new account cannot run by the new account's measurements: the report is the old account's, never chosen", async () => {
+    // 2026-10-04, thread «Tiriti»: its turn ran two hours on the old account
+    // and failed with THAT account's reset (+3 h), after the project had
+    // moved to an account measured out until an earlier time (+2 h). The
+    // plugin waited for the later reset, on the new account, with the new
+    // account free an hour before.
+    let clock = NOW;
+    let mainSession = 100;
+    let workSession = 5;
+    const h = await host(
+      {
+        main: () => Response.json(payload(mainSession, 40)),
+        spare: () => Response.json(payload(100, 60)),
+        work: () => Response.json(payload(workSession, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    // thread-3 starts a long turn on main (the project's account then).
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    // Later, work is out too (until +2 h, measured) and main measures room
+    // (stale: the provider just said no until +3 h).
+    clock = NOW + 5 * 60_000;
+    workSession = 100;
+    mainSession = 5;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const late = failure({ threadId: "thread-3", requestId: "creq_9" });
+    late.rateLimits!.windows[0]!.resetsAtMs = NOW + 3 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", late);
+    expect(h.retries[1]).toEqual({
+      threadId: "thread-3",
+      turnRequestId: "creq_9",
+      reason: "Waiting for work",
+      sendAt: NOW + 2 * HOUR + BUFFER,
+    });
+    // The project stays on work: main just failed, whatever it measures.
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+  });
+
+  it("a refusal of a leftover marks the account its turn ran on, not the project's current account", async () => {
+    let clock = NOW;
+    let workSession = 5;
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(workSession, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    // work measures out when main refuses the leftover: judged, and the
+    // refusal is main's.
+    clock = NOW + 5 * 60_000;
+    workSession = 100;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({
+        threadId: "thread-3",
+        requestId: "creq_9",
+        errorInfo: {
+          category: "unauthorized",
+          providerCode: null,
+          httpStatusCode: 403,
+        },
+        rateLimits: null,
+      }),
+    );
+    // work has room again: a new project goes there (spare if work had
+    // been marked as the refusing account).
+    workSession = 5;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent("thread.created", {
+      thread: thread({ id: "thr-new", projectId: "proj-3" }),
+    });
+    expect(h.envSet.at(-1)).toEqual(
+      expect.objectContaining({ projectId: "proj-3", value: `${ACCOUNTS}/work` }),
+    );
+  });
+
   it("retries a straggler blind once: its retry failing at the door is judged", async () => {
     let clock = NOW;
     const h = await host(

@@ -386,6 +386,34 @@ describe("decideSwitch", () => {
     expect(declineReason(failure({ attemptNumber: ATTEMPTS - 1 }))).toBeNull();
     expect(declineReason(failure())).toBeNull();
   });
+  it("applies the report's reset to the account the turn ran on, never chosen, not to the project's current account", () => {
+    // The turn started on main before the project moved to work; its report
+    // (main's session, 2 h) says nothing about work, measured out for 1 h.
+    // main's own measurement says room: stale, the provider just said no.
+    const moved = input({
+      currentAccount: "work",
+      failedAccount: "main",
+      accounts: [
+        account("main"),
+        account("work", {
+          session: { usedPercent: 100, resetsAt: NOW + HOUR },
+        }),
+      ],
+    });
+    expect(decideSwitch(moved)).toEqual({
+      kind: "wait",
+      account: "work",
+      sendAt: NOW + HOUR + BUFFER,
+      reason: "Waiting for work",
+    });
+    // Another account free: the move goes there, never back to main.
+    expect(
+      decideSwitch({
+        ...moved,
+        accounts: [...moved.accounts, account("spare")],
+      }),
+    ).toEqual({ kind: "switch", account: "spare", model: null });
+  });
 });
 
 describe("a turn the account refused", () => {
