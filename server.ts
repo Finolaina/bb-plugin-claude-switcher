@@ -1193,7 +1193,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return status === 409 && /is not the failed turn/i.test(message);
   }
 
-  async function sendQueued(threadId: string, id: string): Promise<void> {
+  async function sendQueued(
+    threadId: string,
+    projectId: string,
+    id: string,
+  ): Promise<void> {
+    // An explicit send skips bb's dispatch checkpoint, and so the anchor
+    // `thread.active` compares against: set here, as close to the send as
+    // it gets, after any move of the project (Codex IR17-001).
+    dispatchEpoch.set(threadId, movesOf(projectId).epoch);
     try {
       await bb.sdk.threads.queuedMessages.send({
         threadId,
@@ -1201,6 +1209,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         mode: "auto",
       });
     } catch (error) {
+      // Not sent by this call: whoever sends it anchors it, or nobody does.
+      dispatchEpoch.delete(threadId);
       if (stillWaiting(error)) {
         bb.log.info(
           `thread ${threadId}: busy again; the queued retry runs when it frees`,
@@ -1224,6 +1234,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   async function retryTurn(
     event: PluginTurnFailedEvent,
+    projectId: string,
     reason: string,
     sendAt?: number,
     stuck = false,
@@ -1239,7 +1250,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // IR6-002).
       if (stuck) return;
       if (sendAt === undefined) {
-        await sendQueued(threadId, existing.id);
+        await sendQueued(threadId, projectId, existing.id);
         return;
       }
       try {
@@ -1273,7 +1284,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           return;
         }
         if (sendAt === undefined) {
-          await sendQueued(threadId, raced.id);
+          await sendQueued(threadId, projectId, raced.id);
         } else {
           bb.log.warn(
             `thread ${threadId}: another retry was queued first; leaving it`,
@@ -1547,10 +1558,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   const starting = new Map<string, number>();
   let starts = 0;
   /**
-   * The project's moves (`movesOf().epoch`) when bb asked to send each
-   * thread's message: bb reads the account as it starts the turn and
-   * announces `thread.active` after, so a move completed in between is
-   * not where the turn runs (Codex IR16-001).
+   * The project's moves (`movesOf().epoch`) when each thread's message was
+   * sent, by bb's dispatch checkpoint or by this plugin's own explicit
+   * send: bb reads the account as it starts the turn and announces
+   * `thread.active` after, so a move completed in between is not where the
+   * turn runs (Codex IR16-001). A turn announced with no anchor was sent
+   * past both (a queued row sent by hand): where the project stood when it
+   * started is unknown (Codex IR17-001).
    */
   const dispatchEpoch = new Map<string, number>();
   /** From here the thread's turn is no leftover of any account. */
@@ -1574,8 +1588,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // Unknown until read: a failure meanwhile is nobody's (Codex IR15-002).
     startedOn.set(thread.id, null);
     const move = movesOf(thread.projectId);
-    // Since bb was asked to send the turn, when it asked (Codex IR16-001).
-    const epochBefore = anchor ?? move.epoch;
     const busy = move.inFlight > 0;
     let account: string | null | undefined;
     try {
@@ -1590,17 +1602,21 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // what that said stands, not this stale read (code-reviewer r12).
     if (starting.get(thread.id) !== token) return;
     forgetStart(thread.id);
-    // The project was being moved, or moved, while its account was read: the
-    // read says where the project is (or was) going, not where the turn
-    // started. Unknown, rather than the new account's.
+    // The project was being moved, or moved, since the turn was sent or
+    // while its account was read: the read says where the project is (or
+    // was) going, not where the turn started. Unknown, rather than the new
+    // account's; unknown too with no anchor to compare against.
     if (
       account !== undefined &&
-      (busy || move.inFlight > 0 || move.epoch !== epochBefore)
+      (anchor === undefined ||
+        busy ||
+        move.inFlight > 0 ||
+        move.epoch !== anchor)
     )
       account = null;
     if (account === null)
       bb.log.debug(
-        `thread ${thread.id}: where its turn started is unknown (the project moved, or its account could not be read)`,
+        `thread ${thread.id}: where its turn started is unknown (sent past the dispatch checkpoint, the project moved, or its account could not be read)`,
       );
     if (account !== undefined) startedOn.set(thread.id, account);
   });
@@ -1814,7 +1830,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       bb.log.info(
         `thread ${event.threadId}: ${reason} (switched ${now - recent.at} ms ago)`,
       );
-      await retryTurn(event, reason, recent.sendAt);
+      await retryTurn(event, projectId, reason, recent.sendAt);
       return;
     }
     if (typeof started === "string") {
@@ -1840,7 +1856,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         bb.log.info(
           `thread ${event.threadId}: ${reason} (its turn started on ${started})`,
         );
-        await retryTurn(event, reason, sendAt);
+        await retryTurn(event, projectId, reason, sendAt);
         return;
       }
     }
@@ -2067,11 +2083,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       bb.log.info(
         `thread ${event.threadId}: ${how}${reason} until ${new Date(decision.sendAt).toISOString()}`,
       );
-      await retryTurn(event, reason, decision.sendAt, stuck);
+      await retryTurn(event, projectId, reason, decision.sendAt, stuck);
       return;
     }
     bb.log.info(`thread ${event.threadId}: ${how}${reason}`);
-    await retryTurn(event, reason, undefined, stuck);
+    await retryTurn(event, projectId, reason, undefined, stuck);
   }
 
   bb.events.on("turn.failed", async (event) => {
