@@ -1742,7 +1742,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       threadModel.get(event.threadId) ??
       (await loggedModel(event.threadId)) ??
       current.preferredModel;
-    await judge(event, projectId, from, model, now, false);
+    await judge(event, projectId, from, model, now, false, started);
   }
 
   /**
@@ -1835,7 +1835,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /**
    * Where the failed turn runs again: the project moves there and the retry
    * is queued. `stuck`: judged on a refresh for a thread left in error (see
-   * `rescueStuck`), not on its failure.
+   * `rescueStuck`), not on its failure. `ranOn`: the account the turn ran
+   * on when it is not the project's (a leftover the project's account cannot
+   * run either): the failure, its report and a refusal are that account's.
    */
   async function judge(
     event: PluginTurnFailedEvent,
@@ -1844,13 +1846,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     model: string,
     now: number,
     stuck: boolean,
+    ranOn?: string,
   ): Promise<void> {
     const fromName = from.account ?? current.defaultAccountName;
+    const failedOn = ranOn ?? fromName;
     const refusal = isRefusal(event);
     if (refusal && !stuck) {
-      refusedAt.set(fromName, now);
+      refusedAt.set(failedOn, now);
       bb.log.warn(
-        `account ${fromName} refused a turn (HTTP ${event.errorInfo?.httpStatusCode ?? "?"}): chosen for nothing for ${REFUSAL_MS / 3_600_000} h`,
+        `account ${failedOn} refused a turn (HTTP ${event.errorInfo?.httpStatusCode ?? "?"}): chosen for nothing for ${REFUSAL_MS / 3_600_000} h`,
       );
     } else if (refusal) {
       // Found in the log on a rescue: bb masks the account in its log and
@@ -1866,6 +1870,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const decision = decideSwitch({
       failure: event,
       currentAccount: fromName,
+      failedAccount: failedOn,
       accounts: measuredAccounts(model),
       preferredModel: model,
       maximumWaitMs:
@@ -1888,7 +1893,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     const reason =
       decision.kind === "switch"
-        ? `Switched to account ${decision.account}${decision.model === null ? "" : ` (${decision.model})`}${refusal ? `: ${fromName} refused the turn` : ""}`
+        ? `Switched to account ${decision.account}${decision.model === null ? "" : ` (${decision.model})`}${refusal ? `: ${failedOn} refused the turn` : ""}`
         : decision.kind === "retry"
           ? `Retrying on account ${decision.account}${decision.model === null ? "" : ` (${decision.model})`}: it has room now`
           : decision.reason;

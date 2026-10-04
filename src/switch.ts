@@ -40,6 +40,13 @@ export type SwitchDecision =
 export interface SwitchInput {
   failure: PluginTurnFailedEvent;
   currentAccount: string;
+  /**
+   * The account the failed turn ran on, when the project has moved since
+   * (a leftover that outlived the grace): the provider's report is that
+   * account's, which is never chosen, and the current account is judged on
+   * its measurements alone. Default: the current account.
+   */
+  failedAccount?: string;
   /** Every account with measured usage, the current one included. */
   accounts: AccountUsage[];
   /** "" = any model. */
@@ -145,6 +152,7 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
 
   const accounts = input.accounts.map((a) => settle(a, input.now));
   const stuck = input.stuck === true;
+  const failedOn = input.failedAccount ?? input.currentAccount;
   const options = { preferredModel: input.preferredModel };
   // A failure just reported rules its account out. Left in error, the thread
   // is judged on the measurements: the project may have moved since, and its
@@ -160,7 +168,9 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
       };
     }
   }
-  const others = accounts.filter((a) => a.name !== input.currentAccount);
+  const others = accounts.filter(
+    (a) => a.name !== input.currentAccount && a.name !== failedOn,
+  );
   const choice = chooseAccount(others, options);
   if (choice !== null) {
     return {
@@ -192,7 +202,7 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
   let earliest: { account: string; at: number } | null = null;
   for (const account of accounts) {
     let at = freeAt(account, input.preferredModel);
-    if (account.name === input.currentAccount && !stuck) {
+    if (account.name === failedOn && !stuck) {
       at =
         at === null || failedFreeAt === null
           ? null
