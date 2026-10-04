@@ -4,6 +4,40 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.12] - 2026-10-04
+
+### Fixed
+
+- **A thread left in error is looked at again.** bb's provider-retry gives
+  up after five attempts and so did this plugin, so a thread whose attempts
+  were burnt in minutes (a retry of every failed turn was on its way seconds
+  after the failure, before this plugin judged it) sat in error for good,
+  with accounts free. On every refresh, each of the user's threads in error
+  with nothing queued is judged from bb's log, as bb's own failure event
+  reads it (the failure of its latest turn, a turn refused at the door
+  included): retried on the project's own account when that has room now,
+  moved to an account that can run it, or queued to wait for the earliest
+  measured reset. The attempt cap does not apply there (the refresh paces
+  it), a log with no limit report is judged on the measurements alone, and
+  the thread is read again when its project's turn comes (archived, running
+  again or retried meanwhile: left alone; a retry another plugin queued
+  meanwhile is left to it). A refusal found there (no login) marks no
+  account: bb's log does not say which account ran the turn, so the thread
+  is retried where the project sits and the account marks itself if it
+  refuses again. A retry the user cancelled by hand (bb's queued card,
+  `bb thread queue`) is not queued again: the thread is left alone until a
+  new turn of it (bb's own Retry included), across restarts.
+- A refusal (no login) marks the account whatever the attempt: at the fifth
+  it was declined before the mark, and a thread left in error was retried
+  on the same account on every refresh.
+- bb's 409 on a retry it already has (`retry_already_queued`,
+  `no_failed_turn`) is logged, not thrown as a failed handler.
+- The retry already queued for a failed turn is named in the log (its reason
+  and time): the trace of whoever retries ahead of this plugin.
+- A thread whose wait was released on another account is judged afresh if
+  it fails there, instead of being retried at once as a leftover of the
+  account its turn started on.
+
 ## [0.2.11] - 2026-10-04
 
 ### Fixed
@@ -332,6 +366,7 @@ First public release.
 - macOS keychain and Linux credentials-file support; rotated OAuth tokens
   are written back and verified by reading them again.
 
+[0.2.12]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.12
 [0.2.11]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.11
 [0.2.10]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.10
 [0.2.9]: https://github.com/Finolaina/bb-plugin-claude-switcher/releases/tag/v0.2.9

@@ -87,6 +87,8 @@ turn runs again there.
 When no account is free, the project moves to the account that frees
 first and the retry is queued for that reset, within a maximum wait you
 choose. If another account can run it sooner, the turn moves there.
+A thread left in error with nothing queued (every retry spent) is
+judged again on each refresh, from bb's log.
 
 </td>
 <td valign="top">
