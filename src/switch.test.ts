@@ -443,6 +443,28 @@ describe("decideSwitch", () => {
       sendAt: NOW + BUFFER,
       reason: "Waiting for work",
     });
+    // The account the turn ran on unknown: the report (+2 h) is nobody's,
+    // so work, measured out until +1 h, frees first (were the report
+    // work's, main at +1.5 h would).
+    expect(
+      decideSwitch({
+        ...moved,
+        failedAccount: null,
+        accounts: [
+          account("main", {
+            session: { usedPercent: 100, resetsAt: NOW + 1.5 * HOUR },
+          }),
+          account("work", {
+            session: { usedPercent: 100, resetsAt: NOW + HOUR },
+          }),
+        ],
+      }),
+    ).toEqual({
+      kind: "wait",
+      account: "work",
+      sendAt: NOW + HOUR + BUFFER,
+      reason: "Waiting for work",
+    });
   });
 });
 

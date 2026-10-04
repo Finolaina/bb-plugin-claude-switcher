@@ -1764,21 +1764,22 @@ describe("claude accounts plugin", () => {
     await again;
   });
 
-  it("of two starts of the same thread still being read, the newer one's word stands", async () => {
+  it("a start read that crosses a move of the project is unknown: no leftover, no account marked", async () => {
     // The first turn's account is still being read when the turn ends and a
-    // second turn starts; the first read answers first (main, before the
-    // move) and the second after the move (work). The second is the start:
-    // the first writes nothing, and does not kill the second's pending read
-    // either (code-reviewer r13).
+    // second turn starts on main; the first read answers (main) while the
+    // second is still pending; the project moves to work; the second read
+    // answers "work", which is not where the turn started. The first read is
+    // stale (a newer turn started) and writes nothing; the second crossed a
+    // move and records the start as unknown. The turn then refused: no
+    // account is marked, work least of all (Codex IR14-001).
     let clock = NOW;
     let mainSession = 100;
-    let workSession = 5;
     let pending: EnvGate | null = null;
     const h = await host(
       {
         main: () => Response.json(payload(mainSession, 40)),
-        spare: () => Response.json(payload(100, 60)),
-        work: () => Response.json(payload(workSession, 20)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
       },
       { clock: () => clock, beforeEnvRead: () => takeGate() },
     );
@@ -1811,20 +1812,39 @@ describe("claude accounts plugin", () => {
     expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
     second.release();
     await secondActive;
-    // thread-3's turn started on work (as read): its failure is work's,
-    // judged on the measurements, and main has room.
     clock = NOW + 5 * 60_000;
-    workSession = 100;
-    mainSession = 5;
-    await h.harness.behavior.callRpc("accounts_refresh", null);
-    const late = failure({ threadId: "thread-3", requestId: "creq_9" });
-    late.rateLimits!.windows[0]!.resetsAtMs = NOW + 3 * HOUR;
-    await h.harness.behavior.emitThreadEvent("turn.failed", late);
-    expect(h.retries[1]).toEqual({
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({
+        threadId: "thread-3",
+        requestId: "creq_9",
+        errorInfo: {
+          category: "unauthorized",
+          providerCode: null,
+          httpStatusCode: 403,
+        },
+        rateLimits: null,
+      }),
+    );
+    expect(h.retries[1]).toMatchObject({
       threadId: "thread-3",
       turnRequestId: "creq_9",
-      reason: "Switched to account main",
     });
+    expect(
+      h.harness.logEntries.filter((entry) => entry.level === "warn").map((e) => e.message),
+    ).not.toContainEqual(expect.stringContaining("refused a turn"));
+    expect(h.harness.logEntries.map((e) => e.message)).toContainEqual(
+      expect.stringContaining("refused by an account unknown"),
+    );
+    // Neither work nor main is chosen for nothing: a new project goes to
+    // work, which measures best.
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent("thread.created", {
+      thread: thread({ id: "thr-new", projectId: "proj-3" }),
+    });
+    expect(h.envSet.at(-1)).toEqual(
+      expect.objectContaining({ projectId: "proj-3", value: `${ACCOUNTS}/work` }),
+    );
   });
 
   it("a refusal of a leftover the project's account can run marks the account its turn ran on, and the leftover is retried", async () => {
@@ -1875,6 +1895,80 @@ describe("claude accounts plugin", () => {
     });
     expect(h.envSet.at(-1)).toEqual(
       expect.objectContaining({ projectId: "proj-3", value: `${ACCOUNTS}/work` }),
+    );
+  });
+
+  it("inside the grace, a refusal of a leftover marks the account its turn ran on, and the leftover is retried", async () => {
+    // code-reviewer r14, M2.
+    let clock = NOW;
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    clock = NOW + 10_000;
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({
+        threadId: "thread-3",
+        requestId: "creq_9",
+        errorInfo: {
+          category: "unauthorized",
+          providerCode: null,
+          httpStatusCode: 403,
+        },
+        rateLimits: null,
+      }),
+    );
+    expect(h.retries[1]?.reason).toBe("Retrying on account work");
+    expect(
+      h.harness.logEntries.filter((entry) => entry.level === "warn").map((e) => e.message),
+    ).toContainEqual(expect.stringContaining("account main refused a turn"));
+  });
+
+  it("a turn that started on the account the project moved to is no leftover inside the grace: its failure is judged at once", async () => {
+    // code-reviewer r14, M1: before, it was retried on the account it had
+    // just marked as refusing, and judged only on its second failure.
+    let clock = NOW;
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    clock = NOW + 10_000;
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({
+        threadId: "thread-3",
+        requestId: "creq_9",
+        errorInfo: {
+          category: "unauthorized",
+          providerCode: null,
+          httpStatusCode: 403,
+        },
+        rateLimits: null,
+      }),
+    );
+    expect(h.retries[1]?.reason).toBe(
+      "Switched to account spare: work refused the turn",
     );
   });
 

@@ -46,9 +46,10 @@ export interface SwitchInput {
    * account's, which is never switched to (a wait may still move the
    * project there, when its reported reset is the earliest), and the
    * current account is judged on its measurements alone. Default: the
-   * current account.
+   * current account. Null: unknown (the project moved as the turn started):
+   * the report is nobody's and the measurements alone decide.
    */
-  failedAccount?: string;
+  failedAccount?: string | null;
   /** Every account with measured usage, the current one included. */
   accounts: AccountUsage[];
   /** "" = any model. */
@@ -154,7 +155,10 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
 
   const accounts = input.accounts.map((a) => settle(a, input.now));
   const stuck = input.stuck === true;
-  const failedOn = input.failedAccount ?? input.currentAccount;
+  const failedOn =
+    input.failedAccount === undefined
+      ? input.currentAccount
+      : input.failedAccount;
   const options = { preferredModel: input.preferredModel };
   // A failure just reported rules its account out. Left in error, the thread
   // is judged on the measurements: the project may have moved since, and its
