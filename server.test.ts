@@ -337,6 +337,21 @@ interface HostOptions {
   accountEntries?: () => { name: string; directory: boolean }[];
 }
 
+/** A machineEnvironment read held by a test: `reached` once the read waits on it, `release` to let it answer. */
+interface EnvGate {
+  held: Promise<void>;
+  release: () => void;
+  reached: Promise<void>;
+  captured: () => void;
+}
+function envGate(): EnvGate {
+  let release!: () => void;
+  let captured!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  const reached = new Promise<void>((resolve) => (captured = resolve));
+  return { held, release, reached, captured };
+}
+
 /** When the last accounts-changed was announced (its payload's at). */
 function lastChangeAt(h: { harness: { realtimeSignals: readonly { channel: string; payload: unknown }[] } }): number {
   const changes = h.harness.realtimeSignals.filter((s) => s.channel === "accounts-changed");
@@ -583,7 +598,7 @@ async function host(
             throw new Error(`HTTP 503: could not read ${projectId}`);
           if (options.hangEnvRead?.includes(projectId))
             await new Promise(() => {});
-          await options.beforeEnvRead?.(projectId);
+          if (options.beforeEnvRead) await options.beforeEnvRead(projectId);
           return envList(projectId);
         },
         get: async ({ projectId }: { projectId: string }) => ({
@@ -1646,6 +1661,221 @@ describe("claude accounts plugin", () => {
       turnRequestId: "creq_9",
       reason: "Switched to account main",
     });
+  });
+
+  it("forgets where a turn ran when its failure is declined: the next failure, no new turn announced, is the project's account's", async () => {
+    // thread-3 starts on main and fails with something that is not a limit
+    // (declined, no `thread.idle`); the project moves to work; thread-3's
+    // next turn is refused at the door with work's report: work's failure,
+    // not a leftover of main (Codex IR13-001, code-reviewer r13).
+    let clock = NOW;
+    let mainSession = 100;
+    let workSession = 5;
+    const h = await host(
+      {
+        main: () => Response.json(payload(mainSession, 40)),
+        spare: () => Response.json(payload(100, 60)),
+        work: () => Response.json(payload(workSession, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({
+        threadId: "thread-3",
+        requestId: "creq_8",
+        errorInfo: {
+          category: "overloaded",
+          providerCode: null,
+          httpStatusCode: 529,
+        },
+        rateLimits: null,
+      }),
+    );
+    expect(h.retries).toEqual([]);
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    clock = NOW + 5 * 60_000;
+    workSession = 100;
+    mainSession = 5;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const late = failure({ threadId: "thread-3", requestId: "creq_9" });
+    late.rateLimits!.windows[0]!.resetsAtMs = NOW + 3 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", late);
+    expect(h.retries[1]).toEqual({
+      threadId: "thread-3",
+      turnRequestId: "creq_9",
+      reason: "Switched to account main",
+    });
+  });
+
+  it("a new turn forgets the previous turn's start while its own account is still being read", async () => {
+    // thread-3 ran on main; the project moved to work; its next turn is
+    // announced and fails while the plugin still reads its account: not a
+    // leftover of main (code-reviewer r13).
+    let clock = NOW;
+    let mainSession = 100;
+    let workSession = 5;
+    let pending: EnvGate | null = null;
+    const h = await host(
+      {
+        main: () => Response.json(payload(mainSession, 40)),
+        spare: () => Response.json(payload(100, 60)),
+        work: () => Response.json(payload(workSession, 20)),
+      },
+      { clock: () => clock, beforeEnvRead: () => takeGate() },
+    );
+    const takeGate = () => {
+      const gate = pending;
+      pending = null;
+      if (gate === null) return Promise.resolve();
+      gate.captured();
+      return gate.held;
+    };
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    clock = NOW + 5 * 60_000;
+    workSession = 100;
+    mainSession = 5;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const gate = envGate();
+    pending = gate;
+    const again = h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    await gate.reached;
+    const late = failure({ threadId: "thread-3", requestId: "creq_9" });
+    late.rateLimits!.windows[0]!.resetsAtMs = NOW + 3 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", late);
+    expect(h.retries[1]).toEqual({
+      threadId: "thread-3",
+      turnRequestId: "creq_9",
+      reason: "Switched to account main",
+    });
+    gate.release();
+    await again;
+  });
+
+  it("of two starts of the same thread still being read, the newer one's word stands", async () => {
+    // The first turn's account is still being read when the turn ends and a
+    // second turn starts; the first read answers first (main, before the
+    // move) and the second after the move (work). The second is the start:
+    // the first writes nothing, and does not kill the second's pending read
+    // either (code-reviewer r13).
+    let clock = NOW;
+    let mainSession = 100;
+    let workSession = 5;
+    let pending: EnvGate | null = null;
+    const h = await host(
+      {
+        main: () => Response.json(payload(mainSession, 40)),
+        spare: () => Response.json(payload(100, 60)),
+        work: () => Response.json(payload(workSession, 20)),
+      },
+      { clock: () => clock, beforeEnvRead: () => takeGate() },
+    );
+    const takeGate = () => {
+      const gate = pending;
+      pending = null;
+      if (gate === null) return Promise.resolve();
+      gate.captured();
+      return gate.held;
+    };
+    dispose = () => h.harness.dispose();
+    const first = envGate();
+    pending = first;
+    const firstActive = h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    await first.reached;
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    const second = envGate();
+    pending = second;
+    const secondActive = h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    await second.reached;
+    first.release();
+    await firstActive;
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    second.release();
+    await secondActive;
+    // thread-3's turn started on work (as read): its failure is work's,
+    // judged on the measurements, and main has room.
+    clock = NOW + 5 * 60_000;
+    workSession = 100;
+    mainSession = 5;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const late = failure({ threadId: "thread-3", requestId: "creq_9" });
+    late.rateLimits!.windows[0]!.resetsAtMs = NOW + 3 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", late);
+    expect(h.retries[1]).toEqual({
+      threadId: "thread-3",
+      turnRequestId: "creq_9",
+      reason: "Switched to account main",
+    });
+  });
+
+  it("a refusal of a leftover the project's account can run marks the account its turn ran on, and the leftover is retried", async () => {
+    // Codex IR13-002: retried on work, and main (which refused) is chosen
+    // for nothing: a new project does not go there however it measures.
+    let clock = NOW;
+    let mainSession = 100;
+    const h = await host(
+      {
+        main: () => Response.json(payload(mainSession, 40)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    clock = NOW + 5 * 60_000;
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({
+        threadId: "thread-3",
+        requestId: "creq_9",
+        errorInfo: {
+          category: "unauthorized",
+          providerCode: null,
+          httpStatusCode: 403,
+        },
+        rateLimits: null,
+      }),
+    );
+    expect(h.retries[1]).toEqual({
+      threadId: "thread-3",
+      turnRequestId: "creq_9",
+      reason: "Retrying on account work",
+    });
+    expect(
+      h.harness.logEntries.filter((entry) => entry.level === "warn").map((e) => e.message),
+    ).toContainEqual(expect.stringContaining("account main refused a turn"));
+    mainSession = 1;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent("thread.created", {
+      thread: thread({ id: "thr-new", projectId: "proj-3" }),
+    });
+    expect(h.envSet.at(-1)).toEqual(
+      expect.objectContaining({ projectId: "proj-3", value: `${ACCOUNTS}/work` }),
+    );
   });
 
   it("another thread's turn ending does not forget where this thread's turn started", async () => {
