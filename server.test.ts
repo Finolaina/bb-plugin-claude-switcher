@@ -698,6 +698,21 @@ function thread(overrides: Partial<ThreadResponse> = {}): ThreadResponse {
   });
 }
 
+/** bb asks the plugin before sending a message of the thread (its dispatch checkpoint); no model named. */
+function sent(
+  h: { harness: { registrations: { hooks: Record<string, ((ctx: unknown) => Promise<unknown>) | undefined> } } },
+  threadId: string,
+  projectId: string,
+) {
+  return h.harness.registrations.hooks["message.dispatch"]!(
+    makeMessageDispatchHookContext({
+      thread: thread({ id: threadId, projectId }),
+      requestedExecution: { providerId: "claude-code", model: null },
+      attempt: "start-turn",
+    }),
+  );
+}
+
 function ownNote(name: string) {
   return `Claude Code account "${name}" (set by the Claude Switcher plugin)`;
 }
@@ -1424,6 +1439,7 @@ describe("claude accounts plugin", () => {
       sendAt: NOW + 2 * HOUR + BUFFER,
     });
     // thread-3's turn started on work (the project's account, waiting).
+    await sent(h, "thread-3", "proj-1");
     await h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-3", projectId: "proj-1" }),
     });
@@ -1516,6 +1532,7 @@ describe("claude accounts plugin", () => {
     );
     dispose = () => h.harness.dispose();
     // thread-3 starts a long turn on main (the project's account then).
+    await sent(h, "thread-3", "proj-1");
     await h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-3", projectId: "proj-1" }),
     });
@@ -1553,6 +1570,7 @@ describe("claude accounts plugin", () => {
     );
     dispose = () => h.harness.dispose();
     // thread-3 starts a long turn on main (the project's account then).
+    await sent(h, "thread-3", "proj-1");
     await h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-3", projectId: "proj-1" }),
     });
@@ -1590,6 +1608,7 @@ describe("claude accounts plugin", () => {
       { clock: () => clock },
     );
     dispose = () => h.harness.dispose();
+    await sent(h, "thread-3", "proj-1");
     await h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-3", projectId: "proj-1" }),
     });
@@ -1644,6 +1663,7 @@ describe("claude accounts plugin", () => {
       { clock: () => clock },
     );
     dispose = () => h.harness.dispose();
+    await sent(h, "thread-3", "proj-1");
     await h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-3", projectId: "proj-1" }),
     });
@@ -1686,6 +1706,7 @@ describe("claude accounts plugin", () => {
     dispose = () => h.harness.dispose();
     let release!: () => void;
     hold = new Promise<void>((resolve) => (release = resolve));
+    await sent(h, "thread-3", "proj-1");
     const active = h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-3", projectId: "proj-1" }),
     });
@@ -1728,6 +1749,7 @@ describe("claude accounts plugin", () => {
       { clock: () => clock },
     );
     dispose = () => h.harness.dispose();
+    await sent(h, "thread-3", "proj-1");
     await h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-3", projectId: "proj-1" }),
     });
@@ -1785,6 +1807,7 @@ describe("claude accounts plugin", () => {
       return gate.held;
     };
     dispose = () => h.harness.dispose();
+    await sent(h, "thread-3", "proj-1");
     await h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-3", projectId: "proj-1" }),
     });
@@ -1796,6 +1819,7 @@ describe("claude accounts plugin", () => {
     await h.harness.behavior.callRpc("accounts_refresh", null);
     const gate = envGate();
     pending = gate;
+    await sent(h, "thread-3", "proj-1");
     const again = h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-3", projectId: "proj-1" }),
     });
@@ -1841,6 +1865,7 @@ describe("claude accounts plugin", () => {
     dispose = () => h.harness.dispose();
     const first = envGate();
     pending = first;
+    await sent(h, "thread-3", "proj-1");
     const firstActive = h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-3", projectId: "proj-1" }),
     });
@@ -1850,6 +1875,7 @@ describe("claude accounts plugin", () => {
     });
     const second = envGate();
     pending = second;
+    await sent(h, "thread-3", "proj-1");
     const secondActive = h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-3", projectId: "proj-1" }),
     });
@@ -1913,6 +1939,7 @@ describe("claude accounts plugin", () => {
       { clock: () => clock },
     );
     dispose = () => h.harness.dispose();
+    await sent(h, "thread-3", "proj-1");
     await h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-3", projectId: "proj-1" }),
     });
@@ -1962,6 +1989,7 @@ describe("claude accounts plugin", () => {
       { clock: () => clock },
     );
     dispose = () => h.harness.dispose();
+    await sent(h, "thread-3", "proj-1");
     await h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-3", projectId: "proj-1" }),
     });
@@ -2002,6 +2030,7 @@ describe("claude accounts plugin", () => {
     dispose = () => h.harness.dispose();
     await h.harness.behavior.emitThreadEvent("turn.failed", failure());
     expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    await sent(h, "thread-3", "proj-1");
     await h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-3", projectId: "proj-1" }),
     });
@@ -2108,6 +2137,7 @@ describe("claude accounts plugin", () => {
     const refusedWhileRead = async (attemptNumber: number, requestId: string) => {
       const gate = envGate();
       pending = gate;
+      await sent(h, "thread-3", "proj-1");
       const active = h.harness.behavior.emitThreadEvent("thread.active", {
         thread: thread({ id: "thread-3", projectId: "proj-1" }),
       });
@@ -2169,6 +2199,7 @@ describe("claude accounts plugin", () => {
       },
     );
     dispose = () => h.harness.dispose();
+    await sent(h, "thread-3", "proj-1");
     await h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-3", projectId: "proj-1" }),
     });
@@ -2190,6 +2221,139 @@ describe("claude accounts plugin", () => {
       turnRequestId: "creq_9",
       reason: "Retrying on account main: it has room now",
     });
+    expect(
+      h.harness.logEntries.filter((entry) => entry.level === "warn").map((e) => e.message),
+    ).not.toContainEqual(expect.stringContaining("refused a turn"));
+    expect(h.harness.logEntries.map((e) => e.message)).toContainEqual(
+      expect.stringContaining("refused by an account unknown"),
+    );
+  });
+
+  it("a turn announced with no send seen (a queued row sent by hand) is unknown: its refusal marks nobody", async () => {
+    // bb skips its dispatch checkpoint when a queued row is sent explicitly
+    // (Codex IR17-001): the plugin has no anchor for the turn, so the
+    // account read at the announcement is not trusted as where it started.
+    const h = await host({
+      main: () => Response.json(payload(10, 40)),
+      spare: () => Response.json(payload(100, 60)),
+      work: () => Response.json(payload(5, 20)),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({
+        threadId: "thread-3",
+        requestId: "creq_9",
+        errorInfo: {
+          category: "unauthorized",
+          providerCode: null,
+          httpStatusCode: 403,
+        },
+        rateLimits: null,
+      }),
+    );
+    expect(h.retries[0]).toEqual({
+      threadId: "thread-3",
+      turnRequestId: "creq_9",
+      reason: "Retrying on account main: it has room now",
+    });
+    expect(
+      h.harness.logEntries.filter((entry) => entry.level === "warn").map((e) => e.message),
+    ).not.toContainEqual(expect.stringContaining("refused a turn"));
+    expect(h.harness.logEntries.map((e) => e.message)).toContainEqual(
+      expect.stringContaining("refused by an account unknown"),
+    );
+  });
+
+  it("a retry the plugin sends itself, after moving the project, starts on the new account: its refusal marks that account", async () => {
+    // The plugin sends provider-retry's queued row explicitly, past bb's
+    // dispatch checkpoint: it anchors the send itself, after the move, so
+    // the start reads as work and a refusal there marks work.
+    const h = await host(ALL_FREE, {
+      queued: [
+        {
+          id: "pr-1",
+          threadId: "thread-1",
+          payload: {
+            kind: "retry",
+            attempt: 2,
+            reason: "Rate limited",
+            retryOfTurnRequestId: "creq_1",
+          },
+          sendAt: NOW + 2 * HOUR,
+        },
+      ],
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    expect(h.sent).toEqual(["pr-1"]);
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-1", projectId: "proj-1" }),
+    });
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({
+        requestId: "creq_2",
+        attemptNumber: 2,
+        errorInfo: {
+          category: "unauthorized",
+          providerCode: null,
+          httpStatusCode: 403,
+        },
+        rateLimits: null,
+      }),
+    );
+    expect(
+      h.harness.logEntries.filter((entry) => entry.level === "warn").map((e) => e.message),
+    ).toContainEqual(expect.stringContaining("account work refused a turn"));
+    expect(h.retries.at(-1)).toMatchObject({
+      threadId: "thread-1",
+      turnRequestId: "creq_2",
+      reason: "Switched to account spare: work refused the turn",
+    });
+  });
+
+  it("a send whose turn ended at the door leaves no anchor behind: the next turn announced with no send seen is unknown", async () => {
+    // Sent, failed before any `thread.active` (a failure the plugin
+    // declines), then a turn announced with no send seen: the old anchor
+    // must be gone, or that turn would read as a known start.
+    const h = await host({
+      main: () => Response.json(payload(10, 40)),
+      spare: () => Response.json(payload(100, 60)),
+      work: () => Response.json(payload(5, 20)),
+    });
+    dispose = () => h.harness.dispose();
+    await sent(h, "thread-3", "proj-1");
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({
+        threadId: "thread-3",
+        requestId: "creq_8",
+        errorInfo: { category: "unknown", providerCode: null, httpStatusCode: 500 },
+        rateLimits: null,
+      }),
+    );
+    expect(h.retries).toEqual([]);
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({
+        threadId: "thread-3",
+        requestId: "creq_9",
+        errorInfo: {
+          category: "unauthorized",
+          providerCode: null,
+          httpStatusCode: 403,
+        },
+        rateLimits: null,
+      }),
+    );
     expect(
       h.harness.logEntries.filter((entry) => entry.level === "warn").map((e) => e.message),
     ).not.toContainEqual(expect.stringContaining("refused a turn"));
@@ -2221,6 +2385,7 @@ describe("claude accounts plugin", () => {
     dispose = () => h.harness.dispose();
     const gate = envGate();
     pending = gate;
+    await sent(h, "thread-3", "proj-1");
     const active = h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-3", projectId: "proj-1" }),
     });
@@ -2278,6 +2443,7 @@ describe("claude accounts plugin", () => {
     const moving = h.harness.behavior.emitThreadEvent("turn.failed", failure());
     await write.reached;
     // The variable already says work; the plugin is still writing.
+    await sent(h, "thread-3", "proj-1");
     await h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-3", projectId: "proj-1" }),
     });
@@ -2333,6 +2499,7 @@ describe("claude accounts plugin", () => {
     dispose = () => h.harness.dispose();
     const gate = envGate();
     pending = gate;
+    await sent(h, "thread-3", "proj-1");
     const active = h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-3", projectId: "proj-1" }),
     });
@@ -2369,6 +2536,7 @@ describe("claude accounts plugin", () => {
     );
     dispose = () => h.harness.dispose();
     for (const id of ["thread-3", "thread-4"]) {
+      await sent(h, id, "proj-1");
       await h.harness.behavior.emitThreadEvent("thread.active", {
         thread: thread({ id, projectId: "proj-1" }),
       });
@@ -2400,6 +2568,7 @@ describe("claude accounts plugin", () => {
       { clock: () => clock },
     );
     dispose = () => h.harness.dispose();
+    await sent(h, "thread-3", "proj-1");
     await h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-3", projectId: "proj-1" }),
     });
@@ -2431,6 +2600,7 @@ describe("claude accounts plugin", () => {
     dispose = () => h.harness.dispose();
     await h.harness.behavior.emitThreadEvent("turn.failed", failure());
     // thread-3 starts after the switch, on work.
+    await sent(h, "thread-3", "proj-1");
     await h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-3", projectId: "proj-1" }),
     });
@@ -3833,6 +4003,7 @@ describe("the account shown in each thread's header", () => {
       kind: "unauthenticated",
     });
     // As in bb, the leftover's turn announced itself when it started on main.
+    await sent(h, "thread-1", "proj-1");
     await h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-1", projectId: "proj-1" }),
     });
@@ -3850,6 +4021,7 @@ describe("the account shown in each thread's header", () => {
     dispose = () => h.harness.dispose();
     await h.harness.behavior.callRpc("accounts_refresh", null);
     // As in bb, the leftover's turn announced itself when it started on main.
+    await sent(h, "thread-1", "proj-1");
     await h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-1", projectId: "proj-1" }),
     });
@@ -6360,6 +6532,7 @@ describe("a wait another account can end sooner", () => {
     // not a leftover of main to retry on spare at once.
     const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")]);
     dispose = () => h.harness.dispose();
+    await sent(h, "thread-1", "proj-1");
     await h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-1", projectId: "proj-1" }),
     });
@@ -6558,6 +6731,7 @@ describe("a wait another account can end sooner", () => {
         clock: () => clock,
       });
       dispose = () => h.harness.dispose();
+      await sent(h, "thread-1", "proj-1");
       await h.harness.behavior.emitThreadEvent("thread.active", {
         thread: thread({ id: "thread-1", projectId: "proj-1" }),
       });
@@ -7109,6 +7283,7 @@ describe("a wait another account can end sooner", () => {
       // the same event for that.
       const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")]);
       dispose = () => h.harness.dispose();
+      await sent(h, "thread-1", "proj-1");
       await h.harness.behavior.emitThreadEvent("thread.active", {
         thread: thread({ id: "thread-1", projectId: "proj-1" }),
       });
@@ -7141,6 +7316,7 @@ describe("a wait another account can end sooner", () => {
         },
       });
       dispose = () => h?.harness.dispose();
+      await sent(h, "thread-1", "proj-1");
       await h.harness.behavior.emitThreadEvent("thread.active", {
         thread: thread({ id: "thread-1", projectId: "proj-1" }),
       });
@@ -7168,6 +7344,7 @@ describe("a wait another account can end sooner", () => {
         },
       });
       dispose = () => h?.harness.dispose();
+      await sent(h, "thread-1", "proj-1");
       await h.harness.behavior.emitThreadEvent("thread.active", {
         thread: thread({ id: "thread-1", projectId: "proj-1" }),
       });
