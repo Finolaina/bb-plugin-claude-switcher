@@ -1803,10 +1803,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   const SHORT_WAIT_MS = 2 * 60_000;
   /**
-   * Waits queued back after bb did not take their retry (by row id): newer
-   * than the move that released them, they still waited on the old account.
+   * Waits queued back after bb did not take their retry, by retryKey (their
+   * id never comes back when bb's answer is lost): newer than the move that
+   * released them, they still waited on the old account.
    */
   const putBack = new Set<string>();
+  /** A queued retry's turn: bb keeps one queued retry per thread, chain and attempt. */
+  function retryKey(threadId: string, of: string, attempt: number): string {
+    return JSON.stringify([threadId, of, attempt]);
+  }
 
   /**
    * A timed retry waits for the reset of the account its project was on when
@@ -1824,8 +1829,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   async function revisitWaits(): Promise<void> {
     if (!current.autoSwitch) return;
     const all = await bb.sdk.threads.queue.list();
-    for (const id of putBack)
-      if (!all.some((row) => row.id === id)) putBack.delete(id);
+    for (const key of putBack)
+      if (
+        !all.some(
+          (row) =>
+            row.payload.kind === "retry" &&
+            retryKey(
+              row.threadId,
+              row.payload.retryOfTurnRequestId,
+              row.payload.attempt,
+            ) === key,
+        )
+      )
+        putBack.delete(key);
     const rows = all.filter((row) => longWait(row, deps.now()));
     for (const row of rows) {
       // Switched off meanwhile: the rest of the pass stops too.
@@ -1903,7 +1919,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       (r) => r.id === rowId,
     );
     if (row?.payload.kind !== "retry" || !longWait(row, deps.now())) return;
-    const wait = { id: row.id, reason: row.payload.reason, sendAt: row.sendAt };
+    const wait = {
+      id: row.id,
+      reason: row.payload.reason,
+      sendAt: row.sendAt,
+      key: retryKey(
+        threadId,
+        row.payload.retryOfTurnRequestId,
+        row.payload.attempt,
+      ),
+    };
     const turn = await latestTurn(threadId);
     if (
       turn === null ||
@@ -1921,11 +1946,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const now = deps.now();
     const measured = measuredAccounts(model);
     const here = measured.find((a) => a.name === fromName);
-    // Not measured, but known unable to run anything.
+    // Known unable to run anything, measured or not: no login, or a refusal
+    // within its veto.
     const noLogin =
       collector.get(fromName)?.problem?.kind === "unauthenticated";
     if (
       !noLogin &&
+      !refusing(fromName) &&
       (here === undefined ||
         here.unknown === true ||
         bestAccount([here], model, now) === fromName)
@@ -1934,7 +1961,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       const changed = accountChangedAt.get(projectId);
       if (
         (changed !== undefined && row.createdAt < changed) ||
-        putBack.has(row.id)
+        putBack.has(wait.key)
       )
         await releaseWait(
           threadId,
@@ -1974,7 +2001,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   async function releaseWait(
     threadId: string,
     projectId: string,
-    wait: { id: string; reason: string; sendAt: number | null },
+    wait: { id: string; reason: string; sendAt: number | null; key: string },
     turnRequestId: string,
     reason: string,
   ): Promise<void> {
@@ -2019,7 +2046,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           reason: wait.reason,
           ...(wait.sendAt === null ? {} : { sendAt: wait.sendAt }),
         });
-        if (back.delivery === "queued") putBack.add(back.queuedMessageId);
+        if (back.delivery === "queued") putBack.add(wait.key);
       } catch (restoreError) {
         const restore =
           restoreError instanceof Error
@@ -2029,6 +2056,30 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         if (bbHasTheTurn(restoreError)) {
           bb.log.info(
             `thread ${threadId}: its wait is not queued again: bb has the turn (${restore})`,
+          );
+          return;
+        }
+        // bb may have queued it and lost only its answer: looked at again in
+        // the next pass if it is there.
+        putBack.add(wait.key);
+        const queuedAgain = await bb.sdk.threads.queuedMessages
+          .list({ threadId })
+          .then(
+            (rows) =>
+              rows.some(
+                (r) =>
+                  r.payload.kind === "retry" &&
+                  retryKey(
+                    threadId,
+                    r.payload.retryOfTurnRequestId,
+                    r.payload.attempt,
+                  ) === wait.key,
+              ),
+            () => false,
+          );
+        if (queuedAgain) {
+          bb.log.info(
+            `thread ${threadId}: its wait is queued again (only bb's answer was lost: ${restore})`,
           );
           return;
         }

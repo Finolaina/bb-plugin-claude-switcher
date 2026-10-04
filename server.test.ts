@@ -291,7 +291,7 @@ interface HostOptions {
   /** Rows already queued (e.g. by provider-retry) when the plugin acts. */
   queued?: QueuedRow[];
   /** What threads.retry does: default queues a row; "conflict" throws like bb's 409; "fail-once" fails the first call (a 5xx); "fail" fails every call. */
-  retryBehaviour?: "queue" | "conflict" | "fail-once" | "fail" | "answer-lost";
+  retryBehaviour?: "queue" | "conflict" | "fail-once" | "fail" | "answer-lost" | "restore-answer-lost";
   /** threads.retry throws this, shaped like bb's BbHttpError. */
   retryError?: { message: string; code?: string; status?: number };
   /** queuedMessages.send throws this, shaped like bb's BbHttpError: `code` apart from the message. */
@@ -464,6 +464,12 @@ async function host(
           if (options.retryBehaviour === "fail-once" && retryFailures++ === 0) {
             throw new Error("HTTP 503: internal error");
           }
+          // The first fails before bb does anything; the second (the wait put back) lands, its answer lost.
+          let answerLost = false;
+          if (options.retryBehaviour === "restore-answer-lost" && retryFailures < 2) {
+            if (retryFailures++ === 0) throw new Error("HTTP 503: internal error");
+            answerLost = true;
+          }
           retries.push(args);
           const id = `q${nextId++}`;
           // An immediate retry is dispatched at once; only a timed one waits in the queue.
@@ -473,7 +479,11 @@ async function host(
               threadId: args.threadId,
               payload: {
                 kind: "retry",
-                attempt: (attemptOf.get(args.turnRequestId ?? "") ?? 1) + 1,
+                // Like bb: the failed turn's attempt in the thread's log, plus one.
+                attempt:
+                  (logged !== undefined
+                    ? ((logged.data.retryAttempt as number | undefined) ?? 1)
+                    : (attemptOf.get(args.turnRequestId ?? "") ?? 1)) + 1,
                 reason: args.reason ?? "",
                 retryOfTurnRequestId: args.turnRequestId ?? "",
               },
@@ -481,6 +491,7 @@ async function host(
               waitingOn: { kind: "time" },
               createdAt: (options.clock ?? (() => NOW))(),
             });
+          if (answerLost) throw new Error("socket hang up");
           return {
             ok: true,
             delivery: "queued",
@@ -5209,6 +5220,62 @@ describe("a wait another account can end sooner", () => {
     expect(
       h.harness.logEntries.filter((entry) => entry.level === "error"),
     ).toEqual([]);
+  });
+
+  it("looks again at a wait put back whose answer bb lost", async () => {
+    // Codex r4 (IR4-001): the wait is queued again but its id never comes
+    // back; it still waited on the old account.
+    const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")], {
+      retryBehaviour: "restore-answer-lost",
+    });
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    const [back] = h.queued;
+    expect(back?.sendAt).toBe(NOW + 2 * HOUR + BUFFER);
+    expect(
+      h.harness.logEntries.filter((entry) => entry.level === "error"),
+    ).toEqual([]);
+    await onePass(h);
+    expect(h.deleted).toEqual(["r1", back?.id]);
+    expect(h.retries.at(-1)).toEqual(retriedNow("thread-1", "creq_r1"));
+    expect(h.queued).toEqual([]);
+  });
+
+  it("never retries a wait on an account refusing turns that could not be measured", async () => {
+    // Codex r4 (IR4-002): main refused a turn while its usage could not be
+    // read, and the user picked it again.
+    const noMeasure = {
+      main: () => new Response(null, { status: 429 }),
+      spare: () => Response.json(payload(10, 60, 20)),
+      work: () => Response.json(payload(5, 20, 100)),
+    };
+    const h = await waitingHost(noMeasure, [waiting("r1", "thread-1")]);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({
+        threadId: "thread-7",
+        requestId: "creq_7",
+        errorInfo: {
+          category: "unauthorized",
+          providerCode: null,
+          httpStatusCode: 403,
+        },
+        rateLimits: null,
+      }),
+    );
+    await h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-1",
+      account: "main",
+    });
+    await onePass(h);
+    expect(h.retries.filter((r) => r.threadId === "thread-1")).toEqual([
+      {
+        threadId: "thread-1",
+        turnRequestId: "creq_r1",
+        reason: expect.stringMatching(/^Moved to account spare,.*main refused a turn$/),
+      },
+    ]);
   });
 
   it("judges afresh a thread whose wait bb was already sending when the project moved for it", async () => {
