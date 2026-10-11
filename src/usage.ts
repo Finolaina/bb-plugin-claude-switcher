@@ -86,6 +86,13 @@ export function parseUsage(payload: unknown): ParsedUsage {
   const locked =
     (parsed.data.five_hour?.locked_reason ?? null) !== null ||
     (parsed.data.seven_day?.locked_reason ?? null) !== null;
+  // A plan without a general weekly limit (a Team seat, observed
+  // 2026-10-11: session and per-model windows only, seven_day null) answers
+  // with no weekly_all: that is a weekly window at 0 %, not a missing
+  // answer. Only with seven_day explicitly null: a seven_day bucket with no
+  // weekly_all is still an incomplete answer.
+  if (weekly === null && session !== null && parsed.data.seven_day === null)
+    weekly = { usedPercent: 0, resetsAt: null };
   return {
     blocked: locked || session === null || weekly === null,
     // A reported lock is proof on its own; a missing window alone is not.
