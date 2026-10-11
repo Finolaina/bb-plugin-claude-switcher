@@ -1,3 +1,8 @@
 node_modules/
 dist/*.map
 .DS_Store
+# local agent tooling: untracked, and Tailwind v4 scans every non-ignored file,
+# so a build in this checkout differed from CI (2026-10-11, 0.2.14)
+.agents/
+.claude/
+skills-lock.json
