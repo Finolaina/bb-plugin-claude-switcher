@@ -1722,6 +1722,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       isNew: false,
       accounts: measuredAccounts(model),
       preferredModel: model,
+      reserveModel: current.preferredModel,
       now,
     });
     if (decision.kind === "keep" || turn.abandoned) return;
@@ -2022,6 +2023,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       failedAccount: failedOn,
       accounts: measuredAccounts(model),
       preferredModel: model,
+      reserveModel: current.preferredModel,
       maximumWaitMs:
         current.maximumWaitHours > 0
           ? current.maximumWaitHours * 3_600_000
@@ -2465,6 +2467,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       measured.filter((a) => a.name !== fromName),
       model,
       now,
+      current.preferredModel,
     );
     if (to === null) return;
     await applyAccount(projectId, accountOrDefault(to), from);

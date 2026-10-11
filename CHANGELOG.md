@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.15] - 2026-10-11
+
+### Changed
+
+- **What runs out first is spent first.** Accounts are ranked by the
+  closest deadline for the model the turn runs with: the earlier of the
+  weekly reset and the model's own window reset. A Team seat has no
+  general weekly window, only a per-model one with its own reset; ranked
+  by the weekly reset alone, every seat looked the same and the name
+  decided, so a seat whose Fable window ended in a day lost it while a
+  seat with four days left was spent.
+- **An Opus turn keeps Fable for Fable.** When a thread is sent with a
+  model other than the preferred one, accounts that can no longer run the
+  preferred model come first. The reserve only orders; it never leaves a
+  turn without an account it would have had.
+
 ## [0.2.14] - 2026-10-11
 
 ### Fixed

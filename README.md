@@ -41,20 +41,20 @@ best free one the moment a turn fails on a subscription limit, then runs
 the turn again there. When none is free, it waits for the one that frees
 first.
 
-|                                                | Without Claude Switcher |    With Claude Switcher     |
-| ---------------------------------------------- | :---------------------: | :-------------------------: |
-| See every account's session and weekly windows |           ❌            |    ✅ in Provider usage     |
-| Keep working when one account hits its limit   |           ❌            |     ✅ switch and retry     |
-| Start a new project on an account that works   |           ❌            |  ✅ when its thread opens   |
-| Wait for the account that frees first          |           ❌            | ✅ within your maximum wait |
-| Stick to a model, like Fable                   |            n/a            |     ✅ preferred model      |
-| Choose the account of each project by hand     |           ❌            | ✅ new thread, thread header, picker and CLI |
-| Know when a weekly window runs out at your pace |           ❌            |  ✅ forecast per window     |
-| Move before the limit instead of after a failure |           ❌            | ✅ opt-in, after a turn ends |
-| Add and log in an account without a terminal   |           ❌            |      ✅ from Settings       |
-| See why a project moved                        |           ❌            |    ✅ history of moves      |
-| Touches a `CLAUDE_CONFIG_DIR` it didn't set    |            n/a            |          ❌ never           |
-| Shares or pools accounts between people        |            n/a            |          ❌ never           |
+|                                                  | Without Claude Switcher |             With Claude Switcher             |
+| ------------------------------------------------ | :---------------------: | :------------------------------------------: |
+| See every account's session and weekly windows   |           ❌            |             ✅ in Provider usage             |
+| Keep working when one account hits its limit     |           ❌            |             ✅ switch and retry              |
+| Start a new project on an account that works     |           ❌            |           ✅ when its thread opens           |
+| Wait for the account that frees first            |           ❌            |         ✅ within your maximum wait          |
+| Stick to a model, like Fable                     |           n/a           |              ✅ preferred model              |
+| Choose the account of each project by hand       |           ❌            | ✅ new thread, thread header, picker and CLI |
+| Know when a weekly window runs out at your pace  |           ❌            |            ✅ forecast per window            |
+| Move before the limit instead of after a failure |           ❌            |         ✅ opt-in, after a turn ends         |
+| Add and log in an account without a terminal     |           ❌            |               ✅ from Settings               |
+| See why a project moved                          |           ❌            |             ✅ history of moves              |
+| Touches a `CLAUDE_CONFIG_DIR` it didn't set      |           n/a           |                   ❌ never                   |
+| Shares or pools accounts between people          |           n/a           |                   ❌ never                   |
 
 ## Features
 
@@ -289,15 +289,15 @@ starts on a fresh account runs without your settings, hooks and
 
 ## Where to find it
 
-| Where                                                | What                                                                                                                                                       |
-| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **A Claude Code thread's header**                    | The project's account with a dot (green: room, amber: running low, red: out or not logged in, grey: not measured), and a menu with the forecast of its window, to switch now to the best account or pick any other. |
+| Where                                                | What                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **A Claude Code thread's header**                    | The project's account with a dot (green: room, amber: running low, red: out or not logged in, grey: not measured), and a menu with the forecast of its window, to switch now to the best account or pick any other.                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | **The new-thread composer**                          | The same control for the project picked there, before the first message, with the best account beside it when it is another one. A pick there before you send, even of the account shown, keeps a new project from moving to the best account after its first turn. With automatic switching on, the rules that move any project still apply: your preferred model when the thread is created, the model a message is sent with, limits and refusals. Send after the pick is saved: a message sent in that moment can start on the old account. On a phone it shows once the composer is open. It hides while another provider is picked. |
-| **Settings → Claude Switcher**                       | The nine settings, a card per account with its windows and their forecast, **Add account** and **Log in**, the account each project runs on (with a picker), **Refresh usage**, and the history of moves. |
-| **Settings → Provider usage** (and its sidebar card) | Pick **Claude accounts** in the source menu to see every account's session, weekly and per-model windows.                                                  |
-| **A thread's retry reason**                          | `Switched to account <name>`, `Waiting for <name>` or `Retrying on account <name>`, wherever bb shows why a turn was retried.                              |
-| **`bb plugin logs claude-switcher`**                 | Every switch, wait and decline, with its reason.                                                                                                           |
-| **`bb claude-switcher`**                             | The CLI: `list`, `refresh`, `history`, `use`, `release`.                                                                                                   |
+| **Settings → Claude Switcher**                       | The nine settings, a card per account with its windows and their forecast, **Add account** and **Log in**, the account each project runs on (with a picker), **Refresh usage**, and the history of moves.                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| **Settings → Provider usage** (and its sidebar card) | Pick **Claude accounts** in the source menu to see every account's session, weekly and per-model windows.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| **A thread's retry reason**                          | `Switched to account <name>`, `Waiting for <name>` or `Retrying on account <name>`, wherever bb shows why a turn was retried.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| **`bb plugin logs claude-switcher`**                 | Every switch, wait and decline, with its reason.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| **`bb claude-switcher`**                             | The CLI: `list`, `refresh`, `history`, `use`, `release`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
 ## How it works
 
@@ -393,9 +393,14 @@ only blocks are of that kind is left out; if no account is left, the
 plugin declines rather than guess. A block whose reset is still ahead
 remains a reason to wait, and an old measurement that was free remains a
 candidate.
-Usable accounts are ranked by the closest weekly reset, then by the lowest
-session use, then by name. With a preferred model, only accounts that can
-still run it are chosen. The account that just failed is excluded from
+Usable accounts are ranked by the closest deadline for the model the turn
+runs with (the earlier of the weekly reset and the model's own window
+reset: a Team seat has no general weekly window, only its model's), then
+by the lowest session use, then by name. What runs out first is spent
+first. With a preferred model, only accounts that can still run it are
+chosen; a thread sent with another model goes first to the accounts that
+can no longer run the preferred one, so it does not spend the preferred
+model's window where it is still free. The account that just failed is excluded from
 that decision and is never expected back before the reset the provider
 itself reported for it.
 
@@ -475,18 +480,18 @@ The new-thread control is registered only when the host offers
 Outside bb's SDK, a login you start from Settings runs the `claude`
 executable (`claude auth login`) as a child process of bb's server.
 
-| bb surface                                                       | What the plugin does with it                                                               |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| Provider usage source (the panel's RPC contract)                 | Publishes one resource per account, with its session, weekly and per-model windows.        |
-| `turn.failed` event                                              | Detects subscription-window rate limits of the Claude Code provider, and refused turns.    |
-| `thread.created` event and `projects.get`                        | Places a project when one of its threads is created (a new project by its creation date).  |
-| `thread.idle` event                                              | With `switchAheadPercent` set, measures the account when a turn ends and moves the project. |
-| Project machine environment variables                            | Sets `CLAUDE_CONFIG_DIR` on the project, with a note naming the account.                   |
-| `threads.retry` and queued messages                              | Retries the failed turn now, or at a reset, and reuses the retry provider-retry queued.    |
-| Settings and a settings section                                  | The nine settings, plus the per-project picker, the account cards, the login and the history. |
-| `experimental_threadHeaderAction` slot and `threads.get`         | The account control in a Claude Code thread's header. Experimental in bb: it may change.   |
-| `composer.customize` (a new-thread action) and `useComposer` | The account control in the new-thread composer, for the project picked there. |
-| CLI registration                                                 | `bb claude-switcher list`, `refresh`, `history`, `use` and `release`.                      |
+| bb surface                                                       | What the plugin does with it                                                                                                                                                        |
+| ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Provider usage source (the panel's RPC contract)                 | Publishes one resource per account, with its session, weekly and per-model windows.                                                                                                 |
+| `turn.failed` event                                              | Detects subscription-window rate limits of the Claude Code provider, and refused turns.                                                                                             |
+| `thread.created` event and `projects.get`                        | Places a project when one of its threads is created (a new project by its creation date).                                                                                           |
+| `thread.idle` event                                              | With `switchAheadPercent` set, measures the account when a turn ends and moves the project.                                                                                         |
+| Project machine environment variables                            | Sets `CLAUDE_CONFIG_DIR` on the project, with a note naming the account.                                                                                                            |
+| `threads.retry` and queued messages                              | Retries the failed turn now, or at a reset, and reuses the retry provider-retry queued.                                                                                             |
+| Settings and a settings section                                  | The nine settings, plus the per-project picker, the account cards, the login and the history.                                                                                       |
+| `experimental_threadHeaderAction` slot and `threads.get`         | The account control in a Claude Code thread's header. Experimental in bb: it may change.                                                                                            |
+| `composer.customize` (a new-thread action) and `useComposer`     | The account control in the new-thread composer, for the project picked there.                                                                                                       |
+| CLI registration                                                 | `bb claude-switcher list`, `refresh`, `history`, `use` and `release`.                                                                                                               |
 | Background service, key-value storage, realtime signals, logging | Periodic usage refresh, the history of moves, the usage samples behind the forecast, the install time and the new projects already handled, live updates of the section, and a log. |
 
 </details>
@@ -599,17 +604,17 @@ named `default`; the default account's own name always works.
 <details>
 <summary><b>All settings</b></summary>
 
-| Setting              | Default              | Meaning                                                                                                                                                   |
-| -------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `accountsDir`        | `~/.claude-accounts` | Where the extra config directories live.                                                                                                                  |
-| `defaultAccountName` | `default`            | Name shown for `~/.claude`. A subdirectory with the same name is skipped, with a warning in the log.                                                      |
+| Setting              | Default              | Meaning                                                                                                                                                                                                             |
+| -------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `accountsDir`        | `~/.claude-accounts` | Where the extra config directories live.                                                                                                                                                                            |
+| `defaultAccountName` | `default`            | Name shown for `~/.claude`. A subdirectory with the same name is skipped, with a warning in the log.                                                                                                                |
 | `preferredModel`     | _(empty = any)_      | Model display name as the usage API reports it (e.g. `Fable`, case-insensitive). Only accounts that can still run it are chosen; else wait for its reset. A thread sent with another model is judged by that model. |
-| `autoSwitch`         | `true`               | Place projects when a thread is created, and switch and retry on subscription limits. Off = the panel and the picker only.                               |
-| `maximumWaitHours`   | `6`                  | Queue a retry for a reset only if it is closer than this (0 = no limit).                                                                                  |
-| `refreshMinutes`     | `5`                  | Background usage refresh interval (never below 1).                                                                                                        |
-| `switchAheadPercent` | `0` (off)            | When a turn ends with the project's account at or above this share of its session, weekly or preferred-model window, move the project to an account below it. Needs `autoSwitch`. |
-| `claudeCommand`      | `claude`             | The Claude Code executable used to log an account in from bb: a name looked up in the `PATH` of bb's server, or a full path.                              |
-| `loginPrivateWindow` | `true`               | macOS: open logins in a private Chrome window, so they do not reuse the browser's Claude session. Off, without Chrome, or on Linux: the default browser. |
+| `autoSwitch`         | `true`               | Place projects when a thread is created, and switch and retry on subscription limits. Off = the panel and the picker only.                                                                                          |
+| `maximumWaitHours`   | `6`                  | Queue a retry for a reset only if it is closer than this (0 = no limit).                                                                                                                                            |
+| `refreshMinutes`     | `5`                  | Background usage refresh interval (never below 1).                                                                                                                                                                  |
+| `switchAheadPercent` | `0` (off)            | When a turn ends with the project's account at or above this share of its session, weekly or preferred-model window, move the project to an account below it. Needs `autoSwitch`.                                   |
+| `claudeCommand`      | `claude`             | The Claude Code executable used to log an account in from bb: a name looked up in the `PATH` of bb's server, or a full path.                                                                                        |
+| `loginPrivateWindow` | `true`               | macOS: open logins in a private Chrome window, so they do not reuse the browser's Claude session. Off, without Chrome, or on Linux: the default browser.                                                            |
 
 The accounts are read again whenever you pick one (`use`, the picker) and
 when a thread is created, so a new account directory or a changed
