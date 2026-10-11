@@ -40,11 +40,7 @@ import {
   type Series,
 } from "./src/forecast.js";
 import type { CredentialIo } from "./src/credentials.js";
-import {
-  LoginFlow,
-  type LoginIo,
-  type LoginStatus,
-} from "./src/login.js";
+import { LoginFlow, type LoginIo, type LoginStatus } from "./src/login.js";
 import {
   loginHelperPath,
   nodeAccountsIo,
@@ -246,8 +242,14 @@ export const rpcContract = defineRpcContract({
     output: stateSchema,
   },
   /** Log an account in from bb: a new directory under the accounts dir, or a listed account without a login. */
-  account_login_start: { input: z.object({ name: z.string().max(255) }), output: stateSchema },
-  account_login_code: { input: z.object({ code: z.string().max(4096) }), output: stateSchema },
+  account_login_start: {
+    input: z.object({ name: z.string().max(255) }),
+    output: stateSchema,
+  },
+  account_login_code: {
+    input: z.object({ code: z.string().max(4096) }),
+    output: stateSchema,
+  },
   /** Stops a running login; when none runs, forgets the last outcome. */
   account_login_cancel: { input: z.null(), output: stateSchema },
 });
@@ -536,7 +538,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     for (const account of accounts) {
       const m = collector.get(account.name);
       const own = series[account.name] ?? {};
-      if (m?.usage === null || m?.usage === undefined || m.observedAt === null) {
+      if (
+        m?.usage === null ||
+        m?.usage === undefined ||
+        m.observedAt === null
+      ) {
         if (series[account.name] !== undefined) next[account.name] = own;
         continue;
       }
@@ -545,10 +551,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         next[account.name] = own;
         continue;
       }
-      const windows: [string, { usedPercent: number; resetsAt: number | null }][] = [
-        ["weekly", m.usage.weekly],
-        ...Object.entries(m.usage.models),
-      ];
+      const windows: [
+        string,
+        { usedPercent: number; resetsAt: number | null },
+      ][] = [["weekly", m.usage.weekly], ...Object.entries(m.usage.models)];
       const updated: Record<string, Series> = {};
       for (const [name, w] of windows)
         updated[name] = recordSample(own[name], {
@@ -715,9 +721,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         );
       // A link would take the login, and what is linked into it, elsewhere.
       if (!entry.directory)
-        throw new Error(
-          `${name} in the accounts directory is not a directory`,
-        );
+        throw new Error(`${name} in the accounts directory is not a directory`);
     }
     return {
       name,
@@ -1105,10 +1109,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     async account_login_start({ name }) {
       const target = await loginTarget(name);
       const shareFrom = `${deps.accountsIo.home.replace(/\/+$/, "")}/.claude`;
-      await login.start({ ...target, shareFrom }, {
-        ...deps.env,
-        CLAUDE_SWITCHER_PRIVATE: current.loginPrivateWindow ? "1" : "0",
-      });
+      await login.start(
+        { ...target, shareFrom },
+        {
+          ...deps.env,
+          CLAUDE_SWITCHER_PRIVATE: current.loginPrivateWindow ? "1" : "0",
+        },
+      );
       return state();
     },
     async account_login_code({ code }) {
@@ -2218,8 +2225,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           bb.log.info(
             `thread ${thread.id}: bb already has a retry of the turn (${message})`,
           );
-        else
-          bb.log.warn(`thread ${thread.id}: not judged again: ${message}`);
+        else bb.log.warn(`thread ${thread.id}: not judged again: ${message}`);
       }
     }
   }
@@ -2316,9 +2322,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   ): PluginTurnFailedEvent["errorInfo"] {
     switch (reason) {
       case "rate_limited":
-        return { category: "rate-limit", providerCode: null, httpStatusCode: null };
+        return {
+          category: "rate-limit",
+          providerCode: null,
+          httpStatusCode: null,
+        };
       case "auth_required":
-        return { category: "unauthorized", providerCode: null, httpStatusCode: null };
+        return {
+          category: "unauthorized",
+          providerCode: null,
+          httpStatusCode: null,
+        };
       default:
         return null;
     }

@@ -331,7 +331,8 @@ function fullestWindow(
   const scoped = modelWindow(account, preferredModel);
   if (scoped !== undefined) windows.push([preferredModel, scoped]);
   let fullest = windows[0]!;
-  for (const w of windows) if (w[1].usedPercent > fullest[1].usedPercent) fullest = w;
+  for (const w of windows)
+    if (w[1].usedPercent > fullest[1].usedPercent) fullest = w;
   return { window: fullest[0], used: fullest[1].usedPercent };
 }
 
@@ -345,7 +346,8 @@ function fullestWindow(
 export function decideAhead(input: AheadInput): AheadDecision {
   const accounts = input.accounts.map((a) => settle(a, input.now));
   const current = accounts.find((a) => a.name === input.currentAccount);
-  if (current === undefined || current.unknown === true) return { kind: "keep" };
+  if (current === undefined || current.unknown === true)
+    return { kind: "keep" };
   const { window, used } = fullestWindow(current, input.preferredModel);
   if (used < input.threshold) return { kind: "keep" };
   const roomy = accounts.filter(
