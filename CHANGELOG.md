@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.14] - 2026-10-11
+
+### Fixed
+
+- **Team plan accounts are usable.** A Team seat answers the usage API
+  with a 5-hour session and per-model weekly windows, no general weekly
+  window and `seven_day: null`. The plugin read that as an incomplete
+  answer and showed the account as `LOCKED`, so it was never chosen. A
+  missing general weekly window now counts as 0 % with no reset when the
+  answer says `seven_day: null` and has a session window. An answer that
+  carries `seven_day` but no general weekly window is still unknown.
+
 ## [0.2.13] - 2026-10-04
 
 ### Fixed
