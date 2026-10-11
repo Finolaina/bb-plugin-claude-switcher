@@ -49,7 +49,7 @@ describe("chooseAccount", () => {
 });
 
 describe("canRunModel", () => {
-  it("with no preferred model, ignores every model row, even one the provider named \"\"", () => {
+  it('with no preferred model, ignores every model row, even one the provider named ""', () => {
     const odd = account("odd", {
       models: { "": { usedPercent: 100, resetsAt: NOW + HOUR } },
     });
@@ -78,8 +78,104 @@ describe("chooseAccount: limits", () => {
   it("breaks a full tie by name, whatever the input order", () => {
     const b = account("beta");
     const a = account("alpha");
-    expect(chooseAccount([b, a], { preferredModel: "" })?.account).toBe("alpha");
-    expect(chooseAccount([a, b], { preferredModel: "" })?.account).toBe("alpha");
+    expect(chooseAccount([b, a], { preferredModel: "" })?.account).toBe(
+      "alpha",
+    );
+    expect(chooseAccount([a, b], { preferredModel: "" })?.account).toBe(
+      "alpha",
+    );
+  });
+
+  // Measured 2026-10-11: a Team seat has no general weekly window (0 %, no
+  // reset) and a Fable window with its own reset; five seats reset on
+  // different days. The window that binds the turn is the one whose reset
+  // orders the choice: what runs out first is spent first.
+  it("ranks a Team seat by its preferred-model reset when it has no weekly reset", () => {
+    const seat = (name: string, fableResetHours: number) =>
+      account(name, {
+        session: { usedPercent: 0, resetsAt: null },
+        weekly: { usedPercent: 0, resetsAt: null },
+        models: {
+          Fable: { usedPercent: 2, resetsAt: NOW + fableResetHours * HOUR },
+        },
+      });
+    // alphabetical order runs against the resets so the name cannot decide by luck
+    const chosen = chooseAccount(
+      [seat("team2", 96), seat("team3", 72), seat("team5", 24)],
+      { preferredModel: "Fable" },
+    );
+    expect(chosen?.account).toBe("team5");
+  });
+
+  it("orders by the earliest of the weekly and the preferred-model resets", () => {
+    const chosen = chooseAccount(
+      [
+        account("weeklySoon", {
+          weekly: { usedPercent: 10, resetsAt: NOW + 48 * HOUR },
+          models: { Fable: { usedPercent: 10, resetsAt: NOW + 60 * HOUR } },
+        }),
+        account("fableSoon", {
+          weekly: { usedPercent: 10, resetsAt: NOW + 72 * HOUR },
+          models: { Fable: { usedPercent: 10, resetsAt: NOW + 24 * HOUR } },
+        }),
+      ],
+      { preferredModel: "Fable" },
+    );
+    expect(chosen?.account).toBe("fableSoon");
+  });
+
+  it("ignores the model reset when choosing for another model", () => {
+    const chosen = chooseAccount(
+      [
+        account("fableSoon", {
+          weekly: { usedPercent: 10, resetsAt: NOW + 72 * HOUR },
+          models: { Fable: { usedPercent: 10, resetsAt: NOW + 24 * HOUR } },
+        }),
+        account("weeklySoon", {
+          weekly: { usedPercent: 10, resetsAt: NOW + 48 * HOUR },
+          models: { Fable: { usedPercent: 10, resetsAt: NOW + 60 * HOUR } },
+        }),
+      ],
+      { preferredModel: "Opus" },
+    );
+    expect(chosen?.account).toBe("weeklySoon");
+  });
+
+  // A thread sent with Opus should not burn the Fable of an account that
+  // still has it: accounts measured out of the reserved model come first.
+  it("for another model, prefers accounts that can no longer run the reserved model", () => {
+    const chosen = chooseAccount(
+      [
+        // its weekly resets sooner, so without the reserve it would win
+        account("maxWithFable", {
+          weekly: { usedPercent: 10, resetsAt: NOW + 24 * HOUR },
+          models: { Fable: { usedPercent: 2, resetsAt: NOW + 24 * HOUR } },
+        }),
+        account("viaulab", {
+          weekly: { usedPercent: 91, resetsAt: NOW + 60 * HOUR },
+          models: { Fable: { usedPercent: 100, resetsAt: NOW + 60 * HOUR } },
+        }),
+      ],
+      { preferredModel: "Opus", reserveModel: "Fable" },
+    );
+    expect(chosen).toEqual({ account: "viaulab", model: "Opus" });
+  });
+
+  it("reserves nothing when choosing for the reserved model itself", () => {
+    const chosen = chooseAccount(
+      [
+        account("hasFable", {
+          weekly: { usedPercent: 0, resetsAt: NOW + 24 * HOUR },
+          models: { Fable: { usedPercent: 2, resetsAt: NOW + 24 * HOUR } },
+        }),
+        account("noFable", {
+          weekly: { usedPercent: 0, resetsAt: NOW + 24 * HOUR },
+          models: { Fable: { usedPercent: 100, resetsAt: NOW + 24 * HOUR } },
+        }),
+      ],
+      { preferredModel: "Fable", reserveModel: "Fable" },
+    );
+    expect(chosen?.account).toBe("hasFable");
   });
 
   it("excludes exactly 100 % and keeps 99 % (session and weekly)", () => {

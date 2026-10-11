@@ -3,6 +3,7 @@ import { makeTurnFailedEvent } from "@get-bb/plugin-sdk/testing";
 import type { PluginTurnFailedEvent } from "@get-bb/plugin-sdk";
 import type { AccountUsage } from "./policy.js";
 import {
+  bestAccount,
   declineReason,
   decideAhead,
   decidePlacement,
@@ -201,7 +202,9 @@ describe("decideSwitch", () => {
     ];
     const accounts = [
       account("main"),
-      account("work", { weekly: { usedPercent: 100, resetsAt: NOW + 20 * HOUR } }),
+      account("work", {
+        weekly: { usedPercent: 100, resetsAt: NOW + 20 * HOUR },
+      }),
     ];
     expect(decideSwitch(input({ accounts, failure: warned }))).toEqual({
       kind: "wait",
@@ -247,12 +250,18 @@ describe("decideSwitch", () => {
 
   it("on a tie between resets, waits on the current account first, then by name, whatever the order measured", () => {
     const exhausted = (name: string) =>
-      account(name, { session: { usedPercent: 100, resetsAt: NOW + 2 * HOUR } });
+      account(name, {
+        session: { usedPercent: 100, resetsAt: NOW + 2 * HOUR },
+      });
     const forward = decideSwitch(
-      input({ accounts: [exhausted("main"), exhausted("work"), exhausted("beta")] }),
+      input({
+        accounts: [exhausted("main"), exhausted("work"), exhausted("beta")],
+      }),
     );
     const backward = decideSwitch(
-      input({ accounts: [exhausted("beta"), exhausted("work"), exhausted("main")] }),
+      input({
+        accounts: [exhausted("beta"), exhausted("work"), exhausted("main")],
+      }),
     );
     expect(forward).toMatchObject({ kind: "wait", account: "main" });
     expect(backward).toEqual(forward);
@@ -554,7 +563,9 @@ describe("decidePlacement", () => {
         currentAccount: "main",
         isNew: true,
         accounts: [
-          account("main", { session: { usedPercent: 1, resetsAt: NOW + HOUR } }),
+          account("main", {
+            session: { usedPercent: 1, resetsAt: NOW + HOUR },
+          }),
           account("work"),
         ],
         preferredModel: "",
@@ -569,8 +580,13 @@ describe("decidePlacement", () => {
         currentAccount: "main",
         isNew: false,
         accounts: [
-          account("main", { session: { usedPercent: 90, resetsAt: NOW + HOUR }, models: fable(99) }),
-          account("work", { session: { usedPercent: 0, resetsAt: NOW + HOUR } }),
+          account("main", {
+            session: { usedPercent: 90, resetsAt: NOW + HOUR },
+            models: fable(99),
+          }),
+          account("work", {
+            session: { usedPercent: 0, resetsAt: NOW + HOUR },
+          }),
         ],
         preferredModel: "Fable",
         now: NOW,
@@ -597,7 +613,9 @@ describe("decidePlacement", () => {
         currentAccount: "main",
         isNew: false,
         accounts: [
-          account("main", { weekly: { usedPercent: 100, resetsAt: NOW + 3 * 24 * HOUR } }),
+          account("main", {
+            weekly: { usedPercent: 100, resetsAt: NOW + 3 * 24 * HOUR },
+          }),
           account("work"),
         ],
         preferredModel: "",
@@ -697,8 +715,12 @@ describe("decideAhead", () => {
       decideAhead({
         ...base,
         accounts: [
-          account("main", { models: { Fable: { usedPercent: 92, resetsAt: NOW + HOUR } } }),
-          account("spare", { models: { Fable: { usedPercent: 40, resetsAt: NOW + HOUR } } }),
+          account("main", {
+            models: { Fable: { usedPercent: 92, resetsAt: NOW + HOUR } },
+          }),
+          account("spare", {
+            models: { Fable: { usedPercent: 40, resetsAt: NOW + HOUR } },
+          }),
         ],
       }),
     ).toEqual({ kind: "move", account: "spare", used: 92, window: "Fable" });
@@ -709,8 +731,12 @@ describe("decideAhead", () => {
       decideAhead({
         ...base,
         accounts: [
-          account("main", { models: { Fable: { usedPercent: 89, resetsAt: NOW + HOUR } } }),
-          account("spare", { models: { Fable: { usedPercent: 40, resetsAt: NOW + HOUR } } }),
+          account("main", {
+            models: { Fable: { usedPercent: 89, resetsAt: NOW + HOUR } },
+          }),
+          account("spare", {
+            models: { Fable: { usedPercent: 40, resetsAt: NOW + HOUR } },
+          }),
         ],
       }),
     ).toEqual({ kind: "keep" });
@@ -721,8 +747,12 @@ describe("decideAhead", () => {
       decideAhead({
         ...base,
         accounts: [
-          account("main", { models: { Fable: { usedPercent: 90, resetsAt: NOW + HOUR } } }),
-          account("spare", { models: { Fable: { usedPercent: 89, resetsAt: NOW + HOUR } } }),
+          account("main", {
+            models: { Fable: { usedPercent: 90, resetsAt: NOW + HOUR } },
+          }),
+          account("spare", {
+            models: { Fable: { usedPercent: 89, resetsAt: NOW + HOUR } },
+          }),
         ],
       }),
     ).toEqual({ kind: "move", account: "spare", used: 90, window: "Fable" });
@@ -733,7 +763,9 @@ describe("decideAhead", () => {
       decideAhead({
         ...base,
         accounts: [
-          account("main", { session: { usedPercent: 95, resetsAt: NOW + HOUR } }),
+          account("main", {
+            session: { usedPercent: 95, resetsAt: NOW + HOUR },
+          }),
           account("spare"),
         ],
       }),
@@ -742,7 +774,9 @@ describe("decideAhead", () => {
       decideAhead({
         ...base,
         accounts: [
-          account("main", { weekly: { usedPercent: 91, resetsAt: NOW + HOUR } }),
+          account("main", {
+            weekly: { usedPercent: 91, resetsAt: NOW + HOUR },
+          }),
           account("spare"),
         ],
       }),
@@ -754,9 +788,15 @@ describe("decideAhead", () => {
       decideAhead({
         ...base,
         accounts: [
-          account("main", { models: { Fable: { usedPercent: 92, resetsAt: NOW + HOUR } } }),
-          account("spare", { models: { Fable: { usedPercent: 90, resetsAt: NOW + HOUR } } }),
-          account("work", { session: { usedPercent: 90, resetsAt: NOW + HOUR } }),
+          account("main", {
+            models: { Fable: { usedPercent: 92, resetsAt: NOW + HOUR } },
+          }),
+          account("spare", {
+            models: { Fable: { usedPercent: 90, resetsAt: NOW + HOUR } },
+          }),
+          account("work", {
+            session: { usedPercent: 90, resetsAt: NOW + HOUR },
+          }),
           account("other", { blocked: true }),
         ],
       }),
@@ -764,9 +804,9 @@ describe("decideAhead", () => {
   });
 
   it("keeps the project when its account is not measured", () => {
-    expect(
-      decideAhead({ ...base, accounts: [account("spare")] }),
-    ).toEqual({ kind: "keep" });
+    expect(decideAhead({ ...base, accounts: [account("spare")] })).toEqual({
+      kind: "keep",
+    });
   });
 
   it("settles a window whose reset has passed before judging", () => {
@@ -786,9 +826,15 @@ describe("decideAhead", () => {
       decideAhead({
         ...base,
         accounts: [
-          account("main", { session: { usedPercent: 99, resetsAt: NOW + HOUR } }),
-          account("spare", { weekly: { usedPercent: 50, resetsAt: NOW + 5 * 24 * HOUR } }),
-          account("work", { weekly: { usedPercent: 50, resetsAt: NOW + 2 * 24 * HOUR } }),
+          account("main", {
+            session: { usedPercent: 99, resetsAt: NOW + HOUR },
+          }),
+          account("spare", {
+            weekly: { usedPercent: 50, resetsAt: NOW + 5 * 24 * HOUR },
+          }),
+          account("work", {
+            weekly: { usedPercent: 50, resetsAt: NOW + 2 * 24 * HOUR },
+          }),
         ],
       }),
     ).toEqual({ kind: "move", account: "work", used: 99, window: "session" });
@@ -817,5 +863,87 @@ describe("modelFamily", () => {
       "my-claude-opus-5-5",
     ])
       expect(modelFamily(id)).toBeNull();
+  });
+});
+
+// The reserve must reach every decision that chooses for the model a
+// message is sent with: if `reserveModel` is dropped from the options of
+// any of them, these go red while the policy's own tests stay green.
+describe("reserveModel reaches each decision", () => {
+  // Its weekly resets sooner, so without the reserve it wins every ranking.
+  const keepsFable = account("keepsFable", {
+    weekly: { usedPercent: 10, resetsAt: NOW + 24 * HOUR },
+    models: { Fable: { usedPercent: 2, resetsAt: NOW + 24 * HOUR } },
+  });
+  const noFable = account("noFable", {
+    weekly: { usedPercent: 91, resetsAt: NOW + 60 * HOUR },
+    models: { Fable: { usedPercent: 100, resetsAt: NOW + 60 * HOUR } },
+  });
+
+  it("decideSwitch moves an Opus turn to the account out of Fable", () => {
+    const base = input({
+      accounts: [
+        account("main", {
+          session: { usedPercent: 100, resetsAt: NOW + 2 * HOUR },
+        }),
+        keepsFable,
+        noFable,
+      ],
+      preferredModel: "Opus",
+    });
+    expect(decideSwitch(base)).toMatchObject({
+      kind: "switch",
+      account: "keepsFable",
+    });
+    expect(decideSwitch({ ...base, reserveModel: "Fable" })).toMatchObject({
+      kind: "switch",
+      account: "noFable",
+    });
+  });
+
+  it("decidePlacement places a new project and moves a blocked one with the reserve", () => {
+    const fresh = {
+      currentAccount: "main",
+      isNew: true,
+      accounts: [account("main"), keepsFable, noFable],
+      preferredModel: "Opus",
+      now: NOW,
+    };
+    expect(decidePlacement(fresh)).toMatchObject({
+      kind: "move",
+      account: "keepsFable",
+    });
+    expect(decidePlacement({ ...fresh, reserveModel: "Fable" })).toMatchObject({
+      kind: "move",
+      account: "noFable",
+    });
+    const blocked = {
+      ...fresh,
+      isNew: false,
+      accounts: [
+        account("main", {
+          session: { usedPercent: 100, resetsAt: NOW + 2 * HOUR },
+        }),
+        keepsFable,
+        noFable,
+      ],
+    };
+    expect(decidePlacement(blocked)).toMatchObject({
+      kind: "move",
+      account: "keepsFable",
+    });
+    expect(
+      decidePlacement({ ...blocked, reserveModel: "Fable" }),
+    ).toMatchObject({
+      kind: "move",
+      account: "noFable",
+    });
+  });
+
+  it("bestAccount takes the reserve as its fourth argument", () => {
+    expect(bestAccount([keepsFable, noFable], "Opus", NOW)).toBe("keepsFable");
+    expect(bestAccount([keepsFable, noFable], "Opus", NOW, "Fable")).toBe(
+      "noFable",
+    );
   });
 });

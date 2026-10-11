@@ -54,6 +54,8 @@ export interface SwitchInput {
   accounts: AccountUsage[];
   /** "" = any model. */
   preferredModel: string;
+  /** The model kept for its own threads; see ChoiceOptions.reserveModel. */
+  reserveModel?: string;
   maximumWaitMs: number | null;
   now: number;
   random: number;
@@ -159,7 +161,10 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
     input.failedAccount === undefined
       ? input.currentAccount
       : input.failedAccount;
-  const options = { preferredModel: input.preferredModel };
+  const options = {
+    preferredModel: input.preferredModel,
+    reserveModel: input.reserveModel,
+  };
   // A failure just reported rules its account out. Left in error, the thread
   // is judged on the measurements: the project may have moved since, and its
   // log reports the account it failed on, not the one it sits on now. The
@@ -254,6 +259,8 @@ export interface PlacementInput {
   accounts: AccountUsage[];
   /** "" = any model. */
   preferredModel: string;
+  /** The model kept for its own threads; see ChoiceOptions.reserveModel. */
+  reserveModel?: string;
   now: number;
 }
 
@@ -262,11 +269,12 @@ export function bestAccount(
   accounts: AccountUsage[],
   preferredModel: string,
   now: number,
+  reserveModel?: string,
 ): string | null {
   return (
     chooseAccount(
       accounts.map((a) => settle(a, now)),
-      { preferredModel },
+      { preferredModel, reserveModel },
     )?.account ?? null
   );
 }
@@ -281,7 +289,10 @@ export function bestAccount(
  */
 export function decidePlacement(input: PlacementInput): PlacementDecision {
   const accounts = input.accounts.map((a) => settle(a, input.now));
-  const options = { preferredModel: input.preferredModel };
+  const options = {
+    preferredModel: input.preferredModel,
+    reserveModel: input.reserveModel,
+  };
   if (input.isNew) {
     const choice = chooseAccount(accounts, options);
     return choice === null || choice.account === input.currentAccount
@@ -314,6 +325,8 @@ export interface AheadInput {
   accounts: AccountUsage[];
   /** "" = any model. */
   preferredModel: string;
+  /** The model kept for its own threads; see ChoiceOptions.reserveModel. */
+  reserveModel?: string;
   /** Share of a window (session, weekly or the preferred model's) at which the project moves ahead of the limit. */
   threshold: number;
   now: number;
@@ -356,7 +369,10 @@ export function decideAhead(input: AheadInput): AheadDecision {
       a.unknown !== true &&
       fullestWindow(a, input.preferredModel).used < input.threshold,
   );
-  const choice = chooseAccount(roomy, { preferredModel: input.preferredModel });
+  const choice = chooseAccount(roomy, {
+    preferredModel: input.preferredModel,
+    reserveModel: input.reserveModel,
+  });
   return choice === null
     ? { kind: "keep" }
     : { kind: "move", account: choice.account, used, window };

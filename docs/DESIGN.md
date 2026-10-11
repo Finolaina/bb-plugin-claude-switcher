@@ -28,19 +28,19 @@ created (below).
 
 ## Pieces
 
-| File                 | Role                                                                                                                                                                    |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/accounts.ts`    | Discovery: `~/.claude` (no variable) plus every subdirectory of the accounts directory that holds a `.claude.json`.                                                     |
-| `src/credentials.ts` | Reads each login from the macOS keychain or `<dir>/.credentials.json`, refreshes an expired token, writes it back and verifies the write, and calls the usage endpoint. |
-| `src/usage.ts`       | Parses the usage endpoint's answer into session, weekly and per-model windows.                                                                                          |
-| `src/collector.ts`   | One cached measurement per account, single-flight queries, the rule for stale measurements.                                                                             |
-| `src/policy.ts`      | Pure ranking: which usable account to choose.                                                                                                                           |
+| File                 | Role                                                                                                                                                                                   |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/accounts.ts`    | Discovery: `~/.claude` (no variable) plus every subdirectory of the accounts directory that holds a `.claude.json`.                                                                    |
+| `src/credentials.ts` | Reads each login from the macOS keychain or `<dir>/.credentials.json`, refreshes an expired token, writes it back and verifies the write, and calls the usage endpoint.                |
+| `src/usage.ts`       | Parses the usage endpoint's answer into session, weekly and per-model windows.                                                                                                         |
+| `src/collector.ts`   | One cached measurement per account, single-flight queries, the rule for stale measurements.                                                                                            |
+| `src/policy.ts`      | Pure ranking: which usable account to choose.                                                                                                                                          |
 | `src/switch.ts`      | Pure decisions: where a project runs before a new thread's first turn, what to do with one failed turn (switch, wait or decline), and whether to move ahead of the limit after a turn. |
-| `src/forecast.ts`    | Pure: the usage samples of a window and the pace they give.                                                                                                             |
-| `src/login.ts`       | A `claude auth login` run for one account directory: its phases, the fallback address and code, the timeout, and what a new directory shares with `~/.claude`.          |
-| `bin/open-login.sh`  | The `BROWSER` of that login: opens an `https://` address in a private Chrome window, or the default browser.                                                            |
-| `server.ts`          | Wires it to bb: settings, the Provider usage source, `thread.created`, `turn.failed`, `thread.idle`, project variables, retries, the history, CLI, realtime updates.     |
-| `app.tsx`            | The Claude Switcher section in Settings, and the account control in a Claude Code thread's header and in the new-thread composer.                                       |
+| `src/forecast.ts`    | Pure: the usage samples of a window and the pace they give.                                                                                                                            |
+| `src/login.ts`       | A `claude auth login` run for one account directory: its phases, the fallback address and code, the timeout, and what a new directory shares with `~/.claude`.                         |
+| `bin/open-login.sh`  | The `BROWSER` of that login: opens an `https://` address in a private Chrome window, or the default browser.                                                                           |
+| `server.ts`          | Wires it to bb: settings, the Provider usage source, `thread.created`, `turn.failed`, `thread.idle`, project variables, retries, the history, CLI, realtime updates.                   |
+| `app.tsx`            | The Claude Switcher section in Settings, and the account control in a Claude Code thread's header and in the new-thread composer.                                                      |
 
 The policy and the decision are pure functions of their inputs (usage,
 the failure, `now`, a random number), so every rule below has a unit test
@@ -81,10 +81,15 @@ so both tools pick the same account.
 2. With a **preferred model**, the account must also be under 100 % in that
    model's window (matched case-insensitively). No row for the model means
    it counts against the weekly window only.
-3. Usable accounts are ranked by the **closest weekly reset**, then the
-   **lowest session use**, then the **name**, never by the order in which
-   they were measured. Spending the account whose week ends soonest first
-   wastes the least quota.
+3. Usable accounts are ranked by the **closest deadline for the model**
+   (the earlier of the weekly reset and the model's own window reset; a
+   Team seat, measured 2026-10-11, has no general weekly window, only its
+   model's), then the **lowest session use**, then the **name**, never by
+   the order in which they were measured. Spending the account whose
+   window ends soonest first wastes the least quota. When choosing for a
+   named model other than the preferred one, accounts that can no longer
+   run the preferred model come first (`reserveModel`), so an Opus turn
+   does not spend Fable where it is still free.
 
 ## Placing a project before the first turn
 
@@ -492,7 +497,7 @@ The refresh token rotates on every refresh, so the plugin:
   account is set aside, a project picked onto it by hand (header,
   new-thread composer, Settings, `use`) moves off again at its next message, with the reason
   "refused a turn"; nothing but the clock or `bb plugin reload
-  claude-switcher` lifts it, not a new login either. A wait for another
+claude-switcher` lifts it, not a new login either. A wait for another
   account's reset after a refusal says "Waiting for ...", without naming
   the refusal. A clock set back lengthens the 6 hours by as much.
 - **Every account refusing makes the plugin quiet for 6 hours.** Should an
