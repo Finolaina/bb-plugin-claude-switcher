@@ -320,7 +320,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       type: "number",
       label: "Switch ahead of the limit at (%)",
       description:
-        "After each turn, when the project's account is at or above this share of its session, weekly or preferred-model window and another account is below it, the project moves there before a turn fails. Needs the automatic choice above. 0 = off (switch only when a turn fails).",
+        "After each turn of a thread in the preferred model (every thread when none is set), when the project's account is at or above this share of its session, weekly or preferred-model window and another account is below it, the project moves there before a turn fails. Threads sent with another model use the setting below. Needs the automatic choice above. 0 = off (switch only when a turn fails).",
       default: 0,
     },
     switchAheadOtherPercent: {
@@ -1504,17 +1504,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * next turn fail. Judged on the latest measurement of each account (see
    * measureForAhead for the project's own).
    */
-  async function moveAhead(thread: ThreadResponse): Promise<void> {
+  async function moveAhead(
+    thread: ThreadResponse,
+    model: string,
+  ): Promise<void> {
     // Asked again: the settings may have changed while the account was measured.
     if (!current.autoSwitch || !aheadConfigured()) return;
-    // The threshold is the thread's model's: a thread in the preferred model
-    // moves at switchAheadPercent, one sent with another model (Opus while
-    // Fable is preferred: it only spends the 5-hour session of a Team seat)
-    // at switchAheadOtherPercent. Each can be off on its own.
-    const model =
-      threadModel.get(thread.id) ??
-      (await loggedModel(thread.id)) ??
-      current.preferredModel;
+    // The threshold is the thread's model's (`model`: read by the caller from
+    // bb's log): a thread in the preferred model moves at switchAheadPercent,
+    // one sent with another model (Opus while Fable is preferred: it only
+    // spends the 5-hour session of a Team seat) at switchAheadOtherPercent.
+    // Each can be off on its own.
     const threshold = aheadThreshold(model);
     if (!(threshold > 0)) return;
     const projectId = thread.projectId;
@@ -1577,10 +1577,21 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       notTheUsersThread(thread) !== null
     )
       return;
+    // The threshold is the thread's model's, and the turn that just ended is
+    // the truth about it: bb's log names the model of every turn requested,
+    // also of the sends that skip the checkpoint (a Send now, an edited
+    // message), which the dispatch cache never saw (Codex R0216-INSPECT-001).
+    // Read before the account is measured and outside the project's queue:
+    // a thread whose model has no percentage costs no query (code-reviewer r1).
+    const model =
+      (await loggedModel(thread.id)) ??
+      threadModel.get(thread.id) ??
+      current.preferredModel;
+    if (!(aheadThreshold(model) > 0)) return;
     // Emptied by a change of the accounts directory, until the next look.
     if (accounts.length === 0) await discover();
     await measureForAhead(thread.projectId);
-    await inProjectQueue(thread.projectId, () => moveAhead(thread));
+    await inProjectQueue(thread.projectId, () => moveAhead(thread, model));
   });
 
   /**

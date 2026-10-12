@@ -89,7 +89,12 @@ so both tools pick the same account.
    window ends soonest first wastes the least quota. When choosing for a
    named model other than the preferred one, accounts that can no longer
    run the preferred model come first (`reserveModel`), so an Opus turn
-   does not spend Fable where it is still free.
+   does not spend Fable where it is still free; among the accounts that
+   keep it, a Team seat without a window of its own for the turn's model
+   comes before a Max account (`spendsWeekly`): an Opus turn there spends
+   only the 5-hour session, on a Max account the weekly window the
+   preferred model needs. The accounts already out of the preferred model
+   keep their deadline order, Team seat or not.
 
 ## Placing a project before the first turn
 
@@ -244,9 +249,15 @@ the same project failing together must not make two different moves.
 
 ## Moving ahead of the limit
 
-Off by default (`switchAheadPercent` = 0). With a percentage set, a
-visible Claude Code thread turning idle is the trigger: the turn has
-ended, so moving the project interrupts nothing and spends no retry.
+Off by default: `switchAheadPercent` = 0 for threads in the preferred
+model (every thread when none is set) and `switchAheadOtherPercent` = 0
+for threads sent with another model; each can be set alone. With a
+percentage set, a visible Claude Code thread turning idle is the trigger:
+the turn has ended, so moving the project interrupts nothing and spends no
+retry. The thread's model is read first from bb's log (the latest turn
+requested, which also names the sends that skip the checkpoint), then
+from the model the plugin last saw the thread sent with, then it is the
+preferred model; a thread whose model has no percentage costs no query.
 
 1. The project's account is measured again unless it was measured, or
    asked for, within the last minute: the turn that just ended used some
@@ -256,11 +267,12 @@ ended, so moving the project interrupts nothing and spends no retry.
    does not wait on it; the decision, inside the queue, reads the account
    the project has by then.
 2. `decideAhead` keeps the project when its account is unknown or
-   unmeasured, or when the fullest of its session, weekly and
-   preferred-model windows (settled: a window past its reset counts 0) is
+   unmeasured, or when the fullest of its session, weekly and the
+   thread's model's windows (settled: a window past its reset counts 0) is
    under the percentage.
 3. Otherwise the candidates are the accounts under the percentage in all
-   three windows, ranked by the same policy as a switch. A candidate is
+   three windows, ranked by the same policy as a switch for the thread's
+   model, the preferred model reserved. A candidate is
    listed now, was measured within two refresh periods (an account whose
    query keeps failing keeps an old measurement, which a switch after a
    failed turn still tries and this does not: nothing fails if the project

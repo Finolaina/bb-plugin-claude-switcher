@@ -14,6 +14,8 @@ project uses [Semantic Versioning](https://semver.org/).
   with room before its next turn fails, while Fable threads keep
   `switchAheadPercent` (0 = never moved ahead). The move is measured on
   the thread's own model and the destination is chosen for that model.
+  The thread's model is the one bb logged for its latest turn, so a Send
+  now or an edited message that skipped the plugin's checkpoint counts.
 
 ### Changed
 
@@ -27,6 +29,11 @@ project uses [Semantic Versioning](https://semver.org/).
   usage answer with `seven_day: null` sets an explicit mark on the
   account, so the expired weekly window of a Max account (settled to 0 %
   with no reset) is never taken for a Team seat.
+- **A thread in another model no longer moves ahead on
+  `switchAheadPercent`.** That setting now covers threads in the preferred
+  model only (before, it measured the preferred model's window for every
+  thread). To keep moving the other threads ahead, set
+  `switchAheadOtherPercent`.
 
 ## [0.2.15] - 2026-10-11
 
