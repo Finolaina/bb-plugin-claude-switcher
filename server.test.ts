@@ -4852,6 +4852,43 @@ describe("moving a project ahead of the limit with two percentages", () => {
       expect.stringMatching(/^Switched ahead of the limit to work: main at 96% of Fable$/),
     ]);
   });
+
+  it("lets the project back once the account it left drops below the share that moved it: at that share it stays, one point below it comes back", async () => {
+    for (const [fableAtMain, back] of [
+      [95, false],
+      [94, true],
+    ] as const) {
+      let clock = NOW;
+      let fableMain = 96;
+      const h = await host(
+        {
+          main: () => Response.json(payload(20, 30, fableMain)),
+          work: () => Response.json(payload(85, 30, 10)),
+        },
+        {
+          settings: { preferredModel: "Fable", switchAheadPercent: 95, switchAheadOtherPercent: 80 },
+          clock: () => clock,
+        },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      clock = NOW + 5 * 60_000;
+      expect(await sentOf(h, "thread-1", "claude-fable-5-1")).toEqual({ action: "proceed" });
+      expect((await idleOf(h, "thread-1")).errors).toEqual([]);
+      expect(h.envSet.map((e) => e.note)).toEqual([ownNote("work")]);
+      // main measured again at the share under test; the Opus thread's turn ends on work (85 >= 80)
+      fableMain = fableAtMain;
+      clock = NOW + 10 * 60_000;
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await sentOf(h, "thread-2", "claude-opus-5-5")).toEqual({ action: "proceed" });
+      expect((await idleOf(h, "thread-2")).errors).toEqual([]);
+      const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+      expect(state.history).toHaveLength(back ? 2 : 1);
+      expect(h.envDeleted).toHaveLength(back ? 1 : 0);
+      h.harness.dispose();
+      dispose = null;
+    }
+  });
 });
 
 describe("moving a project ahead of the limit, after a turn", () => {
@@ -6003,6 +6040,27 @@ describe("the model a thread's turn runs on", () => {
         ...FABLE,
         threadEvents: {
           "thread-1": [requested(1, "claude-opus-5-5"), requested(2, "claude-fable-5-1")],
+        },
+      },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.retries.map((r) => r.reason)).toEqual([
+      "Switched to account work (Opus)",
+    ]);
+  });
+
+  it("judges a failed turn whose request bb's log no longer lists among the latest 20 by the latest message", async () => {
+    const h = await host(
+      { ...OPUS_ELSEWHERE, main: usage(50, 30, 0) },
+      {
+        ...FABLE,
+        threadEvents: {
+          "thread-1": [
+            requested(1, "claude-fable-5-1"),
+            ...Array.from({ length: 20 }, (_, i) => requested(i + 2, "claude-opus-5-5")),
+          ],
         },
       },
     );
