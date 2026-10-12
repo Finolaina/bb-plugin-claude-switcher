@@ -64,13 +64,22 @@ describe("spendsNoWeekly", () => {
     // a window of the model that exists counts as spent, reset or not
     expect(
       spendsNoWeekly(
-        { ...seat, models: { ...seat.models, Opus: { usedPercent: 3, resetsAt: NOW + HOUR } } },
+        {
+          ...seat,
+          models: {
+            ...seat.models,
+            Opus: { usedPercent: 3, resetsAt: NOW + HOUR },
+          },
+        },
         "Opus",
       ),
     ).toBe(false);
     expect(
       spendsNoWeekly(
-        { ...seat, models: { ...seat.models, Opus: { usedPercent: 0, resetsAt: null } } },
+        {
+          ...seat,
+          models: { ...seat.models, Opus: { usedPercent: 0, resetsAt: null } },
+        },
         "Opus",
       ),
     ).toBe(false);
@@ -262,6 +271,25 @@ describe("chooseAccount: limits", () => {
       { preferredModel: "Opus", reserveModel: "Fable" },
     );
     expect(chosen?.account).toBe("teamNoFable");
+  });
+
+  it("for the preferred model, a Team seat and a Max account are still ordered by deadline (the seat preference is for other models)", () => {
+    const seat = (fableResetsAt: number) =>
+      account("team", {
+        weekly: { usedPercent: 0, resetsAt: null, absent: true },
+        models: { Fable: { usedPercent: 40, resetsAt: fableResetsAt } },
+      });
+    const max = account("max", {
+      weekly: { usedPercent: 50, resetsAt: NOW + 48 * HOUR },
+      models: { Fable: { usedPercent: 40, resetsAt: NOW + 48 * HOUR } },
+    });
+    const options = { preferredModel: "Fable", reserveModel: "Fable" };
+    expect(chooseAccount([seat(NOW + 72 * HOUR), max], options)?.account).toBe(
+      "max",
+    );
+    expect(chooseAccount([seat(NOW + 24 * HOUR), max], options)?.account).toBe(
+      "team",
+    );
   });
 
   // Decision 4 (2026-10-12): the seat preference only orders the accounts

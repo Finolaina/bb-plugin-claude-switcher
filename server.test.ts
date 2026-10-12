@@ -4661,6 +4661,122 @@ describe("moving a project ahead of the limit for a thread in another model", ()
     await idle(h);
     expect(h.envSet).toEqual([]);
   });
+
+  it("asks the usage API nothing for a thread whose model has no percentage", async () => {
+    let clock = NOW;
+    let asked = 0;
+    const h = await host(
+      {
+        ...TEAM_AHEAD,
+        main: () => {
+          asked += 1;
+          return Response.json(teamPayload(95, 70));
+        },
+      },
+      {
+        settings: { preferredModel: "Fable", switchAheadPercent: 0, switchAheadOtherPercent: 95 },
+        clock: () => clock,
+      },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const before = asked;
+    clock = NOW + 5 * 60_000;
+    expect(await sent(h, "claude-fable-5-1")).toEqual({ action: "proceed" });
+    await idle(h);
+    expect(asked).toBe(before);
+    expect(h.envSet).toEqual([]);
+  });
+
+  /** bb's log for thread-1: its latest turn was requested with `model`. */
+  const logged = (model: string | null): Record<string, LoggedEvent[]> => ({
+    "thread-1": [
+      {
+        id: "evt_1",
+        scope: { kind: "thread" },
+        threadId: "thread-1",
+        seq: 1,
+        createdAt: NOW - HOUR,
+        type: "client/turn/requested",
+        data: { requestId: "creq_1", execution: { model } },
+      },
+    ],
+  });
+
+  it("reads the thread's model from bb's log first: last sent with Opus through the checkpoint, its latest turn (a Send now) ran Fable, so it stays", async () => {
+    let clock = NOW;
+    const h = await host(TEAM_AHEAD, {
+      settings: { preferredModel: "Fable", switchAheadPercent: 0, switchAheadOtherPercent: 95 },
+      clock: () => clock,
+      threadEvents: logged("claude-fable-5-1"),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + 5 * 60_000;
+    expect(await sent(h, "claude-opus-5-5")).toEqual({ action: "proceed" });
+    await idle(h);
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("judges a thread it never saw sent (the plugin restarted) by bb's log: an Opus thread moves", async () => {
+    let clock = NOW;
+    const h = await host(TEAM_AHEAD, {
+      settings: { preferredModel: "Fable", switchAheadPercent: 0, switchAheadOtherPercent: 95 },
+      clock: () => clock,
+      threadEvents: logged("claude-opus-5-5"),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + 5 * 60_000;
+    await idle(h);
+    expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([["proj-1", ownNote("work")]]);
+  });
+
+  it("judges a thread it never saw sent whose log names no model as the preferred model: it stays with switchAheadPercent 0", async () => {
+    let clock = NOW;
+    const h = await host(TEAM_AHEAD, {
+      settings: { preferredModel: "Fable", switchAheadPercent: 0, switchAheadOtherPercent: 95 },
+      clock: () => clock,
+      threadEvents: logged(null),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + 5 * 60_000;
+    await idle(h);
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("with no preferred model, switchAheadOtherPercent moves nothing: every thread is judged by switchAheadPercent", async () => {
+    let clock = NOW;
+    const h = await host(TEAM_AHEAD, {
+      settings: { preferredModel: "", switchAheadPercent: 0, switchAheadOtherPercent: 95 },
+      clock: () => clock,
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + 5 * 60_000;
+    expect(await sent(h, "claude-opus-5-5")).toEqual({ action: "proceed" });
+    await idle(h);
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("matches the preferred model case-insensitively: a Fable thread moves at switchAheadPercent with preferredModel 'fable'", async () => {
+    let clock = NOW;
+    const h = await host(TEAM_AHEAD, {
+      settings: { preferredModel: "fable", switchAheadPercent: 90, switchAheadOtherPercent: 0 },
+      clock: () => clock,
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + 5 * 60_000;
+    expect(await sent(h, "claude-fable-5-1")).toEqual({ action: "proceed" });
+    await idle(h);
+    expect(h.envSet).toHaveLength(1);
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history[0]?.reason).toMatch(
+      /^Switched ahead of the limit to (work|spare): main at 95% of session$/,
+    );
+  });
 });
 
 describe("moving a project ahead of the limit, after a turn", () => {
