@@ -4644,7 +4644,7 @@ describe("moving a project ahead of the limit for a thread in another model", ()
     await h.harness.behavior.callRpc("accounts_refresh", null);
     clock = NOW + 5 * 60_000;
     expect(await sent(h, "claude-fable-5-1")).toEqual({ action: "proceed" });
-    await idle(h);
+    expect((await idle(h)).errors).toEqual([]);
     expect(h.envSet).toEqual([]);
   });
 
@@ -4658,7 +4658,7 @@ describe("moving a project ahead of the limit for a thread in another model", ()
     await h.harness.behavior.callRpc("accounts_refresh", null);
     clock = NOW + 5 * 60_000;
     expect(await sent(h, "claude-opus-5-5")).toEqual({ action: "proceed" });
-    await idle(h);
+    expect((await idle(h)).errors).toEqual([]);
     expect(h.envSet).toEqual([]);
   });
 
@@ -4680,11 +4680,38 @@ describe("moving a project ahead of the limit for a thread in another model", ()
     );
     dispose = () => h.harness.dispose();
     await h.harness.behavior.callRpc("accounts_refresh", null);
-    const before = asked;
+    const before = h.usageCalls.length;
     clock = NOW + 5 * 60_000;
     expect(await sent(h, "claude-fable-5-1")).toEqual({ action: "proceed" });
     await idle(h);
-    expect(asked).toBe(before);
+    expect(h.usageCalls.slice(before)).toEqual([]);
+    expect(asked).toBe(1);
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("measures nothing after a turn when no model is preferred and only the other models' percentage is set: without a preferred model there are no other models", async () => {
+    let clock = NOW;
+    let asked = 0;
+    const h = await host(
+      {
+        main: () => {
+          asked += 1;
+          return Response.json(teamPayload(95, 70));
+        },
+      },
+      {
+        settings: { preferredModel: "", switchAheadPercent: 0, switchAheadOtherPercent: 80 },
+        clock: () => clock,
+      },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const before = h.usageCalls.length;
+    clock = NOW + 5 * 60_000;
+    expect(await sent(h, "claude-opus-5-5")).toEqual({ action: "proceed" });
+    expect((await idle(h)).errors).toEqual([]);
+    expect(h.usageCalls.slice(before)).toEqual([]);
+    expect(asked).toBe(1);
     expect(h.envSet).toEqual([]);
   });
 
@@ -4714,7 +4741,7 @@ describe("moving a project ahead of the limit for a thread in another model", ()
     await h.harness.behavior.callRpc("accounts_refresh", null);
     clock = NOW + 5 * 60_000;
     expect(await sent(h, "claude-opus-5-5")).toEqual({ action: "proceed" });
-    await idle(h);
+    expect((await idle(h)).errors).toEqual([]);
     expect(h.envSet).toEqual([]);
   });
 
@@ -4742,7 +4769,7 @@ describe("moving a project ahead of the limit for a thread in another model", ()
     dispose = () => h.harness.dispose();
     await h.harness.behavior.callRpc("accounts_refresh", null);
     clock = NOW + 5 * 60_000;
-    await idle(h);
+    expect((await idle(h)).errors).toEqual([]);
     expect(h.envSet).toEqual([]);
   });
 
@@ -4756,7 +4783,7 @@ describe("moving a project ahead of the limit for a thread in another model", ()
     await h.harness.behavior.callRpc("accounts_refresh", null);
     clock = NOW + 5 * 60_000;
     expect(await sent(h, "claude-opus-5-5")).toEqual({ action: "proceed" });
-    await idle(h);
+    expect((await idle(h)).errors).toEqual([]);
     expect(h.envSet).toEqual([]);
   });
 
@@ -4773,9 +4800,57 @@ describe("moving a project ahead of the limit for a thread in another model", ()
     await idle(h);
     expect(h.envSet).toHaveLength(1);
     const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
-    expect(state.history[0]?.reason).toMatch(
-      /^Switched ahead of the limit to (work|spare): main at 95% of session$/,
+    expect(state.history[0]?.reason).toBe(
+      "Switched ahead of the limit to spare: main at 95% of session",
     );
+  });
+});
+
+describe("moving a project ahead of the limit with two percentages", () => {
+  // main: Fable at 96 (over the Fable percentage), session 20. work: session
+  // 85 (over the Opus percentage), Fable 10. A Fable thread moves the project
+  // to work; the project's Opus thread must not move it back while main is
+  // still over the share that moved it away (code-reviewer r2).
+  const TWO = {
+    main: () => Response.json(payload(20, 30, 96)),
+    work: () => Response.json(payload(85, 30, 10)),
+  };
+  const idleOf = (h: Awaited<ReturnType<typeof host>>, id: string) =>
+    h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id, projectId: "proj-1" }),
+      lastAssistantText: null,
+    });
+  const sentOf = (h: Awaited<ReturnType<typeof host>>, id: string, model: string) =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id, projectId: "proj-1" }),
+        requestedExecution: { providerId: "claude-code", model },
+        attempt: "start-turn",
+      }),
+    );
+
+  it("does not move the project back to the account it left while that account is still over the share that moved it", async () => {
+    let clock = NOW;
+    const h = await host(TWO, {
+      settings: { preferredModel: "Fable", switchAheadPercent: 95, switchAheadOtherPercent: 80 },
+      clock: () => clock,
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + 5 * 60_000;
+    expect(await sentOf(h, "thread-1", "claude-fable-5-1")).toEqual({ action: "proceed" });
+    expect((await idleOf(h, "thread-1")).errors).toEqual([]);
+    expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([["proj-1", ownNote("work")]]);
+    clock = NOW + 10 * 60_000;
+    expect(await sentOf(h, "thread-2", "claude-opus-5-5")).toEqual({ action: "proceed" });
+    expect((await idleOf(h, "thread-2")).errors).toEqual([]);
+    // Back to main (the default account) would be an env deletion, not a set.
+    expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([["proj-1", ownNote("work")]]);
+    expect(h.envDeleted).toEqual([]);
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history.map((x) => x.reason)).toEqual([
+      expect.stringMatching(/^Switched ahead of the limit to work: main at 96% of Fable$/),
+    ]);
   });
 });
 
@@ -4847,7 +4922,7 @@ describe("moving a project ahead of the limit, after a turn", () => {
     await h.harness.behavior.callRpc("accounts_refresh", null);
     clock = NOW + 5 * 60_000;
     mainFable = 85;
-    await idle(h);
+    expect((await idle(h)).errors).toEqual([]);
     expect(h.envSet).toEqual([]);
   });
 
@@ -4872,7 +4947,7 @@ describe("moving a project ahead of the limit, after a turn", () => {
     await h.harness.behavior.callRpc("accounts_refresh", null);
     clock = NOW + 10 * 60_000 + 1;
     mainFable = 85;
-    await idle(h);
+    expect((await idle(h)).errors).toEqual([]);
     expect(h.envSet).toEqual([]);
     // At two periods exactly it still counts.
     const at = await host(
@@ -4929,7 +5004,7 @@ describe("moving a project ahead of the limit, after a turn", () => {
     });
     dispose = () => h.harness.dispose();
     await h.harness.behavior.callRpc("accounts_refresh", null);
-    await idle(h);
+    expect((await idle(h)).errors).toEqual([]);
     expect(h.envSet).toEqual([]);
     const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
     expect(state.history).toEqual([]);
@@ -4939,7 +5014,7 @@ describe("moving a project ahead of the limit, after a turn", () => {
     const h = await host(AHEAD, { settings: { preferredModel: "Fable" } });
     dispose = () => h.harness.dispose();
     await h.harness.behavior.callRpc("accounts_refresh", null);
-    await idle(h);
+    expect((await idle(h)).errors).toEqual([]);
     expect(h.envSet).toEqual([]);
   });
 
@@ -5081,7 +5156,7 @@ describe("moving a project ahead of the limit, after a turn", () => {
     });
     dispose = () => h.harness.dispose();
     await h.harness.behavior.callRpc("accounts_refresh", null);
-    await idle(h);
+    expect((await idle(h)).errors).toEqual([]);
     expect(h.envSet).toEqual([]);
 
     const off = await host(AHEAD, {
@@ -5890,7 +5965,7 @@ describe("the model a thread's turn runs on", () => {
     }
   });
 
-  it("asks bb's log only for a thread whose model it does not know: the model of the message it saw sent wins", async () => {
+  it("reads bb's log first for a failed turn and falls back to the model it saw sent when the log cannot be read", async () => {
     const h = await host(
       { ...OPUS_ELSEWHERE, main: usage(50, 30, 0) },
       { ...FABLE, threadEventsError: "HTTP 503: internal error" },
@@ -5904,7 +5979,39 @@ describe("the model a thread's turn runs on", () => {
     ]);
     expect(
       h.harness.logEntries.filter((entry) => entry.level === "warn"),
-    ).toEqual([]);
+    ).toHaveLength(1);
+  });
+
+  it("judges a failed turn by the model bb logged for that very turn: sent with Fable through the checkpoint, the turn that failed (a Send now) ran Opus, so it switches to an account with Opus", async () => {
+    const h = await host(
+      { ...OPUS_ELSEWHERE, main: usage(50, 30, 0) },
+      { ...FABLE, threadEvents: { "thread-1": [requested(1, "claude-opus-5-5")] } },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await dispatch(h, "claude-fable-5-1");
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.retries.map((r) => r.reason)).toEqual([
+      "Switched to account work (Opus)",
+    ]);
+  });
+
+  it("judges a failed turn by its own request, not by a newer turn of the thread in another model", async () => {
+    const h = await host(
+      { ...OPUS_ELSEWHERE, main: usage(50, 30, 0) },
+      {
+        ...FABLE,
+        threadEvents: {
+          "thread-1": [requested(1, "claude-opus-5-5"), requested(2, "claude-fable-5-1")],
+        },
+      },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.retries.map((r) => r.reason)).toEqual([
+      "Switched to account work (Opus)",
+    ]);
   });
 
   it("forgets a thread's model when the thread is archived: the preferred model decides its next failure", async () => {

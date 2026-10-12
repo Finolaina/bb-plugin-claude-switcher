@@ -15,7 +15,12 @@ project uses [Semantic Versioning](https://semver.org/).
   `switchAheadPercent` (0 = never moved ahead). The move is measured on
   the thread's own model and the destination is chosen for that model.
   The thread's model is the one bb logged for its latest turn, so a Send
-  now or an edited message that skipped the plugin's checkpoint counts.
+  now or an edited message that skipped the plugin's checkpoint counts;
+  a failed turn is judged by the model bb logged for that very turn. The
+  account a project left ahead of the limit is not a target for it again
+  while that account is still at or above the share that moved it away,
+  so a project with a Fable thread and an Opus thread does not move back
+  and forth between two accounts.
 
 ### Changed
 

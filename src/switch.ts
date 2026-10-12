@@ -333,7 +333,7 @@ export interface AheadInput {
 }
 
 /** The fullest of the windows a turn counts against, by name. */
-function fullestWindow(
+export function fullestWindow(
   account: AccountUsage,
   preferredModel: string,
 ): { window: string; used: number } {
