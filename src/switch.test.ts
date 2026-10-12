@@ -85,6 +85,18 @@ function input(overrides: Partial<SwitchInput> = {}): SwitchInput {
 }
 
 describe("settle", () => {
+  it("keeps the absent mark of a Team seat's weekly and never adds one", () => {
+    const seat = account("team1", {
+      weekly: { usedPercent: 0, resetsAt: null, absent: true },
+      models: { Fable: { usedPercent: 100, resetsAt: NOW - 1 } },
+    });
+    expect(settle(seat, NOW)).toEqual({
+      ...seat,
+      models: { Fable: { usedPercent: 0, resetsAt: null } },
+    });
+  });
+
+
   it("zeroes a window whose reset has passed and leaves the rest alone", () => {
     const stale = account("work", {
       session: { usedPercent: 100, resetsAt: NOW - 1 },

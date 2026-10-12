@@ -10,6 +10,13 @@ export interface UsageWindow {
   usedPercent: number;
   /** Epoch milliseconds, or null when the provider gave no reset. */
   resetsAt: number | null;
+  /**
+   * The provider reported no such window at all: a Team seat's general
+   * weekly (measured 2026-10-11: session and per-model windows only). Set
+   * only by the usage parser; a window whose reset merely passed is not
+   * absent, it is empty until the next measurement.
+   */
+  absent?: true;
 }
 
 export interface AccountUsage {
@@ -84,6 +91,18 @@ function deadline(account: AccountUsage, model: string): number {
   return resets.length > 0 ? Math.min(...resets) : FAR_FUTURE;
 }
 
+/**
+ * Whether a turn with `model` on this account counts against no weekly
+ * window: the account has no general weekly at all (a Team seat) and no
+ * window of the model's own. Only its 5-hour session is spent. A window of
+ * the model that exists, settled or not, counts as spent.
+ */
+export function spendsNoWeekly(account: AccountUsage, model: string): boolean {
+  return (
+    account.weekly.absent === true && modelWindow(account, model) === undefined
+  );
+}
+
 function reserving(options: ChoiceOptions): boolean {
   const reserve = options.reserveModel ?? "";
   return (
@@ -96,18 +115,29 @@ function reserving(options: ChoiceOptions): boolean {
 function rank(
   account: AccountUsage,
   options: ChoiceOptions,
-): [number, number, number] {
+): [number, number, number, number] {
   const keepsReserve =
     reserving(options) && canRunModel(account, options.reserveModel!) ? 1 : 0;
+  // Among the accounts that keep the reserved model, a turn with another
+  // model goes first where it spends no weekly window (a Team seat: only
+  // its session), last where it spends the weekly the reserved model needs
+  // (a Max account). The accounts already out of the reserve keep their
+  // deadline order: nothing of theirs is spared by choosing a seat.
+  const spendsWeekly =
+    keepsReserve === 1 && !spendsNoWeekly(account, options.preferredModel)
+      ? 1
+      : 0;
   return [
     keepsReserve,
+    spendsWeekly,
     deadline(account, options.preferredModel),
     account.session.usedPercent,
   ];
 }
 
 /**
- * Accounts out of the reserved model first (when reserving), then the closest
+ * Accounts out of the reserved model first (when reserving), then those
+ * that spend no weekly window for the model (Team seats), then the closest
  * deadline for the model, then lowest session use, then name: never the
  * order measured. What runs out first is spent first.
  */
@@ -116,9 +146,10 @@ function sortedByRank(
   options: ChoiceOptions,
 ): AccountUsage[] {
   return [...accounts].sort((a, b) => {
-    const [ka, da, sa] = rank(a, options);
-    const [kb, db, sb] = rank(b, options);
+    const [ka, wa, da, sa] = rank(a, options);
+    const [kb, wb, db, sb] = rank(b, options);
     if (ka !== kb) return ka - kb;
+    if (wa !== wb) return wa - wb;
     if (da !== db) return da - db;
     if (sa !== sb) return sa - sb;
     return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;

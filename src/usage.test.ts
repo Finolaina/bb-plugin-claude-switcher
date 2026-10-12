@@ -146,7 +146,8 @@ describe("parseUsage", () => {
     expect(parseUsage(team)).toEqual({
       blocked: false,
       session: { usedPercent: 0, resetsAt: null },
-      weekly: { usedPercent: 0, resetsAt: null },
+      // absent: the provider gave no weekly at all (not an empty one)
+      weekly: { usedPercent: 0, resetsAt: null, absent: true },
       models: {
         Fable: { usedPercent: 0, resetsAt: Date.parse("2026-10-15T11:00:00Z") },
       },

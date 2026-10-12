@@ -323,6 +323,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         "After each turn, when the project's account is at or above this share of its session, weekly or preferred-model window and another account is below it, the project moves there before a turn fails. Needs the automatic choice above. 0 = off (switch only when a turn fails).",
       default: 0,
     },
+    switchAheadOtherPercent: {
+      type: "number",
+      label: "Switch ahead of the limit, threads in another model (%)",
+      description:
+        "For a thread sent with a model other than the preferred one (e.g. Opus while Fable is preferred): after each turn, when the project's account is at or above this share of its session, weekly or that model's window and another account is below it, the project moves there before a turn fails. Needs the automatic choice above; no effect without a preferred model. 0 = off.",
+      default: 0,
+    },
     maximumWaitHours: {
       type: "number",
       label: "Maximum automatic wait (hours)",
@@ -1477,6 +1484,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     await collector.collect(account);
     await recordSamples();
   }
+  /** Either switch-ahead threshold is on. */
+  function aheadConfigured(): boolean {
+    return (
+      current.switchAheadPercent > 0 || current.switchAheadOtherPercent > 0
+    );
+  }
+  /** The switch-ahead threshold for a thread in `model`: the preferred model's, or the other models' when one is set. */
+  function aheadThreshold(model: string): number {
+    const other =
+      current.preferredModel !== "" &&
+      model.toLowerCase() !== current.preferredModel.toLowerCase();
+    return other ? current.switchAheadOtherPercent : current.switchAheadPercent;
+  }
+
   /**
    * When a turn ends, the project's account may be close to its limit: move
    * the project now, while another account has room, rather than let the
@@ -1485,7 +1506,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   async function moveAhead(thread: ThreadResponse): Promise<void> {
     // Asked again: the settings may have changed while the account was measured.
-    if (!current.autoSwitch || !(current.switchAheadPercent > 0)) return;
+    if (!current.autoSwitch || !aheadConfigured()) return;
+    // The threshold is the thread's model's: a thread in the preferred model
+    // moves at switchAheadPercent, one sent with another model (Opus while
+    // Fable is preferred: it only spends the 5-hour session of a Team seat)
+    // at switchAheadOtherPercent. Each can be off on its own.
+    const model =
+      threadModel.get(thread.id) ??
+      (await loggedModel(thread.id)) ??
+      current.preferredModel;
+    const threshold = aheadThreshold(model);
+    if (!(threshold > 0)) return;
     const projectId = thread.projectId;
     const from = await projectAccount(projectId);
     if (from.external) return;
@@ -1497,7 +1528,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // (a directory of the same one shares its usage and gains nothing).
     const maxAgeMs = 2 * Math.max(1, current.refreshMinutes) * 60_000;
     const own = accounts.find((a) => a.name === fromName);
-    const candidates = measuredAccounts().filter((usage) => {
+    const candidates = measuredAccounts(model).filter((usage) => {
       if (usage.name === fromName) return true;
       const account = accounts.find((a) => a.name === usage.name);
       const observedAt = collector.get(usage.name)?.observedAt ?? null;
@@ -1513,8 +1544,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const decision = decideAhead({
       currentAccount: fromName,
       accounts: candidates,
-      preferredModel: current.preferredModel,
-      threshold: current.switchAheadPercent,
+      preferredModel: model,
+      reserveModel: current.preferredModel,
+      threshold,
       now,
     });
     if (decision.kind === "keep") return;
@@ -1540,7 +1572,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   bb.events.on("thread.idle", async ({ thread }) => {
     if (
       !current.autoSwitch ||
-      !(current.switchAheadPercent > 0) ||
+      !aheadConfigured() ||
       thread.providerId !== CLAUDE_CODE_PROVIDER ||
       notTheUsersThread(thread) !== null
     )
