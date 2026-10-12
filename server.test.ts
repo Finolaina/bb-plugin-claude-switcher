@@ -738,6 +738,7 @@ describe("claude accounts plugin", () => {
       "maximumWaitHours",
       "preferredModel",
       "refreshMinutes",
+      "switchAheadOtherPercent",
       "switchAheadPercent",
     ]);
     expect(h.harness.registrations.rpcMethods.sort()).toEqual(
@@ -4565,6 +4566,100 @@ describe("the forecast of each window", () => {
     expect(Object.keys(state.forecasts).sort()).toEqual(["main", "spare"]);
     const stored = (await h.bb.storage.kv.get("usage-series")) as Record<string, unknown>;
     expect(Object.keys(stored).sort()).toEqual(["main", "spare"]);
+  });
+});
+
+/** A Team seat's answer (measured 2026-10-11): session and a Fable window, no weekly_all, seven_day null. */
+function teamPayload(session: number, fable: number): Payload {
+  return {
+    limits: [
+      {
+        kind: "session",
+        percent: session,
+        resets_at: new Date(NOW + 2 * HOUR).toISOString(),
+      },
+      {
+        kind: "weekly_scoped",
+        percent: fable,
+        resets_at: new Date(NOW + 72 * HOUR).toISOString(),
+        scope: { model: { display_name: "Fable" } },
+      },
+    ],
+    five_hour: { locked_reason: null },
+    seven_day: null,
+  };
+}
+
+describe("moving a project ahead of the limit for a thread in another model", () => {
+  // The project's account (main) is a Team seat whose session is nearly
+  // full; work is a Team seat with room; spare is a Max account that still
+  // has Fable (an Opus thread must not spend its weekly).
+  const TEAM_AHEAD = {
+    main: () => Response.json(teamPayload(95, 70)),
+    work: () => Response.json(teamPayload(17, 42)),
+    spare: () => Response.json(payload(10, 10, 2)),
+  };
+  const idle = (h: Awaited<ReturnType<typeof host>>) =>
+    h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "thread-1", projectId: "proj-1" }),
+      lastAssistantText: null,
+    });
+  const sent = (h: Awaited<ReturnType<typeof host>>, model: string) =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: "thread-1", projectId: "proj-1" }),
+        requestedExecution: { providerId: "claude-code", model },
+        attempt: "start-turn",
+      }),
+    );
+
+  it("moves an Opus thread off a nearly full Team seat to the Team seat with room, not to the Max with Fable, at switchAheadOtherPercent", async () => {
+    let clock = NOW;
+    const h = await host(TEAM_AHEAD, {
+      settings: { preferredModel: "Fable", switchAheadPercent: 0, switchAheadOtherPercent: 95 },
+      clock: () => clock,
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + 5 * 60_000;
+    expect(await sent(h, "claude-opus-5-5")).toEqual({ action: "proceed" });
+    await idle(h);
+    expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([["proj-1", ownNote("work")]]);
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history[0]).toMatchObject({
+      projectId: "proj-1",
+      from: "main",
+      to: "work",
+      reason: "Switched ahead of the limit to work: main at 95% of session",
+    });
+  });
+
+  it("leaves a Fable thread alone when switchAheadPercent is 0, whatever switchAheadOtherPercent says", async () => {
+    let clock = NOW;
+    const h = await host(TEAM_AHEAD, {
+      settings: { preferredModel: "Fable", switchAheadPercent: 0, switchAheadOtherPercent: 95 },
+      clock: () => clock,
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + 5 * 60_000;
+    expect(await sent(h, "claude-fable-5-1")).toEqual({ action: "proceed" });
+    await idle(h);
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("does not apply the preferred model's threshold to an Opus thread", async () => {
+    let clock = NOW;
+    const h = await host(TEAM_AHEAD, {
+      settings: { preferredModel: "Fable", switchAheadPercent: 90, switchAheadOtherPercent: 0 },
+      clock: () => clock,
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + 5 * 60_000;
+    expect(await sent(h, "claude-opus-5-5")).toEqual({ action: "proceed" });
+    await idle(h);
+    expect(h.envSet).toEqual([]);
   });
 });
 

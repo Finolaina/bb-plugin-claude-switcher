@@ -4,6 +4,30 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.16] - 2026-10-12
+
+### Added
+
+- **`switchAheadOtherPercent`.** A second ahead-of-the-limit percentage
+  for threads sent with a model other than `preferredModel`. An Opus
+  thread on a Team seat at 95 % of its session moves to the Team seat
+  with room before its next turn fails, while Fable threads keep
+  `switchAheadPercent` (0 = never moved ahead). The move is measured on
+  the thread's own model and the destination is chosen for that model.
+
+### Changed
+
+- **An Opus turn goes to a Team seat before a Max account.** Among the
+  accounts that still keep the preferred model, a Team seat without a
+  window of its own for the turn's model spends only its 5-hour session,
+  so it comes before a Max account, whose Opus turn would spend the
+  weekly window Fable needs. Accounts already out of the preferred model
+  still come first, and the seat preference never reorders them.
+- **A Team seat's missing weekly window is marked, not guessed.** The
+  usage answer with `seven_day: null` sets an explicit mark on the
+  account, so the expired weekly window of a Max account (settled to 0 %
+  with no reset) is never taken for a Team seat.
+
 ## [0.2.15] - 2026-10-11
 
 ### Changed

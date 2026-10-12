@@ -92,7 +92,7 @@ export function parseUsage(payload: unknown): ParsedUsage {
   // answer. Only with seven_day explicitly null: a seven_day bucket with no
   // weekly_all is still an incomplete answer.
   if (weekly === null && session !== null && parsed.data.seven_day === null)
-    weekly = { usedPercent: 0, resetsAt: null };
+    weekly = { usedPercent: 0, resetsAt: null, absent: true };
   return {
     blocked: locked || session === null || weekly === null,
     // A reported lock is proof on its own; a missing window alone is not.

@@ -139,7 +139,9 @@ of a thread's header and of the new-thread composer, and in `list`.
 
 Opt-in. Set a percentage and, when a turn ends with the project's account
 at or above it, the project moves to an account below it, so the next
-turn does not fail first. Needs the automatic choice on.
+turn does not fail first. Needs the automatic choice on. A second
+percentage covers threads running in another model, so an Opus thread
+moves at 95 % while Fable threads keep theirs.
 
 </td>
 </tr>
@@ -335,7 +337,10 @@ flowchart TD
   starts, and a turn that fails on a limit is judged against that model
   too. So a thread you switch to Opus runs on an account with Opus left
   even when `preferredModel` is `Fable` and no account has Fable left,
-  while a thread sent with Fable waits for Fable as before. This is
+  while a thread sent with Fable waits for Fable as before. Among the
+  accounts that keep Fable, a Team seat, whose Opus turn spends only its
+  5-hour session, comes before a Max account, whose Opus turn would spend
+  the weekly window Fable needs. This is
   decided on the measurements already there and never refuses a message
   (at worst it delays it 3 seconds); the plugin never changes a thread's
   model. bb does not ask for a Send now of a queued message nor for an
@@ -352,6 +357,12 @@ flowchart TD
   account under the percentage, measured in the last two refresh
   intervals, that is another Claude account. This also moves a project you pinned
   by hand; leave the setting at 0 to move only on a failed turn.
+  A thread sent with another model than `preferredModel` uses
+  `switchAheadOtherPercent` instead: it is measured on its session, weekly
+  and that model's window, and the account it moves to is the best one
+  for that model (accounts out of the preferred model first, then Team
+  seats, whose Opus turn spends only the session, then the rest). Set one
+  percentage and leave the other at 0 to move only threads in that model.
 - **The forecast is shown, never acted on.** For each weekly window the
   plugin keeps its first measurement of the window and the latest, and
   reports the average pace between them: "runs out in 2 d 5 h at this
@@ -613,6 +624,7 @@ named `default`; the default account's own name always works.
 | `maximumWaitHours`   | `6`                  | Queue a retry for a reset only if it is closer than this (0 = no limit).                                                                                                                                            |
 | `refreshMinutes`     | `5`                  | Background usage refresh interval (never below 1).                                                                                                                                                                  |
 | `switchAheadPercent` | `0` (off)            | When a turn ends with the project's account at or above this share of its session, weekly or preferred-model window, move the project to an account below it. Needs `autoSwitch`.                                   |
+| `switchAheadOtherPercent` | `0` (off) | The same for a thread sent with another model than `preferredModel`, measured on that model's windows; the project moves to the best account for that model (out of the preferred model first, then Team seats). Needs `autoSwitch`. |
 | `claudeCommand`      | `claude`             | The Claude Code executable used to log an account in from bb: a name looked up in the `PATH` of bb's server, or a full path.                                                                                        |
 | `loginPrivateWindow` | `true`               | macOS: open logins in a private Chrome window, so they do not reuse the browser's Claude session. Off, without Chrome, or on Linux: the default browser.                                                            |
 
