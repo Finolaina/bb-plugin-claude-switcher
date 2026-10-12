@@ -57,6 +57,8 @@ import {
   isRefusal,
   MAX_ATTEMPTS,
   modelFamily,
+  fullestWindow,
+  settle,
 } from "./src/switch.js";
 import {
   usageFetchMethod,
@@ -1504,6 +1506,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * next turn fail. Judged on the latest measurement of each account (see
    * measureForAhead for the project's own).
    */
+  /**
+   * The account each project last left ahead of the limit, with the model
+   * and the share that moved it: not a target for that project again while
+   * it is still at or above that share. Without it a project with a Fable
+   * thread and an Opus thread, each with its own percentage, moved back and
+   * forth between two accounts at every turn end (code-reviewer r2).
+   */
+  const aheadLeft = new Map<
+    string,
+    { account: string; model: string; threshold: number }
+  >();
   async function moveAhead(
     thread: ThreadResponse,
     model: string,
@@ -1528,8 +1541,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // (a directory of the same one shares its usage and gains nothing).
     const maxAgeMs = 2 * Math.max(1, current.refreshMinutes) * 60_000;
     const own = accounts.find((a) => a.name === fromName);
+    const left = aheadLeft.get(projectId);
     const candidates = measuredAccounts(model).filter((usage) => {
       if (usage.name === fromName) return true;
+      if (
+        left !== undefined &&
+        usage.name === left.account &&
+        fullestWindow(settle(usage, now), left.model).used >= left.threshold
+      )
+        return false;
       const account = accounts.find((a) => a.name === usage.name);
       const observedAt = collector.get(usage.name)?.observedAt ?? null;
       return (
@@ -1567,6 +1587,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // that account's, not a leftover of the old one.
       thread.id,
     );
+    aheadLeft.set(projectId, { account: fromName, model, threshold });
   }
 
   bb.events.on("thread.idle", async ({ thread }) => {
@@ -1716,14 +1737,29 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * long turn outlives both). Null when the log cannot be read or names no
    * Claude model: the preferred model decides then.
    */
-  async function loggedModel(threadId: string): Promise<string | null> {
+  async function loggedModel(
+    threadId: string,
+    requestId?: string,
+  ): Promise<string | null> {
     try {
-      const [row] = await bb.sdk.threads.events.list({
+      const rows = await bb.sdk.threads.events.list({
         threadId,
         types: ["client/turn/requested"],
         order: "desc",
-        limit: "1",
+        limit: requestId === undefined ? "1" : "20",
       });
+      // A failed turn is judged by what that very turn was sent with (its
+      // request id), not by the latest message: the latest may be a newer
+      // turn in another model (code-reviewer r2). A turn the log does not
+      // name (an older id, or none) is judged by the latest message.
+      const row =
+        requestId === undefined
+          ? rows[0]
+          : (rows.find(
+              (r) =>
+                r.type === "client/turn/requested" &&
+                r.data.requestId === requestId,
+            ) ?? rows[0]);
       return row?.type === "client/turn/requested"
         ? modelFamily(row.data.execution?.model ?? null)
         : null;
@@ -1919,9 +1955,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
       return;
     }
+    // The log first, for the turn that failed: a Send now or an edited
+    // message skips the checkpoint and the cache still names the model of
+    // the message before it (code-reviewer r2, same hole as thread.idle).
     const model =
+      (await loggedModel(event.threadId, event.requestId)) ??
       threadModel.get(event.threadId) ??
-      (await loggedModel(event.threadId)) ??
       current.preferredModel;
     await judge(event, projectId, from, model, now, false, started);
   }

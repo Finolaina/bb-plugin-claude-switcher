@@ -278,8 +278,12 @@ preferred model; a thread whose model has no percentage costs no query.
    failed turn still tries and this does not: nothing fails if the project
    stays), and is another Claude account (a directory of the same one
    shares its usage). None: the project stays. The target is under the percentage and the account left is at
-   or above it; usage only falls at a reset, so the project does not come
-   back before the account it left has reset.
+   or above it; usage only falls at a reset, and the account a project
+   left ahead of the limit is not a target for that project again while
+   it is still at or above the share that moved it away (another thread
+   of the project, in a model with a lower percentage, would otherwise
+   move it back and forth), so the project does not come back before the
+   account it left has reset.
 4. The move is recorded like a switch (reason
    `Switched ahead of the limit to <name>: <old> at <n>% of <window>`) and
    opens the grace window below for turns of the same project still
