@@ -1314,48 +1314,39 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return status === 409 && /is not the failed turn/i.test(message);
   }
 
-  async function sendQueued(
-    threadId: string,
-    projectId: string,
-    id: string,
-  ): Promise<void> {
-    // An explicit send skips bb's dispatch checkpoint, and so the anchor
-    // `thread.active` compares against: set here, as close to the send as
-    // it gets, after any move of the project (Codex IR17-001).
-    dispatchEpoch.set(threadId, movesOf(projectId).epoch);
+  /**
+   * Replace `rowId`, another plugin's retry of the turn, by one of ours: it is
+   * deleted here and queued again by the caller, so bb dispatches the retry
+   * through its checkpoint, where the turn is placed. An explicit send of
+   * the row would skip that checkpoint and run the turn where the project
+   * stood when the row was found, not when it is sent (Codex
+   * BM-INSPECT-R2-001). False when the row is already on its way: nothing to
+   * replace.
+   */
+  async function replaceQueued(threadId: string, rowId: string): Promise<boolean> {
     try {
-      await bb.sdk.threads.queuedMessages.send({
-        threadId,
-        queuedMessageId: id,
-        mode: "auto",
-      });
+      await deleteOwn(threadId, rowId);
+      return true;
     } catch (error) {
-      // Not sent by this call: whoever sends it anchors it, or nobody does.
-      dispatchEpoch.delete(threadId);
-      if (stillWaiting(error)) {
-        bb.log.info(
-          `thread ${threadId}: busy again; the queued retry runs when it frees`,
-        );
-        return;
-      }
-      if (alreadyOnItsWay(error)) {
-        bb.log.info(
-          `thread ${threadId}: the queued retry is already on its way`,
-        );
-        return;
-      }
-      throw error;
+      // Sent between the list and this delete (bb would refuse a retry of a
+      // thread that is running again), or removed by the user: nothing to
+      // replace.
+      if (!alreadyOnItsWay(error)) throw error;
+      bb.log.info(
+        `thread ${threadId}: the queued retry is already on its way; leaving it`,
+      );
+      return false;
     }
   }
 
   /**
    * Retry the failed turn now (no sendAt) or at `sendAt`. bb keeps ONE retry
-   * per turn: if provider-retry got there first, its row is sent right away
-   * (the project is already on the new account) or replaced by our timed one.
+   * per turn: if provider-retry got there first, its row is replaced by ours,
+   * at once or timed, so bb dispatches the retry through its checkpoint (see
+   * replaceQueued).
    */
   async function retryTurn(
     event: PluginTurnFailedEvent,
-    projectId: string,
     reason: string,
     sendAt?: number,
     stuck = false,
@@ -1367,25 +1358,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         `thread ${threadId}: a retry of the turn is already queued ("${existing.reason}"${existing.sendAt === null ? "" : `, for ${new Date(existing.sendAt).toISOString()}`})`,
       );
       // On a rescue it is left to whoever queued it: another plugin may be
-      // holding it, and an explicit send would skip that hold (Codex r6,
+      // holding it, and replacing it would drop that hold (Codex r6,
       // IR6-002).
       if (stuck) return;
-      if (sendAt === undefined) {
-        await sendQueued(threadId, projectId, existing.id);
-        return;
-      }
-      try {
-        await deleteOwn(threadId, existing.id);
-      } catch (error) {
-        // Sent between the list and this delete (bb would refuse a retry
-        // of a thread that is running again), or removed by the user:
-        // nothing to replace.
-        if (!alreadyOnItsWay(error)) throw error;
-        bb.log.info(
-          `thread ${threadId}: the queued retry is already on its way; leaving it`,
-        );
-        return;
-      }
+      if (!(await replaceQueued(threadId, existing.id))) return;
     }
     try {
       await bb.sdk.threads.retry({
@@ -1398,18 +1374,29 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // Raced with another retry of the same turn between the list and ours.
       const raced = await queuedRetry(event);
       if (raced !== null) {
-        if (stuck) {
-          bb.log.info(
+        if (stuck || sendAt !== undefined) {
+          bb.log[stuck ? "info" : "warn"](
             `thread ${threadId}: another retry was queued first; leaving it`,
           );
           return;
         }
-        if (sendAt === undefined) {
-          await sendQueued(threadId, projectId, raced.id);
-        } else {
-          bb.log.warn(
-            `thread ${threadId}: another retry was queued first; leaving it`,
-          );
+        // Replaced too, once: a retry queued a third time is left to bb,
+        // which dispatches it through its checkpoint at its own time.
+        if (!(await replaceQueued(threadId, raced.id))) return;
+        try {
+          await bb.sdk.threads.retry({
+            threadId,
+            turnRequestId: event.requestId,
+            reason,
+          });
+        } catch (again) {
+          if ((await queuedRetry(event)) !== null) {
+            bb.log.warn(
+              `thread ${threadId}: another retry was queued again; leaving it`,
+            );
+            return;
+          }
+          throw again;
         }
         return;
       }
@@ -2088,7 +2075,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       bb.log.info(
         `thread ${event.threadId}: ${reason} (switched ${now - recent.at} ms ago)`,
       );
-      await retryTurn(event, projectId, reason, recent.sendAt);
+      await retryTurn(event, reason, recent.sendAt);
       return;
     }
     if (typeof started === "string") {
@@ -2118,7 +2105,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         bb.log.info(
           `thread ${event.threadId}: ${reason} (its turn started on ${started})`,
         );
-        await retryTurn(event, projectId, reason, sendAt);
+        await retryTurn(event, reason, sendAt);
         return;
       }
     }
@@ -2357,11 +2344,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       bb.log.info(
         `thread ${event.threadId}: ${how}${reason} until ${new Date(decision.sendAt).toISOString()}`,
       );
-      await retryTurn(event, projectId, reason, decision.sendAt, stuck);
+      await retryTurn(event, reason, decision.sendAt, stuck);
       return;
     }
     bb.log.info(`thread ${event.threadId}: ${how}${reason}`);
-    await retryTurn(event, projectId, reason, undefined, stuck);
+    await retryTurn(event, reason, undefined, stuck);
   }
 
   bb.events.on("turn.failed", async (event) => {

@@ -392,9 +392,10 @@ flowchart TD
   runs a thread, never which model it runs.
 - **One retry per turn.** bb's bundled **provider-retry** plugin also
   queues a retry at the reset the provider reported, and bb keeps a single
-  retry per turn. After switching, this plugin sends the retry
-  provider-retry already queued (the project is on the new account by
-  then) instead of queueing a second one; when it has to wait, it replaces
+  retry per turn. After switching, this plugin replaces the retry
+  provider-retry already queued by its own, which bb dispatches at once
+  through the same checks as any message (where the turn is placed on the
+  account the project is on by then); when it has to wait, it replaces
   that retry with its own timed one. Keep provider-retry enabled: disabling
   it is global and would also drop its retries for overloads and for other
   providers.
