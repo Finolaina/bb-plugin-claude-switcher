@@ -946,7 +946,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // Logged, not debug: the project's next turn in the preferred model
       // then stays where it is, and this line is why (code-reviewer r1).
       bb.log.info(
-        `project ${projectId}: excursion from ${fromName} not noted (${move.picks !== before.picks ? "picked by hand meanwhile" : "another move crossed it"})`,
+        `project ${projectId}: excursion from ${fromName} not noted (${move.picks !== before.picks ? "picked or released by hand meanwhile" : "another move crossed it"})`,
       );
       return;
     }
@@ -2726,7 +2726,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       now,
       current.preferredModel,
     );
-    if (to === null) return;
+    if (to === null) {
+      // Nothing to release it on; the wait fires on its own at sendAt and
+      // is placed then (code-reviewer r2, CR2-05).
+      bb.log.debug(
+        `thread ${threadId}: its wait stays on ${fromName}: no other account can run ${model}${reservedFor(fromName, model, now) ? " and this one keeps " + current.preferredModel : ""}`,
+      );
+      return;
+    }
     await applyAccount(projectId, accountOrDefault(to), from);
     await markHandled(projectId);
     noteMove(projectId, fromName, to, model, before);
