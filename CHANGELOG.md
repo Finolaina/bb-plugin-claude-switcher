@@ -46,7 +46,12 @@ project uses [Semantic Versioning](https://semver.org/).
   ran where the project stood when the row was found, not when it was
   sent, so an Opus retry could start on a Max account a Fable turn had
   taken the project back to meanwhile. The row is replaced by a retry of
-  this plugin's, which bb dispatches through the checkpoint at once.
+  this plugin's, which bb dispatches through the checkpoint at once. If
+  ours cannot be queued, the row is put back as it was; if the row cannot
+  be removed, ours is queued anyway and bb keeps whichever it has: the turn
+  is never left without a retry.
+- **A new thread of a project on an excursion goes home too**: the
+  placement a new thread causes takes the way back like a turn's does.
 
 ## [0.2.16] - 2026-10-12
 
