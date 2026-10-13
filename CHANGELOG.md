@@ -31,9 +31,16 @@ project uses [Semantic Versioning](https://semver.org/).
   soon as that account can run it and the project did not leave it ahead
   of the limit. A later move for the other model keeps the first origin;
   a move for the preferred model, a pick by hand (also one that confirms
-  the account) and `release` forget it; a move that crossed another move,
-  or a read of the project's account that did, notes nothing. A reload
+  the account) and `release` forget it (`release` also for a project on
+  the default account with no variable of its own); a move that crossed
+  another move, a read of the project's account that did, or a pick by
+  hand while the move's answer was pending, notes nothing. The way home
+  depends on home's measurement alone, not on the seat's. A reload
   forgets it too: the project stays where it is.
+- **A leftover turn follows the recorded move only while the project
+  still sits where that move put it** and no move is under way; and a
+  failed turn is judged on the clock after the accounts were re-read, so a
+  Max account whose Fable reset passed meanwhile keeps Fable again.
 
 ## [0.2.16] - 2026-10-12
 

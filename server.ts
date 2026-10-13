@@ -877,14 +877,28 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * done: a read of the project's account that overlaps or crosses one says
    * nothing about where a turn started (Codex IR15-001).
    */
-  const moves = new Map<string, { epoch: number; inFlight: number }>();
-  function movesOf(projectId: string): { epoch: number; inFlight: number } {
+  type MoveMark = { epoch: number; picks: number };
+  const moves = new Map<
+    string,
+    { epoch: number; inFlight: number; picks: number }
+  >();
+  function movesOf(projectId: string): {
+    epoch: number;
+    inFlight: number;
+    /** Choices by hand (a pick, also one that confirms the account; a release): each outranks an automatic move still under way. */
+    picks: number;
+  } {
     let move = moves.get(projectId);
     if (move === undefined) {
-      move = { epoch: 0, inFlight: 0 };
+      move = { epoch: 0, inFlight: 0, picks: 0 };
       moves.set(projectId, move);
     }
     return move;
+  }
+  /** The project's moves and picks as they stand, for noteMove: taken BEFORE reading the project's account. */
+  function moveMark(projectId: string): MoveMark {
+    const { epoch, picks } = movesOf(projectId);
+    return { epoch, picks };
   }
 
   /**
@@ -907,18 +921,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * After applyAccount moved the project from `fromName` to `toName` for a
    * turn in `model`. A move for another model notes the FIRST account left
    * and keeps it through later moves; a move for the preferred model is a
-   * new home and forgets it. `epochBefore`: the project's moves when the
-   * caller captured it, BEFORE reading the project's account: the origin
-   * is noted only when exactly this move happened since (epoch + 2), so
-   * neither a stale read nor a move that crossed the write names a wrong
-   * origin (Codex BM-R2-003, BM-R3-001).
+   * new home and forgets it. `before`: the project's moves and picks when
+   * the caller captured them, BEFORE reading the project's account: the
+   * origin is noted only when exactly this move happened since (epoch + 2)
+   * and nobody picked by hand meanwhile, so neither a stale read, a move
+   * that crossed the write nor a pick that confirmed the account names a
+   * wrong origin (Codex BM-R2-003, BM-R3-001, BM-INSPECT-004).
    */
   function noteMove(
     projectId: string,
     fromName: string,
     toName: string,
     model: string,
-    epochBefore: number,
+    before: MoveMark,
   ): void {
     if (fromName === toName) return;
     if (!otherModel(model)) {
@@ -926,11 +941,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return;
     }
     if (excursions.has(projectId)) return;
-    if (movesOf(projectId).epoch !== epochBefore + 2) {
+    const move = movesOf(projectId);
+    if (move.epoch !== before.epoch + 2 || move.picks !== before.picks) {
       // Logged, not debug: the project's next turn in the preferred model
       // then stays where it is, and this line is why (code-reviewer r1).
       bb.log.info(
-        `project ${projectId}: excursion from ${fromName} not noted (another move crossed it)`,
+        `project ${projectId}: excursion from ${fromName} not noted (${move.picks !== before.picks ? "picked by hand meanwhile" : "another move crossed it"})`,
       );
       return;
     }
@@ -1120,8 +1136,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         await applyAccount(projectId, to, from);
         applied = true;
         // The pick is the user's: nothing to come back from, also when it
-        // confirms the account the project is on.
+        // confirms the account the project is on; and it outranks an
+        // automatic move whose answer is still pending (see noteMove).
         excursions.delete(projectId);
+        movesOf(projectId).picks += 1;
         await markHandled(projectId);
         const fromName = from.account ?? current.defaultAccountName;
         const toName = to?.name ?? current.defaultAccountName;
@@ -1473,7 +1491,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const projectId = thread.projectId;
     // Always: picks up a changed accounts directory and prunes its measurements.
     await discover();
-    const epochBefore = movesOf(projectId).epoch;
+    const before = moveMark(projectId);
     const from = await projectAccount(projectId);
     if (from.external) {
       bb.log.info(
@@ -1536,7 +1554,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       fromName,
       decision.account,
       current.preferredModel,
-      epochBefore,
+      before,
     );
     const reason =
       decision.why === "new-project"
@@ -1626,7 +1644,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const threshold = aheadThreshold(model);
     if (!(threshold > 0)) return;
     const projectId = thread.projectId;
-    const epochBefore = movesOf(projectId).epoch;
+    const before = moveMark(projectId);
     const from = await projectAccount(projectId);
     if (from.external) return;
     const fromName = from.account ?? current.defaultAccountName;
@@ -1668,7 +1686,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (decision.kind === "keep") return;
     await applyAccount(projectId, accountOrDefault(decision.account), from);
     await markHandled(projectId);
-    noteMove(projectId, fromName, decision.account, model, epochBefore);
+    noteMove(projectId, fromName, decision.account, model, before);
     const reason = `Switched ahead of the limit to ${decision.account}: ${fromName} at ${Math.round(decision.used)}% of ${decision.window}`;
     bb.log.info(`thread ${thread.id}: ${reason}`);
     await recordMove(
@@ -1889,7 +1907,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const projectId = thread.projectId;
     // Emptied by a change of the accounts directory, until the next look.
     if (accounts.length === 0) await discover();
-    const epochBefore = movesOf(projectId).epoch;
+    const before = moveMark(projectId);
     const from = await projectAccount(projectId);
     if (from.external) return;
     const fromName = from.account ?? current.defaultAccountName;
@@ -1933,7 +1951,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (turn.abandoned) return;
     await applyAccount(projectId, accountOrDefault(decision.account), from);
     await markHandled(projectId);
-    noteMove(projectId, fromName, decision.account, model, epochBefore);
+    noteMove(projectId, fromName, decision.account, model, before);
     const reason =
       decision.why === "back-from-excursion"
         ? `Moved back to account ${decision.account} before the turn: ${fromName} was an excursion for ${excursion?.model ?? "another model"}`
@@ -2028,8 +2046,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       threadModel.get(event.threadId) ??
       current.preferredModel;
     const recent = recentSwitches.get(projectId);
+    // Where the project is now: a leftover follows the recorded move only
+    // while the project still sits where that move put it and no move is
+    // under way. placeTurn runs outside the project's queue: a move landed
+    // but not yet recorded would have the turn retried "on" an account the
+    // variable no longer names (Codex BM-INSPECT-002).
+    const at = await projectAccount(projectId);
+    const currentName = at.account ?? current.defaultAccountName;
+    const settled = !at.external && movesOf(projectId).inFlight === 0;
     if (
       recent !== undefined &&
+      settled &&
+      currentName === recent.to &&
       now - recent.at <= SWITCH_GRACE_MS &&
       recent.threadId !== event.threadId &&
       !recent.graced.has(event.threadId) &&
@@ -2064,8 +2092,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return;
     }
     if (typeof started === "string") {
-      const at = await projectAccount(projectId);
-      const currentName = at.account ?? current.defaultAccountName;
       const sendAt =
         recent !== undefined &&
         recent.to === currentName &&
@@ -2097,7 +2123,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       }
     }
     await refreshAll();
-    const epochBefore = movesOf(projectId).epoch;
+    const before = moveMark(projectId);
     const from = await projectAccount(projectId);
     if (from.external) {
       bb.log.info(
@@ -2105,7 +2131,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
       return;
     }
-    await judge(event, projectId, from, model, now, false, epochBefore, started);
+    // On the clock after those reads: a window that reset meanwhile has
+    // reset (Codex BM-INSPECT-003).
+    await judge(
+      event,
+      projectId,
+      from,
+      model,
+      deps.now(),
+      false,
+      before,
+      started,
+    );
   }
 
   /**
@@ -2211,8 +2248,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     model: string,
     now: number,
     stuck: boolean,
-    /** The project's moves before `from` was read (see noteMove). */
-    epochBefore: number,
+    /** The project's moves and picks before `from` was read (see noteMove). */
+    before: MoveMark,
     ranOn?: string | null,
   ): Promise<void> {
     const fromName = from.account ?? current.defaultAccountName;
@@ -2281,7 +2318,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (stuck && !current.autoSwitch) return;
     if (decision.account !== fromName) {
       await applyAccount(projectId, accountOrDefault(decision.account), from);
-      noteMove(projectId, fromName, decision.account, model, epochBefore);
+      noteMove(projectId, fromName, decision.account, model, before);
       await recordMove(
         {
           at: now,
@@ -2535,7 +2572,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       bb.log.debug(`thread ${threadId}: left in error (${declined})`);
       return;
     }
-    const epochBefore = movesOf(thread.projectId).epoch;
+    const before = moveMark(thread.projectId);
     const from = await projectAccount(thread.projectId);
     if (from.external) return;
     await judge(
@@ -2545,7 +2582,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       turn.model ?? current.preferredModel,
       deps.now(),
       true,
-      epochBefore,
+      before,
     );
   }
   /** What bb's failure event says of a turn rejected at the door (bb 0.45, `doorRejectionErrorInfo`). */
@@ -2661,7 +2698,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const model =
       modelFamily(row.model) ?? turn.model ?? current.preferredModel;
     // Read last: nothing is awaited between this read and the move below.
-    const epochBefore = movesOf(projectId).epoch;
+    const before = moveMark(projectId);
     const from = await projectAccount(projectId);
     if (from.external || !current.autoSwitch) return;
     const fromName = from.account ?? current.defaultAccountName;
@@ -2705,7 +2742,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (to === null) return;
     await applyAccount(projectId, accountOrDefault(to), from);
     await markHandled(projectId);
-    noteMove(projectId, fromName, to, model, epochBefore);
+    noteMove(projectId, fromName, to, model, before);
     const reason = `Moved to account ${to}, which can run the waiting turn now: ${fromName} ${noLogin ? "is not logged in" : whyOut(fromName, model)}`;
     bb.log.info(`thread ${threadId}: ${reason}`);
     await recordMove(
@@ -2993,6 +3030,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                     await applyAccount(p.id, null, await projectAccount(p.id));
                     recentSwitches.delete(p.id);
                     excursions.delete(p.id);
+                    movesOf(p.id).picks += 1;
                   });
                   lines.push(
                     `${p.name}\treleased (was ${p.account ?? "a vanished account"})`,
@@ -3003,6 +3041,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                     `${p.name}\tNOT released: ${error instanceof Error ? error.message : String(error)}`,
                   );
                 }
+              } else {
+                // On the default account with no variable of its own (an
+                // excursion to it deleted the variable): nothing to remove,
+                // but nothing to come back from either (Codex
+                // BM-INSPECT-005).
+                excursions.delete(p.id);
+                movesOf(p.id).picks += 1;
               }
             }
             return {

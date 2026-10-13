@@ -961,6 +961,30 @@ describe("decidePlacement with a reserved model (2026-10-13: the Max accounts ar
       ).toEqual({ kind: "move", account: "main", why: "current-blocked" });
     });
 
+    it("goes home even when the seat's own measurement is missing or incomplete (Sol r1, BM-INSPECT-006)", () => {
+      expect(decidePlacement({ ...onSeat, accounts: [maxWithFable] })).toEqual({
+        kind: "move",
+        account: "spare",
+        why: "back-from-excursion",
+      });
+      expect(
+        decidePlacement({
+          ...onSeat,
+          accounts: [{ ...seat, blocked: true, unknown: true }, maxWithFable],
+        }),
+      ).toEqual({ kind: "move", account: "spare", why: "back-from-excursion" });
+      // Home unmeasured or incomplete: the seat keeps it, measured or not.
+      expect(
+        decidePlacement({
+          ...onSeat,
+          accounts: [
+            { ...seat, blocked: true, unknown: true },
+            { ...maxWithFable, blocked: true, unknown: true },
+          ],
+        }),
+      ).toEqual({ kind: "keep" });
+    });
+
     it("means nothing to a turn in another model", () => {
       expect(
         decidePlacement({ ...onSeat, preferredModel: "Opus", accounts: [seat, maxWithFable] }),
