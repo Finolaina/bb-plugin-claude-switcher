@@ -294,8 +294,6 @@ interface HostOptions {
   retryBehaviour?: "queue" | "conflict" | "fail-once" | "fail" | "answer-lost" | "restore-answer-lost";
   /** threads.retry throws this, shaped like bb's BbHttpError. */
   retryError?: { message: string; code?: string; status?: number };
-  /** queuedMessages.send throws this, shaped like bb's BbHttpError: `code` apart from the message. */
-  sendError?: { message: string; code?: string; status?: number };
   /** deleteMachineEnvironmentVariable throws for these projects (deleted meanwhile, or a bb hiccup). */
   failDelete?: string[];
   /** queuedMessages.delete throws this (the row left the queue between list and delete); `landed`: bb removed the row first, and only its answer was lost. */
@@ -312,6 +310,8 @@ interface HostOptions {
   beforeEvents?: () => Promise<void>;
   /** Runs as queuedMessages.delete starts, before it lands or fails (bb's events meanwhile). */
   beforeDelete?: () => Promise<void>;
+  /** Runs before queuedMessages.list answers (the plugin's look for a queued retry). */
+  beforeQueuedList?: (threadId: string) => Promise<unknown>;
   /** bb's raw log per thread, as threads.events.list answers it. */
   threadEvents?: Record<string, LoggedEvent[]>;
   /** threads.events.list throws this (a bb hiccup). */
@@ -556,13 +556,11 @@ async function host(
           list: async () => [...queued],
         },
         queuedMessages: {
-          list: async ({ threadId }: { threadId: string }) =>
-            queued.filter((row) => row.threadId === threadId),
+          list: async ({ threadId }: { threadId: string }) => {
+            await options.beforeQueuedList?.(threadId);
+            return queued.filter((row) => row.threadId === threadId);
+          },
           send: async ({ queuedMessageId }: { queuedMessageId: string }) => {
-            if (options.sendError !== undefined) {
-              const { message, ...rest } = options.sendError;
-              throw Object.assign(new Error(message), rest);
-            }
             sent.push(queuedMessageId);
             // Dispatched rows leave the queue, as in bb.
             const at = queued.findIndex((row) => row.id === queuedMessageId);
@@ -907,7 +905,7 @@ describe("claude accounts plugin", () => {
     ).toBe(true);
   });
 
-  it("sends the retry provider-retry already queued instead of queueing a second one", async () => {
+  it("replaces the retry provider-retry already queued by its own, which bb dispatches through its checkpoint, instead of sending it as it is", async () => {
     const h = await host(ALL_FREE, {
       queued: [
         {
@@ -936,13 +934,20 @@ describe("claude accounts plugin", () => {
     );
     expect(errors).toEqual([]);
     expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
-    expect(h.sent).toEqual(["pr-1"]);
-    expect(h.retries).toEqual([]);
+    expect(h.sent).toEqual([]);
+    expect(h.deleted).toEqual(["pr-1"]);
+    expect(h.retries).toEqual([
+      {
+        threadId: "thread-1",
+        turnRequestId: "creq_1",
+        reason: "Switched to account work",
+      },
+    ]);
+    expect(h.queued.map((r) => r.id)).toEqual(["other"]);
   });
 
   it("on a retry's own failure (attempt 2+), still finds provider-retry's row, which is keyed by the ORIGINAL request", async () => {
     const h = await host(ALL_FREE, {
-      retryBehaviour: "conflict",
       queued: [
         {
           id: "pr-2",
@@ -965,7 +970,9 @@ describe("claude accounts plugin", () => {
     );
     expect(errors).toEqual([]);
     expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
-    expect(h.sent).toEqual(["pr-2"]);
+    expect(h.sent).toEqual([]);
+    expect(h.deleted).toEqual(["pr-2"]);
+    expect(h.retries.map((r) => r.turnRequestId)).toEqual(["creq_retry_2"]);
   });
 
   it("picks the retry row of THIS turn's chain, not an older turn's row still waiting on the thread", async () => {
@@ -991,12 +998,13 @@ describe("claude accounts plugin", () => {
       },
       sendAt: NOW + 2 * HOUR,
     };
-    // Switch: only this turn's row is sent; the older wait is left alone.
+    // Switch: only this turn's row is replaced; the older wait is left alone.
     const h = await host(ALL_FREE, { queued: [older, mine] });
     dispose = () => h.harness.dispose();
     await h.harness.behavior.emitThreadEvent("turn.failed", failure());
-    expect(h.sent).toEqual(["r-mine"]);
-    expect(h.deleted).toEqual([]);
+    expect(h.sent).toEqual([]);
+    expect(h.deleted).toEqual(["r-mine"]);
+    expect(h.queued.map((r) => r.id)).toEqual(["r-old"]);
     // Wait: only this turn's row is replaced.
     const w = await host(
       {
@@ -1016,7 +1024,6 @@ describe("claude accounts plugin", () => {
     expect(w.queued.map((r) => r.id)).toContain("r-old");
     // On a retry's failure, the chain's row (attempt + 1) is the one, whatever its original id.
     const r = await host(ALL_FREE, {
-      retryBehaviour: "conflict",
       queued: [
         older,
         { ...mine, id: "r-3", payload: { ...mine.payload, attempt: 3, retryOfTurnRequestId: "creq_root" } },
@@ -1031,11 +1038,13 @@ describe("claude accounts plugin", () => {
       "turn.failed",
       failure({ requestId: "creq_retry_2", attemptNumber: 2 }),
     );
-    expect(r.sent).toEqual(["r-3"]);
+    expect(r.sent).toEqual([]);
+    expect(r.deleted).toEqual(["r-3"]);
+    expect(r.queued.map((row) => row.id)).toEqual(["r-old"]);
   });
 
-  it("when bb rejects a second retry for the turn, sends the one already queued", async () => {
-    const h = await host(ALL_FREE, { retryBehaviour: "conflict" });
+  it("when bb rejects a second retry for the turn, replaces the one queued meanwhile by its own, once; a third one is left to bb", async () => {
+    const h = await host(ALL_FREE);
     dispose = () => h.harness.dispose();
     // provider-retry wins the race between our list and our retry.
     h.harness.sdk.stub("threads.queuedMessages.list", async () =>
@@ -1059,7 +1068,43 @@ describe("claude accounts plugin", () => {
       failure(),
     );
     expect(errors).toEqual([]);
-    expect(h.sent).toEqual(["late"]);
+    expect(h.sent).toEqual([]);
+    expect(h.deleted).toEqual(["late"]);
+    expect(h.retries.map((r) => r.reason)).toEqual(["Switched to account work"]);
+    // Queued yet again after that replacement: left to bb, which dispatches
+    // it through its checkpoint at its own time; the turn is never without a retry.
+    const again = await host(ALL_FREE, { retryBehaviour: "conflict" });
+    const disposeFirst = dispose;
+    dispose = () => {
+      disposeFirst?.();
+      again.harness.dispose();
+    };
+    again.harness.sdk.stub("threads.queuedMessages.list", async () => {
+      if (again.queued.length === 0)
+        again.queued.push({
+          id: `late-${again.deleted.length + 1}`,
+          threadId: "thread-1",
+          payload: {
+            kind: "retry",
+            attempt: 2,
+            reason: "",
+            retryOfTurnRequestId: "creq_1",
+          },
+          sendAt: NOW + HOUR,
+        });
+      return again.queued;
+    });
+    const result = await again.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure(),
+    );
+    expect(result.errors).toEqual([]);
+    expect(again.sent).toEqual([]);
+    expect(again.deleted).toEqual(["late-1", "late-2"]);
+    expect(again.queued.map((r) => r.id)).toEqual(["late-3"]);
+    expect(
+      again.harness.logEntries.filter((e) => e.level === "warn").map((e) => e.message),
+    ).toContainEqual(expect.stringContaining("another retry was queued again; leaving it"));
   });
 
   it("replaces a queued retry with its own timed one when it has to wait", async () => {
@@ -1238,7 +1283,7 @@ describe("claude accounts plugin", () => {
     ]);
   });
 
-  it("treats bb's 'still waiting' answer to a send as done (the row runs when the thread frees), and keeps the original error when restoring fails too", async () => {
+  it("treats bb's answers for a row already on its way as done when replacing it (sent meanwhile, or being sent), reports any other failure of the delete, and keeps the original error when restoring fails too", async () => {
     const row = {
       id: "pr-1",
       threadId: "thread-1",
@@ -1250,35 +1295,14 @@ describe("claude accounts plugin", () => {
       },
       sendAt: NOW + 2 * HOUR,
     };
-    // bb's real 409: ApiError(409, "queued_message_still_waiting", "This message cannot be sent yet: …")
-    // reaches the plugin as BbHttpError { message: "HTTP 409: This message…", code, status }.
-    const busy = await host(ALL_FREE, {
-      queued: [row],
-      sendError: {
-        message:
-          "HTTP 409: This message cannot be sent yet: the thread is already running a turn.",
-        code: "queued_message_still_waiting",
-        status: 409,
-      },
-    });
-    dispose = () => busy.harness.dispose();
-    const { errors } = await busy.harness.behavior.emitThreadEvent(
-      "turn.failed",
-      failure(),
-    );
-    expect(errors).toEqual([]);
-    expect(busy.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
-    // Either signal alone is enough: the code with another text, or bb's
-    // text without the code (an SDK that drops it). And bb's two answers
-    // for a row that is already on its way (sent by another caller, or
-    // being sent right now) are "done" too.
-    for (const sendError of [
-      { message: "HTTP 409: Conflict", code: "queued_message_still_waiting" },
-      { message: "HTTP 409: This message cannot be sent yet: the thread is stopping." },
+    // bb's two answers for a row that is already on its way (sent by
+    // another caller, or being sent right now): nothing to replace, and the
+    // turn is not retried a second time.
+    for (const deleteRowError of [
       { message: "HTTP 404: Queued message not found", code: "invalid_request", status: 404 },
       { message: "HTTP 409: Queued message is already being sent", code: "invalid_request", status: 409 },
     ]) {
-      const alone = await host(ALL_FREE, { queued: [row], sendError });
+      const alone = await host(ALL_FREE, { queued: [row], deleteRowError });
       const disposeBefore = dispose;
       dispose = () => {
         disposeBefore?.();
@@ -1289,24 +1313,28 @@ describe("claude accounts plugin", () => {
         failure(),
       );
       expect(result.errors).toEqual([]);
+      expect(alone.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+      expect(alone.sent).toEqual([]);
+      expect(alone.retries).toEqual([]);
     }
-    // Any other failure of the send is reported, not swallowed.
+    // Any other failure of the delete is reported, not swallowed.
     const broken = await host(ALL_FREE, {
       queued: [row],
-      sendError: { message: "HTTP 500: internal error", status: 500 },
+      deleteRowError: { message: "HTTP 500: internal error", status: 500 },
     });
-    const disposeBusy = dispose;
+    const disposeBroken = dispose;
     dispose = () => {
-      disposeBusy?.();
+      disposeBroken?.();
       broken.harness.dispose();
     };
-    const sendFailed = await broken.harness.behavior.emitThreadEvent(
+    const deleteFailed = await broken.harness.behavior.emitThreadEvent(
       "turn.failed",
       failure(),
     );
-    expect(sendFailed.errors.map(String)).toEqual([
+    expect(deleteFailed.errors.map(String)).toEqual([
       expect.stringMatching(/HTTP 500/),
     ]);
+    expect(broken.retries).toEqual([]);
     const dead = await host(
       {
         main: () => Response.json(payload(100, 40, 100)),
@@ -2273,10 +2301,10 @@ describe("claude accounts plugin", () => {
     );
   });
 
-  it("a retry the plugin sends itself, after moving the project, starts on the new account: its refusal marks that account", async () => {
-    // The plugin sends provider-retry's queued row explicitly, past bb's
-    // dispatch checkpoint: it anchors the send itself, after the move, so
-    // the start reads as work and a refusal there marks work.
+  it("a retry the plugin queues after moving the project is dispatched through bb's checkpoint and starts on the new account: its refusal marks that account", async () => {
+    // provider-retry's row is replaced, never sent explicitly: bb dispatches
+    // the retry through its checkpoint, which anchors the send after the
+    // move, so the start reads as work and a refusal there marks work.
     const h = await host(ALL_FREE, {
       queued: [
         {
@@ -2295,7 +2323,10 @@ describe("claude accounts plugin", () => {
     dispose = () => h.harness.dispose();
     await h.harness.behavior.emitThreadEvent("turn.failed", failure());
     expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
-    expect(h.sent).toEqual(["pr-1"]);
+    expect(h.sent).toEqual([]);
+    expect(h.deleted).toEqual(["pr-1"]);
+    expect(h.retries.map((r) => r.turnRequestId)).toEqual(["creq_1"]);
+    await sent(h, "thread-1", "proj-1");
     await h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-1", projectId: "proj-1" }),
     });
@@ -8430,6 +8461,86 @@ describe("an Opus turn never retried, released or placed on a Max account that k
       });
       expect(h.envDeleted).toEqual([]);
       expect(notes(h)).toEqual([ownNote("work"), ownNote("work")]);
+    });
+
+    it("an Opus retry provider-retry queued is never sent past bb's checkpoint: once the Fable turn took the project home meanwhile, the retry is queued through it and placed on the seat again (Astra r2, BM-INSPECT-R2-001)", async () => {
+      let workSession = 100;
+      let armed = false;
+      const gate = envGate();
+      const h = await host(
+        {
+          main: () => Response.json(payload(10, 10, 2)),
+          spare: () => Response.json(payload(10, 10, 5)),
+          work: () => Response.json(teamPayload(workSession, 42)),
+        },
+        {
+          ...FABLE,
+          beforeQueuedList: async () => {
+            if (!armed) return;
+            armed = false;
+            gate.captured();
+            await gate.held;
+          },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      // The project lives on spare by hand; with no seat free, thread-3 (Opus) stays and starts there.
+      expect(
+        (await h.harness.behavior.runCli(["use", "Website", "spare"])).exitCode,
+      ).toBe(0);
+      expect(await dispatch(h, "thread-3", OPUS_ID)).toEqual({
+        action: "proceed",
+      });
+      await active(h, "thread-3");
+      expect(notes(h)).toEqual([ownNote("spare")]);
+      // A seat frees; the Opus turn fails on spare: the project moves out to
+      // work and the plugin looks for the retry provider-retry queued.
+      workSession = 17;
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      armed = true;
+      const failed = h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ threadId: "thread-3", requestId: "creq_3" }),
+      );
+      await gate.reached;
+      expect(notes(h)).toEqual([ownNote("spare"), ownNote("work")]);
+      // Meanwhile provider-retry queues its row and thread-2 (Fable) takes the project home.
+      h.queued.push({
+        id: "pr-3",
+        threadId: "thread-3",
+        payload: {
+          kind: "retry",
+          attempt: 2,
+          reason: "Rate limited",
+          retryOfTurnRequestId: "creq_3",
+        },
+        sendAt: NOW + 30_000,
+      });
+      expect(await dispatch(h, "thread-2", FABLE_ID)).toEqual({
+        action: "proceed",
+      });
+      expect(notes(h)).toEqual([
+        ownNote("spare"),
+        ownNote("work"),
+        ownNote("spare"),
+      ]);
+      gate.release();
+      expect((await failed).errors).toEqual([]);
+      // Not sent as it is (an explicit send skips the checkpoint and would
+      // run Opus on spare): replaced by a retry bb dispatches through it.
+      expect(h.sent).toEqual([]);
+      expect(h.deleted).toEqual(["pr-3"]);
+      expect(h.retries.at(-1)).toEqual({
+        threadId: "thread-3",
+        turnRequestId: "creq_3",
+        reason: "Switched to account work (Opus)",
+      });
+      // At the checkpoint, the retry is placed again: back on the seat.
+      expect(await dispatch(h, "thread-3", OPUS_ID)).toEqual({
+        action: "proceed",
+      });
+      expect(notes(h).at(-1)).toBe(ownNote("work"));
     });
   });
 

@@ -41,6 +41,12 @@ project uses [Semantic Versioning](https://semver.org/).
   still sits where that move put it** and no move is under way; and a
   failed turn is judged on the clock after the accounts were re-read, so a
   Max account whose Fable reset passed meanwhile keeps Fable again.
+- **The retry provider-retry queued is never sent as it is.** An explicit
+  send skips bb's dispatch checkpoint, where the turn is placed: the retry
+  ran where the project stood when the row was found, not when it was
+  sent, so an Opus retry could start on a Max account a Fable turn had
+  taken the project back to meanwhile. The row is replaced by a retry of
+  this plugin's, which bb dispatches through the checkpoint at once.
 
 ## [0.2.16] - 2026-10-12
 
