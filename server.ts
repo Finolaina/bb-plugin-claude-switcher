@@ -1321,7 +1321,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * the row would skip that checkpoint and run the turn where the project
    * stood when the row was found, not when it is sent (Codex
    * BM-INSPECT-R2-001). False when the row is already on its way: nothing to
-   * replace.
+   * replace. Any other failure of the delete (its answer lost, bb refusing)
+   * is logged and ours is queued anyway: if the row is still there, bb
+   * refuses ours (one retry per turn) and the row stays, so the turn is
+   * never left without a retry (Codex BM-INSPECT-R3-001).
    */
   async function replaceQueued(threadId: string, rowId: string): Promise<boolean> {
     try {
@@ -1331,11 +1334,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // Sent between the list and this delete (bb would refuse a retry of a
       // thread that is running again), or removed by the user: nothing to
       // replace.
-      if (!alreadyOnItsWay(error)) throw error;
-      bb.log.info(
-        `thread ${threadId}: the queued retry is already on its way; leaving it`,
+      if (alreadyOnItsWay(error)) {
+        bb.log.info(
+          `thread ${threadId}: the queued retry is already on its way; leaving it`,
+        );
+        return false;
+      }
+      bb.log.warn(
+        `thread ${threadId}: could not remove the queued retry (${error instanceof Error ? error.message : String(error)}); queuing ours anyway`,
       );
-      return false;
+      return true;
     }
   }
 
@@ -1343,7 +1351,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * Retry the failed turn now (no sendAt) or at `sendAt`. bb keeps ONE retry
    * per turn: if provider-retry got there first, its row is replaced by ours,
    * at once or timed, so bb dispatches the retry through its checkpoint (see
-   * replaceQueued).
+   * replaceQueued). A row queued meanwhile, between the list and ours, is
+   * replaced once more; a third one is left to bb, which dispatches it
+   * through the checkpoint at its own time. If ours cannot be queued after a
+   * row was replaced, that row is put back rather than leave the turn
+   * without any retry (code-reviewer r3, CR3-01).
    */
   async function retryTurn(
     event: PluginTurnFailedEvent,
@@ -1352,82 +1364,77 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     stuck = false,
   ): Promise<void> {
     const threadId = event.threadId;
-    const existing = await queuedRetry(event);
-    if (existing !== null) {
+    let row = await queuedRetry(event);
+    if (row !== null) {
       bb.log.info(
-        `thread ${threadId}: a retry of the turn is already queued ("${existing.reason}"${existing.sendAt === null ? "" : `, for ${new Date(existing.sendAt).toISOString()}`})`,
+        `thread ${threadId}: a retry of the turn is already queued ("${row.reason}"${row.sendAt === null ? "" : `, for ${new Date(row.sendAt).toISOString()}`})`,
       );
       // On a rescue it is left to whoever queued it: another plugin may be
       // holding it, and replacing it would drop that hold (Codex r6,
       // IR6-002).
       if (stuck) return;
-      if (!(await replaceQueued(threadId, existing.id))) return;
     }
-    try {
-      await bb.sdk.threads.retry({
-        threadId,
-        turnRequestId: event.requestId,
-        reason,
-        ...(sendAt === undefined ? {} : { sendAt }),
-      });
-    } catch (error) {
-      // Raced with another retry of the same turn between the list and ours.
-      const raced = await queuedRetry(event);
-      if (raced !== null) {
-        if (stuck || sendAt !== undefined) {
-          bb.log[stuck ? "info" : "warn"](
-            `thread ${threadId}: another retry was queued first; leaving it`,
-          );
-          return;
-        }
-        // Replaced too, once: a retry queued a third time is left to bb,
-        // which dispatches it through its checkpoint at its own time.
-        if (!(await replaceQueued(threadId, raced.id))) return;
-        try {
-          await bb.sdk.threads.retry({
-            threadId,
-            turnRequestId: event.requestId,
-            reason,
-          });
-        } catch (again) {
-          if ((await queuedRetry(event)) !== null) {
-            bb.log.warn(
-              `thread ${threadId}: another retry was queued again; leaving it`,
-            );
-            return;
-          }
-          throw again;
-        }
-        return;
-      }
-      // A newer turn replaced the failed one (a message sent meanwhile): it
-      // runs on the project's account, and its own failure comes on its own.
-      if (superseded(error)) {
-        bb.log.info(
-          `thread ${threadId}: turn ${event.requestId} is no longer its latest; the newer turn goes on`,
-        );
-        return;
-      }
-      if (existing === null || sendAt === undefined) throw error;
-      // Ours failed after replacing the queued one: put that one back rather
-      // than leave the turn without any retry.
-      const message = error instanceof Error ? error.message : String(error);
-      bb.log.warn(
-        `thread ${threadId}: could not queue the retry (${message}); restoring the one queued before`,
-      );
+    for (let replacements = 0; ; replacements++) {
+      if (row !== null && !(await replaceQueued(threadId, row.id))) return;
       try {
         await bb.sdk.threads.retry({
           threadId,
           turnRequestId: event.requestId,
-          reason: existing.reason,
-          ...(existing.sendAt === null ? {} : { sendAt: existing.sendAt }),
+          reason,
+          ...(sendAt === undefined ? {} : { sendAt }),
         });
-      } catch (restoreError) {
-        throw new Error(
-          `${message}; restoring the retry queued before failed too: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
-          { cause: error },
-        );
+        return;
+      } catch (error) {
+        // Raced with another retry of the same turn between the list and ours.
+        const raced = await queuedRetry(event);
+        if (raced !== null) {
+          if (stuck || sendAt !== undefined || replacements > 0) {
+            bb.log[stuck ? "info" : "warn"](
+              `thread ${threadId}: another retry was queued ${replacements > 0 ? "again" : "first"}; leaving it`,
+            );
+            return;
+          }
+          row = raced;
+          continue;
+        }
+        // A newer turn replaced the failed one (a message sent meanwhile): it
+        // runs on the project's account, and its own failure comes on its own.
+        if (superseded(error)) {
+          bb.log.info(
+            `thread ${threadId}: turn ${event.requestId} is no longer its latest; the newer turn goes on`,
+          );
+          return;
+        }
+        if (row === null) throw error;
+        await restoreQueued(threadId, event, row, error);
+        return;
       }
+    }
+  }
+
+  /** Ours could not be queued after `row` was replaced: `row` is queued again as it was. */
+  async function restoreQueued(
+    threadId: string,
+    event: PluginTurnFailedEvent,
+    row: { reason: string; sendAt: number | null },
+    error: unknown,
+  ): Promise<void> {
+    const message = error instanceof Error ? error.message : String(error);
+    bb.log.warn(
+      `thread ${threadId}: could not queue the retry (${message}); restoring the one queued before`,
+    );
+    try {
+      await bb.sdk.threads.retry({
+        threadId,
+        turnRequestId: event.requestId,
+        reason: row.reason,
+        ...(row.sendAt === null ? {} : { sendAt: row.sendAt }),
+      });
+    } catch (restoreError) {
+      throw new Error(
+        `${message}; restoring the retry queued before failed too: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
+        { cause: error },
+      );
     }
   }
 
@@ -1474,6 +1481,32 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * first, it runs where the project was, and its failure gets the grace
    * retry on the new account (see recordMove).
    */
+  /**
+   * The way back from an excursion, for a turn in `model`, as decidePlacement
+   * takes it: the account the project left for another model; null when it
+   * left that account ahead of the limit and it is still at or above that
+   * share (see aheadLeft); undefined when there is no excursion or the turn
+   * is in another model. Shared by every placement, a new thread's included
+   * (Codex BM-INSPECT-R3-003).
+   */
+  function wayHome(
+    projectId: string,
+    model: string,
+    measured: ReturnType<typeof measuredAccounts>,
+    now: number,
+  ): string | null | undefined {
+    const excursion = excursions.get(projectId);
+    if (excursion === undefined || otherModel(model)) return undefined;
+    const left = aheadLeft.get(projectId);
+    const home = measured.find((a) => a.name === excursion.from);
+    return left !== undefined &&
+      left.account === excursion.from &&
+      home !== undefined &&
+      fullestWindow(settle(home, now), left.model).used >= left.threshold
+      ? null
+      : excursion.from;
+  }
+
   async function placeProject(thread: ThreadResponse): Promise<void> {
     const projectId = thread.projectId;
     // Always: picks up a changed accounts directory and prunes its measurements.
@@ -1511,11 +1544,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     const now = deps.now();
     const fromName = from.account ?? current.defaultAccountName;
+    // Read before noteMove, which forgets it on the way home.
+    const excursion = excursions.get(projectId);
     const decision = decidePlacement({
       currentAccount: fromName,
       isNew,
       accounts: measured,
       preferredModel: current.preferredModel,
+      excursionFrom: wayHome(projectId, current.preferredModel, measured, now),
       now,
     });
     if (decision.kind === "keep") {
@@ -1546,7 +1582,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const reason =
       decision.why === "new-project"
         ? `New project placed on account ${decision.account}${current.preferredModel === "" ? "" : ` (${current.preferredModel})`}`
-        : `Moved to account ${decision.account} before the turn: ${fromName} ${whyOut(fromName, current.preferredModel)}`;
+        : decision.why === "back-from-excursion"
+          ? `Moved back to account ${decision.account} before the turn: ${fromName} was an excursion for ${excursion?.model ?? "another model"}`
+          : `Moved to account ${decision.account} before the turn: ${fromName} ${whyOut(fromName, current.preferredModel)}`;
     bb.log.info(`thread ${thread.id}: ${reason}`);
     await recordMove(
       {
@@ -1900,31 +1938,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const fromName = from.account ?? current.defaultAccountName;
     const now = deps.now();
     const measured = measuredAccounts(model);
-    // The way back from an excursion, for a turn in the preferred model:
-    // not to an account the project left ahead of the limit while it is
-    // still at or above that share (see aheadLeft).
     const excursion = excursions.get(projectId);
-    const left = aheadLeft.get(projectId);
-    const home =
-      excursion === undefined
-        ? undefined
-        : measured.find((a) => a.name === excursion.from);
-    const excursionFrom =
-      excursion === undefined || otherModel(model)
-        ? undefined
-        : left !== undefined &&
-            left.account === excursion.from &&
-            home !== undefined &&
-            fullestWindow(settle(home, now), left.model).used >= left.threshold
-          ? null
-          : excursion.from;
     const decision = decidePlacement({
       currentAccount: fromName,
       isNew: false,
       accounts: measured,
       preferredModel: model,
       reserveModel: current.preferredModel,
-      excursionFrom,
+      excursionFrom: wayHome(projectId, model, measured, now),
       now,
     });
     if (decision.kind === "keep") {

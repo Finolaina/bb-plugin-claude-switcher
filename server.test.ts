@@ -1283,7 +1283,7 @@ describe("claude accounts plugin", () => {
     ]);
   });
 
-  it("treats bb's answers for a row already on its way as done when replacing it (sent meanwhile, or being sent), reports any other failure of the delete, and keeps the original error when restoring fails too", async () => {
+  it("treats bb's answers for a row already on its way as done when replacing it (sent meanwhile, or being sent), and keeps the original error when restoring fails too", async () => {
     const row = {
       id: "pr-1",
       threadId: "thread-1",
@@ -1317,24 +1317,6 @@ describe("claude accounts plugin", () => {
       expect(alone.sent).toEqual([]);
       expect(alone.retries).toEqual([]);
     }
-    // Any other failure of the delete is reported, not swallowed.
-    const broken = await host(ALL_FREE, {
-      queued: [row],
-      deleteRowError: { message: "HTTP 500: internal error", status: 500 },
-    });
-    const disposeBroken = dispose;
-    dispose = () => {
-      disposeBroken?.();
-      broken.harness.dispose();
-    };
-    const deleteFailed = await broken.harness.behavior.emitThreadEvent(
-      "turn.failed",
-      failure(),
-    );
-    expect(deleteFailed.errors.map(String)).toEqual([
-      expect.stringMatching(/HTTP 500/),
-    ]);
-    expect(broken.retries).toEqual([]);
     const dead = await host(
       {
         main: () => Response.json(payload(100, 40, 100)),
@@ -1355,6 +1337,139 @@ describe("claude accounts plugin", () => {
     expect(second.errors).toHaveLength(1);
     // The original failure (503) and the restore's (502) both survive in the message.
     expect(String(second.errors[0])).toMatch(/503.*restor.*502/);
+  });
+
+  it("puts the replaced row back when its own immediate retry cannot be queued, so the turn is never left without a retry (code-reviewer r3, CR3-01)", async () => {
+    const row = {
+      id: "pr-1",
+      threadId: "thread-1",
+      payload: {
+        kind: "retry" as const,
+        attempt: 2,
+        reason: "Rate limited",
+        retryOfTurnRequestId: "creq_1",
+      },
+      sendAt: NOW + 2 * HOUR,
+    };
+    // Switch (an immediate retry): the row is replaced, ours fails once (a
+    // 5xx), the row is queued again as it was.
+    const h = await host(ALL_FREE, { queued: [row], retryBehaviour: "fail-once" });
+    dispose = () => h.harness.dispose();
+    const { errors } = await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure(),
+    );
+    expect(errors).toEqual([]);
+    expect(h.deleted).toEqual(["pr-1"]);
+    expect(h.retries).toEqual([
+      {
+        threadId: "thread-1",
+        turnRequestId: "creq_1",
+        reason: "Rate limited",
+        sendAt: NOW + 2 * HOUR,
+      },
+    ]);
+    expect(h.queued.map((r) => [r.payload.kind, r.sendAt])).toEqual([
+      ["retry", NOW + 2 * HOUR],
+    ]);
+    expect(
+      h.harness.logEntries.filter((e) => e.level === "warn").map((e) => e.message),
+    ).toContainEqual(expect.stringContaining("restoring the one queued before"));
+    // The same after a race: the row that won it is put back too (CR3-02).
+    const raced = await host(ALL_FREE, { retryBehaviour: "fail-once" });
+    const disposeFirst = dispose;
+    dispose = () => {
+      disposeFirst?.();
+      raced.harness.dispose();
+    };
+    let late = false;
+    raced.harness.sdk.stub("threads.queuedMessages.list", async () => {
+      // provider-retry queues its row between our list and our retry, once.
+      if (!late) {
+        late = true;
+        raced.queued.push({
+          id: "late",
+          threadId: "thread-1",
+          payload: {
+            kind: "retry",
+            attempt: 2,
+            reason: "Rate limited",
+            retryOfTurnRequestId: "creq_1",
+          },
+          sendAt: NOW + HOUR,
+        });
+        return [];
+      }
+      return raced.queued;
+    });
+    const result = await raced.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure(),
+    );
+    expect(result.errors).toEqual([]);
+    expect(raced.deleted).toEqual(["late"]);
+    expect(raced.retries).toEqual([
+      {
+        threadId: "thread-1",
+        turnRequestId: "creq_1",
+        reason: "Rate limited",
+        sendAt: NOW + HOUR,
+      },
+    ]);
+    expect(raced.queued.map((r) => [r.payload.kind, r.sendAt])).toEqual([
+      ["retry", NOW + HOUR],
+    ]);
+  });
+
+  it("goes on with its own retry when the delete of the replaced row fails for any other reason: landed with its answer lost, ours is queued; not landed, bb refuses ours and the row stays (Sol r3, BM-INSPECT-R3-001)", async () => {
+    const row = {
+      id: "pr-1",
+      threadId: "thread-1",
+      payload: {
+        kind: "retry" as const,
+        attempt: 2,
+        reason: "Rate limited",
+        retryOfTurnRequestId: "creq_1",
+      },
+      sendAt: NOW + 2 * HOUR,
+    };
+    const landed = await host(ALL_FREE, {
+      queued: [row],
+      deleteRowError: { message: "socket hang up", landed: true },
+    });
+    dispose = () => landed.harness.dispose();
+    const first = await landed.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure(),
+    );
+    expect(first.errors).toEqual([]);
+    expect(landed.deleted).toEqual(["pr-1"]);
+    expect(landed.retries).toEqual([
+      { threadId: "thread-1", turnRequestId: "creq_1", reason: "Switched to account work" },
+    ]);
+    expect(landed.queued).toEqual([]);
+    // Not landed: the row is still there, bb refuses ours (one retry per
+    // turn) and the row is left to bb, which dispatches it through its
+    // checkpoint at its own time.
+    const kept = await host(ALL_FREE, {
+      queued: [row],
+      deleteRowError: { message: "socket hang up" },
+    });
+    const disposeFirst = dispose;
+    dispose = () => {
+      disposeFirst?.();
+      kept.harness.dispose();
+    };
+    const second = await kept.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure(),
+    );
+    expect(second.errors).toEqual([]);
+    expect(kept.retries).toEqual([]);
+    expect(kept.queued.map((r) => r.id)).toEqual(["pr-1"]);
+    expect(
+      kept.harness.logEntries.filter((e) => e.level === "warn").map((e) => e.message),
+    ).toContainEqual(expect.stringContaining("leaving it"));
   });
 
   it("a retry bb refuses because a newer turn replaced the failed one is no failure: logged, not thrown", async () => {
@@ -8590,6 +8705,50 @@ describe("an Opus turn never retried, released or placed on a Max account that k
       ]);
       expect(h.envSet).toEqual([]);
     });
+  });
+
+  it("a new thread of a project on an excursion goes home too, when home can run Fable and the seat cannot, even if another account measures better (Sol r3, BM-INSPECT-R3-003)", async () => {
+    let workSession = 17;
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, 10, 2)),
+        spare: () => Response.json(payload(10, 10, 5)),
+        work: () => Response.json(teamPayload(workSession, 42)),
+      },
+      FABLE,
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect(
+      (await h.harness.behavior.runCli(["use", "Website", "spare"])).exitCode,
+    ).toBe(0);
+    // thread-1 (Opus) takes the project out to the seat.
+    expect(await dispatch(h, "thread-1", OPUS_ID)).toEqual({
+      action: "proceed",
+    });
+    expect(notes(h)).toEqual([ownNote("spare"), ownNote("work")]);
+    // The seat runs out; a new thread is created: placed back home (spare),
+    // not on main, which measures better.
+    workSession = 100;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent("thread.created", {
+      thread: thread({ id: "thr-new", projectId: "proj-1" }),
+    });
+    expect(notes(h)).toEqual([
+      ownNote("spare"),
+      ownNote("work"),
+      ownNote("spare"),
+    ]);
+    expect(h.harness.logEntries.map((e) => e.message)).toContainEqual(
+      expect.stringContaining(
+        "Moved back to account spare before the turn: work was an excursion for Opus",
+      ),
+    );
+    // And the way home is used up: the next Fable turn stays.
+    expect(await dispatch(h, "thread-2", FABLE_ID)).toEqual({
+      action: "proceed",
+    });
+    expect(notes(h)).toHaveLength(3);
   });
 
   describe("what forgets an excursion (Codex BM-R1-003)", () => {
