@@ -343,9 +343,9 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
       ? { kind: "keep" }
       : { kind: "move", account: choice.account, why: "new-project" };
   }
-  const current = accounts.find((a) => a.name === input.currentAccount);
-  if (current === undefined || current.unknown === true)
-    return { kind: "keep" };
+  // The way home first: it depends on home's measurement, not on the
+  // current account's, which may be missing or incomplete (Codex
+  // BM-INSPECT-006).
   if (
     !reserving(options) &&
     typeof input.excursionFrom === "string" &&
@@ -360,6 +360,9 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     )
       return { kind: "move", account: home.name, why: "back-from-excursion" };
   }
+  const current = accounts.find((a) => a.name === input.currentAccount);
+  if (current === undefined || current.unknown === true)
+    return { kind: "keep" };
   const runs = isUsable(current) && canRunModel(current, input.preferredModel);
   if (runs && !spendsReservedWeekly(current, options)) return { kind: "keep" };
   const choice = chooseAccount(
