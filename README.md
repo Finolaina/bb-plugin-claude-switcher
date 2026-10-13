@@ -354,7 +354,10 @@ flowchart TD
   back. A failed Opus turn then waits only for an
   account that will spare Fable when the retry is sent, or is left alone
   (`reserved-for-preferred-model`), and a leftover Opus turn is never
-  retried on such an account. This is
+  retried on such an account, not even after a pick by hand of it: the
+  pick stands for the project's next turns in Fable, while an Opus turn
+  that fails there is judged like any other and may move the project
+  out. This is
   decided on the measurements already there and never refuses a message
   (at worst it delays it 3 seconds); the plugin never changes a thread's
   model. bb does not ask for a Send now of a queued message nor for an
