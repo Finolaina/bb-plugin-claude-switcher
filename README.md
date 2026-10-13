@@ -348,7 +348,10 @@ flowchart TD
   stays where it is; a pick by hand, also one that confirms the account,
   and `release` forget it too). When no account spares Fable the Opus
   turn stays where the project is and the log says so (`stays on …: no
-  account spares Fable`); a failed Opus turn then waits only for an
+  account spares Fable`). The history reads `Moved to account … before
+  the turn: … would spend Fable's weekly` on the way out and `Moved back
+  to account … before the turn: … was an excursion for Opus` on the way
+  back. A failed Opus turn then waits only for an
   account that will spare Fable when the retry is sent, or is left alone
   (`reserved-for-preferred-model`), and a leftover Opus turn is never
   retried on such an account. This is

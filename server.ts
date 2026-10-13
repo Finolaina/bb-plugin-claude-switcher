@@ -58,6 +58,8 @@ import {
   MAX_ATTEMPTS,
   modelFamily,
   fullestWindow,
+  RESET_BUFFER_MS,
+  RESET_JITTER_MS,
   settle,
 } from "./src/switch.js";
 import { reserving, spendsReservedWeekly } from "./src/policy.js";
@@ -925,7 +927,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     if (excursions.has(projectId)) return;
     if (movesOf(projectId).epoch !== epochBefore + 2) {
-      bb.log.debug(
+      // Logged, not debug: the project's next turn in the preferred model
+      // then stays where it is, and this line is why (code-reviewer r1).
+      bb.log.info(
         `project ${projectId}: excursion from ${fromName} not noted (another move crossed it)`,
       );
       return;
@@ -935,19 +939,22 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /**
    * `name` is measured keeping the preferred model AND has a weekly window:
    * a turn in `model` there spends what the preferred model needs (see
-   * spendsReservedWeekly). Never retried there without judging.
+   * spendsReservedWeekly). Never retried there without judging. Judged as
+   * the account will be when the turn is sent (`at`: a wait's send time;
+   * now by default), at the latest: a Max account whose Fable window
+   * resets before a wait ends keeps Fable again by then (code-reviewer
+   * r1, M1), as decideSwitch projects its waits.
    */
-  function reservedFor(name: string, model: string): boolean {
+  function reservedFor(name: string, model: string, at = deps.now()): boolean {
     if (!otherModel(model)) return false;
     const known = measuredAccounts(model).find((a) => a.name === name);
-    return (
-      known !== undefined &&
-      known.unknown !== true &&
-      spendsReservedWeekly(settle(known, deps.now()), {
-        preferredModel: model,
-        reserveModel: current.preferredModel,
-      })
-    );
+    if (known === undefined || known.unknown === true) return false;
+    const sendBy =
+      Math.max(at, deps.now()) + RESET_BUFFER_MS + RESET_JITTER_MS;
+    return spendsReservedWeekly(settle(known, sendBy), {
+      preferredModel: model,
+      reserveModel: current.preferredModel,
+    });
   }
 
   /** Point the project at `account` (null = default). Refuses an external variable. */
@@ -2037,8 +2044,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // the account is out by definition until its reset): judged below.
       (recent.sendAt !== undefined || !cannotRun(recent.to)) &&
       // Or keeping the preferred model's weekly, which this turn's model
-      // would spend: judged below, where the rule applies.
-      !reservedFor(recent.to, model)
+      // would spend when the retry is sent: judged below, where the rule
+      // applies.
+      !reservedFor(recent.to, model, recent.sendAt ?? now)
     ) {
       // Another thread of the project, still running on the old account
       // (whatever its attempt: a leftover can be a retry too): the project
@@ -2058,27 +2066,28 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (typeof started === "string") {
       const at = await projectAccount(projectId);
       const currentName = at.account ?? current.defaultAccountName;
+      const sendAt =
+        recent !== undefined &&
+        recent.to === currentName &&
+        recent.sendAt !== undefined &&
+        recent.sendAt > now
+          ? recent.sendAt
+          : undefined;
       if (
         !at.external &&
         started !== currentName &&
         !cannotRun(currentName) &&
-        !reservedFor(currentName, model)
+        !reservedFor(currentName, model, sendAt ?? now)
       ) {
         // Started on the old account before the project moved: a leftover
         // (a long tool call can outlast the grace window), not a failure of
         // the project's account. It runs again there, or waits for the same
         // reset when the project's latest move was a wait on that account.
         // Unless the project's account cannot run it either (a hand pick of
-        // an account without a login, or out): then it is judged below.
+        // an account without a login, or out), or keeps the preferred
+        // model's weekly for this turn's model: then it is judged below.
         // Its refusal is the old account's, wherever it runs again.
         if (isRefusal(event)) markRefused(started, now, event);
-        const sendAt =
-          recent !== undefined &&
-          recent.to === currentName &&
-          recent.sendAt !== undefined &&
-          recent.sendAt > now
-            ? recent.sendAt
-            : undefined;
         const reason = `Retrying on account ${currentName}`;
         bb.log.info(
           `thread ${event.threadId}: ${reason} (its turn started on ${started})`,
