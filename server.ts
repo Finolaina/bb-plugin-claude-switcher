@@ -60,6 +60,7 @@ import {
   fullestWindow,
   settle,
 } from "./src/switch.js";
+import { reserving, spendsReservedWeekly } from "./src/policy.js";
 import {
   usageFetchMethod,
   usageListMethod,
@@ -391,7 +392,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** Why a project moves off `name` before a turn, for the history. */
   function whyOut(name: string, model: string): string {
     if (refusing(name)) return "refused a turn";
+    if (reservedFor(name, model) && canRunHere(name, model))
+      return `would spend ${current.preferredModel}'s weekly`;
     return model === "" ? "is out of usage" : `cannot run ${model}`;
+  }
+  /** `name` is measured able to run `model`, the reserve apart. */
+  function canRunHere(name: string, model: string): boolean {
+    const known = measuredAccounts(model).find((a) => a.name === name);
+    return (
+      known !== undefined &&
+      known.unknown !== true &&
+      bestAccount([known], model, deps.now()) === name
+    );
   }
   /** Switches applied per project, for the grace window after each one. */
   const recentSwitches = new Map<
@@ -873,6 +885,71 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return move;
   }
 
+  /**
+   * The account each project left for a turn in another model (its
+   * excursion, 2026-10-13: the Max accounts are Fable's): a turn in the
+   * preferred model takes the project back there. In memory, like
+   * aheadLeft: a reload forgets it and the project stays where it is.
+   * Kept by noteMove, next to every applyAccount, and cleared by a pick by
+   * hand and by `release`.
+   */
+  const excursions = new Map<string, { from: string; model: string }>();
+  /** A turn in `model` is another model's: it must not spend what the preferred model needs. */
+  function otherModel(model: string): boolean {
+    return reserving({
+      preferredModel: model,
+      reserveModel: current.preferredModel,
+    });
+  }
+  /**
+   * After applyAccount moved the project from `fromName` to `toName` for a
+   * turn in `model`. A move for another model notes the FIRST account left
+   * and keeps it through later moves; a move for the preferred model is a
+   * new home and forgets it. `epochBefore`: the project's moves when the
+   * caller captured it, BEFORE reading the project's account: the origin
+   * is noted only when exactly this move happened since (epoch + 2), so
+   * neither a stale read nor a move that crossed the write names a wrong
+   * origin (Codex BM-R2-003, BM-R3-001).
+   */
+  function noteMove(
+    projectId: string,
+    fromName: string,
+    toName: string,
+    model: string,
+    epochBefore: number,
+  ): void {
+    if (fromName === toName) return;
+    if (!otherModel(model)) {
+      excursions.delete(projectId);
+      return;
+    }
+    if (excursions.has(projectId)) return;
+    if (movesOf(projectId).epoch !== epochBefore + 2) {
+      bb.log.debug(
+        `project ${projectId}: excursion from ${fromName} not noted (another move crossed it)`,
+      );
+      return;
+    }
+    excursions.set(projectId, { from: fromName, model });
+  }
+  /**
+   * `name` is measured keeping the preferred model AND has a weekly window:
+   * a turn in `model` there spends what the preferred model needs (see
+   * spendsReservedWeekly). Never retried there without judging.
+   */
+  function reservedFor(name: string, model: string): boolean {
+    if (!otherModel(model)) return false;
+    const known = measuredAccounts(model).find((a) => a.name === name);
+    return (
+      known !== undefined &&
+      known.unknown !== true &&
+      spendsReservedWeekly(settle(known, deps.now()), {
+        preferredModel: model,
+        reserveModel: current.preferredModel,
+      })
+    );
+  }
+
   /** Point the project at `account` (null = default). Refuses an external variable. */
   async function applyAccount(
     projectId: string,
@@ -1035,6 +1112,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         const to = choose(findAccount);
         await applyAccount(projectId, to, from);
         applied = true;
+        // The pick is the user's: nothing to come back from, also when it
+        // confirms the account the project is on.
+        excursions.delete(projectId);
         await markHandled(projectId);
         const fromName = from.account ?? current.defaultAccountName;
         const toName = to?.name ?? current.defaultAccountName;
@@ -1386,6 +1466,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const projectId = thread.projectId;
     // Always: picks up a changed accounts directory and prunes its measurements.
     await discover();
+    const epochBefore = movesOf(projectId).epoch;
     const from = await projectAccount(projectId);
     if (from.external) {
       bb.log.info(
@@ -1443,6 +1524,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     await applyAccount(projectId, accountOrDefault(decision.account), latest);
     await markHandled(projectId);
+    noteMove(
+      projectId,
+      fromName,
+      decision.account,
+      current.preferredModel,
+      epochBefore,
+    );
     const reason =
       decision.why === "new-project"
         ? `New project placed on account ${decision.account}${current.preferredModel === "" ? "" : ` (${current.preferredModel})`}`
@@ -1531,6 +1619,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const threshold = aheadThreshold(model);
     if (!(threshold > 0)) return;
     const projectId = thread.projectId;
+    const epochBefore = movesOf(projectId).epoch;
     const from = await projectAccount(projectId);
     if (from.external) return;
     const fromName = from.account ?? current.defaultAccountName;
@@ -1572,6 +1661,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (decision.kind === "keep") return;
     await applyAccount(projectId, accountOrDefault(decision.account), from);
     await markHandled(projectId);
+    noteMove(projectId, fromName, decision.account, model, epochBefore);
     const reason = `Switched ahead of the limit to ${decision.account}: ${fromName} at ${Math.round(decision.used)}% of ${decision.window}`;
     bb.log.info(`thread ${thread.id}: ${reason}`);
     await recordMove(
@@ -1792,22 +1882,55 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const projectId = thread.projectId;
     // Emptied by a change of the accounts directory, until the next look.
     if (accounts.length === 0) await discover();
+    const epochBefore = movesOf(projectId).epoch;
     const from = await projectAccount(projectId);
     if (from.external) return;
     const fromName = from.account ?? current.defaultAccountName;
     const now = deps.now();
+    const measured = measuredAccounts(model);
+    // The way back from an excursion, for a turn in the preferred model:
+    // not to an account the project left ahead of the limit while it is
+    // still at or above that share (see aheadLeft).
+    const excursion = excursions.get(projectId);
+    const left = aheadLeft.get(projectId);
+    const home =
+      excursion === undefined
+        ? undefined
+        : measured.find((a) => a.name === excursion.from);
+    const excursionFrom =
+      excursion === undefined || otherModel(model)
+        ? undefined
+        : left !== undefined &&
+            left.account === excursion.from &&
+            home !== undefined &&
+            fullestWindow(settle(home, now), left.model).used >= left.threshold
+          ? null
+          : excursion.from;
     const decision = decidePlacement({
       currentAccount: fromName,
       isNew: false,
-      accounts: measuredAccounts(model),
+      accounts: measured,
       preferredModel: model,
       reserveModel: current.preferredModel,
+      excursionFrom,
       now,
     });
-    if (decision.kind === "keep" || turn.abandoned) return;
+    if (decision.kind === "keep") {
+      // bb never refuses a message: the turn runs where the project is.
+      if (decision.why === "current-reserved")
+        bb.log.info(
+          `thread ${thread.id}: ${model} turn stays on ${fromName}: no account spares ${current.preferredModel}`,
+        );
+      return;
+    }
+    if (turn.abandoned) return;
     await applyAccount(projectId, accountOrDefault(decision.account), from);
     await markHandled(projectId);
-    const reason = `Moved to account ${decision.account} before the turn: ${fromName} ${whyOut(fromName, model)}`;
+    noteMove(projectId, fromName, decision.account, model, epochBefore);
+    const reason =
+      decision.why === "back-from-excursion"
+        ? `Moved back to account ${decision.account} before the turn: ${fromName} was an excursion for ${excursion?.model ?? "another model"}`
+        : `Moved to account ${decision.account} before the turn: ${fromName} ${whyOut(fromName, model)}`;
     bb.log.info(`thread ${thread.id}: ${reason}`);
     await recordMove(
       {
@@ -1888,6 +2011,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     started: string | null | undefined,
   ): Promise<void> {
     const now = deps.now();
+    // The log first, for the turn that failed: a Send now or an edited
+    // message skips the checkpoint and the cache still names the model of
+    // the message before it (code-reviewer r2, same hole as thread.idle).
+    // Read before the shortcuts below: a leftover is not retried on an
+    // account reserved for the preferred model (Codex BM-R1-001).
+    const model =
+      (await loggedModel(event.threadId, event.requestId)) ??
+      threadModel.get(event.threadId) ??
+      current.preferredModel;
     const recent = recentSwitches.get(projectId);
     if (
       recent !== undefined &&
@@ -1903,7 +2035,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       (started !== recent.to || recent.sendAt !== undefined) &&
       // Measured since as unable to run a turn (a wait keeps its grace:
       // the account is out by definition until its reset): judged below.
-      (recent.sendAt !== undefined || !cannotRun(recent.to))
+      (recent.sendAt !== undefined || !cannotRun(recent.to)) &&
+      // Or keeping the preferred model's weekly, which this turn's model
+      // would spend: judged below, where the rule applies.
+      !reservedFor(recent.to, model)
     ) {
       // Another thread of the project, still running on the old account
       // (whatever its attempt: a leftover can be a retry too): the project
@@ -1923,7 +2058,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (typeof started === "string") {
       const at = await projectAccount(projectId);
       const currentName = at.account ?? current.defaultAccountName;
-      if (!at.external && started !== currentName && !cannotRun(currentName)) {
+      if (
+        !at.external &&
+        started !== currentName &&
+        !cannotRun(currentName) &&
+        !reservedFor(currentName, model)
+      ) {
         // Started on the old account before the project moved: a leftover
         // (a long tool call can outlast the grace window), not a failure of
         // the project's account. It runs again there, or waits for the same
@@ -1948,6 +2088,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       }
     }
     await refreshAll();
+    const epochBefore = movesOf(projectId).epoch;
     const from = await projectAccount(projectId);
     if (from.external) {
       bb.log.info(
@@ -1955,14 +2096,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
       return;
     }
-    // The log first, for the turn that failed: a Send now or an edited
-    // message skips the checkpoint and the cache still names the model of
-    // the message before it (code-reviewer r2, same hole as thread.idle).
-    const model =
-      (await loggedModel(event.threadId, event.requestId)) ??
-      threadModel.get(event.threadId) ??
-      current.preferredModel;
-    await judge(event, projectId, from, model, now, false, started);
+    await judge(event, projectId, from, model, now, false, epochBefore, started);
   }
 
   /**
@@ -2068,6 +2202,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     model: string,
     now: number,
     stuck: boolean,
+    /** The project's moves before `from` was read (see noteMove). */
+    epochBefore: number,
     ranOn?: string | null,
   ): Promise<void> {
     const fromName = from.account ?? current.defaultAccountName;
@@ -2136,6 +2272,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (stuck && !current.autoSwitch) return;
     if (decision.account !== fromName) {
       await applyAccount(projectId, accountOrDefault(decision.account), from);
+      noteMove(projectId, fromName, decision.account, model, epochBefore);
       await recordMove(
         {
           at: now,
@@ -2389,6 +2526,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       bb.log.debug(`thread ${threadId}: left in error (${declined})`);
       return;
     }
+    const epochBefore = movesOf(thread.projectId).epoch;
     const from = await projectAccount(thread.projectId);
     if (from.external) return;
     await judge(
@@ -2398,6 +2536,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       turn.model ?? current.preferredModel,
       deps.now(),
       true,
+      epochBefore,
     );
   }
   /** What bb's failure event says of a turn rejected at the door (bb 0.45, `doorRejectionErrorInfo`). */
@@ -2513,6 +2652,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const model =
       modelFamily(row.model) ?? turn.model ?? current.preferredModel;
     // Read last: nothing is awaited between this read and the move below.
+    const epochBefore = movesOf(projectId).epoch;
     const from = await projectAccount(projectId);
     if (from.external || !current.autoSwitch) return;
     const fromName = from.account ?? current.defaultAccountName;
@@ -2528,7 +2668,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       !refusing(fromName) &&
       (here === undefined ||
         here.unknown === true ||
-        bestAccount([here], model, now) === fromName)
+        // With the reserve: a Max account that keeps the preferred model
+        // never gets an Opus retry released on it (Codex BM-R1-005).
+        bestAccount([here], model, now, current.preferredModel) === fromName)
     ) {
       // It waited on the account the project was on before.
       const changed = accountChangedAt.get(projectId);
@@ -2554,6 +2696,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (to === null) return;
     await applyAccount(projectId, accountOrDefault(to), from);
     await markHandled(projectId);
+    noteMove(projectId, fromName, to, model, epochBefore);
     const reason = `Moved to account ${to}, which can run the waiting turn now: ${fromName} ${noLogin ? "is not logged in" : whyOut(fromName, model)}`;
     bb.log.info(`thread ${threadId}: ${reason}`);
     await recordMove(
@@ -2840,6 +2983,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                   await inProjectQueue(p.id, async () => {
                     await applyAccount(p.id, null, await projectAccount(p.id));
                     recentSwitches.delete(p.id);
+                    excursions.delete(p.id);
                   });
                   lines.push(
                     `${p.name}\treleased (was ${p.account ?? "a vanished account"})`,

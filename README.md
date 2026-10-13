@@ -337,10 +337,21 @@ flowchart TD
   starts, and a turn that fails on a limit is judged against that model
   too. So a thread you switch to Opus runs on an account with Opus left
   even when `preferredModel` is `Fable` and no account has Fable left,
-  while a thread sent with Fable waits for Fable as before. Among the
-  accounts that keep Fable, a Team seat, whose Opus turn spends only its
-  5-hour session, comes before a Max account, whose Opus turn would spend
-  the weekly window Fable needs. This is
+  while a thread sent with Fable waits for Fable as before. A Max
+  account that still keeps Fable is no target for an Opus turn at all:
+  its weekly window and Fable's reset together (measured 2026-10-13), so
+  what Opus spends there is Fable's. A known project on such an account
+  moves to a Team seat (whose Opus turn spends only its 5-hour session)
+  or to an account out of Fable before the Opus turn, and comes back
+  before its next Fable turn: the plugin remembers, in memory, the
+  account the project left for that (a reload forgets it, and the project
+  stays where it is; a pick by hand, also one that confirms the account,
+  and `release` forget it too). When no account spares Fable the Opus
+  turn stays where the project is and the log says so (`stays on …: no
+  account spares Fable`); a failed Opus turn then waits only for an
+  account that will spare Fable when the retry is sent, or is left alone
+  (`reserved-for-preferred-model`), and a leftover Opus turn is never
+  retried on such an account. This is
   decided on the measurements already there and never refuses a message
   (at worst it delays it 3 seconds); the plugin never changes a thread's
   model. bb does not ask for a Send now of a queued message nor for an
@@ -411,7 +422,14 @@ by the lowest session use, then by name. What runs out first is spent
 first. With a preferred model, only accounts that can still run it are
 chosen; a thread sent with another model goes first to the accounts that
 can no longer run the preferred one, so it does not spend the preferred
-model's window where it is still free. The account that just failed is excluded from
+model's window where it is still free, then to the Team seats that keep
+it (no weekly window: only their session is spent). An account that
+keeps the preferred model AND has a weekly window (a Max account) is
+never chosen for another model, not even as the last resort: on a Max
+account the weekly and the preferred model's window reset together, so
+what the other model spends there is the preferred model's. A wait for a
+reset only considers accounts that rule admits as the retry is sent (the
+account projected to the latest possible send). The account that just failed is excluded from
 that decision and is never expected back before the reset the provider
 itself reported for it.
 

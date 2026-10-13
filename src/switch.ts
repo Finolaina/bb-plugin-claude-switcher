@@ -11,6 +11,8 @@ import {
   chooseAccount,
   isUsable,
   modelWindow,
+  reserving,
+  spendsReservedWeekly,
   type AccountUsage,
   type UsageWindow,
 } from "./policy.js";
@@ -28,6 +30,8 @@ export type DeclineReason =
   | "not-claude-code"
   | "attempts-exhausted"
   | "no-account-usable"
+  /** Every account that could run the turn keeps the reserved model's weekly (see spendsReservedWeekly). */
+  | "reserved-for-preferred-model"
   | "beyond-maximum-wait";
 
 export type SwitchDecision =
@@ -213,6 +217,7 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
   const before = (a: string, b: string) =>
     a === input.currentAccount || (b !== input.currentAccount && a < b);
   let earliest: { account: string; at: number } | null = null;
+  let reserved = false;
   for (const account of accounts) {
     let at = freeAt(account, input.preferredModel);
     if (account.name === failedOn && !stuck) {
@@ -222,6 +227,17 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
           : Math.max(at, failedFreeAt);
     }
     if (at === null) continue;
+    // Never a wait for an account the rule would not choose as the retry
+    // is sent: the account as it will be at the latest possible send (a
+    // Max account whose weekly and reserved window reset together keeps
+    // the reserve again then). From now at the earliest: a reset already
+    // past, reported or measured, does not date the send before now.
+    const sendBy =
+      Math.max(at, input.now) + RESET_BUFFER_MS + RESET_JITTER_MS;
+    if (spendsReservedWeekly(settle(account, sendBy), options)) {
+      reserved = true;
+      continue;
+    }
     if (
       earliest === null ||
       at < earliest.at ||
@@ -230,7 +246,10 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
       earliest = { account: account.name, at };
   }
   if (earliest === null)
-    return { kind: "decline", reason: "no-account-usable" };
+    return {
+      kind: "decline",
+      reason: reserved ? "reserved-for-preferred-model" : "no-account-usable",
+    };
   if (
     input.maximumWaitMs !== null &&
     earliest.at - input.now > input.maximumWaitMs
@@ -248,8 +267,19 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
 }
 
 export type PlacementDecision =
-  | { kind: "keep" }
-  | { kind: "move"; account: string; why: "new-project" | "current-blocked" };
+  /** `why`: kept although its account spends the reserve, because no account spares it. */
+  | { kind: "keep"; why?: "current-reserved" }
+  | {
+      kind: "move";
+      account: string;
+      why:
+        | "new-project"
+        | "current-blocked"
+        /** A turn in another model: its account spends the reserved model's weekly. */
+        | "current-reserved"
+        /** A turn in the reserved model: back to the account the project left for another model. */
+        | "back-from-excursion";
+    };
 
 export interface PlacementInput {
   currentAccount: string;
@@ -261,6 +291,13 @@ export interface PlacementInput {
   preferredModel: string;
   /** The model kept for its own threads; see ChoiceOptions.reserveModel. */
   reserveModel?: string;
+  /**
+   * The account the project left for a turn in another model (its excursion),
+   * for a turn in the reserved model to go back to; null when the caller
+   * rules it out (left ahead of the limit and still above the share).
+   * Nothing to a turn in another model.
+   */
+  excursionFrom?: string | null;
   now: number;
 }
 
@@ -280,12 +317,19 @@ export function bestAccount(
 }
 
 /**
- * Where a project should run before a new thread's first turn. A new project
- * goes to the best account (the same choice a switch makes); a known one is
- * moved only when its account is MEASURED unable to run, so a project the user
- * pinned by hand stays put while it works. An unmeasured account (or one whose
- * answer lacked a window), or no other account able to run, keeps the
- * project: the failure path then decides, exactly as before this check existed.
+ * Where a project should run before a turn. A new project goes to the best
+ * account (the same choice a switch makes); a known one is moved only when
+ * its account is MEASURED unable to run, so a project the user pinned by
+ * hand stays put while it works. An unmeasured account (or one whose answer
+ * lacked a window), or no other account able to run, keeps the project: the
+ * failure path then decides, exactly as before this check existed.
+ *
+ * With a reserved model (2026-10-13), "able to run" a turn in another model
+ * includes not spending the reserve: a known project on a Max account that
+ * keeps Fable moves off it for an Opus turn (current-reserved), and stays,
+ * saying so, when no account spares Fable. A turn in the reserved model
+ * goes back to the account the project left for that (back-from-excursion)
+ * as soon as it can run it.
  */
 export function decidePlacement(input: PlacementInput): PlacementDecision {
   const accounts = input.accounts.map((a) => settle(a, input.now));
@@ -300,19 +344,35 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
       : { kind: "move", account: choice.account, why: "new-project" };
   }
   const current = accounts.find((a) => a.name === input.currentAccount);
-  if (
-    current === undefined ||
-    current.unknown === true ||
-    (isUsable(current) && canRunModel(current, input.preferredModel))
-  )
+  if (current === undefined || current.unknown === true)
     return { kind: "keep" };
+  if (
+    !reserving(options) &&
+    typeof input.excursionFrom === "string" &&
+    input.excursionFrom !== input.currentAccount
+  ) {
+    const home = accounts.find((a) => a.name === input.excursionFrom);
+    if (
+      home !== undefined &&
+      home.unknown !== true &&
+      isUsable(home) &&
+      canRunModel(home, input.preferredModel)
+    )
+      return { kind: "move", account: home.name, why: "back-from-excursion" };
+  }
+  const runs = isUsable(current) && canRunModel(current, input.preferredModel);
+  if (runs && !spendsReservedWeekly(current, options)) return { kind: "keep" };
   const choice = chooseAccount(
     accounts.filter((a) => a.name !== input.currentAccount),
     options,
   );
-  return choice === null
-    ? { kind: "keep" }
-    : { kind: "move", account: choice.account, why: "current-blocked" };
+  if (choice === null)
+    return runs ? { kind: "keep", why: "current-reserved" } : { kind: "keep" };
+  return {
+    kind: "move",
+    account: choice.account,
+    why: runs ? "current-reserved" : "current-blocked",
+  };
 }
 
 export type AheadDecision =
