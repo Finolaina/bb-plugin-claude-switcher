@@ -1476,12 +1476,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
 
   // ---- Placement before a new thread's first turn ----------------------
   /**
-   * Races the thread's first turn, on purpose: nothing here waits on the
-   * network unless no account has a usable measurement. When the turn starts
-   * first, it runs where the project was, and its failure gets the grace
-   * retry on the new account (see recordMove).
-   */
-  /**
    * The way back from an excursion, for a turn in `model`, as decidePlacement
    * takes it: the account the project left for another model; null when it
    * left that account ahead of the limit and it is still at or above that
@@ -1507,6 +1501,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       : excursion.from;
   }
 
+  /**
+   * Races the thread's first turn, on purpose: nothing here waits on the
+   * network unless no account has a usable measurement. When the turn starts
+   * first, it runs where the project was, and its failure gets the grace
+   * retry on the new account (see recordMove).
+   */
   async function placeProject(thread: ThreadResponse): Promise<void> {
     const projectId = thread.projectId;
     // Always: picks up a changed accounts directory and prunes its measurements.
