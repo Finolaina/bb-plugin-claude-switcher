@@ -8294,6 +8294,50 @@ describe("an Opus turn never retried, released or placed on a Max account that k
     });
   });
 
+  describe("a leftover Opus turn that fails while the project waits for Fable on a Max account (code-reviewer r1, M1)", () => {
+    // main is out of Fable until +4 h and keeps it again from then on; the
+    // others are out of Fable for longer. A Fable turn waits on main; an
+    // Opus leftover of the project must not follow that wait: when it is
+    // sent, main spends Fable's weekly again.
+    const FABLE_WAITS_ON_MAIN = {
+      main: () => Response.json(payload(10, 40, 100)),
+      spare: () => Response.json(payload(10, 10, 100)),
+      work: () => Response.json(teamPayload(17, 100)),
+    };
+
+    it("is judged for Opus (switched to an account out of Fable), never retried on main at the wait's send time", async () => {
+      let clock = NOW;
+      const h = await host(FABLE_WAITS_ON_MAIN, { ...FABLE, clock: () => clock });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      // thread-2 (Opus) starts on main, which can run Opus now.
+      expect(await dispatch(h, "thread-2", OPUS_ID)).toEqual({ action: "proceed" });
+      await active(h, "thread-2");
+      expect(h.envSet).toEqual([]);
+      // thread-1 (Fable) fails: every account is out of Fable, main frees first.
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(h.retries).toEqual([
+        {
+          threadId: "thread-1",
+          turnRequestId: "creq_1",
+          reason: "Waiting for Fable on main",
+          sendAt: NOW + 4 * HOUR + BUFFER,
+        },
+      ]);
+      clock = NOW + 1_000;
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ threadId: "thread-2", requestId: "creq_2" }),
+      );
+      expect(h.retries[1]).toEqual({
+        threadId: "thread-2",
+        turnRequestId: "creq_2",
+        reason: "Switched to account spare (Opus)",
+      });
+      expect(notes(h)).toEqual([ownNote("spare")]);
+    });
+  });
+
   describe("what forgets an excursion (Codex BM-R1-003)", () => {
     const MAX_AND_SEAT = {
       main: () => Response.json(payload(10, 10, 2)),
