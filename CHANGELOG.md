@@ -4,6 +4,37 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.17] - 2026-10-13
+
+### Changed
+
+- **A Max account that keeps the preferred model is no target for another
+  model.** Measured 2026-10-13: on a Max account the general weekly window
+  and Fable's reset together, so an Opus turn there spends what Fable
+  needs. Such an account is never chosen for an Opus turn, not even as the
+  last resort (`spendsReservedWeekly` in the policy): a known project on
+  one moves to a Team seat, or to an account out of Fable, before the turn
+  (`current-reserved`), and when no account spares Fable the turn stays
+  where the project is and the log says so (`Opus turn stays on …: no
+  account spares Fable`). A failed Opus turn waits only for an account
+  that will spare Fable when the retry is sent (each account projected to
+  the latest possible send, from now at the earliest), or is left alone
+  with the new reason `reserved-for-preferred-model`; a leftover Opus turn
+  is never retried on such an account by the grace shortcuts, and a
+  waiting Opus retry is never released on one by the refresh.
+
+### Added
+
+- **Excursions.** The plugin remembers, in memory, the account a project
+  left for a turn in another model, and takes the project back there
+  before its next turn in the preferred model (`back-from-excursion`), as
+  soon as that account can run it and the project did not leave it ahead
+  of the limit. A later move for the other model keeps the first origin;
+  a move for the preferred model, a pick by hand (also one that confirms
+  the account) and `release` forget it; a move that crossed another move,
+  or a read of the project's account that did, notes nothing. A reload
+  forgets it too: the project stays where it is.
+
 ## [0.2.16] - 2026-10-12
 
 ### Added

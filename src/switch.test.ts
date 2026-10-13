@@ -498,6 +498,126 @@ describe("decideSwitch", () => {
   });
 });
 
+// 2026-10-13 ("the Max accounts are Fable's"): an Opus turn never spends the
+// weekly of a Max account that keeps Fable, and never waits for one either:
+// the wait only looks at the accounts the rule admits as the retry is sent.
+describe("decideSwitch with a reserved model: a Max account that keeps it is no target and no wait", () => {
+  const opus = (overrides: Partial<SwitchInput> = {}) =>
+    input({ preferredModel: "Opus", reserveModel: "Fable", ...overrides });
+  const failed = account("main", {
+    session: { usedPercent: 100, resetsAt: NOW + 2 * HOUR },
+  });
+  const maxWithFable = (overrides: Partial<AccountUsage> = {}) =>
+    account("spare", {
+      weekly: { usedPercent: 10, resetsAt: NOW + 24 * HOUR },
+      models: { Fable: { usedPercent: 2, resetsAt: NOW + 24 * HOUR } },
+      ...overrides,
+    });
+  const seatOut = account("team1", {
+    session: { usedPercent: 100, resetsAt: NOW + 2 * HOUR },
+    weekly: { usedPercent: 0, resetsAt: null, absent: true },
+    models: { Fable: { usedPercent: 42, resetsAt: NOW + 72 * HOUR } },
+  });
+
+  it("declines with its own reason when the only free account keeps the reserved model", () => {
+    expect(decideSwitch(opus({ accounts: [failed, maxWithFable()] }))).toEqual({
+      kind: "decline",
+      reason: "reserved-for-preferred-model",
+    });
+  });
+
+  it("waits for a Team seat's session rather than take the Max account that keeps the reserved model", () => {
+    expect(
+      decideSwitch(opus({ accounts: [failed, maxWithFable(), seatOut] })),
+    ).toEqual({
+      kind: "wait",
+      account: "team1",
+      sendAt: NOW + 2 * HOUR + BUFFER,
+      reason: "Waiting for Opus on team1",
+    });
+  });
+
+  it("does not wait for a Max account whose weekly and reserved window reset together: it keeps the reserve again as the retry is sent", () => {
+    const together = maxWithFable({
+      weekly: { usedPercent: 100, resetsAt: NOW + HOUR },
+      models: { Fable: { usedPercent: 100, resetsAt: NOW + HOUR } },
+    });
+    expect(
+      decideSwitch(opus({ accounts: [failed, together, seatOut] })),
+    ).toMatchObject({ kind: "wait", account: "team1" });
+    expect(decideSwitch(opus({ accounts: [failed, together] }))).toEqual({
+      kind: "decline",
+      reason: "reserved-for-preferred-model",
+    });
+  });
+
+  it("does wait for a Max account out of the reserved model that is only blocked by its session", () => {
+    const outOfFable = maxWithFable({
+      session: { usedPercent: 100, resetsAt: NOW + HOUR },
+      weekly: { usedPercent: 50, resetsAt: NOW + 60 * HOUR },
+      models: { Fable: { usedPercent: 100, resetsAt: NOW + 60 * HOUR } },
+    });
+    expect(
+      decideSwitch(opus({ accounts: [failed, outOfFable, seatOut] })),
+    ).toEqual({
+      kind: "wait",
+      account: "spare",
+      sendAt: NOW + HOUR + BUFFER,
+      reason: "Waiting for Opus on spare",
+    });
+  });
+
+  it("projects from now, not from a reset already past: the failed account whose reserved window returns within the buffer is no wait", () => {
+    // The provider reported main's session reset 60 s ago and the stale
+    // measurement agrees; its Fable window returns in 10 s, inside the 15 s
+    // buffer: by the time the retry is sent, main keeps Fable again.
+    const past = failure();
+    past.rateLimits!.windows[0]!.resetsAtMs = NOW - 60_000;
+    const main = account("main", {
+      session: { usedPercent: 100, resetsAt: NOW - 60_000 },
+      weekly: { usedPercent: 50, resetsAt: NOW + 60 * HOUR },
+      models: { Fable: { usedPercent: 100, resetsAt: NOW + 10_000 } },
+    });
+    expect(
+      decideSwitch(opus({ failure: past, accounts: [main] })),
+    ).toEqual({ kind: "decline", reason: "reserved-for-preferred-model" });
+    // Returning after the latest possible send instead: a wait on main.
+    const later = { ...main, models: { Fable: { usedPercent: 100, resetsAt: NOW + 60_000 } } };
+    expect(
+      decideSwitch(opus({ failure: past, accounts: [later] })),
+    ).toMatchObject({ kind: "wait", account: "main" });
+  });
+
+  it("still says no-account-usable when nothing is reserved either", () => {
+    const locked = account("spare", {
+      blocked: true,
+      session: { usedPercent: 100, resetsAt: NOW + HOUR },
+    });
+    // The failed account is out of Fable: a wait for it is fine.
+    const outOfFable = {
+      ...failed,
+      models: { Fable: { usedPercent: 100, resetsAt: NOW + 60 * HOUR } },
+    };
+    expect(
+      decideSwitch(opus({ accounts: [outOfFable, locked] })),
+    ).toMatchObject({ kind: "wait", account: "main" });
+    const unknown = {
+      ...outOfFable,
+      session: { usedPercent: 100, resetsAt: null },
+    };
+    expect(decideSwitch(opus({ accounts: [unknown, locked] }))).toEqual({
+      kind: "decline",
+      reason: "no-account-usable",
+    });
+    // A Max account with no window of Fable keeps it (Fable then counts
+    // against its weekly): with it as the only account, the decline says so.
+    expect(decideSwitch(opus({ accounts: [failed, locked] }))).toEqual({
+      kind: "decline",
+      reason: "reserved-for-preferred-model",
+    });
+  });
+});
+
 describe("a turn the account refused", () => {
   // As bb reported it on 2026-09-30 for an account whose organization turned
   // off subscription access: no rate-limit report comes with it.
@@ -711,6 +831,141 @@ describe("decidePlacement", () => {
         now: NOW,
       }),
     ).toEqual({ kind: "keep" });
+  });
+});
+
+describe("decidePlacement with a reserved model (2026-10-13: the Max accounts are Fable's)", () => {
+  const maxWithFable = account("spare", {
+    weekly: { usedPercent: 10, resetsAt: NOW + 24 * HOUR },
+    models: { Fable: { usedPercent: 2, resetsAt: NOW + 24 * HOUR } },
+  });
+  const seat = account("team1", {
+    session: { usedPercent: 17, resetsAt: NOW + 4 * HOUR },
+    weekly: { usedPercent: 0, resetsAt: null, absent: true },
+    models: { Fable: { usedPercent: 42, resetsAt: NOW + 72 * HOUR } },
+  });
+  const known = {
+    currentAccount: "spare",
+    isNew: false,
+    reserveModel: "Fable",
+    now: NOW,
+  };
+
+  it("moves a known project off the Max account that keeps the reserved model before an Opus turn, to a Team seat", () => {
+    expect(
+      decidePlacement({
+        ...known,
+        accounts: [maxWithFable, seat],
+        preferredModel: "Opus",
+      }),
+    ).toEqual({ kind: "move", account: "team1", why: "current-reserved" });
+  });
+
+  it("keeps it there, saying why, when no account spares the reserve", () => {
+    expect(
+      decidePlacement({
+        ...known,
+        accounts: [maxWithFable],
+        preferredModel: "Opus",
+      }),
+    ).toEqual({ kind: "keep", why: "current-reserved" });
+    const otherMax = account("main", {
+      weekly: { usedPercent: 10, resetsAt: NOW + 30 * HOUR },
+      models: { Fable: { usedPercent: 5, resetsAt: NOW + 30 * HOUR } },
+    });
+    expect(
+      decidePlacement({
+        ...known,
+        accounts: [maxWithFable, otherMax],
+        preferredModel: "Opus",
+      }),
+    ).toEqual({ kind: "keep", why: "current-reserved" });
+  });
+
+  it("keeps a Fable turn on that same account, as before", () => {
+    expect(
+      decidePlacement({
+        ...known,
+        accounts: [maxWithFable, seat],
+        preferredModel: "Fable",
+      }),
+    ).toEqual({ kind: "keep" });
+  });
+
+  it("places a new project for an Opus turn on the seat, or keeps it when only the Max is there", () => {
+    expect(
+      decidePlacement({
+        ...known,
+        isNew: true,
+        accounts: [maxWithFable, seat],
+        preferredModel: "Opus",
+      }),
+    ).toEqual({ kind: "move", account: "team1", why: "new-project" });
+    expect(
+      decidePlacement({
+        ...known,
+        isNew: true,
+        accounts: [maxWithFable],
+        preferredModel: "Opus",
+      }),
+    ).toEqual({ kind: "keep" });
+  });
+
+  describe("the way back from an excursion (the project left `excursionFrom` for another model)", () => {
+    const onSeat = {
+      ...known,
+      currentAccount: "team1",
+      preferredModel: "Fable",
+      excursionFrom: "spare",
+    };
+
+    it("takes a Fable turn back to the account the project left, when it can run Fable now", () => {
+      expect(
+        decidePlacement({ ...onSeat, accounts: [seat, maxWithFable] }),
+      ).toEqual({ kind: "move", account: "spare", why: "back-from-excursion" });
+      // Even when the seat could not run Fable either: home first.
+      expect(
+        decidePlacement({
+          ...onSeat,
+          accounts: [
+            { ...seat, models: { Fable: { usedPercent: 100, resetsAt: NOW + 72 * HOUR } } },
+            maxWithFable,
+          ],
+        }),
+      ).toEqual({ kind: "move", account: "spare", why: "back-from-excursion" });
+    });
+
+    it("keeps the project on the seat while home is out of Fable, blocked, unmeasured or vetoed (excursionFrom null)", () => {
+      const out = { ...maxWithFable, models: { Fable: { usedPercent: 100, resetsAt: NOW + 24 * HOUR } } };
+      expect(decidePlacement({ ...onSeat, accounts: [seat, out] })).toEqual({ kind: "keep" });
+      const blocked = { ...maxWithFable, session: { usedPercent: 100, resetsAt: NOW + HOUR } };
+      expect(decidePlacement({ ...onSeat, accounts: [seat, blocked] })).toEqual({ kind: "keep" });
+      expect(decidePlacement({ ...onSeat, accounts: [seat] })).toEqual({ kind: "keep" });
+      expect(
+        decidePlacement({ ...onSeat, accounts: [seat, maxWithFable], excursionFrom: null }),
+      ).toEqual({ kind: "keep" });
+    });
+
+    it("falls back to current-blocked when neither home nor the seat can run Fable", () => {
+      const out = { ...maxWithFable, models: { Fable: { usedPercent: 100, resetsAt: NOW + 24 * HOUR } } };
+      const other = account("main", { models: { Fable: { usedPercent: 3, resetsAt: NOW + 30 * HOUR } } });
+      expect(
+        decidePlacement({
+          ...onSeat,
+          accounts: [
+            { ...seat, models: { Fable: { usedPercent: 100, resetsAt: NOW + 72 * HOUR } } },
+            out,
+            other,
+          ],
+        }),
+      ).toEqual({ kind: "move", account: "main", why: "current-blocked" });
+    });
+
+    it("means nothing to a turn in another model", () => {
+      expect(
+        decidePlacement({ ...onSeat, preferredModel: "Opus", accounts: [seat, maxWithFable] }),
+      ).toEqual({ kind: "keep" });
+    });
   });
 });
 

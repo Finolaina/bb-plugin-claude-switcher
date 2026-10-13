@@ -103,12 +103,35 @@ export function spendsNoWeekly(account: AccountUsage, model: string): boolean {
   );
 }
 
-function reserving(options: ChoiceOptions): boolean {
+/** Whether `options` choose for a model other than the reserved one. */
+export function reserving(options: ChoiceOptions): boolean {
   const reserve = options.reserveModel ?? "";
   return (
     reserve !== "" &&
     options.preferredModel !== "" &&
     reserve.toLowerCase() !== options.preferredModel.toLowerCase()
+  );
+}
+
+/**
+ * Whether a turn with `preferredModel` on this account would spend a weekly
+ * window the reserved model still needs: the account keeps the reserved
+ * model (its window under 100 %, or no window of it: then it counts against
+ * the general weekly) and has a general weekly window at all (a Max
+ * account; a Team seat has none, measured 2026-10-11). On a Max account the
+ * general weekly and Fable's window reset together (measured 2026-10-13),
+ * so what another model spends there is Fable's. Such an account is never
+ * chosen for another model, not even as the last resort: the turn waits or
+ * stays where it is ("the Max accounts are Fable's", 2026-10-13).
+ */
+export function spendsReservedWeekly(
+  account: AccountUsage,
+  options: ChoiceOptions,
+): boolean {
+  return (
+    reserving(options) &&
+    canRunModel(account, options.reserveModel!) &&
+    account.weekly.absent !== true
   );
 }
 
@@ -139,7 +162,9 @@ function rank(
  * Accounts out of the reserved model first (when reserving), then those
  * that spend no weekly window for the model (Team seats), then the closest
  * deadline for the model, then lowest session use, then name: never the
- * order measured. What runs out first is spent first.
+ * order measured. What runs out first is spent first. (The accounts that
+ * keep the reserved model AND have a weekly window never get here: see
+ * spendsReservedWeekly.)
  */
 function sortedByRank(
   accounts: AccountUsage[],
@@ -163,7 +188,8 @@ export function chooseAccount(
   const usable = sortedByRank(
     accounts
       .filter(isUsable)
-      .filter((a) => canRunModel(a, options.preferredModel)),
+      .filter((a) => canRunModel(a, options.preferredModel))
+      .filter((a) => !spendsReservedWeekly(a, options)),
     options,
   );
   return usable.length > 0

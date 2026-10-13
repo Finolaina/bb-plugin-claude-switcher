@@ -3,6 +3,7 @@ import {
   canRunModel,
   chooseAccount,
   spendsNoWeekly,
+  spendsReservedWeekly,
   type AccountUsage,
 } from "./policy.js";
 
@@ -348,6 +349,93 @@ describe("chooseAccount: limits", () => {
       { preferredModel: "Fable", reserveModel: "Fable" },
     );
     expect(chosen?.account).toBe("hasFable");
+  });
+
+  // 2026-10-13 ("the Max accounts are Fable's"): on a Max account the
+  // general weekly window and Fable's reset together, so an Opus turn there
+  // spends what Fable needs. Such an account is not a candidate for another
+  // model at all, not even as the last resort: the turn waits or stays.
+  describe("for another model, an account that keeps the reserved model AND has a weekly window is never chosen", () => {
+    const maxWithFable = account("maxWithFable", {
+      weekly: { usedPercent: 10, resetsAt: NOW + 24 * HOUR },
+      models: { Fable: { usedPercent: 2, resetsAt: NOW + 24 * HOUR } },
+    });
+    const options = { preferredModel: "Opus", reserveModel: "Fable" };
+
+    it("not even when it is the only usable account", () => {
+      expect(chooseAccount([maxWithFable], options)).toBeNull();
+    });
+
+    it("nor when it has no window of the reserved model (it then counts against the weekly)", () => {
+      expect(
+        chooseAccount([account("maxNoRow", { models: {} })], options),
+      ).toBeNull();
+    });
+
+    it("while a Team seat that keeps the reserved model is, with or without a window of the other model", () => {
+      const seat = account("team1", {
+        weekly: { usedPercent: 0, resetsAt: null, absent: true },
+        models: { Fable: { usedPercent: 42, resetsAt: NOW + 72 * HOUR } },
+      });
+      expect(chooseAccount([maxWithFable, seat], options)?.account).toBe(
+        "team1",
+      );
+      const seatWithOpus = account("team2", {
+        weekly: { usedPercent: 0, resetsAt: null, absent: true },
+        models: {
+          Fable: { usedPercent: 42, resetsAt: NOW + 72 * HOUR },
+          Opus: { usedPercent: 5, resetsAt: NOW + 72 * HOUR },
+        },
+      });
+      expect(
+        chooseAccount([maxWithFable, seatWithOpus], options)?.account,
+      ).toBe("team2");
+    });
+
+    it("and a Max account out of the reserved model is", () => {
+      const out = account("viaulab", {
+        weekly: { usedPercent: 91, resetsAt: NOW + 60 * HOUR },
+        models: { Fable: { usedPercent: 100, resetsAt: NOW + 60 * HOUR } },
+      });
+      expect(chooseAccount([maxWithFable, out], options)?.account).toBe(
+        "viaulab",
+      );
+    });
+
+    it("but nothing changes without a reserve, or for the reserved model itself", () => {
+      expect(
+        chooseAccount([maxWithFable], { preferredModel: "Opus" })?.account,
+      ).toBe("maxWithFable");
+      expect(
+        chooseAccount([maxWithFable], { preferredModel: "Fable", reserveModel: "Fable" })?.account,
+      ).toBe("maxWithFable");
+    });
+
+    it("spendsReservedWeekly says which accounts the rule excludes", () => {
+      expect(spendsReservedWeekly(maxWithFable, options)).toBe(true);
+      expect(spendsReservedWeekly(account("maxNoRow"), options)).toBe(true);
+      expect(
+        spendsReservedWeekly(
+          account("team1", {
+            weekly: { usedPercent: 0, resetsAt: null, absent: true },
+            models: { Fable: { usedPercent: 42, resetsAt: NOW + 72 * HOUR } },
+          }),
+          options,
+        ),
+      ).toBe(false);
+      expect(
+        spendsReservedWeekly(
+          account("viaulab", {
+            models: { Fable: { usedPercent: 100, resetsAt: NOW + 60 * HOUR } },
+          }),
+          options,
+        ),
+      ).toBe(false);
+      expect(spendsReservedWeekly(maxWithFable, { preferredModel: "Opus" })).toBe(false);
+      expect(
+        spendsReservedWeekly(maxWithFable, { preferredModel: "Fable", reserveModel: "Fable" }),
+      ).toBe(false);
+    });
   });
 
   it("excludes exactly 100 % and keeps 99 % (session and weekly)", () => {
