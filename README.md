@@ -399,7 +399,11 @@ flowchart TD
   provider-retry already queued by its own, which bb dispatches at once
   through the same checks as any message (where the turn is placed on the
   account the project is on by then); when it has to wait, it replaces
-  that retry with its own timed one. Keep provider-retry enabled: disabling
+  that retry with its own timed one. If its own retry cannot be queued, the
+  replaced one is queued again as it was; if the replaced one cannot be
+  removed, bb keeps it: the turn is never left without a retry. A new
+  thread of a project on an excursion takes the way home like a turn does.
+  Keep provider-retry enabled: disabling
   it is global and would also drop its retries for overloads and for other
   providers.
 - **Stops after five attempts** on the same turn, like provider-retry.
@@ -523,7 +527,7 @@ executable (`claude auth login`) as a child process of bb's server.
 | `thread.created` event and `projects.get`                        | Places a project when one of its threads is created (a new project by its creation date).                                                                                           |
 | `thread.idle` event                                              | With `switchAheadPercent` or `switchAheadOtherPercent` set, reads the thread's model, measures the account when a turn ends and moves the project.                                                                                         |
 | Project machine environment variables                            | Sets `CLAUDE_CONFIG_DIR` on the project, with a note naming the account.                                                                                                            |
-| `threads.retry` and queued messages                              | Retries the failed turn now, or at a reset, and reuses the retry provider-retry queued.                                                                                             |
+| `threads.retry` and queued messages                              | Retries the failed turn now, or at a reset, and replaces the retry provider-retry queued.                                                                                             |
 | Settings and a settings section                                  | The ten settings, plus the per-project picker, the account cards, the login and the history.                                                                                       |
 | `experimental_threadHeaderAction` slot and `threads.get`         | The account control in a Claude Code thread's header. Experimental in bb: it may change.                                                                                            |
 | `composer.customize` (a new-thread action) and `useComposer`     | The account control in the new-thread composer, for the project picked there.                                                                                                       |
