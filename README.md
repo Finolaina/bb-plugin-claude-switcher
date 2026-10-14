@@ -400,9 +400,11 @@ flowchart TD
   through the same checks as any message (where the turn is placed on the
   account the project is on by then); when it has to wait, it replaces
   that retry with its own timed one. If its own retry cannot be queued, the
-  replaced one is queued again as it was; if the replaced one cannot be
-  removed, bb keeps it: the turn is never left without a retry. A new
-  thread of a project on an excursion takes the way home like a turn does.
+  replaced one is queued again as it was and looked at again by the
+  refresh, like a wait bb did not take (released once its account is
+  measured able to run the turn); if the replaced one cannot be removed,
+  bb keeps it: the turn is never left without a retry. A new thread of a
+  project on an excursion takes the way home like a turn does.
   Keep provider-retry enabled: disabling
   it is global and would also drop its retries for overloads and for other
   providers.
