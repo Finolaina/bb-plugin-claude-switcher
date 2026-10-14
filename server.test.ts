@@ -7201,7 +7201,7 @@ describe("a wait another account can end sooner", () => {
     ).toEqual([]);
     expect(
       h.harness.logEntries.filter((e) => e.level === "info").map((e) => e.message),
-    ).toContainEqual(expect.stringContaining("only bb's answer was lost"));
+    ).toContainEqual(expect.stringContaining("queued after all"));
     spareFable = 20;
     await onePass(h);
     expect(h.deleted).toEqual(["pr-1", back?.id]);
@@ -7271,17 +7271,22 @@ describe("a wait another account can end sooner", () => {
       return snapshot ?? [];
     });
     const pass = onePass(h);
-    await vi.waitFor(() => expect(listCalls).toBe(1));
-    const f = failure();
-    f.rateLimits!.windows[0]!.resetsAtMs = NOW + 9 * HOUR;
-    const { errors } = await h.harness.behavior.emitThreadEvent("turn.failed", f);
-    expect(errors).toEqual([]);
-    expect(h.deleted).toEqual(["pr-1"]);
-    expect(snapshot).toEqual([]);
-    const [back] = h.queued;
-    expect(back?.sendAt).toBe(NOW + 2 * HOUR);
-    release();
-    await pass;
+    let back: QueuedRow | undefined;
+    try {
+      await vi.waitFor(() => expect(listCalls).toBe(1));
+      const f = failure();
+      f.rateLimits!.windows[0]!.resetsAtMs = NOW + 9 * HOUR;
+      const { errors } = await h.harness.behavior.emitThreadEvent("turn.failed", f);
+      expect(errors).toEqual([]);
+      expect(h.deleted).toEqual(["pr-1"]);
+      expect(snapshot).toEqual([]);
+      back = h.queued[0];
+      expect(back?.sendAt).toBe(NOW + 2 * HOUR);
+    } finally {
+      // Whatever failed above, the held read is answered and the pass ends.
+      release();
+      await pass;
+    }
     // The pass that was reading did not drop the mark of the row put back.
     spareFable = 20;
     await onePass(h);
@@ -7358,6 +7363,55 @@ describe("a wait another account can end sooner", () => {
     expect(h.deleted).toEqual(["pr-1"]);
     expect(h.retries).toHaveLength(1);
     expect(h.queued.map((r) => r.id)).toEqual([back?.id]);
+  });
+
+  it("leaves no mark when the restore failed and nothing is queued: a later row of the same turn is not taken for one put back (code-reviewer 0.2.18 r2, CR2-01)", async () => {
+    // Switch to work; ours fails (503) and so does the restore (502):
+    // nothing is queued, the error is thrown as before.
+    const h = await host(ALL_FREE, {
+      retryBehaviour: "fail",
+      queued: [
+        {
+          id: "pr-1",
+          threadId: "thread-1",
+          payload: {
+            kind: "retry",
+            attempt: 2,
+            reason: "Rate limited",
+            retryOfTurnRequestId: "creq_1",
+          },
+          sendAt: NOW + 2 * HOUR,
+          waitingOn: { kind: "time" },
+          createdAt: NOW - HOUR,
+        },
+      ],
+      threads: { "thread-1": { status: "error" } },
+      threadEvents: { "thread-1": [turnRequested("thread-1", "creq_1", FABLE_ID)] },
+    });
+    dispose = () => h.harness.dispose();
+    const { errors } = await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(errors).toHaveLength(1);
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    expect(h.deleted).toEqual(["pr-1"]);
+    expect(h.queued).toEqual([]);
+    // Another plugin queues a retry of the turn (same key) after the move.
+    h.queued.push({
+      id: "other",
+      threadId: "thread-1",
+      payload: {
+        kind: "retry",
+        attempt: 2,
+        reason: "Rate limited",
+        retryOfTurnRequestId: "creq_1",
+      },
+      sendAt: NOW + 2 * HOUR,
+      waitingOn: { kind: "time" },
+      createdAt: NOW + 1000,
+    });
+    await onePass(h);
+    // Newer than the move and never put back by us: left to its own time.
+    expect(h.deleted).toEqual(["pr-1"]);
+    expect(h.queued.map((r) => r.id)).toEqual(["other"]);
   });
 
   it("never retries a wait on an account refusing turns that could not be measured", async () => {
