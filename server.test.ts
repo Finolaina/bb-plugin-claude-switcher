@@ -1577,6 +1577,57 @@ describe("claude accounts plugin", () => {
     ).toContainEqual(expect.stringContaining("bb has the turn"));
   });
 
+  it("does not try to restore the replaced row when bb refused ours because it has the turn and the second look at the queue failed (code-reviewer 0.2.18 r1, CR1-03)", async () => {
+    const h = await host(ALL_FREE, {
+      // Every retry: bb already has one of the turn (the delete did not land).
+      retryError: {
+        message: "HTTP 409: Turn creq_1 already has a retry waiting on thread thread-1.",
+        code: "retry_already_queued",
+        status: 409,
+      },
+      queued: [
+        {
+          id: "pr-1",
+          threadId: "thread-1",
+          payload: {
+            kind: "retry",
+            attempt: 2,
+            reason: "Rate limited",
+            retryOfTurnRequestId: "creq_1",
+          },
+          sendAt: NOW + 2 * HOUR,
+        },
+      ],
+    });
+    dispose = () => h.harness.dispose();
+    let failed = false;
+    h.harness.sdk.stub(
+      "threads.queuedMessages.list",
+      async ({ threadId }: { threadId: string }) => {
+        if (h.deleted.length > 0 && !failed) {
+          failed = true;
+          throw new Error("HTTP 503: bb is busy");
+        }
+        return h.queued.filter((r) => r.threadId === threadId);
+      },
+    );
+    const { errors } = await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure(),
+    );
+    expect(errors).toEqual([]);
+    expect(h.deleted).toEqual(["pr-1"]);
+    // One call: ours, refused. No restore round trip, no warn about restoring.
+    expect(h.harness.sdk.callsTo("threads.retry")).toHaveLength(1);
+    const warns = h.harness.logEntries
+      .filter((e) => e.level === "warn")
+      .map((e) => e.message);
+    expect(warns).not.toContainEqual(expect.stringContaining("restoring the one queued before"));
+    expect(
+      h.harness.logEntries.filter((e) => e.level === "info").map((e) => e.message),
+    ).toContainEqual(expect.stringContaining("bb already has a retry of the turn"));
+  });
+
   it("a retry bb refuses because a newer turn replaced the failed one is no failure: logged, not thrown", async () => {
     // bb's answer on 2026-10-02 (thr_2stddgrdfb): a message sent after the
     // failed turn started a newer one, whose own failure is handled apart.
