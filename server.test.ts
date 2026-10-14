@@ -7294,6 +7294,72 @@ describe("a wait another account can end sooner", () => {
     expect(h.queued).toEqual([]);
   });
 
+  it("keeps a row put back waiting while its account cannot be measured: a mark releases it only on an account measured able (Codex Sol 0.2.18 r2, R0218-R2-001)", async () => {
+    // Fable is out everywhere: the project stays on main and waits for its
+    // reset; provider-retry's row is replaced by ours, which fails once, so
+    // the row is put back. Then main answers without its session window
+    // (unknown) while Fable is still at 100 %.
+    let mainAnswer: Payload = payload(100, 40, 100);
+    const h = await host(
+      {
+        main: () => Response.json(mainAnswer),
+        spare: () => Response.json(payload(1, 1, 100)),
+        work: () => Response.json(payload(1, 1, 100)),
+      },
+      {
+        settings: { preferredModel: "Fable" },
+        retryBehaviour: "fail-once",
+        queued: [
+          {
+            id: "pr-1",
+            threadId: "thread-1",
+            payload: {
+              kind: "retry",
+              attempt: 2,
+              reason: "Rate limited",
+              retryOfTurnRequestId: "creq_1",
+            },
+            sendAt: NOW + 2 * HOUR,
+            waitingOn: { kind: "time" },
+            createdAt: NOW - HOUR,
+          },
+        ],
+        threads: { "thread-1": { status: "error" } },
+        threadEvents: { "thread-1": [turnRequested("thread-1", "creq_1", FABLE_ID)] },
+      },
+    );
+    dispose = () => h.harness.dispose();
+    const { errors } = await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(errors).toEqual([]);
+    expect(h.envSet).toEqual([]);
+    expect(h.deleted).toEqual(["pr-1"]);
+    expect(h.retries).toHaveLength(1);
+    const [back] = h.queued;
+    expect(back?.sendAt).toBe(NOW + 2 * HOUR);
+    mainAnswer = {
+      limits: [
+        {
+          kind: "weekly_all",
+          percent: 40,
+          resets_at: new Date(NOW + 3 * 24 * HOUR).toISOString(),
+        },
+        {
+          kind: "weekly_scoped",
+          percent: 100,
+          resets_at: new Date(NOW + 4 * HOUR).toISOString(),
+          scope: { model: { display_name: "Fable" } },
+        },
+      ],
+      five_hour: { locked_reason: null },
+      seven_day: { locked_reason: null },
+    };
+    await onePass(h);
+    // Not released on main: nothing says it can run the turn.
+    expect(h.deleted).toEqual(["pr-1"]);
+    expect(h.retries).toHaveLength(1);
+    expect(h.queued.map((r) => r.id)).toEqual([back?.id]);
+  });
+
   it("never retries a wait on an account refusing turns that could not be measured", async () => {
     // Codex r4 (IR4-002): main refused a turn while its usage could not be
     // read, and the user picked it again.
