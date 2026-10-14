@@ -1244,6 +1244,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
 
   // ---- Retry of a failed turn ---------------------------------------------
   /**
+   * Waits queued back after bb did not take their retry, or after ours could
+   * not replace them (restoreQueued), by retryKey (their id never comes back
+   * when bb's answer is lost): newer than the move that released them, they
+   * still waited on the old account (Codex BM-INSPECT-R4-002).
+   */
+  const putBack = new Set<string>();
+  /** A queued retry's turn: bb keeps one queued retry per thread, chain and attempt. */
+  function retryKey(threadId: string, of: string, attempt: number): string {
+    return JSON.stringify([threadId, of, attempt]);
+  }
+
+  /**
    * Retry row bb (or its provider-retry plugin) already queued for the failed
    * turn. bb stamps the row with `attempt` = the failed turn's attempt + 1 and
    * keys it by the ORIGINAL request of the retry chain, while a retry's
@@ -1254,7 +1266,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   async function queuedRetry(
     event: PluginTurnFailedEvent,
-  ): Promise<{ id: string; reason: string; sendAt: number | null } | null> {
+  ): Promise<{
+    id: string;
+    reason: string;
+    sendAt: number | null;
+    key: string;
+  } | null> {
     const rows = await bb.sdk.threads.queuedMessages.list({
       threadId: event.threadId,
     });
@@ -1267,7 +1284,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         payload.retryOfTurnRequestId !== event.requestId
       )
         continue;
-      return { id: row.id, reason: payload.reason, sendAt: row.sendAt };
+      return {
+        id: row.id,
+        reason: payload.reason,
+        sendAt: row.sendAt,
+        key: retryKey(event.threadId, payload.retryOfTurnRequestId, payload.attempt),
+      };
     }
     return null;
   }
@@ -1386,11 +1408,22 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         return;
       } catch (error) {
         // Raced with another retry of the same turn between the list and ours.
-        const raced = await queuedRetry(event);
+        // If this look fails too, nothing is known about a race, and the row
+        // replaced, if any, is still put back below (Codex BM-INSPECT-R4-001).
+        let raced: Awaited<ReturnType<typeof queuedRetry>> = null;
+        try {
+          raced = await queuedRetry(event);
+        } catch (lookError) {
+          bb.log.warn(
+            `thread ${threadId}: could not look at the queue again (${lookError instanceof Error ? lookError.message : String(lookError)}); going on without it`,
+          );
+        }
         if (raced !== null) {
           if (stuck || sendAt !== undefined || replacements > 0) {
             bb.log[stuck ? "info" : "warn"](
-              `thread ${threadId}: another retry was queued ${replacements > 0 ? "again" : "first"}; leaving it`,
+              row !== null && raced.id === row.id
+                ? `thread ${threadId}: the retry queued before could not be removed and is still there; leaving it`
+                : `thread ${threadId}: another retry was queued ${replacements > 0 ? "again" : "first"}; leaving it`,
             );
             return;
           }
@@ -1412,11 +1445,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
   }
 
-  /** Ours could not be queued after `row` was replaced: `row` is queued again as it was. */
+  /**
+   * Ours could not be queued after `row` was replaced: `row` is queued again
+   * as it was, and marked put back so a later pass may still release it
+   * (Codex BM-INSPECT-R4-002). Unless bb has the turn: ours landed and only
+   * its answer was lost, or the turn is no longer the failed one
+   * (code-reviewer r4, CR4-01).
+   */
   async function restoreQueued(
     threadId: string,
     event: PluginTurnFailedEvent,
-    row: { reason: string; sendAt: number | null },
+    row: { reason: string; sendAt: number | null; key: string },
     error: unknown,
   ): Promise<void> {
     const message = error instanceof Error ? error.message : String(error);
@@ -1424,13 +1463,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       `thread ${threadId}: could not queue the retry (${message}); restoring the one queued before`,
     );
     try {
-      await bb.sdk.threads.retry({
+      const back = await bb.sdk.threads.retry({
         threadId,
         turnRequestId: event.requestId,
         reason: row.reason,
         ...(row.sendAt === null ? {} : { sendAt: row.sendAt }),
       });
+      if (back.delivery === "queued") putBack.add(row.key);
     } catch (restoreError) {
+      if (bbHasTheTurn(restoreError)) {
+        bb.log.info(
+          `thread ${threadId}: the retry queued before is not restored: bb has the turn (${restoreError instanceof Error ? restoreError.message : String(restoreError)})`,
+        );
+        return;
+      }
       throw new Error(
         `${message}; restoring the retry queued before failed too: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
         { cause: error },
@@ -2418,17 +2464,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * last), so no backoff is cut short.
    */
   const SHORT_WAIT_MS = 2 * 60_000;
-  /**
-   * Waits queued back after bb did not take their retry, by retryKey (their
-   * id never comes back when bb's answer is lost): newer than the move that
-   * released them, they still waited on the old account.
-   */
-  const putBack = new Set<string>();
-  /** A queued retry's turn: bb keeps one queued retry per thread, chain and attempt. */
-  function retryKey(threadId: string, of: string, attempt: number): string {
-    return JSON.stringify([threadId, of, attempt]);
-  }
-
   /**
    * A timed retry waits for the reset of the account its project was on when
    * the turn failed; an account that could not be measured then may have

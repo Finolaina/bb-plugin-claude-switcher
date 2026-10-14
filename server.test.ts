@@ -1467,9 +1467,114 @@ describe("claude accounts plugin", () => {
     expect(second.errors).toEqual([]);
     expect(kept.retries).toEqual([]);
     expect(kept.queued.map((r) => r.id)).toEqual(["pr-1"]);
+    // The row that "won the race" is the one that could not be removed: the
+    // log says so, not that another retry was queued (code-reviewer r4, CR4-02).
+    const warns = kept.harness.logEntries
+      .filter((e) => e.level === "warn")
+      .map((e) => e.message);
+    expect(warns).toContainEqual(
+      expect.stringContaining("the retry queued before could not be removed and is still there; leaving it"),
+    );
+    expect(warns).not.toContainEqual(expect.stringContaining("another retry was queued"));
+  });
+
+  it("still puts the replaced row back when the second look at the queue fails too (Codex BM-INSPECT-R4-001)", async () => {
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 40, 100)),
+        spare: () => Response.json(payload(1, 1, 100)),
+        work: () => Response.json(payload(1, 1, 100)),
+      },
+      {
+        settings: { preferredModel: "Fable" },
+        retryBehaviour: "fail-once",
+        queued: [
+          {
+            id: "pr-1",
+            threadId: "thread-1",
+            payload: {
+              kind: "retry",
+              attempt: 2,
+              reason: "Rate limited",
+              retryOfTurnRequestId: "creq_1",
+            },
+            sendAt: NOW + 2 * HOUR,
+          },
+        ],
+      },
+    );
+    dispose = () => h.harness.dispose();
+    // The look for a race, right after our retry failed, fails as well.
+    let failed = false;
+    h.harness.sdk.stub(
+      "threads.queuedMessages.list",
+      async ({ threadId }: { threadId: string }) => {
+        if (h.deleted.length > 0 && !failed) {
+          failed = true;
+          throw new Error("HTTP 503: bb is busy");
+        }
+        return h.queued.filter((r) => r.threadId === threadId);
+      },
+    );
+    const { errors } = await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure(),
+    );
+    expect(errors).toEqual([]);
+    expect(h.deleted).toEqual(["pr-1"]);
+    expect(h.retries).toEqual([
+      {
+        threadId: "thread-1",
+        turnRequestId: "creq_1",
+        sendAt: NOW + 2 * HOUR,
+        reason: "Rate limited",
+      },
+    ]);
+    expect(h.queued.map((r) => [r.payload.kind, r.sendAt])).toEqual([
+      ["retry", NOW + 2 * HOUR],
+    ]);
+    const warns = h.harness.logEntries
+      .filter((e) => e.level === "warn")
+      .map((e) => e.message);
+    expect(warns).toContainEqual(expect.stringContaining("could not look at the queue again"));
+    expect(warns).toContainEqual(expect.stringContaining("restoring the one queued before"));
+  });
+
+  it("does not call a restore failed when bb has the turn: ours landed with its answer lost, and bb refuses the row put back (code-reviewer r4, CR4-01)", async () => {
+    const h = await host(ALL_FREE, {
+      retryBehaviour: "answer-lost",
+      queued: [
+        {
+          id: "pr-1",
+          threadId: "thread-1",
+          payload: {
+            kind: "retry",
+            attempt: 2,
+            reason: "Rate limited",
+            retryOfTurnRequestId: "creq_1",
+          },
+          sendAt: NOW + 2 * HOUR,
+        },
+      ],
+    });
+    dispose = () => h.harness.dispose();
+    const { errors } = await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure(),
+    );
+    expect(errors).toEqual([]);
+    expect(h.deleted).toEqual(["pr-1"]);
+    // Ours was dispatched (its answer lost); the row is not queued again.
+    expect(h.retries).toEqual([
+      { threadId: "thread-1", turnRequestId: "creq_1", reason: "Switched to account work" },
+    ]);
+    expect(h.queued).toEqual([]);
     expect(
-      kept.harness.logEntries.filter((e) => e.level === "warn").map((e) => e.message),
-    ).toContainEqual(expect.stringContaining("leaving it"));
+      h.harness.logEntries.filter((e) => e.level === "error"),
+    ).toEqual([]);
+    expect(
+      h.harness.logEntries.filter((e) => e.level === "info").map((e) => e.message),
+    ).toContainEqual(expect.stringContaining("bb has the turn"));
   });
 
   it("a retry bb refuses because a newer turn replaced the failed one is no failure: logged, not thrown", async () => {
@@ -6933,6 +7038,70 @@ describe("a wait another account can end sooner", () => {
     await onePass(h);
     expect(h.deleted).toEqual(["r1", back?.id]);
     expect(h.retries.at(-1)).toEqual(retriedNow("thread-1", "creq_r1"));
+    expect(h.queued).toEqual([]);
+  });
+
+  it("looks again at a wait put back after its own retry could not replace it, and releases it once its account can run the turn (Codex BM-INSPECT-R4-002)", async () => {
+    // A timed wait for spare's Fable reset: the project moves to spare and
+    // provider-retry's row is replaced by ours, which fails once, so the row
+    // is queued again as it was. Born after the move, it still waited on
+    // the old account.
+    let spareFable = 100;
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 40, 100)),
+        spare: () => Response.json(payload(1, 1, spareFable)),
+        work: () => Response.json(payload(1, 1, 100)),
+      },
+      {
+        settings: { preferredModel: "Fable", maximumWaitHours: 0 },
+        retryBehaviour: "fail-once",
+        queued: [
+          {
+            id: "pr-1",
+            threadId: "thread-1",
+            payload: {
+              kind: "retry",
+              attempt: 2,
+              reason: "Rate limited",
+              retryOfTurnRequestId: "creq_1",
+            },
+            sendAt: NOW + 2 * HOUR,
+            waitingOn: { kind: "time" },
+            createdAt: NOW - HOUR,
+          },
+        ],
+        threads: { "thread-1": { status: "error" } },
+        threadEvents: { "thread-1": [turnRequested("thread-1", "creq_1", FABLE_ID)] },
+      },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const f = failure();
+    f.rateLimits!.windows[0]!.resetsAtMs = NOW + 9 * HOUR;
+    const { errors } = await h.harness.behavior.emitThreadEvent("turn.failed", f);
+    expect(errors).toEqual([]);
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+    expect(h.deleted).toEqual(["pr-1"]);
+    expect(h.retries).toEqual([
+      {
+        threadId: "thread-1",
+        turnRequestId: "creq_1",
+        sendAt: NOW + 2 * HOUR,
+        reason: "Rate limited",
+      },
+    ]);
+    const [back] = h.queued;
+    expect(back?.sendAt).toBe(NOW + 2 * HOUR);
+    // spare can run Fable now: the wait put back is released there, at once.
+    spareFable = 20;
+    await onePass(h);
+    expect(h.deleted).toEqual(["pr-1", back?.id]);
+    expect(h.retries.at(-1)).toEqual({
+      threadId: "thread-1",
+      turnRequestId: "creq_1",
+      reason: "Retrying on account spare, where the project is now",
+    });
     expect(h.queued).toEqual([]);
   });
 
