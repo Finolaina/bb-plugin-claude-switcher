@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.18] - 2026-10-14
+
+### Fixed
+
+- **Recovery of a retry that fails twice.** When provider-retry's row has
+  been replaced and the plugin's own retry then fails (a 5xx), the row is
+  queued again as it was; that recovery now holds in the cases 0.2.17 left
+  open. A failed second look at the queue no longer escapes before the row
+  is put back. A retry bb refuses because it already has one of the turn,
+  or because the turn is no longer the failed one, is no failure, before
+  and after the restore. A restore whose answer bb lost is looked for in
+  the queue instead of being reported as failed. The row put back is
+  marked, so a later refresh releases it as soon as its account is
+  measured able to run the turn (never on an account that cannot be
+  measured), like a wait the refresh released that bb did not take; a mark
+  is set only for a row found queued, and marks made while a refresh was
+  reading the queue survive it. The log names the row that could not be
+  removed instead of calling it another retry.
+
 ## [0.2.17] - 2026-10-13
 
 ### Changed

@@ -7283,7 +7283,9 @@ describe("a wait another account can end sooner", () => {
       back = h.queued[0];
       expect(back?.sendAt).toBe(NOW + 2 * HOUR);
     } finally {
-      // Whatever failed above, the held read is answered and the pass ends.
+      // Whatever failed above, the held read is answered (its snapshot too,
+      // if it was never taken) and the pass ends.
+      snapshotTaken();
       release();
       await pass;
     }
