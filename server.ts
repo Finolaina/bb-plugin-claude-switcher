@@ -1252,9 +1252,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * automatic choice off, it stays until a pass runs again (a few strings,
    * and a stale mark matches no newer row: the attempt is part of the key).
    * A row put back on a project that did not move is released too once its
-   * account can run the turn, as a wait releaseWait put back is: a wait for
-   * a reset that came early. Backoffs are never released: they are due
-   * within SHORT_WAIT_MS (code-reviewer 0.2.18 r1, CR1-01/CR1-02).
+   * account is MEASURED able to run the turn (never on one that cannot be
+   * measured), as a wait releaseWait put back is: a wait for a reset that
+   * came early. Backoffs are never released: they are due within
+   * SHORT_WAIT_MS (code-reviewer 0.2.18 r1, CR1-01/CR1-02).
    */
   const putBack = new Map<string, number>();
   /** Order of the marks: a pass drops only marks older than its read of the queue. */
@@ -2817,7 +2818,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       const changed = accountChangedAt.get(projectId);
       if (
         (changed !== undefined && row.createdAt < changed) ||
-        putBack.has(wait.key)
+        // A row put back is released only on an account MEASURED able to
+        // run it: it may be waiting for this account's own reset (Codex
+        // Sol 0.2.18 r2, R0218-R2-001).
+        (putBack.has(wait.key) && here !== undefined && here.unknown !== true)
       )
         await releaseWait(
           threadId,
