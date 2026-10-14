@@ -1247,7 +1247,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * Waits queued back after bb did not take their retry, or after ours could
    * not replace them (restoreQueued), by retryKey (their id never comes back
    * when bb's answer is lost): newer than the move that released them, they
-   * still waited on the old account (Codex BM-INSPECT-R4-002).
+   * still waited on the old account (Codex BM-INSPECT-R4-002). A mark is
+   * dropped by the next pass that reads the queue without its row; with the
+   * automatic choice off, it stays until a pass runs again (a few strings,
+   * and a stale mark matches no newer row: the attempt is part of the key).
+   * A row put back on a project that did not move is released too once its
+   * account can run the turn, as a wait releaseWait put back is: a wait for
+   * a reset that came early. Backoffs are never released: they are due
+   * within SHORT_WAIT_MS (code-reviewer 0.2.18 r1, CR1-01/CR1-02).
    */
   const putBack = new Map<string, number>();
   /** Order of the marks: a pass drops only marks older than its read of the queue. */
@@ -1453,6 +1460,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         if (superseded(error)) {
           bb.log.info(
             `thread ${threadId}: turn ${event.requestId} is no longer its latest; the newer turn goes on`,
+          );
+          return;
+        }
+        // bb has the turn already (ours refused for a retry it keeps, or
+        // the turn is no longer the failed one): nothing to restore, and
+        // nothing is known about a race (code-reviewer 0.2.18 r1, CR1-03).
+        if (bbHasTheTurn(error)) {
+          bb.log.info(
+            `thread ${threadId}: bb already has a retry of the turn (${error instanceof Error ? error.message : String(error)})`,
           );
           return;
         }
