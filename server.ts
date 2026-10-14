@@ -1254,6 +1254,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function retryKey(threadId: string, of: string, attempt: number): string {
     return JSON.stringify([threadId, of, attempt]);
   }
+  /** Whether a retry with this key is queued on the thread; false when bb cannot be read. */
+  function rowQueued(threadId: string, key: string): Promise<boolean> {
+    return bb.sdk.threads.queuedMessages.list({ threadId }).then(
+      (rows) =>
+        rows.some(
+          (r) =>
+            r.payload.kind === "retry" &&
+            retryKey(threadId, r.payload.retryOfTurnRequestId, r.payload.attempt) ===
+              key,
+        ),
+      () => false,
+    );
+  }
 
   /**
    * Retry row bb (or its provider-retry plugin) already queued for the failed
@@ -1471,14 +1484,28 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       });
       if (back.delivery === "queued") putBack.add(row.key);
     } catch (restoreError) {
+      const restore =
+        restoreError instanceof Error
+          ? restoreError.message
+          : String(restoreError);
       if (bbHasTheTurn(restoreError)) {
         bb.log.info(
-          `thread ${threadId}: the retry queued before is not restored: bb has the turn (${restoreError instanceof Error ? restoreError.message : String(restoreError)})`,
+          `thread ${threadId}: the retry queued before is not restored: bb has the turn (${restore})`,
+        );
+        return;
+      }
+      // bb may have queued it and lost only its answer (as releaseWait
+      // allows for): marked put back and looked for (Codex Sol 0.2.18 r1,
+      // R0218-CODEX-001).
+      putBack.add(row.key);
+      if (await rowQueued(threadId, row.key)) {
+        bb.log.info(
+          `thread ${threadId}: the retry queued before is queued again (only bb's answer was lost: ${restore})`,
         );
         return;
       }
       throw new Error(
-        `${message}; restoring the retry queued before failed too: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
+        `${message}; restoring the retry queued before failed too: ${restore}`,
         { cause: error },
       );
     }
@@ -2875,22 +2902,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         // bb may have queued it and lost only its answer: looked at again in
         // the next pass if it is there.
         putBack.add(wait.key);
-        const queuedAgain = await bb.sdk.threads.queuedMessages
-          .list({ threadId })
-          .then(
-            (rows) =>
-              rows.some(
-                (r) =>
-                  r.payload.kind === "retry" &&
-                  retryKey(
-                    threadId,
-                    r.payload.retryOfTurnRequestId,
-                    r.payload.attempt,
-                  ) === wait.key,
-              ),
-            () => false,
-          );
-        if (queuedAgain) {
+        if (await rowQueued(threadId, wait.key)) {
           bb.log.info(
             `thread ${threadId}: its wait is queued again (only bb's answer was lost: ${restore})`,
           );
