@@ -1517,12 +1517,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         return;
       }
       // bb may have queued it and lost only its answer (as releaseWait
-      // allows for): marked put back and looked for (Codex Sol 0.2.18 r1,
-      // R0218-CODEX-001).
-      markPutBack(row.key);
+      // allows for): looked for, and marked put back only when found, so
+      // no mark outlives a row that was never queued (Codex Sol 0.2.18 r1,
+      // R0218-CODEX-001; code-reviewer r2, CR2-01). The row found may be
+      // the one that could not be removed: a retry is queued either way
+      // (CR2-02).
       if (await rowQueued(threadId, row.key)) {
+        markPutBack(row.key);
         bb.log.info(
-          `thread ${threadId}: the retry queued before is queued again (only bb's answer was lost: ${restore})`,
+          `thread ${threadId}: a retry of the turn is queued after all (the restore's answer was lost: ${restore})`,
         );
         return;
       }
@@ -2929,9 +2932,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           return;
         }
         // bb may have queued it and lost only its answer: looked at again in
-        // the next pass if it is there.
-        markPutBack(wait.key);
+        // the next pass if it is there (marked only when found, CR2-01).
         if (await rowQueued(threadId, wait.key)) {
+          markPutBack(wait.key);
           bb.log.info(
             `thread ${threadId}: its wait is queued again (only bb's answer was lost: ${restore})`,
           );
