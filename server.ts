@@ -1249,7 +1249,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * when bb's answer is lost): newer than the move that released them, they
    * still waited on the old account (Codex BM-INSPECT-R4-002).
    */
-  const putBack = new Set<string>();
+  const putBack = new Map<string, number>();
+  /** Order of the marks: a pass drops only marks older than its read of the queue. */
+  let putBackMarks = 0;
+  function markPutBack(key: string): void {
+    putBack.set(key, ++putBackMarks);
+  }
   /** A queued retry's turn: bb keeps one queued retry per thread, chain and attempt. */
   function retryKey(threadId: string, of: string, attempt: number): string {
     return JSON.stringify([threadId, of, attempt]);
@@ -1482,7 +1487,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         reason: row.reason,
         ...(row.sendAt === null ? {} : { sendAt: row.sendAt }),
       });
-      if (back.delivery === "queued") putBack.add(row.key);
+      if (back.delivery === "queued") markPutBack(row.key);
     } catch (restoreError) {
       const restore =
         restoreError instanceof Error
@@ -1497,7 +1502,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // bb may have queued it and lost only its answer (as releaseWait
       // allows for): marked put back and looked for (Codex Sol 0.2.18 r1,
       // R0218-CODEX-001).
-      putBack.add(row.key);
+      markPutBack(row.key);
       if (await rowQueued(threadId, row.key)) {
         bb.log.info(
           `thread ${threadId}: the retry queued before is queued again (only bb's answer was lost: ${restore})`,
@@ -2506,9 +2511,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   async function revisitWaits(): Promise<void> {
     if (!current.autoSwitch) return;
+    // Marks made while bb reads are kept: its snapshot may predate them
+    // (Codex Sol 0.2.18 r1, R0218-CODEX-002).
+    const marksBefore = putBackMarks;
     const all = await bb.sdk.threads.queue.list();
-    for (const key of putBack)
+    for (const [key, mark] of putBack)
       if (
+        mark <= marksBefore &&
         !all.some(
           (row) =>
             row.payload.kind === "retry" &&
@@ -2886,7 +2895,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           reason: wait.reason,
           ...(wait.sendAt === null ? {} : { sendAt: wait.sendAt }),
         });
-        if (back.delivery === "queued") putBack.add(wait.key);
+        if (back.delivery === "queued") markPutBack(wait.key);
       } catch (restoreError) {
         const restore =
           restoreError instanceof Error
@@ -2901,7 +2910,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         }
         // bb may have queued it and lost only its answer: looked at again in
         // the next pass if it is there.
-        putBack.add(wait.key);
+        markPutBack(wait.key);
         if (await rowQueued(threadId, wait.key)) {
           bb.log.info(
             `thread ${threadId}: its wait is queued again (only bb's answer was lost: ${restore})`,
