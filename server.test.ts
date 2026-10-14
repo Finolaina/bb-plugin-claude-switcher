@@ -7162,6 +7162,87 @@ describe("a wait another account can end sooner", () => {
     expect(h.queued).toEqual([]);
   });
 
+  it("keeps the mark of a row put back while a pass was reading the queue, so the next pass still releases it (Codex Sol 0.2.18 r1, R0218-CODEX-002)", async () => {
+    let spareFable = 100;
+    // bb takes the snapshot for the pass between the delete of the row and
+    // its restore (at the second look at the thread's queue, after ours
+    // failed): neither row is in it. It answers once the turn is handled.
+    let snapshot: QueuedRow[] | null = null;
+    let snapshotTaken: () => void = () => {};
+    const snapshotReady = new Promise<void>((resolve) => {
+      snapshotTaken = resolve;
+    });
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 40, 100)),
+        spare: () => Response.json(payload(1, 1, spareFable)),
+        work: () => Response.json(payload(1, 1, 100)),
+      },
+      {
+        settings: { preferredModel: "Fable", maximumWaitHours: 0 },
+        retryBehaviour: "fail-once",
+        queued: [
+          {
+            id: "pr-1",
+            threadId: "thread-1",
+            payload: {
+              kind: "retry",
+              attempt: 2,
+              reason: "Rate limited",
+              retryOfTurnRequestId: "creq_1",
+            },
+            sendAt: NOW + 2 * HOUR,
+            waitingOn: { kind: "time" },
+            createdAt: NOW - HOUR,
+          },
+        ],
+        threads: { "thread-1": { status: "error" } },
+        threadEvents: { "thread-1": [turnRequested("thread-1", "creq_1", FABLE_ID)] },
+        beforeQueuedList: async () => {
+          if (snapshot === null && h.deleted.length > 0) {
+            snapshot = [...h.queued];
+            snapshotTaken();
+          }
+        },
+      },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    let listCalls = 0;
+    h.harness.sdk.stub("threads.queue.list", async () => {
+      if (listCalls++ > 0) return [...h.queued];
+      await snapshotReady;
+      await held;
+      return snapshot ?? [];
+    });
+    const pass = onePass(h);
+    await vi.waitFor(() => expect(listCalls).toBe(1));
+    const f = failure();
+    f.rateLimits!.windows[0]!.resetsAtMs = NOW + 9 * HOUR;
+    const { errors } = await h.harness.behavior.emitThreadEvent("turn.failed", f);
+    expect(errors).toEqual([]);
+    expect(h.deleted).toEqual(["pr-1"]);
+    expect(snapshot).toEqual([]);
+    const [back] = h.queued;
+    expect(back?.sendAt).toBe(NOW + 2 * HOUR);
+    release();
+    await pass;
+    // The pass that was reading did not drop the mark of the row put back.
+    spareFable = 20;
+    await onePass(h);
+    expect(h.deleted).toEqual(["pr-1", back?.id]);
+    expect(h.retries.at(-1)).toEqual({
+      threadId: "thread-1",
+      turnRequestId: "creq_1",
+      reason: "Retrying on account spare, where the project is now",
+    });
+    expect(h.queued).toEqual([]);
+  });
+
   it("never retries a wait on an account refusing turns that could not be measured", async () => {
     // Codex r4 (IR4-002): main refused a turn while its usage could not be
     // read, and the user picked it again.
