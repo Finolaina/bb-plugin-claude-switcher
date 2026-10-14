@@ -7105,6 +7105,63 @@ describe("a wait another account can end sooner", () => {
     expect(h.queued).toEqual([]);
   });
 
+  it("marks the row put back and looks for it when bb lost the restore's answer, so a later pass still releases it (Codex Sol 0.2.18 r1, R0218-CODEX-001)", async () => {
+    let spareFable = 100;
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 40, 100)),
+        spare: () => Response.json(payload(1, 1, spareFable)),
+        work: () => Response.json(payload(1, 1, 100)),
+      },
+      {
+        settings: { preferredModel: "Fable", maximumWaitHours: 0 },
+        // Ours fails once (503); the restore lands, its answer lost.
+        retryBehaviour: "restore-answer-lost",
+        queued: [
+          {
+            id: "pr-1",
+            threadId: "thread-1",
+            payload: {
+              kind: "retry",
+              attempt: 2,
+              reason: "Rate limited",
+              retryOfTurnRequestId: "creq_1",
+            },
+            sendAt: NOW + 2 * HOUR,
+            waitingOn: { kind: "time" },
+            createdAt: NOW - HOUR,
+          },
+        ],
+        threads: { "thread-1": { status: "error" } },
+        threadEvents: { "thread-1": [turnRequested("thread-1", "creq_1", FABLE_ID)] },
+      },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const f = failure();
+    f.rateLimits!.windows[0]!.resetsAtMs = NOW + 9 * HOUR;
+    const { errors } = await h.harness.behavior.emitThreadEvent("turn.failed", f);
+    expect(errors).toEqual([]);
+    expect(h.deleted).toEqual(["pr-1"]);
+    const [back] = h.queued;
+    expect(back?.sendAt).toBe(NOW + 2 * HOUR);
+    expect(
+      h.harness.logEntries.filter((e) => e.level === "error"),
+    ).toEqual([]);
+    expect(
+      h.harness.logEntries.filter((e) => e.level === "info").map((e) => e.message),
+    ).toContainEqual(expect.stringContaining("only bb's answer was lost"));
+    spareFable = 20;
+    await onePass(h);
+    expect(h.deleted).toEqual(["pr-1", back?.id]);
+    expect(h.retries.at(-1)).toEqual({
+      threadId: "thread-1",
+      turnRequestId: "creq_1",
+      reason: "Retrying on account spare, where the project is now",
+    });
+    expect(h.queued).toEqual([]);
+  });
+
   it("never retries a wait on an account refusing turns that could not be measured", async () => {
     // Codex r4 (IR4-002): main refused a turn while its usage could not be
     // read, and the user picked it again.
