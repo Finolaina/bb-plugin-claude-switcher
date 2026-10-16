@@ -35,7 +35,8 @@ moves projects between them.
 
 An account is a candidate only while its session and its weekly window are
 both under 100 % and the provider reports no lock. Candidates are ranked by
-the closest weekly reset, then lowest session use. If you name a preferred model, or
+the quarter their 5-hour session is in, then the closest reset for the
+model, then lowest session use. If you name a preferred model, or
 switch a thread to another model in bb's picker, only accounts that can still
 run that model are chosen; when none can, the retry waits until one can.
 

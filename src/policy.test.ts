@@ -5,6 +5,8 @@ import {
   spendsNoWeekly,
   spendsReservedWeekly,
   type AccountUsage,
+  type ChoiceOptions,
+  type UsageWindow,
 } from "./policy.js";
 
 const HOUR = 60 * 60 * 1_000;
@@ -508,5 +510,130 @@ describe("chooseAccount: limits", () => {
       account: "plain",
       model: "Opus",
     });
+  });
+});
+
+// Session quarters (0.2.19). Measured 9-16 Oct 2026: ordering by deadline
+// alone sent every new session to one account until its 5-hour window
+// burned (52 h a week with one account at >= 80 % session while another
+// with the preferred model sat under 20 %; 7 h with the preferred model
+// left but its account's session at 100 %). The session now goes first in
+// quarters (0-24, 25-49, 50-74, 75-99); within a quarter what runs out
+// first is still spent first. For another model the reserve keys stay in
+// front ("the Max accounts are the preferred model's"). The scenario names
+// (S1...) are shared with the author's shell switcher's suite, which must
+// choose the same account for the same input.
+describe("session quarter before the deadline (S1-S7, S12)", () => {
+  const seat = (
+    name: string,
+    session: number,
+    fable: number,
+    fableResetHours: number,
+    extra: Record<string, UsageWindow> = {},
+  ) =>
+    account(name, {
+      session: { usedPercent: session, resetsAt: NOW + 4 * HOUR },
+      weekly: { usedPercent: 0, resetsAt: null, absent: true },
+      models: {
+        Fable: { usedPercent: fable, resetsAt: NOW + fableResetHours * HOUR },
+        ...extra,
+      },
+    });
+  const max = (
+    name: string,
+    session: number,
+    weekly: number,
+    weeklyResetHours: number,
+    fable: number,
+  ) =>
+    account(name, {
+      session: { usedPercent: session, resetsAt: NOW + 4 * HOUR },
+      weekly: { usedPercent: weekly, resetsAt: NOW + weeklyResetHours * HOUR },
+      models: {
+        Fable: { usedPercent: fable, resetsAt: NOW + weeklyResetHours * HOUR },
+      },
+    });
+  const fable = { preferredModel: "Fable", reserveModel: "Fable" };
+  const opus = { preferredModel: "Opus", reserveModel: "Fable" };
+  const pick = (accounts: AccountUsage[], options: ChoiceOptions) =>
+    chooseAccount(accounts, options)?.account ?? null;
+
+  it("S1: for the preferred model, a seat at 7 % session beats one at 82 % (quarter 0 before 3)", () => {
+    expect(
+      pick([seat("team-a", 82, 35, 61), seat("team-b", 7, 23, 56)], fable),
+    ).toBe("team-b");
+  });
+
+  it("S2: for the preferred model, a lower quarter beats a closer deadline", () => {
+    // team-a's Fable resets 5 h sooner: by deadline alone it would win
+    expect(
+      pick([seat("team-a", 30, 23, 56), seat("team-b", 10, 35, 61)], fable),
+    ).toBe("team-b");
+  });
+
+  it("S3: within a quarter the closest deadline still wins over a lower session", () => {
+    expect(
+      pick([seat("team-a", 5, 10, 144), seat("team-b", 10, 60, 2)], fable),
+    ).toBe("team-b");
+  });
+
+  it("S4: 24 % and 25 % fall in different quarters, two sessions in one quarter are ordered by deadline", () => {
+    expect(
+      pick([seat("team-a", 25, 40, 144), seat("team-b", 24, 40, 2)], fable),
+    ).toBe("team-b");
+    // the exact cuts: one point under a cut beats the cut even when the
+    // cut resets sooner
+    for (const cut of [25, 50, 75]) {
+      expect(
+        pick(
+          [seat("team-a", cut, 40, 2), seat("team-b", cut - 1, 40, 144)],
+          fable,
+        ),
+      ).toBe("team-b");
+    }
+    expect(
+      pick([seat("team-a", 25, 40, 144), seat("team-b", 25, 40, 2)], fable),
+    ).toBe("team-b");
+  });
+
+  it("S5: for another model, a Max account out of the preferred model still goes first by its deadline", () => {
+    expect(
+      pick(
+        [
+          max("max-a", 0, 60, 24, 100),
+          seat("team-b", 0, 100, 80),
+          seat("team-c", 7, 23, 56),
+        ],
+        opus,
+      ),
+    ).toBe("max-a");
+  });
+
+  it("S6: for another model, between seats out of the preferred model the lower quarter beats a closer deadline", () => {
+    const opusWindow = (hours: number) => ({
+      Opus: { usedPercent: 5, resetsAt: NOW + hours * HOUR },
+    });
+    expect(
+      pick(
+        [
+          seat("team-a", 90, 100, 80, opusWindow(10)),
+          seat("team-b", 10, 100, 80, opusWindow(100)),
+        ],
+        opus,
+      ),
+    ).toBe("team-b");
+  });
+
+  it("S7: for another model, a Max account that keeps the preferred model is still never chosen", () => {
+    expect(pick([max("max-a", 0, 20, 24, 20)], opus)).toBeNull();
+  });
+
+  it("S12: for another model, a seat at 0 % beats a Max account out of the preferred model at 30 % whose weekly resets in 1 h; at 10 % the Max wins", () => {
+    expect(
+      pick([max("max-a", 30, 60, 1, 100), seat("team-b", 0, 100, 80)], opus),
+    ).toBe("team-b");
+    expect(
+      pick([max("max-a", 10, 60, 1, 100), seat("team-b", 0, 100, 80)], opus),
+    ).toBe("max-a");
   });
 });

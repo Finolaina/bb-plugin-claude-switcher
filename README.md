@@ -428,15 +428,18 @@ only blocks are of that kind is left out; if no account is left, the
 plugin declines rather than guess. A block whose reset is still ahead
 remains a reason to wait, and an old measurement that was free remains a
 candidate.
-Usable accounts are ranked by the closest deadline for the model the turn
-runs with (the earlier of the weekly reset and the model's own window
-reset: a Team seat has no general weekly window, only its model's), then
-by the lowest session use, then by name. What runs out first is spent
-first. With a preferred model, only accounts that can still run it are
-chosen; a thread sent with another model goes first to the accounts that
-can no longer run the preferred one, so it does not spend the preferred
-model's window where it is still free, then to the Team seats that keep
-it (no weekly window: only their session is spent). An account that
+Usable accounts are ranked by the quarter their 5-hour session is in
+(0-24 %, 25-49 %, 50-74 %, 75-99 %), then by the closest deadline for the
+model the turn runs with (the earlier of the weekly reset and the model's
+own window reset: a Team seat has no general weekly window, only its
+model's), then by the lowest session use, then by name. Within a quarter,
+what runs out first is spent first; the quarter keeps new sessions from
+piling on one account until its 5-hour window burns. With a preferred
+model, only accounts that can still run it are chosen; a thread sent
+with another model goes first to the accounts that can no longer run the
+preferred one, so it does not spend the preferred model's window where it
+is still free, then to the Team seats that keep it (no weekly window:
+only their session is spent). An account that
 keeps the preferred model AND has a weekly window (a Max account) is
 never chosen for another model, not even as the last resort: on a Max
 account the weekly and the preferred model's window reset together, so
