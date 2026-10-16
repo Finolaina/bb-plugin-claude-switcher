@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.19] - 2026-10-17
+
+### Changed
+
+- **The session quarter goes before the deadline.** Usable accounts are
+  ranked by the quarter their 5-hour session is in (0-24 %, 25-49 %,
+  50-74 %, 75-99 %), then by the closest deadline for the model, then by
+  the exact session use and the name. Ordering by the deadline alone sent
+  every new session to the account whose window ends first until its
+  5-hour session burned, while other accounts able to run the same model
+  sat idle. Over the week of 9-16 October 2026 the author's usage history
+  (measured with the author's `medir-reparto.py`) showed 52 h with one
+  account holding the preferred model at 80 % session or more while
+  another one sat under 20 %, and 7 h in which the preferred model was
+  left only on accounts whose session was at 100 %. Within a quarter what
+  runs out first is still spent first. For another model the reserve
+  rules stay in front: an account out of the preferred model goes first,
+  then a Team seat that keeps it, and a Max account that keeps it is still
+  never chosen; among the accounts out of the preferred model, a Max
+  account whose weekly resets soon no longer beats a seat whose session
+  sits in a lower quarter.
+
 ## [0.2.18] - 2026-10-14
 
 ### Fixed
