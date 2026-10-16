@@ -135,17 +135,28 @@ export function spendsReservedWeekly(
   );
 }
 
+/**
+ * The session's quarter: 0 for 0-24 %, 1 for 25-49 %, 2 for 50-74 %, 3 for
+ * 75-99 % (100 % is not usable). Measured 9-16 Oct 2026: ordering by the
+ * deadline alone sent every new session to the same account until its
+ * 5-hour window burned, while accounts with the same model sat idle.
+ */
+function sessionQuarter(account: AccountUsage): number {
+  return Math.floor(account.session.usedPercent / 25);
+}
+
 function rank(
   account: AccountUsage,
   options: ChoiceOptions,
-): [number, number, number, number] {
+): [number, number, number, number, number] {
   const keepsReserve =
     reserving(options) && canRunModel(account, options.reserveModel!) ? 1 : 0;
   // Among the accounts that keep the reserved model, a turn with another
   // model goes first where it spends no weekly window (a Team seat: only
   // its session), last where it spends the weekly the reserved model needs
   // (a Max account). The accounts already out of the reserve keep their
-  // deadline order: nothing of theirs is spared by choosing a seat.
+  // quarter and deadline order: nothing of theirs is spared by choosing
+  // a seat.
   const spendsWeekly =
     keepsReserve === 1 && !spendsNoWeekly(account, options.preferredModel)
       ? 1
@@ -153,6 +164,7 @@ function rank(
   return [
     keepsReserve,
     spendsWeekly,
+    sessionQuarter(account),
     deadline(account, options.preferredModel),
     account.session.usedPercent,
   ];
@@ -160,10 +172,12 @@ function rank(
 
 /**
  * Accounts out of the reserved model first (when reserving), then those
- * that spend no weekly window for the model (Team seats), then the closest
- * deadline for the model, then lowest session use, then name: never the
- * order measured. What runs out first is spent first. (The accounts that
- * keep the reserved model AND have a weekly window never get here: see
+ * that spend no weekly window for the model (Team seats), then the lowest
+ * session quarter, then the closest deadline for the model, then lowest
+ * session use, then name: never the order measured. Within a quarter what
+ * runs out first is spent first; the quarter keeps new sessions from piling
+ * on one account until its 5-hour window burns. (The accounts that keep the
+ * reserved model AND have a weekly window never get here: see
  * spendsReservedWeekly.)
  */
 function sortedByRank(
@@ -171,10 +185,11 @@ function sortedByRank(
   options: ChoiceOptions,
 ): AccountUsage[] {
   return [...accounts].sort((a, b) => {
-    const [ka, wa, da, sa] = rank(a, options);
-    const [kb, wb, db, sb] = rank(b, options);
+    const [ka, wa, ta, da, sa] = rank(a, options);
+    const [kb, wb, tb, db, sb] = rank(b, options);
     if (ka !== kb) return ka - kb;
     if (wa !== wb) return wa - wb;
+    if (ta !== tb) return ta - tb;
     if (da !== db) return da - db;
     if (sa !== sb) return sa - sb;
     return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;

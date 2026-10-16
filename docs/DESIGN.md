@@ -81,12 +81,16 @@ so both tools pick the same account.
 2. With a **preferred model**, the account must also be under 100 % in that
    model's window (matched case-insensitively). No row for the model means
    it counts against the weekly window only.
-3. Usable accounts are ranked by the **closest deadline for the model**
-   (the earlier of the weekly reset and the model's own window reset; a
-   Team seat, measured 2026-10-11, has no general weekly window, only its
-   model's), then the **lowest session use**, then the **name**, never by
-   the order in which they were measured. Spending the account whose
-   window ends soonest first wastes the least quota. When choosing for a
+3. Usable accounts are ranked by the **session quarter** (0-24 %,
+   25-49 %, 50-74 %, 75-99 % of the 5-hour window), then the **closest
+   deadline for the model** (the earlier of the weekly reset and the
+   model's own window reset; a Team seat, measured 2026-10-11, has no
+   general weekly window, only its model's), then the **lowest session
+   use**, then the **name**, never by the order in which they were
+   measured. Within a quarter, spending the account whose window ends
+   soonest first wastes the least quota; the quarter goes first because
+   the deadline alone sent every new session to one account until its
+   5-hour window burned (0.2.19). When choosing for a
    named model other than the preferred one, accounts that can no longer
    run the preferred model come first (`reserveModel`), so an Opus turn
    does not spend Fable where it is still free; among the accounts that
@@ -94,7 +98,7 @@ so both tools pick the same account.
    comes before a Max account (`spendsWeekly`): an Opus turn there spends
    only the 5-hour session, on a Max account the weekly window the
    preferred model needs. The accounts already out of the preferred model
-   keep their deadline order, Team seat or not.
+   keep their quarter and deadline order, Team seat or not.
 
 ## Placing a project before the first turn
 
