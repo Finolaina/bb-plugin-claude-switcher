@@ -31,9 +31,9 @@ project uses [Semantic Versioning](https://semver.org/).
   is told by a later judgment. The project's latest move (kept for views
   older than the history) records the move's own reason, without the
   advice.
-- **Switched off during a judgment that moves the project, the move is
-  still made and recorded,** as such a judgment always did: now tested,
-  and the README and the 0.2.23 entry say so.
+- **Switched off during a failure's judgment, or a move already under
+  way, the move is still made and recorded,** as such a judgment always
+  did: now tested, and the README and the 0.2.23 entry say so.
 
 ### Changed
 
