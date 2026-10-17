@@ -3375,9 +3375,10 @@ describe("claude accounts plugin", () => {
       },
     );
     dispose = () => h.harness.dispose();
-    // Fable exhausted everywhere until +4 h: a wait.
+    // Fable exhausted everywhere until +4 h: a wait. main's numbers run
+    // Opus: an Opus turn would stay there, and so the advice says.
     await h.harness.behavior.emitThreadEvent("turn.failed", failure());
-    expect(h.retries.map((r) => r.reason)).toEqual(["Waiting for Fable on main" + toOpus("spare")]);
+    expect(h.retries.map((r) => r.reason)).toEqual(["Waiting for Fable on main" + toOpus("main")]);
     // Past that reset with the endpoint down since: nothing confirmed, so
     // no switch and no retry (the clock alone does not free a model).
     endpointDown = true;
@@ -6000,8 +6001,9 @@ describe("the model a thread's turn runs on", () => {
       });
       await h.harness.behavior.emitThreadEvent("turn.failed", failure());
       expect(h.envSet).toEqual([]);
+      // main's numbers run Opus: an Opus turn would stay there.
       expect(h.retries.map((r) => r.reason)).toEqual([
-        "Waiting for Fable on main" + toOpus("spare"),
+        "Waiting for Fable on main" + toOpus("main"),
       ]);
     },
   );
@@ -6418,7 +6420,8 @@ describe("the model a thread's turn runs on", () => {
     });
     await h.harness.behavior.emitThreadEvent("turn.failed", failure());
     expect(h.envSet).toEqual([]);
-    expect(h.retries.map((r) => r.reason)).toEqual(["Waiting for Fable on main" + toOpus("work")]);
+    // main's numbers run Opus: an Opus turn would stay there.
+    expect(h.retries.map((r) => r.reason)).toEqual(["Waiting for Fable on main" + toOpus("main")]);
   });
 });
 
@@ -9077,13 +9080,14 @@ describe("an Opus turn never retried, released or placed on a Max account that k
       expect(await dispatch(h, "thread-2", OPUS_ID)).toEqual({ action: "proceed" });
       await active(h, "thread-2");
       expect(h.envSet).toEqual([]);
-      // thread-1 (Fable) fails: every account is out of Fable, main frees first.
+      // thread-1 (Fable) fails: every account is out of Fable, main frees
+      // first; an Opus turn would stay on main, as thread-2's did.
       await h.harness.behavior.emitThreadEvent("turn.failed", failure());
       expect(h.retries).toEqual([
         {
           threadId: "thread-1",
           turnRequestId: "creq_1",
-          reason: "Waiting for Fable on main" + toOpus("spare"),
+          reason: "Waiting for Fable on main" + toOpus("main"),
           sendAt: NOW + 4 * HOUR + BUFFER,
         },
       ]);
@@ -9633,16 +9637,13 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       "Waiting for Fable on spare. No Fable on any account: switch this thread to Opus with the model picker; it will go to spare";
     expect(h.retries.map((r) => r.reason)).toEqual([reason]);
     expect(await history(h)).toEqual([["thread-1", "proj-1", "main", "spare", reason]]);
-    // Its retry fails on spare: a wait there, said in the queue (spare is
-    // out by its report now: work), no new row.
+    // Its retry fails on spare: a wait there, said in the queue (spare's
+    // numbers still run Opus: an Opus turn would stay there), no new row.
     await h.harness.behavior.emitThreadEvent(
       "turn.failed",
       failure({ requestId: "creq_1b", attemptNumber: 2 }),
     );
-    expect(h.retries.map((r) => r.reason)).toEqual([
-      reason,
-      "Waiting for Fable on spare. No Fable on any account: switch this thread to Opus with the model picker; it will go to work",
-    ]);
+    expect(h.retries.map((r) => r.reason)).toEqual([reason, reason]);
     expect(await history(h)).toHaveLength(1);
   });
 
@@ -9707,8 +9708,9 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       "turn.failed",
       failure({ requestId: "creq_3c", attemptNumber: 3 }),
     );
+    // Told where an Opus turn would run: work, by its numbers, for B.
     expect((await history(h)).filter((r) => r[2] === r[3])).toEqual([
-      ["thread-1", "proj-1", "work", "work", told],
+      ["thread-1", "proj-1", "work", "work", toOpus("work").slice(2)],
       ["thread-1", "proj-1", "main", "main", told],
     ]);
   });
@@ -9730,9 +9732,11 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     const g = failure({ requestId: "creq_1b", attemptNumber: 2 });
     g.rateLimits!.windows[0]!.resetsAtMs = NOW + 9 * HOUR;
     await h.harness.behavior.emitThreadEvent("turn.failed", g);
+    // An Opus turn from main (its session out) would go to spare, the
+    // first by name of the two seats its numbers run.
     expect(h.retries.map((r) => r.reason)).toEqual([
       first,
-      `Waiting for Fable on main${toOpus("work")}`,
+      `Waiting for Fable on main${toOpus("spare")}`,
     ]);
     expect(await history(h)).toEqual([
       ["thread-1", "proj-1", "spare", "main", "Waiting for Fable on main"],
@@ -10208,6 +10212,77 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       ["thread-3", `Retrying on account spare${toOpus("work")}`],
       ["thread-1", `Waiting for Fable on spare. ${told}`],
     ]);
+  });
+
+  /** A Team seat (no weekly): its session (reset in 5 h) and its Fable window, which resets at `fableReset`. */
+  const seatAt = (session: number, fable: number, fableReset: number) => ({
+    limits: [
+      { kind: "session", percent: session, resets_at: new Date(NOW + 5 * HOUR).toISOString() },
+      {
+        kind: "weekly_scoped",
+        percent: fable,
+        resets_at: new Date(fableReset).toISOString(),
+        scope: { model: { display_name: "Fable" } },
+      },
+    ],
+    five_hour: { locked_reason: null },
+    seven_day: null,
+  });
+
+  // Sol B2-002 with the advice asking the placement itself (fix-B2-r3): the
+  // account told is where the dispatch then sends the Opus turn, both on
+  // the same numbers. A's turn fails, its report blocking A's session until
+  // +30 min; the Opus turn is sent just before that reset.
+  describe("the account told for Opus is the one the Opus turn then runs on (Sol B2-002)", () => {
+    const until = NOW + 30 * 60_000;
+    async function failThenOpus(
+      main: Payload,
+      settings: Record<string, unknown> = {},
+    ) {
+      let clock = NOW;
+      const h = await host(
+        // B: a seat with Opus free, Fable spent until +2 h.
+        { main: () => Response.json(main), spare: () => Response.json(seatAt(1, 100, NOW + 2 * HOUR)) },
+        {
+          // Reads good for two hours: no refresh needed below.
+          settings: { preferredModel: "Fable", refreshMinutes: 60, ...settings },
+          dirs: () => ["spare"],
+          clock: () => clock,
+        },
+      );
+      dispose = () => h.harness.dispose();
+      const f = failure();
+      f.rateLimits!.windows[0]!.resetsAtMs = until;
+      await h.harness.behavior.emitThreadEvent("turn.failed", f);
+      const retries = h.retries.map((r) => [r.reason, r.sendAt]);
+      const shown = await banner(h);
+      const movedBefore = h.envSet.length;
+      // Switched to Opus and sent before the reported reset.
+      clock = until - 1;
+      expect(await dispatch(h, "thread-1", OPUS_ID)).toEqual({ action: "proceed" });
+      return { retries, shown, moves: h.envSet.slice(movedBefore).map((e) => [e.projectId, e.note]) };
+    }
+
+    it("A's numbers, read just before, still show its session free: the wait on A names A, and the Opus turn stays on A (it may fail there once: the provider is ahead of A's numbers)", async () => {
+      const { retries, shown, moves } = await failThenOpus(seatAt(10, 100, NOW + HOUR));
+      expect(retries).toEqual([[`Waiting for Fable on main${toOpus("main")}`, NOW + HOUR + BUFFER]]);
+      expect(shown).toBeNull();
+      expect(moves).toEqual([]);
+    });
+
+    it("declined beyond the maximum wait with A's session spent by its numbers: the banner names B, and the Opus turn moves to B", async () => {
+      const { retries, shown, moves } = await failThenOpus(seatAt(100, 100, NOW + HOUR), { maximumWaitHours: 1 });
+      expect(retries).toEqual([]);
+      expect(shown).toBe(toOpus("spare").slice(2));
+      expect(moves).toEqual([["proj-1", ownNote("spare")]]);
+    });
+
+    it("A, a Max account its numbers say keeps Fable, is never named (the Max accounts are Fable's): the wait on A names B, and the Opus turn moves to B", async () => {
+      const { retries, shown, moves } = await failThenOpus(payload(10, 50, 40));
+      expect(retries).toEqual([[`Waiting for Fable on main${toOpus("spare")}`, until + BUFFER]]);
+      expect(shown).toBeNull();
+      expect(moves).toEqual([["proj-1", ownNote("spare")]]);
+    });
   });
 
   /** An answer whose session and Fable windows reset at `reset`: the wait for it is due within seconds. */
