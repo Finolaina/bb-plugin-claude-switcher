@@ -428,17 +428,74 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * of an account stands). The placement before a turn and the Opus advice
    * both leave them out, so the account the advice names is the one an
    * Opus turn then runs on, whatever the account's own numbers still show
-   * (Sol B2-002). A warning report puts none out: no window is blocked. In
-   * memory, like refusedAt; decideSwitch reads the report itself.
+   * (Sol B2-002). A warning report puts none out: no window is blocked.
+   * Only a report proven the failed turn's own puts its account out (see
+   * turnReports), and a read of the account made after the report, without
+   * a problem and complete, decides from then on: the latest word on the
+   * account stands, its report or its numbers (Sol B2-R2-002). In memory,
+   * like refusedAt; decideSwitch reads the report itself.
    */
-  const reportedOut = new Map<string, number>();
+  const reportedOut = new Map<string, { until: number; at: number }>();
+  /**
+   * The failures whose limit report came while their turn ran (see
+   * reportOfTheTurn): the report of the account the turn ran on. bb sends
+   * a thread's latest report with each failure, whichever turn it came
+   * from (SDK 0.6.15, PluginTurnFailedEvent.rateLimits: «the most recent
+   * rate-limit snapshot this thread's provider reported»).
+   */
+  const turnReports = new WeakSet<PluginTurnFailedEvent>();
+  /**
+   * Whether a limit report came while the failed turn ran, from the account
+   * it ran on: in the thread's log, the first report or request after the
+   * turn's request is a report. The turn ended with its failure, so that
+   * report is the latest bb had for the thread then, the one the failure
+   * carries. A report logged before the turn's request is an earlier
+   * turn's, perhaps of another account (Sol B2-R2-002). The request not
+   * among the thread's latest 20, or the log unreadable: unproven, and no
+   * account is put out.
+   */
+  async function reportOfTheTurn(
+    event: PluginTurnFailedEvent,
+  ): Promise<boolean> {
+    try {
+      const requests = await bb.sdk.threads.events.list({
+        threadId: event.threadId,
+        types: ["client/turn/requested"],
+        order: "desc",
+        limit: "20",
+      });
+      const turn = requests.find(
+        (row) =>
+          row.type === "client/turn/requested" &&
+          row.data.requestId === event.requestId,
+      );
+      if (turn === undefined) return false;
+      const [next] = await bb.sdk.threads.events.list({
+        threadId: event.threadId,
+        types: ["client/turn/requested", "provider/rateLimits/updated"],
+        order: "asc",
+        limit: "1",
+        afterSeq: String(turn.seq),
+      });
+      return next?.type === "provider/rateLimits/updated";
+    } catch (error) {
+      bb.log.warn(
+        `thread ${event.threadId}: whose limit report it is could not be read from bb (${error instanceof Error ? error.message : String(error)}); no account is put out by it`,
+      );
+      return false;
+    }
+  }
   function noteReport(
     name: string,
     event: PluginTurnFailedEvent,
     now: number,
   ): void {
-    if (event.rateLimits?.status !== "blocked") return;
-    reportedOut.set(name, reportedReset(event) ?? now + maxReadAgeMs());
+    if (event.rateLimits?.status !== "blocked" || !turnReports.has(event))
+      return;
+    reportedOut.set(name, {
+      until: reportedReset(event) ?? now + maxReadAgeMs(),
+      at: now,
+    });
   }
   /** `accounts` with those a report put out marked blocked until its reset (see reportedOut). */
   function withReported(
@@ -446,11 +503,26 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     now: number,
   ): ReturnType<typeof measuredAccounts> {
     return accounts.map((a) => {
-      const until = reportedOut.get(a.name);
-      if (until === undefined || now >= until) return a;
+      const out = reportedOut.get(a.name);
+      if (out === undefined || now >= out.until || readSince(a, out.at))
+        return a;
       const { unknown: _, ...known } = a;
       return { ...known, blocked: true };
     });
+  }
+  /** `a` was read after `at`, without a problem and complete: its numbers are newer than a report then. */
+  function readSince(
+    a: { name: string; unknown?: true },
+    at: number,
+  ): boolean {
+    const read = collector.get(a.name);
+    return (
+      read !== undefined &&
+      read.problem === null &&
+      read.observedAt !== null &&
+      read.observedAt > at &&
+      a.unknown !== true
+    );
   }
   /** Why a project moves off `name` before a turn, for the history. */
   function whyOut(name: string, model: string): string {
@@ -1698,6 +1770,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         failure: event,
         currentAccount: recent.to,
         failedAccount: typeof started === "string" ? started : null,
+        ownReport: turnReports.has(event),
         accounts: withReported(measuredAccounts(model), now),
         preferredModel: model,
         reserveModel: current.preferredModel,
@@ -2643,6 +2716,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       failure: event,
       currentAccount: fromName,
       failedAccount: failedOn,
+      ownReport: turnReports.has(event),
       accounts: measuredAccounts(model),
       preferredModel: model,
       reserveModel: current.preferredModel,
@@ -2784,6 +2858,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       bb.log.debug(`thread ${event.threadId}: ignored (${skipped})`);
       return;
     }
+    // Whose report it is, read outside the project's queue: only a blocked
+    // one puts an account out (see noteReport).
+    if (
+      event.rateLimits?.status === "blocked" &&
+      (await reportOfTheTurn(event))
+    )
+      turnReports.add(event);
     try {
       await inProjectQueue(thread.projectId, () =>
         handleFailure(event, thread.projectId, started),
