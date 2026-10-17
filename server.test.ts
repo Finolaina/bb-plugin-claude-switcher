@@ -9835,6 +9835,27 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     ]);
   });
 
+  it("a retry's failure reads bb's log once, for the model its turn was sent with and its retry chain (code-reviewer r4, L3)", async () => {
+    let reads = 0;
+    const h = await host(NO_FABLE, {
+      settings: { preferredModel: "Fable", maximumWaitHours: 1 },
+      threadEvents: chainLog([["creq_1"], ["creq_1b", "creq_1", 2]]),
+      beforeEvents: async () => {
+        reads += 1;
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(reads).toBe(1);
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ requestId: "creq_1b", attemptNumber: 2 }),
+    );
+    expect(reads).toBe(2);
+    // Its chain read right: told once, at the chain's first attempt.
+    expect(await history(h)).toEqual([["thread-1", "proj-1", "main", "main", told]]);
+  });
+
   it("a wait beyond the maximum queues nothing: the history and the log say it, once however often it is judged", async () => {
     const h = await host(NO_FABLE, { settings: { preferredModel: "Fable", maximumWaitHours: 1 } });
     dispose = () => h.harness.dispose();
