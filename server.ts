@@ -468,9 +468,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * the report, still show. A warning report puts none out: no window is
    * blocked.
    * Only a report proven the failed turn's own puts its account out (see
-   * turnReports), and a read of the account made after the report, without
-   * a problem and complete, decides from then on: the latest word on the
-   * account stands, its report or its numbers (Sol B2-R2-002). In memory,
+   * turnReports), and a read of the account made after the report decides
+   * from then on: the latest word on the account stands, its report or its
+   * numbers (Sol B2-R2-002). In memory,
    * like refusedAt; decideSwitch reads the report itself.
    */
   const reportedOut = new Map<string, { until: number; at: number }>();
@@ -544,7 +544,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   function withReport(a: AccountUsage, now: number): AccountUsage {
     const out = reportedOut.get(a.name);
-    if (out === undefined || now >= out.until || readSince(a, out.at))
+    if (out === undefined || now >= out.until || readSince(a.name, out.at))
       return a;
     const { unknown: _, ...known } = a;
     if (a.unknown === true) return { ...known, blocked: true };
@@ -563,19 +563,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       },
     };
   }
-  /** `a` was read after `at`, without a problem and complete: its numbers are newer than a report then. */
-  function readSince(
-    a: { name: string; unknown?: true },
-    at: number,
-  ): boolean {
-    const read = collector.get(a.name);
-    return (
-      read !== undefined &&
-      read.problem === null &&
-      read.observedAt !== null &&
-      read.observedAt > at &&
-      a.unknown !== true
-    );
+  /**
+   * `name` was read after `at`: its numbers are newer than a report then. A
+   * read that failed keeps the time of the last one that worked.
+   */
+  function readSince(name: string, at: number): boolean {
+    const observedAt = collector.get(name)?.observedAt ?? null;
+    return observedAt !== null && observedAt > at;
   }
   /** Why a project moves off `name` before a turn, for the history. */
   function whyOut(name: string, model: string): string {

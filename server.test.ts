@@ -10729,6 +10729,76 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
         ),
       ).toHaveLength(1);
     });
+
+    for (const [what, log, named] of [
+      [
+        "the first report or request after the turn's request is that report, a later turn notwithstanding: it puts its account out",
+        reportedLog("thread-1", [["creq_1"], ["creq_2", undefined, undefined, false]]),
+        "spare",
+      ],
+      [
+        "the turn's request is not among the thread's latest in bb's log: it puts no account out",
+        reportedLog("thread-1", [["creq_9"]]),
+        "main",
+      ],
+      [
+        "a turn was requested after the failed one before any report came: it puts no account out",
+        reportedLog("thread-1", [
+          ["creq_0"],
+          ["creq_1", undefined, undefined, false],
+          ["creq_2", undefined, undefined, false],
+        ]),
+        "main",
+      ],
+    ] as const)
+      it(`whose report it is, from bb's log: ${what}`, async () => {
+        const h = await host(
+          {
+            main: () => Response.json(seatAt(10, 100, NOW + HOUR)),
+            spare: () => Response.json(seatAt(1, 100, NOW + 2 * HOUR)),
+          },
+          {
+            settings: { preferredModel: "Fable", refreshMinutes: 60 },
+            dirs: () => ["spare"],
+            threadEvents: { "thread-1": log },
+          },
+        );
+        dispose = () => h.harness.dispose();
+        const f = failure();
+        f.rateLimits!.windows[0]!.resetsAtMs = NOW + 30 * 60_000;
+        await h.harness.behavior.emitThreadEvent("turn.failed", f);
+        expect(h.retries.map((r) => r.reason)).toEqual([`Waiting for Fable on main${toOpus(named)}`]);
+        // Switched to Opus and sent: it runs where it was told.
+        expect(await dispatch(h, "thread-1", OPUS_ID)).toEqual({ action: "proceed" });
+        expect(h.envSet.map((e) => e.note)).toEqual(named === "main" ? [] : [ownNote(named)]);
+      });
+
+    it("another thread that follows the wait, its failure carrying a report not proven its own, is told on the numbers of the account its turn ran on", async () => {
+      // No Fable anywhere until +4 h; every account runs Opus, main best.
+      const h = await host(
+        {
+          main: () => Response.json(payload(10, 40, 100)),
+          spare: () => Response.json(payload(30, 40, 100)),
+          work: () => Response.json(payload(50, 40, 100)),
+        },
+        // No log: no report is proven any turn's own.
+        { settings: { preferredModel: "Fable", refreshMinutes: 60 } },
+      );
+      dispose = () => h.harness.dispose();
+      // thread-3's turn is sent and starts on main.
+      expect(await dispatch(h, "thread-3", FABLE_ID)).toEqual({ action: "proceed" });
+      await active(h, "thread-3");
+      // thread-1's turn fails on main: the wait is on main, which runs Opus.
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(h.retries.map((r) => r.reason)).toEqual([`Waiting for Fable on main${toOpus("main")}`]);
+      // thread-3's turn fails within the grace of that wait: it follows it,
+      // and main, judged on its numbers, is still where Opus would run.
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ threadId: "thread-3", requestId: "creq_3" }),
+      );
+      expect(h.retries.at(-1)!.reason).toBe(`Retrying on account main${toOpus("main")}`);
+    });
   });
 
   describe("an account a blocked report put out, out of every decision until its reset (Sol B2-R2-001)", () => {
