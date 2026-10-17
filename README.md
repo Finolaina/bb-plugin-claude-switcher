@@ -483,23 +483,16 @@ never counts); and an account can run Opus without spending the
 preferred model's weekly. A wait's retry reason then ends with `. No
 <model> on any account: switch this thread to Opus with the model
 picker; it will go to <name>`, naming the account the project's next
-Opus turn would run on: where the wait leaves the project when it can
-run Opus there, else the best other (the account that just failed only
-when its report merely warned and its numbers leave room). A failure
-whose report blocked its account puts that account out of every turn
-until the reset it reported (for two refreshes when it names none),
-whatever its numbers read before the report still show: the advice
-never names it, the placement before a turn moves the project off it,
-so an Opus turn sent after the advice runs where the advice said, and
-no other choice picks it (after another failure, for a thread left in
-error, to release a wait or to move ahead of the limit); a wait for it
-lands on that reset, or later when its own numbers say so. Only a
-report that came while the failed turn ran puts its account out (bb
-sends a thread's latest report with each failure, and after a move
-that can be the other account's): bb's log has it right after that
-turn's request. When the log cannot tell, no account is put out. A read
-of the account made after the report decides from then on. Another
-thread of the
+Opus turn would run on: the one the placement before a turn would keep
+the project on or move it to, from where the decision leaves it (a wait
+moves it to the account waited for), asked of the same function with
+the same usage reads, so an Opus turn sent after the advice runs where
+the advice said. When that placement would keep the project where Opus
+cannot run, nothing is said. Every account is judged there on its own
+numbers, the one the turn just failed on included: when the provider's
+report is ahead of them, the advice and the placement both name that
+account, and the Opus turn may fail there once, then goes through the
+failure path like any other Opus turn. Another thread of the
 project in the preferred model that follows the wait is told too, while
 the wait is still ahead, as the latest usage reads have it: nothing when
 one of them failed since. The history gets the text once per turn you
@@ -515,8 +508,9 @@ the text in a banner over its composer, besides the history and the
 log; the banner goes when a turn of the thread starts, when a later
 failure of it is judged without the advice, when it is archived and
 when the automatic choice is switched off (a judgment still reading
-then does not put it back), and it reads the advice again when bb's
-connection comes back after a drop. A thread whose preferred
+then puts back neither the banner nor a history row), and it reads the
+advice again when bb's connection comes back after a drop. A thread
+whose preferred
 model is Opus itself is never told. Once the model is back, the queued
 wait runs as before.
 
@@ -753,6 +747,27 @@ Coming from `claude-accounts` 0.1.x? See the upgrade note in
 [CHANGELOG.md](CHANGELOG.md).
 
 </details>
+
+## Known limitations
+
+- **A wait can follow another account's limit report.** bb sends a
+  thread's latest limit report with each failure, whichever turn it came
+  from. After a project moves from account A to account B, a failure on
+  B that comes before B reported anything of its own carries A's report,
+  and the plugin takes it for B's: B is waited for until A's reset (say
+  A's weekly, three days away) although B's own numbers put its reset
+  within the hour, or the wait is declined as beyond `maximumWaitHours`.
+  When bb's provider-retry plugin already queued that wait, it stays: a
+  thread with a retry queued is not judged again, and a queued wait is
+  only released early on the project's own account when the project
+  moved since it was queued. Send the turn again by hand (or pick the
+  account) once B has room. This predates the Opus advice.
+- **The Opus advice trusts the account's numbers.** It names where the
+  placement before a turn would run an Opus turn, judged on the usage
+  reads. When the provider's limit report is ahead of them (the account
+  the turn just failed on still shows room), the advice names that
+  account, the Opus turn runs there and may fail once, then goes through
+  the failure path like any other Opus turn.
 
 ## Troubleshooting
 
