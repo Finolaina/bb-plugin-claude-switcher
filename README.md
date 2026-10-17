@@ -90,6 +90,8 @@ choose. If another account can run it sooner, the turn moves there.
 A thread left in error with nothing queued (every retry spent) is
 judged again on each refresh, from bb's log. A turn that outlived its
 project's move is judged by the account it ran on, not the new one.
+When no account has the preferred model left and one can run Opus, the
+thread is told to switch to Opus in bb's picker, and where it will go.
 
 </td>
 <td valign="top">
@@ -161,7 +163,8 @@ terminal.
 ### 🧾 History of moves
 
 Every move of a project, automatic or by hand, with the time, the two
-accounts and the reason. In Settings and with `bb claude-switcher history`.
+accounts and the reason, and every thread told to switch to Opus. In
+Settings and with `bb claude-switcher history`.
 
 </td>
 </tr>
@@ -297,7 +300,7 @@ starts on a fresh account runs without your settings, hooks and
 | **The new-thread composer**                          | The same control for the project picked there, before the first message, with the best account beside it when it is another one. A pick there before you send, even of the account shown, keeps a new project from moving to the best account after its first turn. With automatic switching on, the rules that move any project still apply: your preferred model when the thread is created, the model a message is sent with, limits and refusals. Send after the pick is saved: a message sent in that moment can start on the old account. On a phone it shows once the composer is open. It hides while another provider is picked. |
 | **Settings → Claude Switcher**                       | The ten settings, a card per account with its windows and their forecast, **Add account** and **Log in**, the account each project runs on (with a picker), **Refresh usage**, and the history of moves.                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | **Settings → Provider usage** (and its sidebar card) | Pick **Claude accounts** in the source menu to see every account's session, weekly and per-model windows.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| **A thread's retry reason**                          | `Switched to account <name>`, `Waiting for <name>` or `Retrying on account <name>`, wherever bb shows why a turn was retried.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| **A thread's retry reason**                          | `Switched to account <name>`, `Waiting for <name>` or `Retrying on account <name>`, wherever bb shows why a turn was retried; a wait for the preferred model with no account left that has it may end with `No <model> on any account: switch this thread to Opus with the model picker; it will go to <name>`.                                                                                                                                                                                                                                                                                                                         |
 | **`bb plugin logs claude-switcher`**                 | Every switch, wait and decline, with its reason.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | **`bb claude-switcher`**                             | The CLI: `list`, `refresh`, `history`, `use`, `release`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
@@ -392,7 +395,8 @@ flowchart TD
 - **Per project, not per thread.** The switch sets `CLAUDE_CONFIG_DIR` on
   the thread's project, so the project's next turns run on the new account
   too. A retry keeps the thread's model: the plugin changes which account
-  runs a thread, never which model it runs.
+  runs a thread, never which model it runs. With no account left that has
+  the preferred model, it tells you to switch the thread to Opus yourself.
 - **One retry per turn.** bb's bundled **provider-retry** plugin also
   queues a retry at the reset the provider reported, and bb keeps a single
   retry per turn. After switching, this plugin replaces the retry
@@ -467,6 +471,24 @@ and `Picked by hand` for your own picks. Every one goes to
 `bb claude-switcher history`; the reason
 stored with a retry this plugin created is shown wherever bb shows a
 retry's reason.
+
+When no account has the preferred model left, bb gives a plugin no way
+to send the retry in another model, so the plugin tells you instead. It
+does when a turn in the preferred model fails and is left waiting, or
+the wait would be beyond `maximumWaitHours`, or no account will free; no
+account can run the model (none unlocked with its session, weekly and
+the model's window all under 100 %; the account the turn just failed on
+counts as out, by its report); and an account can run Opus without
+spending the preferred model's weekly. A wait's retry reason then ends
+with `. No <model> on any account: switch this thread to Opus with the
+model picker; it will go to <name>`, naming the account the project's
+next Opus turn would run on (where the wait leaves the project, when it
+can run Opus there; else the best other, never the account that just
+failed). The history gets the same text once per thread (from the
+project's account to itself when nothing moved), and so does the log. A
+usage read that failed (a 429) or was never made is no proof that the
+model is gone: then nothing is said. Once the model is back, the queued
+wait runs as before.
 
 A queued wait is looked at again after every usage refresh: an account
 that could not be measured when the wait was chosen may have room now.
