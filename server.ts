@@ -1635,25 +1635,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return null;
   }
 
-  /**
-   * bb answers 409 `queued_message_still_waiting` when the thread is busy
-   * again: the row stays queued and runs when it frees. The SDK keeps bb's
-   * error code apart from the message ("HTTP 409: This message cannot be
-   * sent yet: …"), so the code is checked first and the text is a fallback.
-   */
-  function stillWaiting(error: unknown): boolean {
-    if (
-      typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      error.code === "queued_message_still_waiting"
-    )
-      return true;
-    return /cannot be sent yet/.test(
-      error instanceof Error ? error.message : String(error),
-    );
-  }
-
   /** bb's answers for a row that is already on its way: sent meanwhile (404) or being sent right now (409). */
   function alreadyOnItsWay(error: unknown): boolean {
     const status =
@@ -2049,13 +2030,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
 
   /**
    * A basis read back after a restart (see adviceBasis), checked against bb
-   * before the pass asks its banner (see stillWaits); a thread that moved on
-   * while the plugin was away keeps nothing (Sol B2-R5-002). The basis
-   * checked, now the thread's; null when it is dropped, when a judgment of
-   * the thread replaced it meanwhile, or when bb could not be read or does
-   * not say yet (kept, unchecked and not shown: asked again by the next
-   * pass, up to RESTORED_CHECKS refreshes in a row). One judged more than
-   * RESTORED_MAX_AGE_MS before is dropped unread (code-reviewer r6, CR-L2).
+   * before the pass asks its banner (see waitsOnJudgedTurn); a thread that
+   * moved on while the plugin was away keeps nothing (Sol B2-R5-002). The
+   * basis checked, now the thread's; null when it is dropped, when a
+   * judgment of the thread replaced it meanwhile, or when bb could not be
+   * read or does not say yet (kept, unchecked and not shown: asked again by
+   * the next pass, up to RESTORED_CHECKS refreshes in a row). One judged
+   * more than RESTORED_MAX_AGE_MS before is dropped unread (code-reviewer
+   * r6, CR-L2).
    */
   async function restoredHolds(
     threadId: string,
@@ -2068,7 +2050,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
     else {
       try {
-        holds = await stillWaits(threadId, basis);
+        holds = await waitsOnJudgedTurn(threadId, basis);
       } catch (error) {
         bb.log.warn(
           `thread ${threadId}: its banner not asked again (the thread could not be read: ${error instanceof Error ? error.message : String(error)})`,
@@ -2112,7 +2094,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * a rescue reads it from bb's log (Sol B2-R6-001). Null: the log does not
    * say yet how that attempt failed.
    */
-  async function stillWaits(
+  async function waitsOnJudgedTurn(
     threadId: string,
     basis: AdviceBasis,
   ): Promise<boolean | null> {
