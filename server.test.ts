@@ -10694,6 +10694,84 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     });
   });
 
+  // Sol B2-R5-001: a refresh that fails (the accounts directory unreadable)
+  // still asks the banners: once every read is older than two refreshes,
+  // the banner goes, as a judgment then says nothing; its basis stays, and
+  // the banner comes back with the reads. A thread with provider-retry's
+  // retry queued is judged by nothing else meanwhile.
+  describe("a refresh that fails still asks the banners (Sol B2-R5-001)", () => {
+    const refreshed = (h: Awaited<ReturnType<typeof host>>) =>
+      h.harness.behavior.callRpc("accounts_refresh", null);
+    /** provider-retry's retry of thread-1's turn, for main's session reset. */
+    const providerRetry: QueuedRow = {
+      id: "pr1",
+      threadId: "thread-1",
+      payload: { kind: "retry", attempt: 2, reason: "Rate limited", retryOfTurnRequestId: "creq_1" },
+      sendAt: NOW + 2 * HOUR + BUFFER,
+      waitingOn: { kind: "time" },
+      createdAt: NOW,
+      model: FABLE_ID,
+    };
+
+    it("the accounts directory unreadable for several refreshes, with provider-retry's retry queued: the banner goes once the reads are older than two refreshes, and comes back with them", async () => {
+      let clock = NOW;
+      let broken = false;
+      const h = await host(NO_FABLE, {
+        settings: { preferredModel: "Fable", maximumWaitHours: 1 },
+        clock: () => clock,
+        threads: { "thread-1": { status: "error" } },
+        threadEvents: chainLog([["creq_1"]]),
+        queued: [providerRetry],
+        dirs: () => {
+          if (broken) throw new Error("EPERM: the accounts directory");
+          return ["spare", "work"];
+        },
+      });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(await banner(h)).toBe(told);
+      broken = true;
+      // Two refreshes (of five minutes) old: still said.
+      clock = NOW + 10 * 60_000;
+      await expect(refreshed(h)).rejects.toThrow(/EPERM/);
+      expect(await banner(h)).toBe(told);
+      // A millisecond older, on the service's refresh, which fails too: gone.
+      clock = NOW + 10 * 60_000 + 1;
+      const run = h.harness.behavior.runService("usage-refresh");
+      await vi.waitFor(async () => {
+        expect(await banner(h)).toBeNull();
+      });
+      run.controller.abort();
+      await run.done;
+      expect(
+        h.harness.logEntries.some((e) => e.message.startsWith("usage refresh failed: EPERM")),
+      ).toBe(true);
+      expect(h.retries).toEqual([]);
+      expect(h.queued.map((r) => r.id)).toEqual(["pr1"]);
+      // The directory readable again: every account read, the banner back.
+      broken = false;
+      await refreshed(h);
+      expect(await banner(h)).toBe(told);
+    });
+
+    it("a read that says nothing takes the banner away also when the project's account cannot be read", async () => {
+      let spare = () => Response.json(payload(1, 1, 100));
+      const failEnvRead: string[] = [];
+      const h = await host(
+        { ...NO_FABLE, spare: () => spare() },
+        { settings: { preferredModel: "Fable", maximumWaitHours: 1 }, failEnvRead },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(await banner(h)).toBe(told);
+      spare = () => new Response("", { status: 429 });
+      failEnvRead.push("proj-1");
+      // The refresh's own list of projects fails too.
+      await expect(refreshed(h)).rejects.toThrow(/could not read proj-1/);
+      expect(await banner(h)).toBeNull();
+    });
+  });
+
   it("a turn of the thread that starts while its failure is judged takes the banner away, and the judgment does not put it back when its reads end (Sol B2-R2-003)", async () => {
     let meanwhile: (() => Promise<unknown>) | null = null;
     const h = await host(NO_FABLE, {

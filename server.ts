@@ -930,11 +930,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
 
   async function refreshAll(): Promise<void> {
-    const found = await discover();
-    await collector.collectAll(found);
-    await recordSamples();
-    bb.realtime.publish(CHANGED, { at: deps.now() });
-    askBannersAgain();
+    try {
+      const found = await discover();
+      await collector.collectAll(found);
+      await recordSamples();
+      bb.realtime.publish(CHANGED, { at: deps.now() });
+    } finally {
+      // Also when the refresh fails: the reads it left grow old, and a
+      // banner on reads older than two refreshes must go (Sol B2-R5-001).
+      askBannersAgain();
+    }
   }
 
   /** A refresh asked for (Settings, the CLI): it answers once the banners are asked again on its reads too. */
@@ -1804,15 +1809,22 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * back, no account for Opus, a read that failed) or back. Only the
    * banner: nothing sent, retried, moved, queued or written. One read of
    * each project's account for all its threads, none for a basis whose
-   * model is no longer the preferred one (Sol B2-R5-003). A judgment of the
+   * model is no longer the preferred one (Sol B2-R5-003), nor while a read
+   * of an account says nothing (failed, missing or older than two
+   * refreshes: see opusInstead): every banner goes then, and its basis
+   * stays for the reads to come back (Sol B2-R5-001). A judgment of the
    * thread, a turn of it, its archiving or the automatic choice switched
    * off while the project is read leave a basis other than the one read:
    * what was read says nothing.
    */
   async function reviseAdvice(): Promise<void> {
     const byProject = new Map<string, [string, AdviceBasis][]>();
+    const unread = unreadAccounts().length > 0;
     for (const [threadId, basis] of adviceBasis) {
-      if (!mayAdviseOpus(basis.decision, basis.model, current.preferredModel)) {
+      if (
+        unread ||
+        !mayAdviseOpus(basis.decision, basis.model, current.preferredModel)
+      ) {
         showAdvice(threadId, null);
         continue;
       }
