@@ -6407,22 +6407,24 @@ describe("the model a thread's turn runs on", () => {
     ]);
   });
 
-  it("forgets a thread's model when the thread is archived: the preferred model decides its next failure", async () => {
-    const h = await host(
-      { ...OPUS_ELSEWHERE, main: seat(50, 30, 0) },
-      FABLE,
-    );
-    dispose = () => h.harness.dispose();
-    await h.harness.behavior.callRpc("accounts_refresh", null);
-    await dispatch(h, "claude-opus-5-5");
-    await h.harness.behavior.emitThreadEvent("thread.archived", {
-      thread: thread({ id: "thread-1", projectId: "proj-1" }),
+  // Deleted: as archived (code-reviewer r5, CR-2).
+  for (const [gone, event] of [["archived", "thread.archived"], ["deleted", "thread.deleted"]] as const)
+    it(`forgets a thread's model when the thread is ${gone}: the preferred model decides its next failure`, async () => {
+      const h = await host(
+        { ...OPUS_ELSEWHERE, main: seat(50, 30, 0) },
+        FABLE,
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      await dispatch(h, "claude-opus-5-5");
+      await h.harness.behavior.emitThreadEvent(event, {
+        thread: thread({ id: "thread-1", projectId: "proj-1" }),
+      });
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(h.envSet).toEqual([]);
+      // main's numbers run Opus: an Opus turn would stay there.
+      expect(h.retries.map((r) => r.reason)).toEqual(["Waiting for Fable on main" + toOpus("main")]);
     });
-    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
-    expect(h.envSet).toEqual([]);
-    // main's numbers run Opus: an Opus turn would stay there.
-    expect(h.retries.map((r) => r.reason)).toEqual(["Waiting for Fable on main" + toOpus("main")]);
-  });
 });
 
 describe("a limit the provider enforced before bb reported it blocked", () => {
@@ -8448,25 +8450,27 @@ describe("a wait another account can end sooner", () => {
       ).toBe(true);
     });
 
-    it("forgets a cancellation by hand, in storage too, when its thread is archived", async () => {
-      // Codex r8 (IR8-004): the stored list only grew; forgotten in memory,
-      // the mark came back at the next restart.
-      const h = await host(MAIN_OUT, stuck(failedLog("thread-1", "creq_1", FABLE_ID)));
-      dispose = () => h.harness.dispose();
-      await h.harness.behavior.emitThreadEvent("message.cancelled", {
-        entry: {
-          id: "pr-1",
-          threadId: "thread-1",
-          sendAt: NOW + HOUR,
-          payload: { kind: "retry", attempt: 2, reason: "provider-retry", retryOfTurnRequestId: "creq_1" },
-        } as never,
+    // Deleted: as archived (code-reviewer r5, CR-2).
+    for (const [gone, event] of [["archived", "thread.archived"], ["deleted", "thread.deleted"]] as const)
+      it(`forgets a cancellation by hand, in storage too, when its thread is ${gone}`, async () => {
+        // Codex r8 (IR8-004): the stored list only grew; forgotten in memory,
+        // the mark came back at the next restart.
+        const h = await host(MAIN_OUT, stuck(failedLog("thread-1", "creq_1", FABLE_ID)));
+        dispose = () => h.harness.dispose();
+        await h.harness.behavior.emitThreadEvent("message.cancelled", {
+          entry: {
+            id: "pr-1",
+            threadId: "thread-1",
+            sendAt: NOW + HOUR,
+            payload: { kind: "retry", attempt: 2, reason: "provider-retry", retryOfTurnRequestId: "creq_1" },
+          } as never,
+        });
+        expect(await h.bb.storage.kv.get("cancelled-retries")).toEqual({ "thread-1": "creq_1" });
+        await h.harness.behavior.emitThreadEvent(event, {
+          thread: thread({ id: "thread-1", projectId: "proj-1", status: "error" }),
+        });
+        expect(await h.bb.storage.kv.get("cancelled-retries")).toEqual({});
       });
-      expect(await h.bb.storage.kv.get("cancelled-retries")).toEqual({ "thread-1": "creq_1" });
-      await h.harness.behavior.emitThreadEvent("thread.archived", {
-        thread: thread({ id: "thread-1", projectId: "proj-1", status: "error" }),
-      });
-      expect(await h.bb.storage.kv.get("cancelled-retries")).toEqual({});
-    });
 
     it("does not take its own deletion of a wait for a cancellation by hand", async () => {
       // Codex r7 (IR7-004): releasing a wait deletes its row, and bb fires
@@ -10900,6 +10904,23 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
         ),
       ).toBe(true);
     });
+  });
+
+  it("a declined thread deleted: its banner goes, and the refreshes neither read its project for it nor keep it (code-reviewer r5, CR-2)", async () => {
+    const h = await host(NO_FABLE, { settings: { preferredModel: "Fable", maximumWaitHours: 1 } });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(await banner(h)).toBe(told);
+    await h.harness.behavior.emitThreadEvent("thread.deleted", {
+      thread: thread({ id: "thread-1", projectId: "proj-1" }),
+    });
+    expect(await banner(h)).toBeNull();
+    const before = h.envReads.length;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // The state the refresh answers with, nothing for the thread.
+    expect(h.envReads.slice(before)).toEqual(["proj-1", "proj-2", "personal"]);
+    expect(await banner(h)).toBeNull();
+    expect(await h.bb.storage.kv.get("advice-bases")).toEqual({});
   });
 
   it("a turn of the thread that starts while its failure is judged takes the banner away, and the judgment does not put it back when its reads end (Sol B2-R2-003)", async () => {
