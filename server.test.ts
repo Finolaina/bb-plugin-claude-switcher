@@ -9802,6 +9802,43 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     expect(await banner(h)).toBeNull();
   });
 
+  it("a declined thread's later failure retried as a leftover of a move takes the banner away, and so does archiving it (Sol B2-004)", async () => {
+    let workFable = 100;
+    const h = await host(
+      { ...NO_FABLE, work: () => Response.json(payload(1, 1, workFable)) },
+      { settings: { preferredModel: "Fable", maximumWaitHours: 1 } },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ threadId: "thread-4", requestId: "creq_4" }),
+    );
+    expect(await banner(h)).toBe(told);
+    expect(await banner(h, "thread-4")).toBe(told);
+    // thread-3 fails while work runs Fable: the project moves there, and
+    // thread-1, failing within the grace, is retried on work.
+    workFable = 30;
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ threadId: "thread-3", requestId: "creq_3" }),
+    );
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ requestId: "creq_1b", attemptNumber: 2 }),
+    );
+    expect(h.retries.map((r) => [r.threadId, r.reason])).toEqual([
+      ["thread-3", "Switched to account work (Fable)"],
+      ["thread-1", "Retrying on account work"],
+    ]);
+    expect(await banner(h)).toBeNull();
+    // thread-4 is archived.
+    await h.harness.behavior.emitThreadEvent("thread.archived", {
+      thread: thread({ id: "thread-4", projectId: "proj-1" }),
+    });
+    expect(await banner(h, "thread-4")).toBeNull();
+  });
+
   it("switching the automatic choice off takes the banner away: no turn is placed then, so the account it names no longer holds (Sol B2-004)", async () => {
     const h = await host(NO_FABLE, { settings: { preferredModel: "Fable", maximumWaitHours: 1 } });
     dispose = () => h.harness.dispose();
@@ -10126,6 +10163,17 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     clock = NOW + 3 * 60_000;
     await h.harness.behavior.emitThreadEvent("turn.failed", failure());
     expect(h.retries.map((r) => r.reason).at(-1)).toBe(`Waiting for Fable on main${toOpus("work")}`);
+    // A leftover within the grace of that wait, its start unknown: main and
+    // spare, both out by their reports, are not named either.
+    clock += 10_000;
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ threadId: "thread-4", requestId: "creq_4" }),
+    );
+    expect(h.retries.map((r) => [r.threadId, r.reason]).at(-1)).toEqual([
+      "thread-4",
+      `Retrying on account main${toOpus("work")}`,
+    ]);
     expect(await dispatch(h, "thread-1", OPUS_ID)).toEqual({ action: "proceed" });
     expect(h.envSet.map((e) => e.note).at(-1)).toBe(ownNote("work"));
   });
