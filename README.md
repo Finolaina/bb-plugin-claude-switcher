@@ -488,8 +488,8 @@ the project on or move it to, from where the decision leaves it (a wait
 moves it to the account waited for), asked of the same function with
 the same usage reads, so a new message sent in Opus on those reads runs
 where the advice said (see Known limitations for what it does not
-cover). When that placement would keep the project where Opus
-cannot run, nothing is said. Every account is judged there on its own
+cover). When that placement would keep the project where Opus cannot
+run, nothing is said. Every account is judged there on its own
 numbers, the one the turn just failed on included: when the provider's
 report is ahead of them, the advice and the placement both name that
 account, and the Opus turn may fail there once, then goes through the
@@ -512,9 +512,16 @@ when the automatic choice is switched off (a judgment still reading or
 moving the project then puts back neither the banner nor the text in a
 history row: a move it still makes is recorded with its own reason,
 without the text, and the turn is told by a later judgment), and it
-reads the advice again when bb's connection comes back after a drop. A
-thread whose preferred model is Opus itself is never told. Once the
-model is back, the queued wait runs as before.
+reads the advice again when bb's connection comes back after a drop.
+After every usage refresh the banner is asked again on the new reads,
+as a later judgment would ask it, also while bb's provider-retry keeps
+a retry of the turn queued (a thread with a retry queued is not judged
+again until it runs): it names the account an Opus turn would go to
+now, goes when the preferred model is back, no account can run Opus, a
+read failed or the project's account was set outside the plugin, and
+comes back with the reads; nothing is sent, retried, moved or written
+for it. A thread whose preferred model is Opus itself is never told.
+Once the model is back, the queued wait runs as before.
 
 A queued wait is looked at again after every usage refresh: an account
 that could not be measured when the wait was chosen may have room now.
@@ -775,10 +782,10 @@ Coming from `claude-accounts` 0.1.x? See the upgrade note in
   through bb's dispatch checkpoint, where the placement before a turn
   runs, on the same usage reads. **Send now** on a queued retry's card
   skips that checkpoint (bb bypasses it for an explicit Send now, by
-  design): the retry runs
-  where the project is, unplaced. The queued retry's card and the
-  history's row keep the name as it was when they were written; the
-  banner over the composer is asked again after every usage refresh.
+  design): the retry runs where the project is, unplaced. The queued
+  retry's card and the history's row keep the name as it was when they
+  were written; the banner over the composer is asked again after every
+  usage refresh.
 
 ## Troubleshooting
 
