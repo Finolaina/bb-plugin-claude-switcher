@@ -1668,7 +1668,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   async function retryTurn(
     event: PluginTurnFailedEvent,
-    reason: string,
+    /**
+     * Asked right before each retry is queued, after the waits on the queue
+     * (its look, the removal of a row): what it says may change meanwhile
+     * (Sol B2-R6-004).
+     */
+    reason: string | (() => string),
     sendAt?: number,
     stuck = false,
   ): Promise<void> {
@@ -1689,7 +1694,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         await bb.sdk.threads.retry({
           threadId,
           turnRequestId: event.requestId,
-          reason,
+          reason: typeof reason === "string" ? reason : reason(),
           ...(sendAt === undefined ? {} : { sendAt }),
         });
         return;
@@ -2714,12 +2719,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // Its queued retry says it now, or nothing is to be said.
       judgedAdvice(event.threadId, null, judgedIn, null);
       // The advice too only while the judgment's generation holds, as its
-      // row (code-reviewer r5, nit 1).
+      // row (code-reviewer r5, nit 1), asked as the retry is queued, after
+      // the waits on the queue (Sol B2-R6-004).
       await retryTurn(
         event,
-        judgedIn === generation(event.threadId)
-          ? reason
-          : `Retrying on account ${recent.to}`,
+        () =>
+          judgedIn === generation(event.threadId)
+            ? reason
+            : `Retrying on account ${recent.to}`,
         recent.sendAt,
       );
       return;
@@ -2760,9 +2767,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         judgedAdvice(event.threadId, null, judgedIn, null);
         await retryTurn(
           event,
-          judgedIn === generation(event.threadId)
-            ? reason
-            : `Retrying on account ${currentName}`,
+          () =>
+            judgedIn === generation(event.threadId)
+              ? reason
+              : `Retrying on account ${currentName}`,
           sendAt,
         );
         return;
@@ -3072,10 +3080,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         `thread ${event.threadId}: ${how}${reason} until ${new Date(decision.sendAt).toISOString()}`,
       );
       // The advice only while the judgment's generation holds, as its rows
-      // (code-reviewer r5, nit 1): otherwise the wait alone.
+      // (code-reviewer r5, nit 1): otherwise the wait alone. Asked as the
+      // retry is queued, after the waits on the queue (Sol B2-R6-004).
+      const waited = decision.reason;
       await retryTurn(
         event,
-        judgedIn === generation(event.threadId) ? reason : decision.reason,
+        () => (judgedIn === generation(event.threadId) ? reason : waited),
         decision.sendAt,
         stuck,
       );
