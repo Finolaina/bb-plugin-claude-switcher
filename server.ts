@@ -1972,59 +1972,70 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       threads.push([threadId, basis]);
       byProject.set(basis.projectId, threads);
     }
-    for (const [projectId, threads] of byProject) {
-      // A move of the project under way: where it sits is being written.
-      // Not read now: the pass runs again once the move is over, and the
-      // banners stay as they were until then (Sol B2-R6-002).
-      const move = movesOf(projectId);
-      if (move.inFlight > 0) {
-        passAfterMove.add(projectId);
-        continue;
-      }
-      const epoch = move.epoch;
-      let at: ProjectAccount;
-      try {
-        at = await projectAccount(projectId);
-      } catch (error) {
-        for (const [threadId, basis] of threads) {
-          bb.log.warn(
-            `thread ${threadId}: its banner not asked again (the project's account could not be read: ${error instanceof Error ? error.message : String(error)})`,
-          );
-          // Where an Opus turn would go is not known: the banner goes
-          // (Sol B2-R6-003).
-          if (adviceBasis.get(threadId) === basis) showAdvice(threadId, null);
-        }
-        continue;
-      }
-      // A move crossed the read: what it says is where the project was, or
-      // is going. Dropped, and the pass runs again (Sol B2-R6-002).
-      if (move.epoch !== epoch) {
-        passAgain = true;
-        continue;
-      }
-      const now = deps.now();
+    for (const [projectId, threads] of byProject)
+      await askProject(projectId, threads);
+  }
+
+  /**
+   * The banners of a project's threads that the pass asks again (see
+   * reviseAdvice), on one read of where the project sits (code-reviewer
+   * r7, N3).
+   */
+  async function askProject(
+    projectId: string,
+    threads: [string, AdviceBasis][],
+  ): Promise<void> {
+    // A move of the project under way: where it sits is being written.
+    // Not read now: the pass runs again once the move is over, and the
+    // banners stay as they were until then (Sol B2-R6-002).
+    const move = movesOf(projectId);
+    if (move.inFlight > 0) {
+      passAfterMove.add(projectId);
+      return;
+    }
+    const epoch = move.epoch;
+    let at: ProjectAccount;
+    try {
+      at = await projectAccount(projectId);
+    } catch (error) {
       for (const [threadId, basis] of threads) {
-        if (adviceBasis.get(threadId) !== basis) continue;
-        // Set outside this plugin: no placement there (see placeTurn).
-        if (at.external) {
-          showAdvice(threadId, null);
-          continue;
-        }
-        const on = opusInstead(
-          basis.decision,
-          {
-            currentAccount: at.account ?? current.defaultAccountName,
-            accounts: measuredAccounts(basis.model),
-            preferredModel: basis.model,
-            reserveModel: current.preferredModel,
-            now,
-            stuck: true,
-          },
-          unreadAccounts(),
-          placementOf(projectId, FALLBACK_MODEL, now),
+        bb.log.warn(
+          `thread ${threadId}: its banner not asked again (the project's account could not be read: ${error instanceof Error ? error.message : String(error)})`,
         );
-        showAdvice(threadId, on === null ? null : opusInsteadText(basis.model, on));
+        // Where an Opus turn would go is not known: the banner goes
+        // (Sol B2-R6-003).
+        if (adviceBasis.get(threadId) === basis) showAdvice(threadId, null);
       }
+      return;
+    }
+    // A move crossed the read: what it says is where the project was, or
+    // is going. Dropped, and the pass runs again (Sol B2-R6-002).
+    if (move.epoch !== epoch) {
+      passAgain = true;
+      return;
+    }
+    const now = deps.now();
+    for (const [threadId, basis] of threads) {
+      if (adviceBasis.get(threadId) !== basis) continue;
+      // Set outside this plugin: no placement there (see placeTurn).
+      if (at.external) {
+        showAdvice(threadId, null);
+        continue;
+      }
+      const on = opusInstead(
+        basis.decision,
+        {
+          currentAccount: at.account ?? current.defaultAccountName,
+          accounts: measuredAccounts(basis.model),
+          preferredModel: basis.model,
+          reserveModel: current.preferredModel,
+          now,
+          stuck: true,
+        },
+        unreadAccounts(),
+        placementOf(projectId, FALLBACK_MODEL, now),
+      );
+      showAdvice(threadId, on === null ? null : opusInsteadText(basis.model, on));
     }
   }
 
