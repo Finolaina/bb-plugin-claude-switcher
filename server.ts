@@ -65,7 +65,11 @@ import {
   RESET_JITTER_MS,
   settle,
 } from "./src/switch.js";
-import { reserving, spendsReservedWeekly } from "./src/policy.js";
+import {
+  reserving,
+  spendsReservedWeekly,
+  type AccountUsage,
+} from "./src/policy.js";
 import {
   usageFetchMethod,
   usageListMethod,
@@ -425,10 +429,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /**
    * Accounts a failure's blocked report put out of every turn, until the
    * reset it reported (two refreshes when it named none; the latest report
-   * of an account stands). The placement before a turn and the Opus advice
-   * both leave them out, so the account the advice names is the one an
-   * Opus turn then runs on, whatever the account's own numbers still show
-   * (Sol B2-002). A warning report puts none out: no window is blocked.
+   * of an account stands). Every decision leaves them out, through
+   * measuredAccounts: the placement before a turn and the Opus advice (so
+   * the account the advice names is the one an Opus turn then runs on, Sol
+   * B2-002), and the choice after another failure, a thread left in error,
+   * the release of a wait, a move ahead of the limit and the grace of a
+   * pick (Sol B2-R2-001), whatever the account's own numbers, read before
+   * the report, still show. A warning report puts none out: no window is
+   * blocked.
    * Only a report proven the failed turn's own puts its account out (see
    * turnReports), and a read of the account made after the report, without
    * a problem and complete, decides from then on: the latest word on the
@@ -497,18 +505,33 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       at: now,
     });
   }
-  /** `accounts` with those a report put out marked blocked until its reset (see reportedOut). */
-  function withReported(
-    accounts: ReturnType<typeof measuredAccounts>,
-    now: number,
-  ): ReturnType<typeof measuredAccounts> {
-    return accounts.map((a) => {
-      const out = reportedOut.get(a.name);
-      if (out === undefined || now >= out.until || readSince(a, out.at))
-        return a;
-      const { unknown: _, ...known } = a;
-      return { ...known, blocked: true };
-    });
+  /**
+   * `a` as a report that put it out has it (see reportedOut): out until the
+   * reset it reported, not for good, so a wait for it lands there (Sol
+   * B2-R2-001): its session at 100 % until then, or later when its own
+   * numbers say so. An account whose answer lacked a window has no reset
+   * known: out, and never waited for.
+   */
+  function withReport(a: AccountUsage, now: number): AccountUsage {
+    const out = reportedOut.get(a.name);
+    if (out === undefined || now >= out.until || readSince(a, out.at))
+      return a;
+    const { unknown: _, ...known } = a;
+    if (a.unknown === true) return { ...known, blocked: true };
+    const session = a.session;
+    return {
+      ...known,
+      session: {
+        ...session,
+        usedPercent: 100,
+        resetsAt:
+          session.usedPercent < 100
+            ? out.until
+            : session.resetsAt === null
+              ? null
+              : Math.max(session.resetsAt, out.until),
+      },
+    };
   }
   /** `a` was read after `at`, without a problem and complete: its numbers are newer than a report then. */
   function readSince(
@@ -1170,11 +1193,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return 2 * Math.max(1, current.refreshMinutes) * 60_000;
   }
 
-  /** Measurements recent enough to decide on (see maxReadAgeMs). */
-  function measuredAccounts(model = current.preferredModel) {
-    // A refusing account is out, whatever its numbers say.
+  /**
+   * Measurements recent enough to decide on (see maxReadAgeMs), as every
+   * decision takes them.
+   */
+  function measuredAccounts(model = current.preferredModel): AccountUsage[] {
+    const now = deps.now();
+    // A refusing account is out, whatever its numbers say; one a report put
+    // out, until its reset (see reportedOut).
     return collector.usable(maxReadAgeMs(), model).map((a) => {
-      if (!refusing(a.name)) return a;
+      if (!refusing(a.name)) return withReport(a, now);
       const { unknown: _, ...known } = a;
       return { ...known, blocked: true };
     });
@@ -1771,7 +1799,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         currentAccount: recent.to,
         failedAccount: typeof started === "string" ? started : null,
         ownReport: turnReports.has(event),
-        accounts: withReported(measuredAccounts(model), now),
+        accounts: measuredAccounts(model),
         preferredModel: model,
         reserveModel: current.preferredModel,
         maximumWaitMs: null,
@@ -2346,7 +2374,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const now = deps.now();
     // An account a report put out runs nothing until its reset (see
     // reportedOut), as the Opus advice has it.
-    const measured = withReported(measuredAccounts(model), now);
+    const measured = measuredAccounts(model);
     const excursion = excursions.get(projectId);
     const decision = decidePlacement({
       currentAccount: fromName,
@@ -2735,10 +2763,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // No Fable on any account, and an account with Opus: the thread is told
     // to switch (D3), whatever the decision's reason, naming the account the
     // placement before an Opus turn would keep (accounts a report put out
-    // left out, as there).
+    // left out, as there: this one's too, read again).
     const opusOn = opusInstead(
       decision,
-      { ...input, accounts: withReported(input.accounts, now) },
+      { ...input, accounts: measuredAccounts(model) },
       unreadAccounts(),
     );
     const advice = opusOn === null ? null : opusInsteadText(model, opusOn);
