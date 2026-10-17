@@ -507,20 +507,26 @@ model is gone: then nothing is said. When nothing is queued for the
 turn (beyond the maximum, or no account will free), the thread shows
 the text in a banner over its composer, besides the history and the
 log; the banner goes when a turn of the thread starts, when a later
-failure of it is judged without the advice, when it is archived and
-when the automatic choice is switched off (a judgment still reading or
-moving the project then puts back neither the banner nor the text in a
-history row: a move it still makes is recorded with its own reason,
-without the text, and the turn is told by a later judgment), and it
-reads the advice again when bb's connection comes back after a drop.
-After every usage refresh the banner is asked again on the new reads,
-as a later judgment would ask it, also while bb's provider-retry keeps
-a retry of the turn queued (a thread with a retry queued is not judged
-again until it runs): it names the account an Opus turn would go to
-now, goes when the preferred model is back, no account can run Opus, a
-read failed or the project's account was set outside the plugin, and
-comes back with the reads; nothing is sent, retried, moved or written
-for it. A thread whose preferred model is Opus itself is never told.
+failure of it is judged without the advice, when it is archived or
+deleted and when the automatic choice is switched off (a judgment still
+reading or moving the project then puts back neither the banner nor the
+text in a history row or a queued retry: a move it still makes is
+recorded with its own reason, as is its queued retry, and the turn is
+told by a later judgment), and it reads the advice again
+when bb's connection comes back after a drop. After every usage
+refresh, one that failed included, the banner is asked again on the
+latest reads, as a later judgment would ask it, also while bb's
+provider-retry keeps a retry of the turn queued (a thread with a retry
+queued is not judged again until it runs): it names the account an
+Opus turn would go to now, goes when the preferred model is back, no
+account can run Opus, a read failed or is older than two refreshes, or
+the project's account was set outside the plugin, and comes back with
+the reads. Nothing is sent, retried, moved or written for it, and
+nothing that decides waits for it: it reads each project's account
+once, after the refresh. What it is asked on is kept in the plugin's
+storage, so after a restart the usage refresh at start asks it again,
+if bb says the thread still waits on the turn it was judged on. A
+thread whose preferred model is Opus itself is never told.
 Once the model is back, the queued wait runs as before.
 
 A queued wait is looked at again after every usage refresh: an account
@@ -781,6 +787,12 @@ Coming from `claude-accounts` 0.1.x? See the upgrade note in
   the preferred model again, it goes at the next usage refresh, while
   bb's provider-retry still waits for that account's reset, and comes
   back with the turn's next failure.
+- **A banner after a restart comes from the plugin's storage.** What a
+  declined thread's banner is asked on is written there, and the usage
+  refresh at start asks it again if bb says the thread still waits on
+  the turn it was judged on. When the store rejected that write (the log
+  says so), the banner is back only with the thread's next judgment, and
+  a thread with a retry queued is not judged again until it runs.
 - **The account named for Opus is where a new Opus message would go,
   on the reads of that moment.** It holds for a message sent in Opus
   through bb's dispatch checkpoint, where the placement before a turn
