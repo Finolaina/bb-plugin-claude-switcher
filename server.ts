@@ -2064,7 +2064,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         holds = await waitsOnJudgedTurn(threadId, basis);
       } catch (error) {
         bb.log.warn(
-          `thread ${threadId}: its banner not asked again (the thread could not be read: ${error instanceof Error ? error.message : String(error)})`,
+          `thread ${threadId}: its banner not asked again (the thread or its log could not be read: ${error instanceof Error ? error.message : String(error)})`,
         );
         holds = null;
       }
@@ -2078,7 +2078,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           adviceBasis.set(threadId, { ...basis, misses, missedIn: refreshes });
           return null;
         }
-        bb.log.debug(
+        bb.log.info(
           `thread ${threadId}: what its banner was asked on is dropped (${RESTORED_CHECKS} checks in a row could not tell)`,
         );
         holds = false;
