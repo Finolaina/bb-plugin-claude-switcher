@@ -11028,5 +11028,75 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
         reason: "Waiting for Fable on spare",
       });
     });
+
+    for (const [own, sessionReset, expected] of [
+      ["a later reset of its own", NOW + 2 * HOUR, { reason: "Waiting for Fable on spare", sendAt: NOW + 2 * HOUR + BUFFER }],
+      ["no reset known", null, { reason: "Waiting for Fable on main", sendAt: NOW + 3 * HOUR + BUFFER }],
+    ] as const)
+      it(`its own numbers keep ${own} when they had its session spent: a report never brings an account back sooner`, async () => {
+        let clock = NOW;
+        let spareDown = false;
+        // spare's session at 100 % when read, before its report.
+        const spareRead = payload(100, 1, 30);
+        (spareRead.limits[0] as { resets_at: string | null }).resets_at =
+          sessionReset === null ? null : new Date(sessionReset).toISOString();
+        const h = await host(
+          {
+            main: () => Response.json(payload(10, 40, 30)),
+            spare: () => (spareDown ? new Response("", { status: 429 }) : Response.json(spareRead)),
+            work: () => Response.json(payload(5, 20, 100)),
+          },
+          {
+            settings: { preferredModel: "Fable", refreshMinutes: 60 },
+            clock: () => clock,
+            threadEvents: {
+              "thread-3": reportedLog("thread-3", [["creq_3"]]),
+              "thread-1": reportedLog("thread-1", [["creq_1"]]),
+            },
+          },
+        );
+        dispose = () => h.harness.dispose();
+        // Its report puts spare out until +30 min only.
+        await putSpareOut(h, (at) => (clock = at), out);
+        spareDown = true;
+        // thread-1's turn fails on main, out until +3 h.
+        clock = NOW + 3 * 60_000;
+        const f = failure();
+        f.rateLimits!.windows[0]!.resetsAtMs = NOW + 3 * HOUR;
+        await h.harness.behavior.emitThreadEvent("turn.failed", f);
+        expect(h.retries.at(-1)).toMatchObject(expected);
+      });
+
+    for (const [when, at, reason] of [
+      ["a millisecond before it, still out", out - 1, "Waiting for Fable on spare"],
+      ["at it, back", out, "Switched to account spare (Fable)"],
+    ] as const)
+      it(`its reported reset ends it though no read came since: ${when}`, async () => {
+        let clock = NOW;
+        let spareDown = false;
+        const h = await host(
+          {
+            main: () => Response.json(payload(10, 40, 30)),
+            spare: () =>
+              spareDown ? new Response("", { status: 429 }) : Response.json(payload(1, 1, 30)),
+            work: () => Response.json(payload(5, 20, 100)),
+          },
+          {
+            settings: { preferredModel: "Fable", refreshMinutes: 60 },
+            clock: () => clock,
+            threadEvents: {
+              "thread-3": reportedLog("thread-3", [["creq_3"]]),
+              "thread-1": reportedLog("thread-1", [["creq_1"]]),
+            },
+          },
+        );
+        dispose = () => h.harness.dispose();
+        await putSpareOut(h, (t) => (clock = t), out);
+        // spare's reads fail from here: no word on it since its report.
+        spareDown = true;
+        clock = at;
+        await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+        expect(h.retries.at(-1)!.reason).toBe(reason);
+      });
   });
 });

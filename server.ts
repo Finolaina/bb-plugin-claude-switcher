@@ -2792,12 +2792,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // No Fable on any account, and an account with Opus: the thread is told
     // to switch (D3), whatever the decision's reason, naming the account the
     // placement before an Opus turn would keep (accounts a report put out
-    // left out, as there: this one's too, read again).
-    const opusOn = opusInstead(
-      decision,
-      { ...input, accounts: measuredAccounts(model) },
-      unreadAccounts(),
-    );
+    // left out, as there; this failure's own, by opusInstead).
+    const opusOn = opusInstead(decision, input, unreadAccounts());
     const advice = opusOn === null ? null : opusInsteadText(model, opusOn);
     const carried = advice === null ? undefined : { model };
     const how = stuck ? "left in error: " : "";
