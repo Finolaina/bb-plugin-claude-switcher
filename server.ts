@@ -1276,9 +1276,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * 429, the endpoint down), or it is older than two refreshes (a rescue
    * still runs after a refresh that failed: code-reviewer 0.2.20, CR-05).
    * An account without a login is not one of them: it runs nothing until
-   * logged in again.
+   * logged in again. With no account found (the accounts directory changed,
+   * and no read of it since worked), every reading still in memory is of an
+   * account not found, and none says anything (code-reviewer r6, CR-L1).
    */
   function unreadAccounts(): string[] {
+    if (accounts.length === 0) return collector.usable().map((a) => a.name);
     const now = deps.now();
     return accounts
       .filter((account) => {

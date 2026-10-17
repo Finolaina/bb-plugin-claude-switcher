@@ -148,8 +148,10 @@ function fakes(
       if (files[path] === undefined) throw new Error("ENOENT");
       return files[path]!;
     },
+    // `${ACCOUNTS}-b`: a second accounts directory, read like the first
+    // (code-reviewer r6, CR-L1: the setting changed to one that fails).
     async listDirs(path) {
-      return path === ACCOUNTS ? dirs() : [];
+      return path === ACCOUNTS || path === `${ACCOUNTS}-b` ? dirs() : [];
     },
   };
   return { credentialIo, accountsIo, usageCalls, files };
@@ -7750,6 +7752,41 @@ describe("a wait another account can end sooner", () => {
       ]);
     });
 
+    it("the accounts directory changed to one that cannot be read: nothing said, however recent the readings of the old one (code-reviewer r6, CR-L1)", async () => {
+      let broken = false;
+      const h = await host(
+        {
+          main: () => Response.json(payload(100, 40, 100)),
+          spare: () => Response.json(payload(1, 1, 100)),
+          work: () => Response.json(payload(1, 1, 100)),
+        },
+        {
+          ...stuck(failedLog("thread-1", "creq_1", FABLE_ID)),
+          ...PAST_MAXIMUM,
+          dirs: () => {
+            if (broken) throw new Error("EPERM: the accounts directory");
+            return ["spare", "work"];
+          },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      await onePass(h);
+      broken = true;
+      await h.harness.behavior.setSettings({ accountsDir: `${ACCOUNTS}-b` });
+      // The refresh fails at once: no account found, while the readings of
+      // the old directory, made a moment ago, are still in memory.
+      const run = h.harness.behavior.runService("usage-refresh");
+      await vi.waitFor(() => {
+        expect(judgedPast(h)).toHaveLength(2);
+      });
+      run.controller.abort();
+      await run.done;
+      expect(judgedPast(h)).toEqual([
+        `thread thread-1: left in error: no switch (beyond-maximum-wait); ${toOpus("spare")}`,
+        "thread thread-1: left in error: no switch (beyond-maximum-wait)",
+      ]);
+    });
+
     it("retries it on an account that can run it, from bb's log alone", async () => {
       const h = await host(MAIN_OUT, stuck(failedLog("thread-1", "creq_1", FABLE_ID)));
       dispose = () => h.harness.dispose();
@@ -10922,6 +10959,61 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       // The refresh's own list of projects fails too.
       await expect(refreshed(h)).rejects.toThrow(/could not read proj-1/);
       expect(await banner(h)).toBeNull();
+    });
+  });
+
+  // code-reviewer r6, CR-L1: a change of the accounts directory empties the
+  // accounts found, not the readings in memory, which never grow old there
+  // (nothing reads those accounts again). With no account found, no read
+  // counts: the banner goes and its basis stays, and a leftover that
+  // follows a wait that told its thread says nothing.
+  describe("no account found since the accounts directory changed: no read counts (code-reviewer r6, CR-L1)", () => {
+    /** The accounts directory of `h` moved to one that cannot be read. */
+    async function moved(h: Awaited<ReturnType<typeof host>>, broken: { now: boolean }) {
+      broken.now = true;
+      await h.harness.behavior.setSettings({ accountsDir: `${ACCOUNTS}-b` });
+    }
+    const dirs = (broken: { now: boolean }) => () => {
+      if (broken.now) throw new Error("EPERM: the accounts directory");
+      return ["spare", "work"];
+    };
+
+    it("an hour later the refresh fails: the banner goes, and comes back once the accounts are found again", async () => {
+      let clock = NOW;
+      const broken = { now: false };
+      const h = await host(NO_FABLE, {
+        settings: { preferredModel: "Fable", maximumWaitHours: 1 },
+        clock: () => clock,
+        dirs: dirs(broken),
+      });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(await banner(h)).toBe(told);
+      await moved(h, broken);
+      clock = NOW + HOUR;
+      await expect(h.harness.behavior.callRpc("accounts_refresh", null)).rejects.toThrow(/EPERM/);
+      expect(await banner(h)).toBeNull();
+      // The directory back as it was: every account read again.
+      broken.now = false;
+      await h.harness.behavior.setSettings({ accountsDir: ACCOUNTS });
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await banner(h)).toBe(told);
+    });
+
+    it("a leftover that follows a wait that told its thread is retried with the move alone", async () => {
+      const broken = { now: false };
+      const h = await host(NO_FABLE, { settings: { preferredModel: "Fable" }, dirs: dirs(broken) });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      await moved(h, broken);
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ threadId: "thread-3", requestId: "creq_3" }),
+      );
+      expect(h.retries.map((r) => [r.threadId, r.reason])).toEqual([
+        ["thread-1", `Waiting for Fable on main. ${told}`],
+        ["thread-3", "Retrying on account main"],
+      ]);
     });
   });
 
