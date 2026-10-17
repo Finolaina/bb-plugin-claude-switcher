@@ -8251,6 +8251,30 @@ describe("a wait another account can end sooner", () => {
         });
     });
 
+    it("the rescue of a retry tells the retry's chain: the chain's next attempt, failing the same way, is not told again (Sol B2-003)", async () => {
+      const log = failedLog("thread-1", "creq_1b", FABLE_ID, { retry: { of: "creq_1", attempt: 2 } });
+      const h = await host(
+        {
+          main: () => Response.json(payload(100, 100, 100)),
+          spare: () => Response.json(payload(1, 1, 100)),
+          work: () => Response.json(payload(1, 1, 100)),
+        },
+        stuck(log),
+      );
+      dispose = () => h.harness.dispose();
+      await onePass(h);
+      expect(h.retries.map((r) => r.reason)).toEqual([`Waiting for Fable on spare. ${toOpus("spare")}`]);
+      // bb sends the timed retry, the chain's third attempt: it fails the same way.
+      log.push({ ...turnRequested("thread-1", "creq_1c", FABLE_ID, { of: "creq_1", attempt: 3 }), seq: 4 });
+      h.queued.length = 0;
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ requestId: "creq_1c", attemptNumber: 3 }),
+      );
+      const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+      expect(state.history.filter((r) => r.reason.includes(toOpus("spare")))).toHaveLength(1);
+    });
+
     it("does not retry when auto-switch is turned off as it moves the project", async () => {
       // Codex r6 (IR6-006): off between the move and the retry.
       const options = stuck(failedLog("thread-1", "creq_1", FABLE_ID));
@@ -9787,6 +9811,30 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     ]);
   });
 
+  it("a new turn whose wait moves the project, after an earlier turn of the thread was told, is told in the move's row (Sol B2-003)", async () => {
+    const h = await host(NO_FABLE, {
+      settings: { preferredModel: "Fable", maximumWaitHours: 0 },
+      threadEvents: chainLog([["creq_1"], ["creq_3"]]),
+    });
+    dispose = () => h.harness.dispose();
+    // Turn A waits on main, told.
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    // Turn B, a message sent by hand: main's report now resets last, the
+    // wait moves the project to spare. Another chain: told again.
+    const g = failure({ requestId: "creq_3" });
+    g.rateLimits!.windows[0]!.resetsAtMs = NOW + 9 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", g);
+    const waited = `Waiting for Fable on spare. ${told}`;
+    expect(h.retries.map((r) => [r.turnRequestId, r.reason])).toEqual([
+      ["creq_1", `Waiting for Fable on main. ${told}`],
+      ["creq_3", waited],
+    ]);
+    expect(await history(h)).toEqual([
+      ["thread-1", "proj-1", "main", "spare", waited],
+      ["thread-1", "proj-1", "main", "main", `Waiting for Fable on main. ${told}`],
+    ]);
+  });
+
   it("a wait beyond the maximum queues nothing: the history and the log say it, once however often it is judged", async () => {
     const h = await host(NO_FABLE, { settings: { preferredModel: "Fable", maximumWaitHours: 1 } });
     dispose = () => h.harness.dispose();
@@ -9996,6 +10044,49 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       expect(h.retries.map((r) => [r.threadId, r.reason])).toEqual([
         ["thread-1", `Waiting for Fable on main. ${told}`],
         ["thread-3", `Retrying on account main. ${told}`],
+      ]);
+      expect((await history(h)).map((r) => r[0])).toEqual(["thread-1"]);
+    });
+
+    it("a leftover past the grace that follows a wait that told its thread: no row", async () => {
+      let clock = NOW;
+      let mainOut = false;
+      const switchOff = { armed: false };
+      const h = await host(
+        {
+          ...NO_FABLE,
+          main: () => Response.json(mainOut ? payload(100, 40, 100) : payload(10, 40, 30)),
+        },
+        {
+          settings: { preferredModel: "Fable", maximumWaitHours: 0 },
+          clock: () => clock,
+          beforeEvents: async () => {
+            if (!switchOff.armed) return;
+            switchOff.armed = false;
+            await h.harness.behavior.setSettings({ autoSwitch: false });
+          },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      // thread-3's turn starts on main, while main can run Fable.
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "thread-3", FABLE_ID)).toEqual({ action: "proceed" });
+      await active(h, "thread-3");
+      mainOut = true;
+      // thread-1 fails on main; the wait moves the project to spare, told.
+      const f = failure();
+      f.rateLimits!.windows[0]!.resetsAtMs = NOW + 9 * HOUR;
+      await h.harness.behavior.emitThreadEvent("turn.failed", f);
+      // Past the grace, thread-3 fails on main, switched off as it is read.
+      clock = NOW + 61_000;
+      switchOff.armed = true;
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ threadId: "thread-3", requestId: "creq_3" }),
+      );
+      expect(h.retries.map((r) => [r.threadId, r.reason])).toEqual([
+        ["thread-1", `Waiting for Fable on spare. ${told}`],
+        ["thread-3", `Retrying on account spare. ${told}`],
       ]);
       expect((await history(h)).map((r) => r[0])).toEqual(["thread-1"]);
     });
