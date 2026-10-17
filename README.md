@@ -506,31 +506,33 @@ was never made or is older than two refreshes is no proof that the
 model is gone: then nothing is said. When nothing is queued for the
 turn (beyond the maximum, or no account will free), the thread shows
 the text in a banner over its composer, besides the history and the
-log; the banner goes when a turn of the thread starts, when a later
+log. The banner goes when a turn of the thread starts, when a later
 failure of it is judged without the advice, when it is archived or
-deleted and when the automatic choice is switched off (a judgment still
+deleted and when the automatic choice is switched off. A judgment still
 reading or moving the project then puts back neither the banner nor the
 text in a history row or a queued retry: a move it still makes is
 recorded with its own reason, as is its queued retry, and the turn is
-told by a later judgment), and it reads the advice again
-when bb's connection comes back after a drop. After every usage
-refresh, one that failed included, the banner is asked again on the
-latest reads, as a later judgment would ask it, also while bb's
-provider-retry keeps a retry of the turn queued (a thread with a retry
-queued is not judged again until it runs): it names the account an
-Opus turn would go to now, goes when the preferred model is back, no
-account can run Opus, a read failed or is older than two refreshes, or
-the project's account was set outside the plugin or could not be read,
-and comes back with the reads. Nothing is sent, retried, moved or
-written for it, and nothing that decides waits for it: it reads each
-project's account once, after the refresh, and not while a move of the
-project is being written (it reads it again once the move is over).
-What it is asked on is kept in the plugin's storage, so after a restart
-the usage refresh at start asks it again, if bb says the thread still
-waits on the turn it was judged on (a later retry of that turn counts
-only when it was sent in the same model and failed on a limit or was
-refused); one judged more than seven days before, or that five
-refreshes in a row could not check, is dropped. A thread whose
+told by a later judgment. The thread reads the advice again when bb's
+connection comes back after a drop. After every usage refresh, one that
+failed included, the banner is asked again on the latest reads, as a
+later judgment would ask it, also while bb's provider-retry keeps a
+retry of the turn queued (a thread with a retry queued is not judged
+again until it runs). It names the account an Opus turn would go to
+now. It goes when the preferred model is back, no account can run
+Opus, a read failed or is older than two refreshes, or the project's
+account was set outside the plugin or could not be read, and comes back
+with the reads. Nothing is sent, retried or moved for it, and nothing
+that decides waits for it. It reads each project's account once, after
+the refresh, and not while a move of the project is being written (it
+reads it again once the move is over). What it is asked on is kept in
+the plugin's storage, so after a restart the usage refresh at start
+asks it again, if bb says the thread still waits on the turn it was
+judged on (a later retry of that turn counts only when it was sent in
+the same model and failed on a limit or was refused). For that it reads
+the thread and its log in bb. What was kept is dropped, and the storage
+written again, when it no longer holds, when it was first judged more
+than seven days before, or when five refreshes in a row could not check
+it. A thread whose
 preferred model is Opus itself is never told.
 Once the model is back, the queued wait runs as before.
 
