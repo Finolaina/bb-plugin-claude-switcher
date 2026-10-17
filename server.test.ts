@@ -11618,7 +11618,7 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
         h.harness.logEntries.some(
           (e) =>
             e.level === "warn" &&
-            e.message === "thread thread-1: its banner not asked again (the thread could not be read: bb is restarting)",
+            e.message === "thread thread-1: its banner not asked again (the thread or its log could not be read: bb is restarting)",
         ),
       ).toBe(true);
       broken = false;
@@ -11721,6 +11721,15 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
         await refreshed(h);
         expect(gets).toBe(5);
         expect(await h.bb.storage.kv.get("advice-bases")).toEqual({});
+        // Said at info (code-reviewer r7, N4).
+        expect(
+          h.harness.logEntries.some(
+            (e) =>
+              e.level === "info" &&
+              e.message ===
+                "thread thread-1: what its banner was asked on is dropped (5 checks in a row could not tell)",
+          ),
+        ).toBe(true);
         await refreshed(h);
         expect(gets).toBe(5);
         expect(await banner(h)).toBeNull();
