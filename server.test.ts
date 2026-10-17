@@ -10195,6 +10195,234 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     });
   });
 
+  // Sol B2-R4-001: a declined thread whose retry bb's provider-retry keeps
+  // queued is never judged again until that retry runs (the rescue leaves
+  // a thread with anything queued alone), while the account an Opus turn
+  // would go to changes with the numbers. Its banner is asked again after
+  // every usage refresh, as a rescue's judgment would ask it, and nothing
+  // else is done for it.
+  describe("the banner is asked again after every usage refresh (Sol B2-R4-001)", () => {
+    /** One pass of the background refresh, to its end. */
+    async function refreshPass(h: Awaited<ReturnType<typeof host>>) {
+      const before = h.usageCalls.length;
+      const run = h.harness.behavior.runService("usage-refresh");
+      await vi.waitFor(() => {
+        expect(h.usageCalls).toHaveLength(before + 3);
+      });
+      run.controller.abort();
+      await run.done;
+    }
+    const refreshed = (h: Awaited<ReturnType<typeof host>>) =>
+      h.harness.behavior.callRpc("accounts_refresh", null);
+    const toWork = toOpus("work").slice(2);
+
+    it("with provider-retry's retry of the turn queued: the account named follows the numbers (spare spent, work), and the banner goes once Fable is back; nothing is sent, retried, moved or written for it", async () => {
+      let spare = () => Response.json(payload(1, 1, 100));
+      let work = () => Response.json(payload(1, 1, 100));
+      const h = await host(
+        { ...NO_FABLE, spare: () => spare(), work: () => work() },
+        {
+          settings: { preferredModel: "Fable", maximumWaitHours: 1 },
+          threads: { "thread-1": { status: "error" } },
+          threadEvents: chainLog([["creq_1"]]),
+          // provider-retry's retry of the turn, for the session's reset.
+          queued: [
+            {
+              id: "pr1",
+              threadId: "thread-1",
+              payload: { kind: "retry", attempt: 2, reason: "Rate limited", retryOfTurnRequestId: "creq_1" },
+              sendAt: NOW + 2 * HOUR + BUFFER,
+              waitingOn: { kind: "time" },
+              createdAt: NOW,
+              model: FABLE_ID,
+            },
+          ],
+        },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(await banner(h)).toBe(told);
+      const rows = await history(h);
+      // spare's session spent: an Opus turn from main would go to work.
+      spare = () => Response.json(payload(100, 1, 100));
+      await refreshPass(h);
+      expect(await banner(h)).toBe(toWork);
+      expect(adviceSignals(h)).toEqual([{ threadId: "thread-1" }, { threadId: "thread-1" }]);
+      expect(h.retries).toEqual([]);
+      expect(h.sent).toEqual([]);
+      expect(h.deleted).toEqual([]);
+      expect(h.envSet).toEqual([]);
+      expect(h.envDeleted).toEqual([]);
+      expect(h.queued.map((r) => r.id)).toEqual(["pr1"]);
+      expect(await history(h)).toEqual(rows);
+      // The same numbers again: nothing new.
+      await refreshPass(h);
+      expect(adviceSignals(h)).toHaveLength(2);
+      // Fable back on work: no advice left.
+      work = () => Response.json(payload(1, 1, 30));
+      await refreshPass(h);
+      expect(await banner(h)).toBeNull();
+      expect(adviceSignals(h)).toHaveLength(3);
+    });
+
+    it("a failed read (429) takes it away, as a judgment then says nothing; the next refresh that reads every account puts it back", async () => {
+      let spare = () => Response.json(payload(1, 1, 100));
+      const h = await host(
+        { ...NO_FABLE, spare: () => spare() },
+        { settings: { preferredModel: "Fable", maximumWaitHours: 1 } },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(await banner(h)).toBe(told);
+      spare = () => new Response("", { status: 429 });
+      await refreshed(h);
+      expect(await banner(h)).toBeNull();
+      spare = () => Response.json(payload(1, 1, 100));
+      await refreshed(h);
+      expect(await banner(h)).toBe(told);
+    });
+
+    it("a decline judged while a read had failed shows it once a refresh reads every account", async () => {
+      let spare = () => Response.json(payload(1, 1, 100));
+      const h = await host(
+        { ...NO_FABLE, spare: () => spare() },
+        { settings: { preferredModel: "Fable", maximumWaitHours: 1 } },
+      );
+      dispose = () => h.harness.dispose();
+      await refreshed(h);
+      spare = () => new Response("", { status: 429 });
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(await banner(h)).toBeNull();
+      spare = () => Response.json(payload(1, 1, 100));
+      await refreshed(h);
+      expect(await banner(h)).toBe(told);
+    });
+
+    it("a later judgment of the thread that is not a decline ends it: the refreshes do not put the banner back", async () => {
+      let workFable = 100;
+      const h = await host(
+        { ...NO_FABLE, work: () => Response.json(payload(1, 1, workFable)) },
+        { settings: { preferredModel: "Fable", maximumWaitHours: 1 } },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      // Its retry fails while work runs Fable again: switched, no advice.
+      workFable = 30;
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ requestId: "creq_1b", attemptNumber: 2 }),
+      );
+      expect(await banner(h)).toBeNull();
+      workFable = 100;
+      await refreshed(h);
+      expect(await banner(h)).toBeNull();
+    });
+
+    it("a later failure of the thread retried as a leftover ends it too", async () => {
+      let workFable = 100;
+      const h = await host(
+        { ...NO_FABLE, work: () => Response.json(payload(1, 1, workFable)) },
+        { settings: { preferredModel: "Fable", maximumWaitHours: 1 } },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      // thread-3 moves the project to work; thread-1, within the grace, is retried there.
+      workFable = 30;
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ threadId: "thread-3", requestId: "creq_3" }),
+      );
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ requestId: "creq_1b", attemptNumber: 2 }),
+      );
+      expect(h.retries.map((r) => [r.threadId, r.reason])).toEqual([
+        ["thread-3", "Switched to account work (Fable)"],
+        ["thread-1", "Retrying on account work"],
+      ]);
+      workFable = 100;
+      await refreshed(h);
+      expect(await banner(h)).toBeNull();
+    });
+
+    for (const [what, meanwhile] of [
+      ["a turn of the thread starts", (h: Awaited<ReturnType<typeof host>>) => active(h, "thread-1")],
+      [
+        "the thread is archived",
+        (h: Awaited<ReturnType<typeof host>>) =>
+          h.harness.behavior.emitThreadEvent("thread.archived", {
+            thread: thread({ id: "thread-1", projectId: "proj-1" }),
+          }),
+      ],
+      [
+        "the automatic choice is switched off and on again",
+        async (h: Awaited<ReturnType<typeof host>>) => {
+          await h.harness.behavior.setSettings({ autoSwitch: false });
+          await h.harness.behavior.setSettings({ autoSwitch: true });
+        },
+      ],
+    ] as const)
+      it(`${what} while a refresh reads the project's account: the refresh puts nothing back`, async () => {
+        let spare = () => Response.json(payload(1, 1, 100));
+        let armed: (() => Promise<unknown>) | null = null;
+        const h = await host(
+          { ...NO_FABLE, spare: () => spare() },
+          {
+            settings: { preferredModel: "Fable", maximumWaitHours: 1 },
+            beforeEnvRead: async () => {
+              const run = armed;
+              armed = null;
+              await run?.();
+            },
+          },
+        );
+        dispose = () => h.harness.dispose();
+        await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+        expect(await banner(h)).toBe(told);
+        // spare's session spent: the refresh would name work.
+        spare = () => Response.json(payload(100, 1, 100));
+        armed = () => meanwhile(h);
+        await refreshed(h);
+        expect(armed).toBeNull();
+        expect(await banner(h)).toBeNull();
+        expect(adviceSignals(h)).toEqual([{ threadId: "thread-1" }, { threadId: "thread-1" }]);
+        // Nor the next refresh: nothing is left to ask again.
+        await refreshed(h);
+        expect(await banner(h)).toBeNull();
+      });
+
+    it("the project's variable set outside the plugin: no placement there, the banner goes", async () => {
+      const h = await host(NO_FABLE, { settings: { preferredModel: "Fable", maximumWaitHours: 1 } });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(await banner(h)).toBe(told);
+      h.env.set("proj-1", [{ name: ENV_VAR, note: "set by hand", secret: true, value: null }]);
+      await refreshed(h);
+      expect(await banner(h)).toBeNull();
+    });
+
+    it("the project's account cannot be read: the banner stays as it was, and the log says why", async () => {
+      let spare = () => Response.json(payload(1, 1, 100));
+      const failEnvRead: string[] = [];
+      const h = await host(
+        { ...NO_FABLE, spare: () => spare() },
+        { settings: { preferredModel: "Fable", maximumWaitHours: 1 }, failEnvRead },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      spare = () => Response.json(payload(100, 1, 100));
+      failEnvRead.push("proj-1");
+      // The refresh's own list of projects fails too; the banner was asked first.
+      await expect(refreshed(h)).rejects.toThrow(/could not read proj-1/);
+      expect(await banner(h)).toBe(told);
+      expect(
+        h.harness.logEntries.some(
+          (e) => e.level === "warn" && e.message.includes("thread thread-1: its banner not asked again"),
+        ),
+      ).toBe(true);
+    });
+  });
+
   it("a turn of the thread that starts while its failure is judged takes the banner away, and the judgment does not put it back when its reads end (Sol B2-R2-003)", async () => {
     let meanwhile: (() => Promise<unknown>) | null = null;
     const h = await host(NO_FABLE, {
@@ -10231,13 +10459,26 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
   ] as const)
     it(`an older failure retried as a leftover ${when} leaves alone the banner a newer turn's failure put up while it read (Sol B2-R2-003)`, async () => {
       let clock = NOW;
-      let workFable = 100;
       let meanwhile: (() => Promise<void>) | null = null;
       const h = await host(
-        { ...NO_FABLE, work: () => Response.json(payload(1, 1, workFable)) },
+        NO_FABLE,
         {
           settings: { preferredModel: "Fable", maximumWaitHours: 1 },
           clock: () => clock,
+          // thread-3's turn was sent in Opus.
+          threadEvents: {
+            "thread-3": [
+              {
+                id: "evt_creq_3",
+                scope: { kind: "thread" },
+                threadId: "thread-3",
+                seq: 1,
+                createdAt: NOW - HOUR,
+                type: "client/turn/requested",
+                data: { requestId: "creq_3", execution: { model: OPUS_ID } },
+              },
+            ],
+          },
           // Its look at the thread, before it joins the project's queue.
           beforeThreadGet: async () => {
             const run = meanwhile;
@@ -10256,20 +10497,23 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
         await active(h, "thread-1");
         await h.harness.behavior.emitThreadEvent("turn.failed", failure({ requestId: "creq_2" }));
         expect(await banner(h)).toBe(told);
-        // Then work runs Fable again, and thread-3's failure moves the project there.
-        workFable = 30;
+        // Then thread-3's Opus turn fails on main and moves the project to
+        // spare, which runs Opus: no Fable anywhere still, so the refresh
+        // of that failure, which asks the banner again (Sol B2-R4-001),
+        // keeps it.
         await h.harness.behavior.emitThreadEvent(
           "turn.failed",
           failure({ threadId: "thread-3", requestId: "creq_3" }),
         );
+        expect(await banner(h)).toBe(told);
         // Past the minute of grace.
         if (late) clock = NOW + 61_000;
       };
       await h.harness.behavior.emitThreadEvent("turn.failed", failure());
-      // The older failure's turn runs again on work, as a leftover...
+      // The older failure's turn runs again on spare, as a leftover...
       expect(h.retries.map((r) => [r.threadId, r.turnRequestId, r.reason])).toEqual([
-        ["thread-3", "creq_3", "Switched to account work (Fable)"],
-        ["thread-1", "creq_1", "Retrying on account work"],
+        ["thread-3", "creq_3", "Switched to account spare (Opus)"],
+        ["thread-1", "creq_1", "Retrying on account spare"],
       ]);
       // ...and says nothing of the newer turn's banner.
       expect(await banner(h)).toBe(told);

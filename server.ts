@@ -65,6 +65,7 @@ import {
   RESET_JITTER_MS,
   settle,
   type PlacementInput,
+  type SwitchDecision,
 } from "./src/switch.js";
 import { reserving, spendsReservedWeekly } from "./src/policy.js";
 import {
@@ -382,9 +383,24 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * is archived, and when the automatic choice is switched off (the advice
    * names where the placement would send an Opus turn, and none is placed
    * then). In memory: after a restart the rescue's next judgment puts it
-   * back.
+   * back. Asked again after every usage refresh (see reviseAdvice).
    */
   const shownAdvice = new Map<string, string>();
+  /**
+   * Per thread whose latest judgment declined its turn, what that judgment
+   * judged on: after every usage refresh its banner is asked again (see
+   * reviseAdvice). Dropped with the banner's generation (a turn of the
+   * thread, its archiving, the automatic choice switched off) and by any
+   * later judgment of the thread that is no decline.
+   */
+  type AdviceBasis = {
+    projectId: string;
+    /** The failed turn's model. */
+    model: string;
+    failure: PluginTurnFailedEvent;
+    decision: SwitchDecision;
+  };
+  const adviceBasis = new Map<string, AdviceBasis>();
   /**
    * Per thread, the generation its judgments belong to: a judgment takes
    * the thread's as it begins and shows or takes away the banner only while
@@ -403,15 +419,26 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** A turn of the thread starts, or it is archived: its banner goes, and what its pending judgments found with it. */
   function adviceOver(threadId: string): void {
     generationOf.set(threadId, ++generations);
+    adviceBasis.delete(threadId);
     showAdvice(threadId, null);
   }
-  /** `judgedIn`: the generation of the judgment that shows or takes it (see generation). */
-  function showAdvice(
+  /**
+   * What a judgment of the thread shows, and what the refreshes ask again
+   * (`basis`: its decline's; null for any other judgment): only in the
+   * generation it began in (see generation).
+   */
+  function judgedAdvice(
     threadId: string,
     text: string | null,
-    judgedIn?: number,
+    judgedIn: number,
+    basis: AdviceBasis | null,
   ): void {
-    if (judgedIn !== undefined && judgedIn !== generation(threadId)) return;
+    if (judgedIn !== generation(threadId)) return;
+    if (basis === null) adviceBasis.delete(threadId);
+    else adviceBasis.set(threadId, basis);
+    showAdvice(threadId, text);
+  }
+  function showAdvice(threadId: string, text: string | null): void {
     // Never a banner with the automatic choice off.
     if (text !== null && !current.autoSwitch) return;
     if ((shownAdvice.get(threadId) ?? null) === text) return;
@@ -428,6 +455,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // A Map visits no key deleted before its turn: the current one may go.
     if (!next.autoSwitch) {
       switchedOffIn = ++generations;
+      adviceBasis.clear();
       for (const threadId of shownAdvice.keys()) showAdvice(threadId, null);
     }
     // Found again (and stale measurements pruned) on next use: an account of
@@ -873,6 +901,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     await collector.collectAll(found);
     await recordSamples();
     bb.realtime.publish(CHANGED, { at: deps.now() });
+    await reviseAdvice();
   }
 
   // ponytail: bb has no batch read of machine environments, so a list costs
@@ -1722,6 +1751,59 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
 
   /**
+   * After a usage refresh: the banner of each thread whose latest judgment
+   * declined its turn, asked again on the new reads (Sol B2-R4-001). A
+   * thread with a retry queued (bb's provider-retry) is never judged again
+   * until that retry runs, while the account an Opus turn would go to
+   * changes with the numbers. As a rescue's judgment would ask it: the
+   * account the turn failed on judged on its numbers like the rest, from
+   * where the project sits now, with the same function and the same
+   * placement (opusInstead): a new account, the banner gone (Fable back, no
+   * account for Opus, a read that failed) or back. Only the banner: nothing
+   * sent, retried, moved, queued or written. A judgment of the thread, a
+   * turn of it, its archiving or the automatic choice switched off while
+   * the project is read leave a basis other than the one read: what was
+   * read says nothing.
+   */
+  async function reviseAdvice(): Promise<void> {
+    for (const [threadId, basis] of adviceBasis) {
+      let at: ProjectAccount;
+      try {
+        at = await projectAccount(basis.projectId);
+      } catch (error) {
+        bb.log.warn(
+          `thread ${threadId}: its banner not asked again (the project's account could not be read: ${error instanceof Error ? error.message : String(error)})`,
+        );
+        continue;
+      }
+      if (adviceBasis.get(threadId) !== basis) continue;
+      // Set outside this plugin: no placement there (see placeTurn).
+      if (at.external) {
+        showAdvice(threadId, null);
+        continue;
+      }
+      const now = deps.now();
+      const on = opusInstead(
+        basis.decision,
+        {
+          failure: basis.failure,
+          currentAccount: at.account ?? current.defaultAccountName,
+          accounts: measuredAccounts(basis.model),
+          preferredModel: basis.model,
+          reserveModel: current.preferredModel,
+          maximumWaitMs: null,
+          now,
+          random: 0,
+          stuck: true,
+        },
+        unreadAccounts(),
+        placementOf(basis.projectId, FALLBACK_MODEL, now),
+      );
+      showAdvice(threadId, on === null ? null : opusInsteadText(basis.model, on));
+    }
+  }
+
+  /**
    * Per thread, the retry chain it was last told to switch to Opus for, by
    * the chain's first request (see chainOf, noteAdvice). Kept in memory:
    * after a restart a thread still in error gets one more row.
@@ -2475,7 +2557,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       if (told !== null)
         await noteAdvice(event.threadId, projectId, recent.to, reason, turn, now, judgedIn);
       // Its queued retry says it now, or nothing is to be said.
-      showAdvice(event.threadId, null, judgedIn);
+      judgedAdvice(event.threadId, null, judgedIn, null);
       await retryTurn(event, reason, recent.sendAt);
       return;
     }
@@ -2512,7 +2594,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         );
         if (told !== null)
           await noteAdvice(event.threadId, projectId, currentName, reason, turn, now, judgedIn);
-        showAdvice(event.threadId, null, judgedIn);
+        judgedAdvice(event.threadId, null, judgedIn, null);
         await retryTurn(event, reason, sendAt);
         return;
       }
@@ -2712,13 +2794,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const carried = advice === null ? undefined : { model };
     const how = stuck ? "left in error: " : "";
     // The thread shows the advice where nothing queued carries it: a
-    // decline (Sol B2-004). Any other judgment takes it away. Unless a turn
-    // of it started, it was archived or the automatic choice was switched
-    // off while this one read (Sol B2-R2-003).
-    showAdvice(
+    // decline (Sol B2-004), asked again after every refresh (Sol
+    // B2-R4-001). Any other judgment takes it away. Unless a turn of it
+    // started, it was archived or the automatic choice was switched off
+    // while this one read (Sol B2-R2-003).
+    judgedAdvice(
       event.threadId,
       decision.kind === "decline" ? advice : null,
       judgedIn,
+      decision.kind === "decline"
+        ? { projectId, model, failure: event, decision }
+        : null,
     );
     if (decision.kind === "decline") {
       // The account the project sits on is no good either: a leftover
