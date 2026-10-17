@@ -1438,7 +1438,7 @@ describe("opusInstead: a Fable thread no account can run is told to switch to Op
     },
   });
 
-  it("under a warning report the account the turn failed on is judged on its numbers for Opus (no window is blocked), never for Fable", () => {
+  it("the account the turn failed on is judged on its numbers for Opus, never for Fable (here under a warning report)", () => {
     // Its fresh numbers: Fable spent, the session at 85 %, Opus room.
     const warned = seat("team5", {
       session: { usedPercent: 85, resetsAt: NOW + HOUR },
@@ -1478,7 +1478,7 @@ describe("opusInstead: a Fable thread no account can run is told to switch to Op
     expect(advice(fable({ failure: warning, accounts: [full, team1, team2] }))).toBe("team2");
   });
 
-  it("under a warning report a Max account the turn failed on, whose numbers still keep Fable, is never named for Opus (the Max accounts are Fable's)", () => {
+  it("a Max account the turn failed on, whose numbers still keep Fable, is never named for Opus (the Max accounts are Fable's; here under a warning report)", () => {
     const max1 = account("max1", {
       session: { usedPercent: 85, resetsAt: NOW + HOUR },
       weekly: { usedPercent: 50, resetsAt: NOW + 72 * HOUR },
