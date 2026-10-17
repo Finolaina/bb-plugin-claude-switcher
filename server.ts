@@ -1958,7 +1958,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     for (const [threadId, stored] of adviceBasis) {
       const basis =
         stored.restored === true ? await restoredHolds(threadId, stored) : stored;
-      if (basis === null) continue;
+      // A judgment of the thread that landed while the pass waited for that
+      // check: its basis, and its banner, are its own (Sol B2-R7-001).
+      if (basis === null || adviceBasis.get(threadId) !== basis) continue;
       if (
         !adviseOpus(
           basis.decision,

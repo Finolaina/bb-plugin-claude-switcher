@@ -11742,6 +11742,74 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       });
     });
 
+    // Sol B2-R7-001: the pass waits for the check of a basis read back
+    // (restoredHolds), and a judgment of the thread can land between the end
+    // of that check and the pass going on. The pass then asks nothing more
+    // of the basis it checked: the judgment's banner stays. The judgment's
+    // last steps are tried against the pass's one tick apart, from landing
+    // after the pass to landing before the check reads the thread.
+    it("a judgment of the thread that lands between the end of the check of what was read back and the pass going on: the judgment's banner stays (Sol B2-R7-001)", async () => {
+      const lost: number[] = [];
+      const before = new Set<boolean>();
+      for (let shift = -12; shift <= 24; shift += 1) {
+        const gate = envGate();
+        let armed = false;
+        let gets = 0;
+        let hold = false;
+        const h = await host(
+          // Fable on main, which the turn failed on: the judgment leaves main
+          // out and tells the thread to switch; the pass, every account on
+          // its numbers, would take the banner away.
+          { ...NO_FABLE, main: () => Response.json(payload(1, 1, 30)) },
+          {
+            ...stillWaiting,
+            kvPreset: storedBasis("creq_1", "creq_1"),
+            // The judgment's look at its thread comes first; the second is
+            // the check of what was read back, by the pass the judgment's
+            // refresh asks for.
+            beforeThreadGet: async () => {
+              if (!armed || ++gets !== 2) return;
+              hold = true;
+              await gate.reached;
+              if (shift < 0) {
+                void (async () => {
+                  for (let i = 0; i < -shift; i += 1) await Promise.resolve();
+                  gate.release();
+                })();
+                return;
+              }
+              gate.release();
+              for (let i = 0; i < shift; i += 1) await Promise.resolve();
+              before.add(adviceSignals(h).length > 0);
+            },
+            // The judgment's read of the project's account after its refresh,
+            // held until the check reads the thread.
+            afterEnvRead: async (projectId) => {
+              if (!hold || projectId !== "proj-1") return;
+              hold = false;
+              gate.captured();
+              await gate.held;
+            },
+          },
+        );
+        dispose = () => h.harness.dispose();
+        armed = true;
+        await h.harness.behavior.emitThreadEvent(
+          "turn.failed",
+          failure({ requestId: "creq_1b", attemptNumber: 2 }),
+        );
+        // What is left of the pass runs on ticks only.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(gets).toBe(2);
+        if ((await banner(h)) !== told) lost.push(shift);
+        await h.harness.dispose();
+        dispose = null;
+      }
+      expect(lost).toEqual([]);
+      // The judgment landed before the check read the thread, and after.
+      expect([...before].sort()).toEqual([false, true]);
+    });
+
     it("the automatic choice off when the plugin starts: nothing is read back, and storage is cleared", async () => {
       const h = await host(NO_FABLE, {
         ...stillWaiting,
