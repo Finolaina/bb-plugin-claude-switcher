@@ -10239,6 +10239,125 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     });
   });
 
+  // Sol B2-R6-004: a queued retry's reason tells the thread to switch to
+  // Opus only while its judgment's generation holds, asked right before the
+  // retry is queued: after the look at the thread's queue and the removal of
+  // the row it replaces. Switched off during either, the retry is queued as
+  // it would be (0.2.20), with its reason alone.
+  describe("a queued retry's reason is asked as the retry is queued, after the waits on the queue (Sol B2-R6-004)", () => {
+    /** provider-retry's retry of the thread's turn, for the session's reset. */
+    const providerRow = (threadId: string, requestId: string): QueuedRow => ({
+      id: `pr-${threadId}`,
+      threadId,
+      payload: { kind: "retry", attempt: 2, reason: "Rate limited", retryOfTurnRequestId: requestId },
+      sendAt: NOW + 2 * HOUR + BUFFER,
+      waitingOn: { kind: "time" },
+      createdAt: NOW,
+      model: FABLE_ID,
+    });
+    /** A host that switches the automatic choice off once `armed` names where: the thread's look at its queue, or the removal of a row. */
+    async function offAt(options: HostOptions, usage: Record<string, () => Response> = NO_FABLE) {
+      const armed: { at: { list: string } | "delete" | null } = { at: null };
+      const h = await host(usage, {
+        ...options,
+        beforeQueuedList: async (threadId) => {
+          const at = armed.at;
+          if (at === null || at === "delete" || at.list !== threadId) return;
+          armed.at = null;
+          await h.harness.behavior.setSettings({ autoSwitch: false });
+        },
+        beforeDelete: async () => {
+          if (armed.at !== "delete") return;
+          armed.at = null;
+          await h.harness.behavior.setSettings({ autoSwitch: false });
+        },
+      });
+      dispose = () => h.harness.dispose();
+      return { h, armed };
+    }
+
+    for (const during of ["its look at the queue", "the removal of provider-retry's row"] as const)
+      it(`a wait on the project's own account, switched off during ${during}: the retry replaces the row, with the wait's reason alone`, async () => {
+        const { h, armed } = await offAt({
+          settings: { preferredModel: "Fable" },
+          queued: [providerRow("thread-1", "creq_1")],
+        });
+        armed.at = during === "its look at the queue" ? { list: "thread-1" } : "delete";
+        await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+        expect(armed.at).toBeNull();
+        expect(h.deleted).toEqual(["pr-thread-1"]);
+        expect(h.retries.map((r) => [r.threadId, r.sendAt, r.reason])).toEqual([
+          ["thread-1", NOW + 4 * HOUR + BUFFER, "Waiting for Fable on main"],
+        ]);
+      });
+
+    for (const during of ["its look at the queue", "the removal of provider-retry's row"] as const)
+      it(`a leftover within the grace that follows a wait that told its thread, switched off during ${during}: retried with the move alone`, async () => {
+        const { h, armed } = await offAt({
+          settings: { preferredModel: "Fable" },
+          queued: during === "its look at the queue" ? [] : [providerRow("thread-3", "creq_3")],
+        });
+        await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+        armed.at = during === "its look at the queue" ? { list: "thread-3" } : "delete";
+        await h.harness.behavior.emitThreadEvent(
+          "turn.failed",
+          failure({ threadId: "thread-3", requestId: "creq_3" }),
+        );
+        expect(armed.at).toBeNull();
+        expect(h.retries.map((r) => [r.threadId, r.reason])).toEqual([
+          ["thread-1", `Waiting for Fable on main. ${told}`],
+          ["thread-3", "Retrying on account main"],
+        ]);
+      });
+
+    it("a leftover past the grace that follows a wait that told its thread, switched off during its look at the queue: retried with the move alone", async () => {
+      let clock = NOW;
+      let mainOut = false;
+      const { h, armed } = await offAt(
+        { settings: { preferredModel: "Fable", maximumWaitHours: 0 }, clock: () => clock },
+        { ...NO_FABLE, main: () => Response.json(mainOut ? payload(100, 40, 100) : payload(10, 40, 30)) },
+      );
+      // thread-3's turn starts on main, while main can run Fable.
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "thread-3", FABLE_ID)).toEqual({ action: "proceed" });
+      await active(h, "thread-3");
+      mainOut = true;
+      // thread-1 fails on main; the wait moves the project to spare, told.
+      const f = failure();
+      f.rateLimits!.windows[0]!.resetsAtMs = NOW + 9 * HOUR;
+      await h.harness.behavior.emitThreadEvent("turn.failed", f);
+      // Past the grace, thread-3 fails on main.
+      clock = NOW + 61_000;
+      armed.at = { list: "thread-3" };
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ threadId: "thread-3", requestId: "creq_3" }),
+      );
+      expect(armed.at).toBeNull();
+      expect(h.retries.map((r) => [r.threadId, r.reason])).toEqual([
+        ["thread-1", `Waiting for Fable on spare. ${told}`],
+        ["thread-3", "Retrying on account spare"],
+      ]);
+    });
+
+    it("with the automatic choice on throughout, each of them says it", async () => {
+      const { h } = await offAt({
+        settings: { preferredModel: "Fable" },
+        queued: [providerRow("thread-1", "creq_1"), providerRow("thread-3", "creq_3")],
+      });
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ threadId: "thread-3", requestId: "creq_3" }),
+      );
+      expect(h.deleted).toEqual(["pr-thread-1", "pr-thread-3"]);
+      expect(h.retries.map((r) => [r.threadId, r.reason])).toEqual([
+        ["thread-1", `Waiting for Fable on main. ${told}`],
+        ["thread-3", `Retrying on account main. ${told}`],
+      ]);
+    });
+  });
+
   // Sol B2-R4-001: a declined thread whose retry bb's provider-retry keeps
   // queued is never judged again until that retry runs (the rescue leaves
   // a thread with anything queued alone), while the account an Opus turn
