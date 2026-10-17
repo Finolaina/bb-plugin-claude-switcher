@@ -2791,7 +2791,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
       // No retry of ours carries it (bb's provider-retry row, if any, is
       // left as it is; a rescue queues none): the history and the log say it.
-      if (advice !== null && !(stuck && !current.autoSwitch))
+      // Switched off meanwhile, noteAdvice writes nothing: the judgment's
+      // generation ended (code-reviewer r4, N2).
+      if (advice !== null)
         await noteAdvice(event.threadId, projectId, fromName, advice, turn, now, judgedIn);
       return;
     }
