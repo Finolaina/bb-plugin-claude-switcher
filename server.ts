@@ -1777,18 +1777,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * every refresh, and where an Opus turn would go can change between two
    * (code-reviewer 0.2.20, CR-04), and the turn's retries say nothing new;
    * a new turn gets its own row, also when it is told only at a later
-   * attempt (r2, R2-01; Sol B2-003). The log says each one.
+   * attempt (r2, R2-01; Sol B2-003). The log says each one. `turn.chain`:
+   * see chainOf, read before the judgment checked anything.
    */
   async function noteAdvice(
     threadId: string,
     projectId: string,
     account: string,
     reason: string,
-    turn: { requestId: string; attemptNumber: number },
+    turn: { requestId: string; chain: string | null },
     at: number,
   ): Promise<void> {
-    if (!tellOnce(threadId, await chainOf(threadId, turn), turn.requestId))
-      return;
+    if (!tellOnce(threadId, turn.chain, turn.requestId)) return;
     await addHistory({
       at,
       threadId,
@@ -2407,6 +2407,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       (await loggedModel(event.threadId, event.requestId)) ??
       threadModel.get(event.threadId) ??
       current.preferredModel;
+    // Its retry chain, for the Opus advice: read before anything below is
+    // checked or marked, so no read waits between those checks and a move
+    // (Sol B2-R3-005).
+    const turn = {
+      requestId: event.requestId,
+      chain: await chainOf(event.threadId, event),
+    };
     const recent = recentSwitches.get(projectId);
     // Where the project is now: a leftover follows the recorded move only
     // while the project still sits where that move put it and no move is
@@ -2452,7 +2459,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         `thread ${event.threadId}: ${reason} (switched ${now - recent.at} ms ago)`,
       );
       if (told !== null)
-        await noteAdvice(event.threadId, projectId, recent.to, reason, event, now);
+        await noteAdvice(event.threadId, projectId, recent.to, reason, turn, now);
       // Its queued retry says it now, or nothing is to be said.
       showAdvice(event.threadId, null, judgedIn);
       await retryTurn(event, reason, recent.sendAt);
@@ -2490,7 +2497,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           `thread ${event.threadId}: ${reason} (its turn started on ${started})`,
         );
         if (told !== null)
-          await noteAdvice(event.threadId, projectId, currentName, reason, event, now);
+          await noteAdvice(event.threadId, projectId, currentName, reason, turn, now);
         showAdvice(event.threadId, null, judgedIn);
         await retryTurn(event, reason, sendAt);
         return;
@@ -2516,6 +2523,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       false,
       before,
       judgedIn,
+      turn.chain,
       started,
     );
   }
@@ -2627,8 +2635,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     before: MoveMark,
     /** The thread's generation as the judgment began (see generation). */
     judgedIn: number,
+    /** The turn's retry chain (see chainOf), read before the judgment began. */
+    chain: string | null,
     ranOn?: string | null,
   ): Promise<void> {
+    const turn = { requestId: event.requestId, chain };
     const fromName = from.account ?? current.defaultAccountName;
     const failedOn = ranOn === undefined ? fromName : ranOn;
     const refusal = isRefusal(event);
@@ -2705,7 +2716,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // No retry of ours carries it (bb's provider-retry row, if any, is
       // left as it is; a rescue queues none): the history and the log say it.
       if (advice !== null && !(stuck && !current.autoSwitch))
-        await noteAdvice(event.threadId, projectId, fromName, advice, event, now);
+        await noteAdvice(event.threadId, projectId, fromName, advice, turn, now);
       return;
     }
     const reason =
@@ -2721,9 +2732,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // moving and before retrying (Codex r6, IR6-006).
     if (stuck && !current.autoSwitch) return;
     if (decision.account !== fromName) {
-      // Read before the move: none of it waits between the move and its record.
-      const chain =
-        advice === null ? null : await chainOf(event.threadId, event);
       await applyAccount(projectId, accountOrDefault(decision.account), from);
       noteMove(projectId, fromName, decision.account, model, before);
       // The move's row tells the turn, once per chain: a retry of a turn
@@ -2760,7 +2768,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         graced: new Set(),
       });
       if (advice !== null)
-        await noteAdvice(event.threadId, projectId, fromName, reason, event, now);
+        await noteAdvice(event.threadId, projectId, fromName, reason, turn, now);
     } else {
       // Retried on the project's own account: it runs there from here, so
       // a failure of it within the grace of the project's latest move is
@@ -2998,6 +3006,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       true,
       before,
       judgedIn,
+      // Its chain, as the log named it above.
+      turn.original,
     );
   }
   /** What bb's failure event says of a turn rejected at the door (bb 0.45, `doorRejectionErrorInfo`). */

@@ -8208,6 +8208,49 @@ describe("a wait another account can end sooner", () => {
       expect(h.envSet).toEqual([]);
     });
 
+    it("switched off while the rescue of a retry reads bb's log, at any of its reads (the retry chain's included), moves nothing and queues nothing (Sol B2-R3-005)", async () => {
+      // Every account out of Fable, main's weekly too: the rescue of
+      // creq_1b, the second attempt of creq_1, waits on spare (moving the
+      // project there) and tells Opus.
+      const usage = {
+        main: () => Response.json(payload(100, 100, 100)),
+        spare: () => Response.json(payload(1, 1, 100)),
+        work: () => Response.json(payload(1, 1, 100)),
+      };
+      const log = failedLog("thread-1", "creq_1b", FABLE_ID, { retry: { of: "creq_1", attempt: 2 } });
+      /** One pass, the automatic choice switched off as bb's log is read for the `offAt`-th time (0: never). */
+      async function pass(offAt: number) {
+        let reads = 0;
+        const options: HostOptions = {
+          ...stuck(log),
+          beforeEvents: async () => {
+            reads += 1;
+            if (reads === offAt) await h.harness.behavior.setSettings({ autoSwitch: false });
+          },
+        };
+        const h = await host(usage, options);
+        dispose = () => h.harness.dispose();
+        await onePass(h);
+        const seen = {
+          reads,
+          moves: h.envSet.map((e) => e.note),
+          retries: h.retries.map((r) => r.reason),
+        };
+        h.harness.dispose();
+        dispose = null;
+        return seen;
+      }
+      const on = await pass(0);
+      expect(on.moves).toEqual([ownNote("spare")]);
+      expect(on.retries).toEqual([`Waiting for Fable on spare. ${toOpus("spare")}`]);
+      expect(on.reads).toBeGreaterThanOrEqual(3);
+      for (let offAt = 1; offAt <= on.reads; offAt++)
+        expect(await pass(offAt), `switched off at read ${offAt}`).toMatchObject({
+          moves: [],
+          retries: [],
+        });
+    });
+
     it("does not retry when auto-switch is turned off as it moves the project", async () => {
       // Codex r6 (IR6-006): off between the move and the retry.
       const options = stuck(failedLog("thread-1", "creq_1", FABLE_ID));
