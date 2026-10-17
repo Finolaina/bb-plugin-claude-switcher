@@ -22,8 +22,9 @@ describe("the thread header's reads", () => {
     const source = await readFile(new URL("./app.tsx", import.meta.url), "utf8");
     expect(source).toContain("useState<State | null>(lastSeen)");
     expect(source).toContain("lastSeen = shown;");
-    // accounts_list and threads.get both try again after a failure.
-    expect(source.split("retryDelayMs(")).toHaveLength(3);
+    // accounts_list and threads.get both try again after a failure (and
+    // the advice banner's thread_advice, Sol B2-004).
+    expect(source.split("retryDelayMs(")).toHaveLength(4);
     // A thread keeps its provider: asked once per thread.
     expect(source).toContain("claudeThreads.set(threadId, claude)");
   });
@@ -100,14 +101,18 @@ async function register(slotNames: string[], withComposer = false) {
   );
   const setup = (definition as unknown as { setup: (app: unknown) => void }).setup;
   // The composer's customizations, as the host receives them.
-  const customized: { id: string; scopes: unknown; actions: { id: string; component: unknown }[] }[] = [];
+  type Part = { id: string; component: unknown };
+  const customized: { id: string; scopes: unknown; actions?: Part[]; banners?: Part[] }[] = [];
+  const named = (parts: Part[]) =>
+    parts.map((a) => ({ id: a.id, component: (a.component as { name?: string }).name }));
   const composer = withComposer
     ? {
-        customize: (r: { id: string; scopes?: unknown; actions?: { id: string; component: unknown }[] }) =>
+        customize: (r: { id: string; scopes?: unknown; actions?: Part[]; banners?: Part[] }) =>
           customized.push({
             id: r.id,
             scopes: r.scopes,
-            actions: (r.actions ?? []).map((a) => ({ id: a.id, component: (a.component as { name?: string }).name })),
+            ...(r.actions === undefined ? {} : { actions: named(r.actions) }),
+            ...(r.banners === undefined ? {} : { banners: named(r.banners) }),
           }),
       }
     : undefined;
@@ -124,11 +129,30 @@ describe("the plugin's frontend registration", () => {
     ]);
   });
 
-  it("puts the account control in the new-thread composer, and only there", async () => {
+  it("puts the account control in the new-thread composer, and only there; the Opus advice over a thread's composer (Sol B2-004)", async () => {
     const { customized } = await register(["settingsSection"], true);
     expect(customized).toEqual([
       { id: "claude-account", scopes: ["new-thread"], actions: [{ id: "claude-account", component: "NewThreadAccount" }] },
+      { id: "claude-opus-advice", scopes: ["thread"], banners: [{ id: "claude-opus-advice", component: "ThreadAdvice" }] },
     ]);
+  });
+
+  it("the advice banner reads its own thread's advice, again on that thread's signal, and drops an answer for a thread it no longer shows (Sol B2-004)", async () => {
+    const source = await readFile(new URL("./app.tsx", import.meta.url), "utf8");
+    const { ADVICE_CHANGED } = await import("./server.ts");
+    // The channel the server signals on, literal in the app (server code is never bundled there).
+    expect(source).toContain(`useRealtime("${ADVICE_CHANGED}", (payload) => {`);
+    expect(source).toContain(
+      'const threadId = composer.scope.kind === "thread" ? composer.scope.threadId : null;',
+    );
+    expect(source).toContain('rpc.call("thread_advice", { threadId })');
+    expect(source).toContain("(payload as { threadId?: unknown } | null)?.threadId === threadId");
+    expect(source).toContain("if (shown === null || shown.threadId !== threadId || shown.text === null)");
+    // A failed read is tried again, as the header's are.
+    expect(source).toContain("timer = setTimeout(ask, retryDelayMs(attempt++))");
+    // It only shows: nothing in it sends, queues or changes the thread.
+    const banner = source.slice(source.indexOf("function ThreadAdvice()"), source.indexOf("export default definePluginApp"));
+    expect(banner).not.toMatch(/threads\.(send|retry|update)|queuedMessages|setProjectAccount/);
   });
 
   it("keeps the other controls on a host without composer customization", async () => {
