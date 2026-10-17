@@ -4,6 +4,35 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.27] - 2026-10-17
+
+### Fixed
+
+- **A judgment that lands while the pass checks what was read back
+  keeps its banner.** After a restart, the banners' pass checks against
+  bb what a banner was asked on, then asks the banner. A judgment of the
+  thread could land between the two, and the pass went on with what it
+  had checked: it could take away the banner the judgment had just shown
+  (when the account the turn failed on had room for the preferred model
+  on its numbers). The pass now goes on only while what it checked is
+  still the thread's.
+- **Five refreshes in a row are five refreshes.** A check of what was
+  read back that could not tell counted once per pass, and the pass runs
+  again within a refresh (once a move is over, or after a read that a
+  move crossed), so what was kept could be dropped within one refresh.
+  Such a check now counts at most once per refresh.
+
+### Changed
+
+- **Log.** A check of what was read back that fails says "the thread or
+  its log could not be read"; what is dropped after 5 checks in a row
+  that could not tell is said at info.
+- **README.** The paragraph on the banner after a usage refresh is split
+  into shorter sentences, and says that dropping what was kept writes
+  the storage again, that after a restart the pass reads the thread and
+  its log in bb, and that the seven days count from when the decline was
+  first judged.
+
 ## [0.2.26] - 2026-10-17
 
 ### Fixed
