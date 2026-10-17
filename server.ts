@@ -1922,13 +1922,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   async function reviseAdvice(): Promise<void> {
     const byProject = new Map<string, [string, AdviceBasis][]>();
-    for (const [threadId, basis] of adviceBasis) {
+    for (const [threadId, stored] of adviceBasis) {
       if (
         !adviseOpus(
-          basis.decision,
+          stored.decision,
           {
-            accounts: measuredAccounts(basis.model),
-            preferredModel: basis.model,
+            accounts: measuredAccounts(stored.model),
+            preferredModel: stored.model,
             reserveModel: current.preferredModel,
             now: deps.now(),
           },
@@ -1940,36 +1940,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         showAdvice(threadId, null);
         continue;
       }
-      // Read back after a restart: it stands only while the thread still
-      // waits on the turn it judged (in error, its latest turn that one or
-      // a retry of its chain); a thread that moved on while the plugin was
-      // away keeps nothing (Sol B2-R5-002).
-      if (basis.restored === true) {
-        let holds: boolean;
-        try {
-          const live = await bb.sdk.threads.get({ threadId });
-          const turn =
-            waitingThread(live) && live.projectId === basis.projectId
-              ? await latestTurn(threadId)
-              : null;
-          holds =
-            turn !== null &&
-            (turn.requestId === basis.requestId ||
-              turn.original === basis.chain);
-        } catch (error) {
-          bb.log.warn(
-            `thread ${threadId}: its banner not asked again (the thread could not be read: ${error instanceof Error ? error.message : String(error)})`,
-          );
-          continue;
-        }
-        if (adviceBasis.get(threadId) !== basis) continue;
-        if (!holds) {
-          adviceBasis.delete(threadId);
-          storeBases();
-          continue;
-        }
-        basis.restored = false;
-      }
+      const basis =
+        stored.restored === true ? await restoredHolds(threadId, stored) : stored;
+      if (basis === null) continue;
       const threads = byProject.get(basis.projectId) ?? [];
       threads.push([threadId, basis]);
       byProject.set(basis.projectId, threads);
@@ -2028,6 +2001,48 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         showAdvice(threadId, on === null ? null : opusInsteadText(basis.model, on));
       }
     }
+  }
+
+  /**
+   * A basis read back after a restart (see adviceBasis), checked against bb
+   * before the pass asks its banner: it stands only while the thread still
+   * waits on the turn it judged (in error, its latest turn that one or a
+   * retry of its chain); a thread that moved on while the plugin was away
+   * keeps nothing (Sol B2-R5-002). The basis checked, now the thread's; null
+   * when it is dropped, when a judgment of the thread replaced it meanwhile,
+   * or when bb could not be read (asked again by the next pass).
+   */
+  async function restoredHolds(
+    threadId: string,
+    basis: AdviceBasis,
+  ): Promise<AdviceBasis | null> {
+    let holds: boolean;
+    try {
+      const live = await bb.sdk.threads.get({ threadId });
+      const turn =
+        waitingThread(live) && live.projectId === basis.projectId
+          ? await latestTurn(threadId)
+          : null;
+      holds =
+        turn !== null &&
+        (turn.requestId === basis.requestId || turn.original === basis.chain);
+    } catch (error) {
+      bb.log.warn(
+        `thread ${threadId}: its banner not asked again (the thread could not be read: ${error instanceof Error ? error.message : String(error)})`,
+      );
+      return null;
+    }
+    if (adviceBasis.get(threadId) !== basis) return null;
+    if (!holds) {
+      adviceBasis.delete(threadId);
+      storeBases();
+      return null;
+    }
+    // A copy: the object in the map stays as it was read (code-reviewer r6,
+    // N2).
+    const checked = { ...basis, restored: false };
+    adviceBasis.set(threadId, checked);
+    return checked;
   }
 
   /**
