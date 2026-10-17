@@ -71,12 +71,12 @@ project uses [Semantic Versioning](https://semver.org/).
   Send now on a queued retry, which skips the placement: README, Known
   limitations, since 0.2.24). When that placement would keep the
   project where Opus cannot run, nothing is said. The account the turn
-  just failed on is judged there on its
-  numbers like any other: when the provider's report is ahead of them,
-  the advice and the placement both name it, and the Opus turn may fail
-  there once, then goes through the failure path like any Opus turn. The
-  README lists it under Known limitations, with a wait that can follow
-  another account's report (older than the advice, not fixed yet).
+  just failed on is judged there on its numbers like any other: when the
+  provider's report is ahead of them, the advice and the placement both
+  name it, and the Opus turn may fail there once, then goes through the
+  failure path like any Opus turn. The README lists it under Known
+  limitations, with a wait that can follow another account's report
+  (older than the advice, not fixed yet).
 
 ### Fixed
 
