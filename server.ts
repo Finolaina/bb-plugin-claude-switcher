@@ -2413,14 +2413,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // not a leftover of the account this turn ran on (code-reviewer r11).
     forgetStart(thread.id);
   });
-  bb.events.on("thread.archived", async ({ thread }) => {
+  /** The thread archived or deleted: nothing of its turns runs again, and what is kept for it goes. */
+  async function threadGone({ thread }: { thread: ThreadResponse }) {
     forgetStart(thread.id);
     threadModel.delete(thread.id);
     adviceOver(thread.id);
     // Forgotten in storage too, or the stored list only grows (Codex r8,
     // IR8-004).
     if (cancelled.delete(thread.id)) await storeCancelled(thread.id);
-  });
+  }
+  bb.events.on("thread.archived", threadGone);
+  // Deleted (bb deletes softly): as archived (code-reviewer r5, CR-2).
+  bb.events.on("thread.deleted", threadGone);
 
   bb.events.on("thread.created", async ({ thread }) => {
     const skipped =
