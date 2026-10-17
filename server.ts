@@ -429,7 +429,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     requestId: string;
     /** The first request of its retry chain (see loggedTurn); null: unknown. */
     chain: string | null;
-    /** When it was judged. */
+    /**
+     * When it was judged; a later judgment of the same decline keeps it
+     * (see judgedAdvice). Read back after a restart, it says how long the
+     * basis is checked (see RESTORED_MAX_AGE_MS).
+     */
     at: number;
     /** Read back from storage, not yet checked against bb (see reviseAdvice). */
     restored?: boolean;
@@ -497,8 +501,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   ): void {
     if (judgedIn !== generation(threadId)) return;
     if (basis !== null) {
-      adviceBasis.set(threadId, basis);
-      storeBases();
+      // The same decline judged again (a rescue on every refresh): when it
+      // was first judged stays, and storage, which keeps nothing else that
+      // changed, is not written (code-reviewer r6, N3).
+      const before = adviceBasis.get(threadId);
+      const same =
+        before !== undefined &&
+        before.projectId === basis.projectId &&
+        before.model === basis.model &&
+        before.decision.reason === basis.decision.reason &&
+        before.requestId === basis.requestId &&
+        before.chain === basis.chain;
+      adviceBasis.set(threadId, same ? { ...basis, at: before.at } : basis);
+      if (!same) storeBases();
     } else if (adviceBasis.delete(threadId)) storeBases();
     showAdvice(threadId, text);
   }
