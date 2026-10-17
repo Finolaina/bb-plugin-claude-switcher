@@ -439,6 +439,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     restored?: boolean;
     /** Checks of it read back that could not tell, in a row (see restoredHolds). */
     misses?: number;
+    /** The refresh whose pass counted the latest of them (see refreshes). */
+    missedIn?: number;
   };
   const adviceBasis = new Map<string, AdviceBasis>();
   /** Writes in order, like the history; awaited by nothing that decides. */
@@ -1032,6 +1034,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * B2-R6-002).
    */
   const passAfterMove = new Set<string>();
+  /**
+   * Refreshes so far: a basis read back counts at most one check that could
+   * not tell per refresh, however many passes run in it (see restoredHolds;
+   * code-reviewer r7, CR-L1).
+   */
+  let refreshes = 0;
   function askBannersAgain(): void {
     passAgain = true;
     bannerPass ??= (async () => {
@@ -1059,6 +1067,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       await recordSamples();
       bb.realtime.publish(CHANGED, { at: deps.now() });
     } finally {
+      refreshes += 1;
       // Also when the refresh fails: the reads it left grow old, and a
       // banner on reads older than two refreshes must go (Sol B2-R5-001).
       askBannersAgain();
@@ -2045,7 +2054,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * checked, now the thread's; null when it is dropped, when a judgment of
    * the thread replaced it meanwhile, or when bb could not be read or does
    * not say yet (kept, unchecked and not shown: asked again by the next
-   * pass, up to RESTORED_CHECKS in a row). One judged more than
+   * pass, up to RESTORED_CHECKS refreshes in a row). One judged more than
    * RESTORED_MAX_AGE_MS before is dropped unread (code-reviewer r6, CR-L2).
    */
   async function restoredHolds(
@@ -2068,9 +2077,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       }
       if (adviceBasis.get(threadId) !== basis) return null;
       if (holds === null) {
+        // One per refresh: a pass that runs again in it (after a move, or a
+        // read a move crossed) counts nothing more (code-reviewer r7, CR-L1).
+        if (basis.missedIn === refreshes) return null;
         const misses = (basis.misses ?? 0) + 1;
         if (misses < RESTORED_CHECKS) {
-          adviceBasis.set(threadId, { ...basis, misses });
+          adviceBasis.set(threadId, { ...basis, misses, missedIn: refreshes });
           return null;
         }
         bb.log.debug(

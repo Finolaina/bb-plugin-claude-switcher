@@ -11719,6 +11719,69 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
         expect(await banner(h)).toBeNull();
       });
 
+    // code-reviewer r7, CR-L1: the pass runs again within a refresh (a move
+    // that crosses its read of the project, the end of a move it left the
+    // project unread for); a check that could not tell counts once per
+    // refresh, so "five refreshes in a row" is what drops the basis.
+    it("passes that run again within one refresh (moves picked by hand crossing the read of the project) count one check that could not tell: the basis is kept for four refreshes and dropped at the fifth (code-reviewer r7, CR-L1)", async () => {
+      let crosses = 0;
+      let crossing = false;
+      let to = "work";
+      const h = await host(NO_FABLE, {
+        ...stillWaiting,
+        threads: { "thread-1": { status: "error" }, "thread-3": { status: "error" } },
+        // thread-1's retry: bb's log never says how it failed. thread-3's
+        // turn, judged: the pass reads where proj-1 sits for it.
+        threadEvents: {
+          ...retriedLog({ how: null }),
+          "thread-3": [
+            {
+              id: "evt_creq_3",
+              scope: { kind: "thread" },
+              threadId: "thread-3",
+              seq: 1,
+              createdAt: NOW - HOUR,
+              type: "client/turn/requested",
+              data: { requestId: "creq_3", execution: { model: FABLE_ID } },
+            },
+          ],
+        },
+        kvPreset: {
+          "advice-bases": {
+            ...storedBasis("creq_1", "creq_1")["advice-bases"],
+            "thread-3": {
+              projectId: "proj-1",
+              model: "Fable",
+              reason: "beyond-maximum-wait",
+              requestId: "creq_3",
+              chain: "creq_3",
+              at: NOW - HOUR,
+            },
+          },
+        },
+        beforeEnvRead: async (projectId) => {
+          if (crosses === 0 || crossing || projectId !== "proj-1") return;
+          crosses -= 1;
+          crossing = true;
+          await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: to });
+          to = to === "work" ? "spare" : "work";
+          crossing = false;
+        },
+      });
+      dispose = () => h.harness.dispose();
+      const kept = async () => Object.keys((await h.bb.storage.kv.get<object>("advice-bases")) ?? {});
+      // Five passes in the first refresh: four reads of proj-1 crossed.
+      crosses = 4;
+      await refreshed(h);
+      expect(crosses).toBe(0);
+      expect(h.envSet).toHaveLength(4);
+      expect(await kept()).toEqual(["thread-1", "thread-3"]);
+      for (let i = 0; i < 3; i += 1) await refreshed(h);
+      expect(await kept()).toEqual(["thread-1", "thread-3"]);
+      await refreshed(h);
+      expect(await kept()).toEqual(["thread-3"]);
+    });
+
     it("a failure of the thread judged while the first refresh reads it back: what that judgment keeps stays", async () => {
       let armed: (() => Promise<unknown>) | null = null;
       const h = await host(NO_FABLE, {
