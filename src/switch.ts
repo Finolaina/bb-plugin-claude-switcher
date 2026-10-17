@@ -54,6 +54,16 @@ export interface SwitchInput {
    * the report is nobody's and the measurements alone decide.
    */
   failedAccount?: string | null;
+  /**
+   * Whether the failure's limit report came while the failed turn ran, so
+   * from the account it ran on. bb sends the thread's latest report with
+   * every failure, whichever turn it came from: a Fable limit comes with
+   * none of its own (measured 2026-10-17), and after a move the latest may
+   * be the old account's. False: not proven so (Sol B2-R2-002): the report
+   * rules no account out for Opus (see opusInstead), and the numbers
+   * decide. Default true.
+   */
+  ownReport?: boolean;
   /** Every account with measured usage, the current one included. */
   accounts: AccountUsage[];
   /** "" = any model. */
@@ -299,7 +309,8 @@ export const FALLBACK_MODEL = "Opus";
  * report no window is blocked and its numbers decide, read just before the
  * judgment (code-reviewer 0.2.20, CR-03). Left in error, it is judged on
  * its numbers like the rest (a Fable limit comes with no such report,
- * measured 2026-10-17: it is judged there).
+ * measured 2026-10-17: it is judged there), and so it is under a report
+ * not proven its turn's own (`ownReport`, Sol B2-R2-002).
  * The account named is the one the placement before an Opus turn would
  * keep or move the project to, from where the decision leaves it (a wait
  * moves it to the account waited for): that account when it runs Opus,
@@ -341,7 +352,9 @@ export function opusInstead(
       : input.failedAccount;
   const ruledOut = input.stuck === true ? null : failedOn;
   const outForOpus =
-    input.failure.rateLimits?.status === "warning" ? null : ruledOut;
+    input.failure.rateLimits?.status === "warning" || input.ownReport === false
+      ? null
+      : ruledOut;
   const runs = (a: AccountUsage) =>
     !a.blocked &&
     a.session.usedPercent < 100 &&
