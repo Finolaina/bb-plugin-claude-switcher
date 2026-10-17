@@ -60,7 +60,6 @@ import {
   fullestWindow,
   opusInstead,
   opusInsteadText,
-  reportedReset,
   RESET_BUFFER_MS,
   RESET_JITTER_MS,
   settle,
@@ -451,36 +450,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function refusing(name: string): boolean {
     const at = refusedAt.get(name);
     return at !== undefined && deps.now() - at < REFUSAL_MS;
-  }
-  /**
-   * Accounts a failure's blocked report put out of every turn, until the
-   * reset it reported (two refreshes when it named none; the latest report
-   * of an account stands). The placement before a turn and the Opus advice
-   * both leave them out, so the account the advice names is the one an
-   * Opus turn then runs on, whatever the account's own numbers still show
-   * (Sol B2-002). A warning report puts none out: no window is blocked. In
-   * memory, like refusedAt; decideSwitch reads the report itself.
-   */
-  const reportedOut = new Map<string, number>();
-  function noteReport(
-    name: string,
-    event: PluginTurnFailedEvent,
-    now: number,
-  ): void {
-    if (event.rateLimits?.status !== "blocked") return;
-    reportedOut.set(name, reportedReset(event) ?? now + maxReadAgeMs());
-  }
-  /** `accounts` with those a report put out marked blocked until its reset (see reportedOut). */
-  function withReported(
-    accounts: ReturnType<typeof measuredAccounts>,
-    now: number,
-  ): ReturnType<typeof measuredAccounts> {
-    return accounts.map((a) => {
-      const until = reportedOut.get(a.name);
-      if (until === undefined || now >= until) return a;
-      const { unknown: _, ...known } = a;
-      return { ...known, blocked: true };
-    });
   }
   /** Why a project moves off `name` before a turn, for the history. */
   function whyOut(name: string, model: string): string {
@@ -1728,7 +1697,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         failure: event,
         currentAccount: recent.to,
         failedAccount: typeof started === "string" ? started : null,
-        accounts: withReported(measuredAccounts(model), now),
+        accounts: measuredAccounts(model),
         preferredModel: model,
         reserveModel: current.preferredModel,
         maximumWaitMs: null,
@@ -2301,9 +2270,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (from.external) return;
     const fromName = from.account ?? current.defaultAccountName;
     const now = deps.now();
-    // An account a report put out runs nothing until its reset (see
-    // reportedOut), as the Opus advice has it.
-    const measured = withReported(measuredAccounts(model), now);
+    const measured = measuredAccounts(model);
     const excursion = excursions.get(projectId);
     const decision = decidePlacement({
       currentAccount: fromName,
@@ -2460,7 +2427,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       recent.graced.add(event.threadId);
       if (typeof started === "string" && isRefusal(event))
         markRefused(started, now, event);
-      if (typeof started === "string") noteReport(started, event, now);
       const told = followsAdvice(recent, model, now, event, started);
       const reason = `Retrying on account ${recent.to}${told === null ? "" : `. ${told}`}`;
       bb.log.info(
@@ -2496,7 +2462,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         // model's weekly for this turn's model: then it is judged below.
         // Its refusal is the old account's, wherever it runs again.
         if (isRefusal(event)) markRefused(started, now, event);
-        noteReport(started, event, now);
         const told =
           sendAt === undefined || recent === undefined
             ? null
@@ -2690,18 +2655,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       stuck,
     };
     const decision = decideSwitch(input);
-    // The report is the failed account's: out of the placement and the
-    // advice until its reset. Left in error it may be an earlier account's.
-    if (!stuck && failedOn !== null) noteReport(failedOn, event, now);
     // No Fable on any account, and an account with Opus: the thread is told
-    // to switch (D3), whatever the decision's reason, naming the account the
-    // placement before an Opus turn would keep (accounts a report put out
-    // left out, as there).
-    const opusOn = opusInstead(
-      decision,
-      { ...input, accounts: withReported(input.accounts, now) },
-      unreadAccounts(),
-    );
+    // to switch (D3), whatever the decision's reason.
+    const opusOn = opusInstead(decision, input, unreadAccounts());
     const advice = opusOn === null ? null : opusInsteadText(model, opusOn);
     const carried = advice === null ? undefined : { model };
     const how = stuck ? "left in error: " : "";
