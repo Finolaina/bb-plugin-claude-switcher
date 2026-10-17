@@ -2005,34 +2005,27 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
 
   /**
    * A basis read back after a restart (see adviceBasis), checked against bb
-   * before the pass asks its banner: it stands only while the thread still
-   * waits on the turn it judged (in error, its latest turn that one or a
-   * retry of its chain); a thread that moved on while the plugin was away
-   * keeps nothing (Sol B2-R5-002). The basis checked, now the thread's; null
-   * when it is dropped, when a judgment of the thread replaced it meanwhile,
-   * or when bb could not be read (asked again by the next pass).
+   * before the pass asks its banner (see stillWaits); a thread that moved on
+   * while the plugin was away keeps nothing (Sol B2-R5-002). The basis
+   * checked, now the thread's; null when it is dropped, when a judgment of
+   * the thread replaced it meanwhile, or when bb could not be read or does
+   * not say yet (kept, unchecked and not shown: asked again by the next
+   * pass).
    */
   async function restoredHolds(
     threadId: string,
     basis: AdviceBasis,
   ): Promise<AdviceBasis | null> {
-    let holds: boolean;
+    let holds: boolean | null;
     try {
-      const live = await bb.sdk.threads.get({ threadId });
-      const turn =
-        waitingThread(live) && live.projectId === basis.projectId
-          ? await latestTurn(threadId)
-          : null;
-      holds =
-        turn !== null &&
-        (turn.requestId === basis.requestId || turn.original === basis.chain);
+      holds = await stillWaits(threadId, basis);
     } catch (error) {
       bb.log.warn(
         `thread ${threadId}: its banner not asked again (the thread could not be read: ${error instanceof Error ? error.message : String(error)})`,
       );
       return null;
     }
-    if (adviceBasis.get(threadId) !== basis) return null;
+    if (adviceBasis.get(threadId) !== basis || holds === null) return null;
     if (!holds) {
       adviceBasis.delete(threadId);
       storeBases();
@@ -2043,6 +2036,37 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const checked = { ...basis, restored: false };
     adviceBasis.set(threadId, checked);
     return checked;
+  }
+  /**
+   * Whether bb says the thread still waits on the turn `basis` judged: in
+   * error, in the same project, its latest turn that one or a later attempt
+   * of its chain. With the plugin running, such an attempt's start would
+   * have ended the banner, and only its failure's judgment could put one
+   * back: so that attempt must have been sent in the model judged and have
+   * failed in a way a failure's judgment takes up (a limit, a refusal), as
+   * a rescue reads it from bb's log (Sol B2-R6-001). Null: the log does not
+   * say yet how that attempt failed.
+   */
+  async function stillWaits(
+    threadId: string,
+    basis: AdviceBasis,
+  ): Promise<boolean | null> {
+    const live = await bb.sdk.threads.get({ threadId });
+    if (!waitingThread(live) || live.projectId !== basis.projectId)
+      return false;
+    const turn = await latestTurn(threadId);
+    if (turn === null) return false;
+    if (turn.requestId === basis.requestId) return true;
+    if (turn.original !== basis.chain) return false;
+    // A turn whose log names no Claude model is the preferred model's, as
+    // a rescue judges it.
+    if (
+      (turn.model ?? current.preferredModel).toLowerCase() !==
+      basis.model.toLowerCase()
+    )
+      return false;
+    const failure = await loggedFailure(threadId, turn);
+    return failure === null ? null : declineReason(failure, true) === null;
   }
 
   /**
@@ -3318,42 +3342,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
       return;
     }
-    // The failure of that turn, not an older one's (a turn sent by hand
-    // after a limit fails on its own account): bb reads it the same way.
-    // A turn bb refused at the door leaves no provider error, only the
-    // reason it was rejected for, as bb's own failure event translates it.
-    const [failed] = await bb.sdk.threads.events.list({
-      threadId,
-      types: ["provider/error", "client/turn/rejected"],
-      order: "desc",
-      limit: "1",
-      afterSeq: String(turn.seq),
-    });
-    const errorInfo =
-      failed?.type === "provider/error"
-        ? (failed.data.errorInfo ?? null)
-        : failed?.type === "client/turn/rejected"
-          ? rejectedErrorInfo(failed.data.reason)
-          : undefined;
-    if (errorInfo === undefined) return;
-    const [reported] = await bb.sdk.threads.events.list({
-      threadId,
-      types: ["provider/rateLimits/updated"],
-      order: "desc",
-      limit: "1",
-    });
-    const failure: PluginTurnFailedEvent = {
-      threadId,
-      requestId: turn.requestId,
-      turnId: null,
-      errorInfo,
-      inputAccepted: failed.type === "provider/error",
-      rateLimits:
-        reported?.type === "provider/rateLimits/updated"
-          ? reported.data.rateLimits
-          : null,
-      attemptNumber: turn.attempt,
-    };
+    const failure = await loggedFailure(threadId, turn);
+    if (failure === null) return;
     const declined = declineReason(failure, true);
     if (declined !== null) {
       bb.log.debug(`thread ${threadId}: left in error (${declined})`);
@@ -3374,6 +3364,52 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // Its chain, as the log named it above.
       turn.original,
     );
+  }
+  /**
+   * The failure of the thread's turn as bb logged it, as a failure event
+   * reports it (the rescue judges it; a basis read back after a restart is
+   * checked against it): null when the log holds none after the turn.
+   */
+  async function loggedFailure(
+    threadId: string,
+    turn: { seq: number; requestId: string; attempt: number },
+  ): Promise<PluginTurnFailedEvent | null> {
+    // The failure of that turn, not an older one's (a turn sent by hand
+    // after a limit fails on its own account): bb reads it the same way.
+    // A turn bb refused at the door leaves no provider error, only the
+    // reason it was rejected for, as bb's own failure event translates it.
+    const [failed] = await bb.sdk.threads.events.list({
+      threadId,
+      types: ["provider/error", "client/turn/rejected"],
+      order: "desc",
+      limit: "1",
+      afterSeq: String(turn.seq),
+    });
+    const errorInfo =
+      failed?.type === "provider/error"
+        ? (failed.data.errorInfo ?? null)
+        : failed?.type === "client/turn/rejected"
+          ? rejectedErrorInfo(failed.data.reason)
+          : undefined;
+    if (errorInfo === undefined) return null;
+    const [reported] = await bb.sdk.threads.events.list({
+      threadId,
+      types: ["provider/rateLimits/updated"],
+      order: "desc",
+      limit: "1",
+    });
+    return {
+      threadId,
+      requestId: turn.requestId,
+      turnId: null,
+      errorInfo,
+      inputAccepted: failed.type === "provider/error",
+      rateLimits:
+        reported?.type === "provider/rateLimits/updated"
+          ? reported.data.rateLimits
+          : null,
+      attemptNumber: turn.attempt,
+    };
   }
   /** What bb's failure event says of a turn rejected at the door (bb 0.45, `doorRejectionErrorInfo`). */
   function rejectedErrorInfo(
