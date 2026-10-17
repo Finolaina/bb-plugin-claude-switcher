@@ -48,6 +48,7 @@ import {
   nodeLoginIo,
 } from "./src/node-io.js";
 import {
+  ADVISED_DECLINES,
   CLAUDE_CODE_PROVIDER,
   declineReason,
   bestAccount,
@@ -137,6 +138,17 @@ type CancelledEntry = PluginThreadEventPayloads["message.cancelled"]["entry"];
 const KV_INSTALLED_AT = "installed-at";
 /** New projects already placed, kept, or pinned by the user: no longer new. */
 const KV_HANDLED_PROJECTS = "handled-projects";
+/** What each declined thread's banner is asked on (see adviceBasis), by thread. */
+const KV_ADVICE = "advice-bases";
+/** A stored basis of a banner (see adviceBasis). */
+const storedBasisSchema = z.object({
+  projectId: z.string(),
+  model: z.string(),
+  reason: z.enum(ADVISED_DECLINES),
+  requestId: z.string(),
+  chain: z.string().nullable(),
+  at: z.number(),
+});
 
 /**
  * A hidden thread (a plugin's worker, a summary): moving the whole project
@@ -383,25 +395,61 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * every judgment of the thread, dropped when a turn of it starts, when it
    * is archived, and when the automatic choice is switched off (the advice
    * names where the placement would send an Opus turn, and none is placed
-   * then). In memory: after a restart the rescue's next judgment puts it
-   * back. Asked again after every usage refresh (see reviseAdvice).
+   * then). Asked again after every usage refresh (see reviseAdvice), also
+   * after a restart: what it is asked on is kept in storage (adviceBasis).
    */
   const shownAdvice = new Map<string, string>();
   /**
-   * Per thread whose latest judgment declined its turn, what that judgment
-   * judged on: after every usage refresh its banner is asked again (see
-   * reviseAdvice). Dropped with the banner's generation (a turn of the
-   * thread, its archiving, the automatic choice switched off) and by any
-   * later judgment of the thread that is no decline.
+   * Per thread whose latest judgment declined its turn in a way that can
+   * tell it (see mayAdviseOpus), what that judgment judged on: after every
+   * usage refresh its banner is asked again (see reviseAdvice). Dropped
+   * with the banner's generation (a turn of the thread, its archiving or
+   * deletion, the automatic choice switched off) and by any later judgment
+   * of the thread that is no such decline. Kept in storage (KV_ADVICE): a
+   * restart reads them back, and the first refresh asks each again once bb
+   * says its thread still waits on the turn judged (Sol B2-R5-002).
    */
   type AdviceBasis = {
     projectId: string;
     /** The failed turn's model. */
     model: string;
-    failure: PluginTurnFailedEvent;
-    decision: SwitchDecision;
+    decision: Extract<SwitchDecision, { kind: "decline" }>;
+    /** The failed turn's request. */
+    requestId: string;
+    /** The first request of its retry chain (see loggedTurn); null: unknown. */
+    chain: string | null;
+    /** When it was judged. */
+    at: number;
+    /** Read back from storage, not yet checked against bb (see reviseAdvice). */
+    restored?: boolean;
   };
   const adviceBasis = new Map<string, AdviceBasis>();
+  /** Writes in order, like the history; awaited by nothing that decides. */
+  let basesWrites: Promise<void> = Promise.resolve();
+  function storeBases(): void {
+    const snapshot = Object.fromEntries(
+      [...adviceBasis].map(([threadId, basis]) => [
+        threadId,
+        {
+          projectId: basis.projectId,
+          model: basis.model,
+          reason: basis.decision.reason,
+          requestId: basis.requestId,
+          chain: basis.chain,
+          at: basis.at,
+        },
+      ]),
+    );
+    basesWrites = basesWrites.then(async () => {
+      try {
+        await bb.storage.kv.set(KV_ADVICE, snapshot);
+      } catch (error) {
+        bb.log.warn(
+          `could not store what the banners are asked on (a restart reads them as they were): ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    });
+  }
   /**
    * Per thread, the generation its judgments belong to: a judgment takes
    * the thread's as it begins and shows or takes away the banner only while
@@ -417,10 +465,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function generation(threadId: string): number {
     return Math.max(generationOf.get(threadId) ?? 0, switchedOffIn);
   }
-  /** A turn of the thread starts, or it is archived: its banner goes, and what its pending judgments found with it. */
+  /** A turn of the thread starts, or it is archived or deleted: its banner goes, and what its pending judgments found with it. */
   function adviceOver(threadId: string): void {
     generationOf.set(threadId, ++generations);
-    adviceBasis.delete(threadId);
+    if (adviceBasis.delete(threadId)) storeBases();
     showAdvice(threadId, null);
   }
   /**
@@ -435,8 +483,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     basis: AdviceBasis | null,
   ): void {
     if (judgedIn !== generation(threadId)) return;
-    if (basis === null) adviceBasis.delete(threadId);
-    else adviceBasis.set(threadId, basis);
+    if (basis !== null) {
+      adviceBasis.set(threadId, basis);
+      storeBases();
+    } else if (adviceBasis.delete(threadId)) storeBases();
     showAdvice(threadId, text);
   }
   function showAdvice(threadId: string, text: string | null): void {
@@ -459,7 +509,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // A Map visits no key deleted before its turn: the current one may go.
     if (!next.autoSwitch) {
       switchedOffIn = ++generations;
-      adviceBasis.clear();
+      if (adviceBasis.size > 0) {
+        adviceBasis.clear();
+        storeBases();
+      }
       for (const threadId of shownAdvice.keys()) showAdvice(threadId, null);
     }
     // Found again (and stale measurements pruned) on next use: an account of
@@ -647,6 +700,38 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   } catch (error) {
     bb.log.warn(
       `could not read the usage samples; starting them again: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  // What the banners were asked on before the restart, thread by thread:
+  // checked against bb by the first refresh (see reviseAdvice). None with
+  // the automatic choice off, which ends them all.
+  try {
+    const stored = await bb.storage.kv.get<unknown>(KV_ADVICE);
+    const byThread = z.record(z.string(), z.unknown()).safeParse(stored);
+    const entries = Object.entries(byThread.success ? byThread.data : {});
+    let unreadable = 0;
+    for (const [threadId, value] of entries) {
+      const parsed = storedBasisSchema.safeParse(value);
+      if (!parsed.success) {
+        unreadable += 1;
+        continue;
+      }
+      if (!current.autoSwitch) continue;
+      const { reason, ...rest } = parsed.data;
+      adviceBasis.set(threadId, {
+        ...rest,
+        decision: { kind: "decline", reason },
+        restored: true,
+      });
+    }
+    if (unreadable > 0 || (stored != null && !byThread.success))
+      bb.log.warn(
+        `what the banners are asked on had ${unreadable > 0 ? `${unreadable} unreadable thread${unreadable === 1 ? "" : "s"}` : "an unreadable shape"}; kept the rest`,
+      );
+    if (adviceBasis.size !== entries.length) storeBases();
+  } catch (error) {
+    bb.log.warn(
+      `could not read what the banners are asked on; they come back with the next judgments: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
   let seriesWrites: Promise<void> = Promise.resolve();
@@ -1781,15 +1866,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const on = opusInstead(
       { kind: "wait", account: recent.to, sendAt: recent.sendAt, reason: "" },
       {
-        failure: event,
         currentAccount: recent.to,
         failedAccount: typeof started === "string" ? started : null,
         accounts: measuredAccounts(model),
         preferredModel: model,
         reserveModel: current.preferredModel,
-        maximumWaitMs: null,
         now,
-        random: 0,
       },
       unreadAccounts(),
       placementOf(projectId, FALLBACK_MODEL, now),
@@ -1820,13 +1902,43 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   async function reviseAdvice(): Promise<void> {
     const byProject = new Map<string, [string, AdviceBasis][]>();
     const unread = unreadAccounts().length > 0;
-    for (const [threadId, basis] of adviceBasis) {
+    for (const [threadId, basis] of [...adviceBasis]) {
       if (
         unread ||
         !mayAdviseOpus(basis.decision, basis.model, current.preferredModel)
       ) {
         showAdvice(threadId, null);
         continue;
+      }
+      // Read back after a restart: it stands only while the thread still
+      // waits on the turn it judged (in error, its latest turn that one or
+      // a retry of its chain); a thread that moved on while the plugin was
+      // away keeps nothing (Sol B2-R5-002).
+      if (basis.restored === true) {
+        let holds: boolean;
+        try {
+          const live = await bb.sdk.threads.get({ threadId });
+          const turn =
+            waitingThread(live) && live.projectId === basis.projectId
+              ? await latestTurn(threadId)
+              : null;
+          holds =
+            turn !== null &&
+            (turn.requestId === basis.requestId ||
+              (basis.chain !== null && turn.original === basis.chain));
+        } catch (error) {
+          bb.log.warn(
+            `thread ${threadId}: its banner not asked again (the thread could not be read: ${error instanceof Error ? error.message : String(error)})`,
+          );
+          continue;
+        }
+        if (adviceBasis.get(threadId) !== basis) continue;
+        if (!holds) {
+          adviceBasis.delete(threadId);
+          storeBases();
+          continue;
+        }
+        basis.restored = false;
       }
       const threads = byProject.get(basis.projectId) ?? [];
       threads.push([threadId, basis]);
@@ -1854,14 +1966,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         const on = opusInstead(
           basis.decision,
           {
-            failure: basis.failure,
             currentAccount: at.account ?? current.defaultAccountName,
             accounts: measuredAccounts(basis.model),
             preferredModel: basis.model,
             reserveModel: current.preferredModel,
-            maximumWaitMs: null,
             now,
-            random: 0,
             stuck: true,
           },
           unreadAccounts(),
@@ -2847,7 +2956,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       judgedIn,
       decision.kind === "decline" &&
         mayAdviseOpus(decision, model, current.preferredModel)
-        ? { projectId, model, failure: event, decision }
+        ? {
+            projectId,
+            model,
+            decision,
+            requestId: event.requestId,
+            chain,
+            at: now,
+          }
         : null,
     );
     if (decision.kind === "decline") {

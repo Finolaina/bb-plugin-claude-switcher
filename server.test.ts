@@ -10772,6 +10772,136 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     });
   });
 
+  // Sol B2-R5-002: what a declined thread's banner is asked on is kept in
+  // the plugin's storage. After a restart, the first refresh asks it again
+  // once bb says the thread still waits on the turn it judged (in error,
+  // its latest turn that one or a retry of its chain); a thread that moved
+  // on while the plugin was away keeps no banner, and nothing is kept for
+  // it. Only the banner: the queue is left as it is.
+  describe("a declined thread's banner after a restart (Sol B2-R5-002)", () => {
+    const refreshed = (h: Awaited<ReturnType<typeof host>>) =>
+      h.harness.behavior.callRpc("accounts_refresh", null);
+    const toWork = toOpus("work").slice(2);
+    /** provider-retry's retry of thread-1's turn, for main's session reset. */
+    const providerRetry: QueuedRow = {
+      id: "pr1",
+      threadId: "thread-1",
+      payload: { kind: "retry", attempt: 2, reason: "Rate limited", retryOfTurnRequestId: "creq_1" },
+      sendAt: NOW + 2 * HOUR + BUFFER,
+      waitingOn: { kind: "time" },
+      createdAt: NOW,
+      model: FABLE_ID,
+    };
+    /** Everything the plugin stored, as a restart finds it. */
+    async function storage(h: Awaited<ReturnType<typeof host>>) {
+      const out: Record<string, unknown> = {};
+      for (const key of await h.bb.storage.kv.list()) out[key] = await h.bb.storage.kv.get(key);
+      return out;
+    }
+    /** thread-1 declined (provider-retry's retry queued), then the plugin restarted: the new host. */
+    async function restarted(
+      usage: Record<string, () => Response>,
+      after: HostOptions = {},
+    ) {
+      const options: HostOptions = {
+        settings: { preferredModel: "Fable", maximumWaitHours: 1 },
+        threads: { "thread-1": { status: "error" } },
+        threadEvents: chainLog([["creq_1"]]),
+        queued: [providerRetry],
+      };
+      const first = await host(usage, options);
+      await first.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(await banner(first)).toBe(told);
+      const kept = await storage(first);
+      await first.harness.dispose();
+      const h = await host(usage, { ...options, ...after, kvPreset: kept });
+      dispose = () => h.harness.dispose();
+      expect(await banner(h)).toBeNull();
+      return h;
+    }
+
+    it("with provider-retry's retry queued hours ahead: the first refresh puts the banner back, naming where an Opus turn would go now; the queue is left as it is", async () => {
+      let spare = () => Response.json(payload(1, 1, 100));
+      const h = await restarted({ ...NO_FABLE, spare: () => spare() });
+      // spare's session spent while the plugin was away: an Opus turn would go to work.
+      spare = () => Response.json(payload(100, 1, 100));
+      const run = h.harness.behavior.runService("usage-refresh");
+      await vi.waitFor(async () => {
+        expect(await banner(h)).toBe(toWork);
+      });
+      run.controller.abort();
+      await run.done;
+      expect(h.retries).toEqual([]);
+      expect(h.deleted).toEqual([]);
+      expect(h.queued.map((r) => r.id)).toEqual(["pr1"]);
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("Fable back while the plugin was away: no banner, and it comes back if Fable runs out again", async () => {
+      let workFable = 100;
+      const h = await restarted({ ...NO_FABLE, work: () => Response.json(payload(1, 1, workFable)) });
+      workFable = 30;
+      await refreshed(h);
+      expect(await banner(h)).toBeNull();
+      workFable = 100;
+      await refreshed(h);
+      expect(await banner(h)).toBe(told);
+    });
+
+    for (const [what, after] of [
+      ["its turn ran again and ended well (the thread is idle)", { threads: { "thread-1": { status: "idle" } } }],
+      ["a new turn of it was sent", { threadEvents: chainLog([["creq_1"], ["creq_9"]]) }],
+      ["it was archived", { threads: { "thread-1": { status: "error", archivedAt: NOW + 1_000 } } }],
+    ] as const)
+      it(`the thread moved on while the plugin was away (${what}): no banner, and nothing is read or kept for it`, async () => {
+        const h = await restarted(NO_FABLE, after as HostOptions);
+        await refreshed(h);
+        expect(await banner(h)).toBeNull();
+        const before = h.envReads.length;
+        await refreshed(h);
+        // The state the refresh answers with, nothing for the thread.
+        expect(h.envReads.slice(before)).toEqual(["proj-1", "proj-2", "personal"]);
+        expect(await h.bb.storage.kv.get("advice-bases")).toEqual({});
+      });
+
+    it("a turn of the thread that starts before the first refresh ends it", async () => {
+      const h = await restarted(NO_FABLE);
+      await active(h, "thread-1");
+      await refreshed(h);
+      expect(await banner(h)).toBeNull();
+    });
+
+    it("a stored basis that cannot be read is dropped and said in the log; the rest are kept", async () => {
+      const h = await host(NO_FABLE, {
+        settings: { preferredModel: "Fable", maximumWaitHours: 1 },
+        threads: { "thread-1": { status: "error" }, "thread-3": { status: "error" } },
+        threadEvents: { ...chainLog([["creq_1"]]) },
+        kvPreset: {
+          "advice-bases": {
+            "thread-1": {
+              projectId: "proj-1",
+              model: "Fable",
+              reason: "beyond-maximum-wait",
+              requestId: "creq_1",
+              chain: "creq_1",
+              at: NOW - HOUR,
+            },
+            "thread-3": { projectId: "proj-1", model: "Fable", reason: "not-rate-limit" },
+          },
+        },
+      });
+      dispose = () => h.harness.dispose();
+      await refreshed(h);
+      expect(await banner(h)).toBe(told);
+      expect(await banner(h, "thread-3")).toBeNull();
+      expect(
+        h.harness.logEntries.some(
+          (e) => e.level === "warn" && e.message.includes("1 unreadable"),
+        ),
+      ).toBe(true);
+    });
+  });
+
   it("a turn of the thread that starts while its failure is judged takes the banner away, and the judgment does not put it back when its reads end (Sol B2-R2-003)", async () => {
     let meanwhile: (() => Promise<unknown>) | null = null;
     const h = await host(NO_FABLE, {
