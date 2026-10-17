@@ -1646,6 +1646,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     cause: string | null,
     sendAt?: number,
     advice?: { model: string },
+    /**
+     * The reason of the move's history row when it also tells the thread to
+     * switch to Opus, asked as that row is added, once the move is stored as
+     * the project's latest (null: `record.reason`): see judge (Sol
+     * B2-R4-002). The latest move keeps `record.reason`: the advice is the
+     * thread's.
+     */
+    told?: () => string | null,
   ) {
     recentSwitches.set(record.projectId, {
       at: record.at,
@@ -1662,7 +1670,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         `could not record the switch: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    await addHistory(record);
+    await addHistory({ ...record, reason: told?.() ?? record.reason });
   }
 
   /**
@@ -2740,12 +2748,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (decision.account !== fromName) {
       await applyAccount(projectId, accountOrDefault(decision.account), from);
       noteMove(projectId, fromName, decision.account, model, before);
-      // The move's row tells the turn, once per chain: a retry of a turn
-      // told already records its move without the advice (Sol B2-003).
-      const retold =
-        advice !== null &&
-        decision.kind === "wait" &&
-        !tellOnce(event.threadId, chain, event.requestId);
       await recordMove(
         {
           at: now,
@@ -2753,11 +2755,26 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           projectId,
           from: fromName,
           to: decision.account,
-          reason: retold ? decision.reason : reason,
+          // The move's own reason: a wait's without the advice.
+          reason: decision.kind === "wait" ? decision.reason : reason,
         },
         event.threadId,
         sendAt,
         carried,
+        // Its history row tells the turn once per chain (Sol B2-003: a
+        // retry of a turn told already records its move alone), and only in
+        // the thread's generation the judgment began in, as noteAdvice:
+        // asked once the move and its store are over (Sol B2-R4-002).
+        // Switched off meanwhile, a turn of the thread started or the thread
+        // archived, the row records the move alone and the chain is not
+        // taken for told.
+        advice === null
+          ? undefined
+          : () =>
+              judgedIn === generation(event.threadId) &&
+              tellOnce(event.threadId, chain, event.requestId)
+                ? reason
+                : null,
       );
     } else if (decision.kind !== "retry") {
       // A wait on this same account is still the project's latest move: a
