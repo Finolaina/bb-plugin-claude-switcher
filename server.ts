@@ -49,6 +49,7 @@ import {
 } from "./src/node-io.js";
 import {
   ADVISED_DECLINES,
+  adviseOpus,
   CLAUDE_CODE_PROVIDER,
   declineReason,
   bestAccount,
@@ -1898,22 +1899,33 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * same placement (opusInstead): a new account, the banner gone (Fable
    * back, no account for Opus, a read that failed) or back. Only the
    * banner: nothing sent, retried, moved, queued or written. One read of
-   * each project's account for all its threads, none for a basis whose
-   * model is no longer the preferred one (Sol B2-R5-003), nor while a read
-   * of an account says nothing (failed, missing or older than two
-   * refreshes: see opusInstead): every banner goes then, and its basis
-   * stays for the reads to come back (Sol B2-R5-001). A judgment of the
-   * thread, a turn of it, its archiving or the automatic choice switched
-   * off while the project is read leave a basis other than the one read:
-   * what was read says nothing.
+   * each project's account for all its threads (Sol B2-R5-003), none for a
+   * banner that goes whatever the project's account (see adviseOpus): its
+   * model no longer the preferred one, a read of an account that says
+   * nothing (failed, missing or older than two refreshes: Sol B2-R5-001),
+   * or the preferred model back on some account (Sol B2-R6-003). A banner
+   * also goes when the project's account cannot be read. In every case its
+   * basis stays for the reads to come back. A judgment of the thread, a
+   * turn of it, its archiving or the automatic choice switched off while
+   * the project is read leave a basis other than the one read: what was
+   * read says nothing, and that thread's banner is theirs.
    */
   async function reviseAdvice(): Promise<void> {
     const byProject = new Map<string, [string, AdviceBasis][]>();
-    const unread = unreadAccounts().length > 0;
     for (const [threadId, basis] of adviceBasis) {
       if (
-        unread ||
-        !mayAdviseOpus(basis.decision, basis.model, current.preferredModel)
+        !adviseOpus(
+          basis.decision,
+          {
+            accounts: measuredAccounts(basis.model),
+            preferredModel: basis.model,
+            reserveModel: current.preferredModel,
+            now: deps.now(),
+          },
+          unreadAccounts(),
+          // As a rescue's judgment asks it: every account on its numbers.
+          null,
+        )
       ) {
         showAdvice(threadId, null);
         continue;
@@ -1957,10 +1969,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       try {
         at = await projectAccount(projectId);
       } catch (error) {
-        for (const [threadId] of threads)
+        for (const [threadId, basis] of threads) {
           bb.log.warn(
             `thread ${threadId}: its banner not asked again (the project's account could not be read: ${error instanceof Error ? error.message : String(error)})`,
           );
+          // Where an Opus turn would go is not known: the banner goes
+          // (Sol B2-R6-003).
+          if (adviceBasis.get(threadId) === basis) showAdvice(threadId, null);
+        }
         continue;
       }
       const now = deps.now();
