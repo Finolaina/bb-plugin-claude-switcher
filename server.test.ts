@@ -9944,6 +9944,63 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     expect(await banner(h)).toBe(told);
   });
 
+  describe("switched off while a failure is judged, the judgment writes no row telling the thread to switch to Opus (code-reviewer r3, N2)", () => {
+    /** A host whose next read of bb's log, once `armed`, switches the automatic choice off first. */
+    async function offHost(settings: Record<string, unknown>) {
+      const switchOff = { armed: false };
+      const h = await host(NO_FABLE, {
+        settings: { preferredModel: "Fable", ...settings },
+        beforeEvents: async () => {
+          if (!switchOff.armed) return;
+          switchOff.armed = false;
+          await h.harness.behavior.setSettings({ autoSwitch: false });
+        },
+      });
+      dispose = () => h.harness.dispose();
+      return { h, switchOff };
+    }
+    const retried = (h: Awaited<ReturnType<typeof host>>) =>
+      h.harness.behavior.emitThreadEvent("turn.failed", failure({ requestId: "creq_1b", attemptNumber: 2 }));
+
+    it("a decline: no row, and the turn's chain is not taken for told (judged again with it on: one row)", async () => {
+      const { h, switchOff } = await offHost({ maximumWaitHours: 1 });
+      switchOff.armed = true;
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(await history(h)).toEqual([]);
+      expect(await banner(h)).toBeNull();
+      await h.harness.behavior.setSettings({ autoSwitch: true });
+      await retried(h);
+      expect(await history(h)).toEqual([["thread-1", "proj-1", "main", "main", told]]);
+    });
+
+    it("a wait on the project's own account: no row (its queued retry still says it, as a failure judged then always was)", async () => {
+      const { h, switchOff } = await offHost({});
+      switchOff.armed = true;
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      const reason = `Waiting for Fable on main. ${told}`;
+      expect(h.retries.map((r) => r.reason)).toEqual([reason]);
+      expect(await history(h)).toEqual([]);
+      await h.harness.behavior.setSettings({ autoSwitch: true });
+      await retried(h);
+      expect(await history(h)).toEqual([["thread-1", "proj-1", "main", "main", reason]]);
+    });
+
+    it("a leftover that follows a wait that told its thread: no row", async () => {
+      const { h, switchOff } = await offHost({});
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      switchOff.armed = true;
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ threadId: "thread-3", requestId: "creq_3" }),
+      );
+      expect(h.retries.map((r) => [r.threadId, r.reason])).toEqual([
+        ["thread-1", `Waiting for Fable on main. ${told}`],
+        ["thread-3", `Retrying on account main. ${told}`],
+      ]);
+      expect((await history(h)).map((r) => r[0])).toEqual(["thread-1"]);
+    });
+  });
+
   it("a turn of the thread that starts while its failure is judged takes the banner away, and the judgment does not put it back when its reads end (Sol B2-R2-003)", async () => {
     let meanwhile: (() => Promise<unknown>) | null = null;
     const h = await host(NO_FABLE, {
