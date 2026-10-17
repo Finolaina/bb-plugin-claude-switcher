@@ -10060,12 +10060,12 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       expect(await history(h)).toEqual([["thread-1", "proj-1", "main", "main", told]]);
     });
 
-    it("a wait on the project's own account: no row (its queued retry still says it, as a failure judged then always was)", async () => {
+    it("a wait on the project's own account: no row, and its queued retry says the wait alone (code-reviewer r5, nit 1)", async () => {
       const { h, switchOff } = await offHost({});
       switchOff.armed = true;
       await h.harness.behavior.emitThreadEvent("turn.failed", failure());
       const reason = `Waiting for Fable on main. ${told}`;
-      expect(h.retries.map((r) => r.reason)).toEqual([reason]);
+      expect(h.retries.map((r) => r.reason)).toEqual(["Waiting for Fable on main"]);
       expect(await history(h)).toEqual([]);
       await h.harness.behavior.setSettings({ autoSwitch: true });
       await retried(h);
@@ -10080,9 +10080,10 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
         "turn.failed",
         failure({ threadId: "thread-3", requestId: "creq_3" }),
       );
+      // Its queued retry says the move alone (code-reviewer r5, nit 1).
       expect(h.retries.map((r) => [r.threadId, r.reason])).toEqual([
         ["thread-1", `Waiting for Fable on main. ${told}`],
-        ["thread-3", `Retrying on account main. ${told}`],
+        ["thread-3", "Retrying on account main"],
       ]);
       expect((await history(h)).map((r) => r[0])).toEqual(["thread-1"]);
     });
@@ -10123,9 +10124,10 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
         "turn.failed",
         failure({ threadId: "thread-3", requestId: "creq_3" }),
       );
+      // Its queued retry says the move alone (code-reviewer r5, nit 1).
       expect(h.retries.map((r) => [r.threadId, r.reason])).toEqual([
         ["thread-1", `Waiting for Fable on spare. ${told}`],
-        ["thread-3", `Retrying on account spare. ${told}`],
+        ["thread-3", "Retrying on account spare"],
       ]);
       expect((await history(h)).map((r) => r[0])).toEqual(["thread-1"]);
     });
@@ -10138,7 +10140,8 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       f.rateLimits!.windows[0]!.resetsAtMs = NOW + 9 * HOUR;
       await h.harness.behavior.emitThreadEvent("turn.failed", f);
       expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([["proj-1", ownNote("spare")]]);
-      expect(h.retries.map((r) => r.reason)).toEqual([`Waiting for Fable on spare. ${told}`]);
+      // Its queued retry says the wait alone too (code-reviewer r5, nit 1).
+      expect(h.retries.map((r) => r.reason)).toEqual(["Waiting for Fable on spare"]);
       expect(await history(h)).toEqual([["thread-1", "proj-1", "main", "spare", "Waiting for Fable on spare"]]);
       // On again, its retry declined beyond the maximum: told then, once.
       await h.harness.behavior.setSettings({ autoSwitch: true, maximumWaitHours: 1 });
@@ -10197,6 +10200,8 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
           expect(armed).toBeNull();
           expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([["proj-1", ownNote("spare")]]);
           expect(await history(h)).toEqual([["thread-1", "proj-1", "main", "spare", "Waiting for Fable on spare"]]);
+          // So does its queued retry (code-reviewer r5, nit 1).
+          expect(h.retries.map((r) => r.reason)).toEqual(["Waiting for Fable on spare"]);
           // Its retry fails, declined beyond the maximum with everything on:
           // the chain was not taken for told, so it is told now, once.
           await h.harness.behavior.setSettings({ autoSwitch: true, maximumWaitHours: 1 });
