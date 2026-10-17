@@ -478,17 +478,21 @@ does when a turn in the preferred model fails and is left waiting, or
 the wait would be beyond `maximumWaitHours`, or no account will free; no
 account can run the model (none unlocked with its session, weekly and
 the model's window all under 100 %; the account the turn just failed on
-counts as out, by its report); and an account can run Opus without
-spending the preferred model's weekly. A wait's retry reason then ends
-with `. No <model> on any account: switch this thread to Opus with the
-model picker; it will go to <name>`, naming the account the project's
-next Opus turn would run on (where the wait leaves the project, when it
-can run Opus there; else the best other, never the account that just
-failed). The history gets the same text once per thread (from the
-project's account to itself when nothing moved), and so does the log. A
-usage read that failed (a 429) or was never made is no proof that the
-model is gone: then nothing is said. Once the model is back, the queued
-wait runs as before.
+never counts); and an account can run Opus without spending the
+preferred model's weekly. A wait's retry reason then ends with `. No
+<model> on any account: switch this thread to Opus with the model
+picker; it will go to <name>`, naming the account the project's next
+Opus turn would run on: where the wait leaves the project when it can
+run Opus there, else the best other (the account that just failed only
+when its report merely warned and its numbers leave room). Another
+thread of the project in the preferred model that follows the wait says
+the same. The history gets the text once per thread until another row
+of it (from the project's account to itself when nothing moved), and the
+log every time. A usage read that failed (a 429), was never made or is
+older than two refreshes is no proof that the model is gone: then
+nothing is said. When nothing is queued for the turn (beyond the
+maximum, or no account will free), only the history and the log say it,
+not the thread. Once the model is back, the queued wait runs as before.
 
 A queued wait is looked at again after every usage refresh: an account
 that could not be measured when the wait was chosen may have room now.
