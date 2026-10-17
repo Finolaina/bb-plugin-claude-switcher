@@ -10092,6 +10092,90 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     });
   });
 
+  // Sol B2-R4-002: a judgment whose wait moves the project tells the thread
+  // in the move's row only while the thread's generation it began in holds,
+  // checked as the row is added, after the move and its store as the
+  // project's latest: otherwise the move (0.2.20) is recorded with its reason
+  // alone and the turn's chain is not taken for told.
+  describe("a wait that moves the project tells its thread in the move's row only while its judgment holds, checked as the row is added (Sol B2-R4-002)", () => {
+    const meanwhile: [string, (h: Awaited<ReturnType<typeof host>>) => Promise<unknown>][] = [
+      ["the automatic choice switched off", (h) => h.harness.behavior.setSettings({ autoSwitch: false })],
+      ["a turn of the thread started", (h) => active(h, "thread-1")],
+      [
+        "the thread archived",
+        (h) =>
+          h.harness.behavior.emitThreadEvent("thread.archived", {
+            thread: thread({ id: "thread-1", projectId: "proj-1" }),
+          }),
+      ],
+    ];
+    for (const [what, act] of meanwhile)
+      for (const during of ["the project's move", "the store of the move as the project's latest"] as const)
+        it(`${what} during ${during}: the move's row says the wait alone, and the chain is told later`, async () => {
+          let armed: (() => Promise<unknown>) | null = null;
+          const fire = async () => {
+            const run = armed;
+            armed = null;
+            await run?.();
+          };
+          const h = await host(NO_FABLE, {
+            settings: { preferredModel: "Fable", maximumWaitHours: 0 },
+            threadEvents: chainLog([["creq_1"], ["creq_1b", "creq_1", 2]]),
+            beforeSet: during === "the project's move" ? fire : undefined,
+          });
+          dispose = () => h.harness.dispose();
+          if (during !== "the project's move") {
+            const set = h.bb.storage.kv.set;
+            h.bb.storage.kv.set = async (key: string, value: unknown) => {
+              if (key === "last-switch") await fire();
+              return set(key, value);
+            };
+          }
+          armed = () => act(h);
+          // main's report resets last: the wait moves the project to spare.
+          const f = failure();
+          f.rateLimits!.windows[0]!.resetsAtMs = NOW + 9 * HOUR;
+          await h.harness.behavior.emitThreadEvent("turn.failed", f);
+          expect(armed).toBeNull();
+          expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([["proj-1", ownNote("spare")]]);
+          expect(await history(h)).toEqual([["thread-1", "proj-1", "main", "spare", "Waiting for Fable on spare"]]);
+          // Its retry fails, declined beyond the maximum with everything on:
+          // the chain was not taken for told, so it is told now, once.
+          await h.harness.behavior.setSettings({ autoSwitch: true, maximumWaitHours: 1 });
+          await h.harness.behavior.emitThreadEvent(
+            "turn.failed",
+            failure({ requestId: "creq_1b", attemptNumber: 2 }),
+          );
+          expect(await history(h)).toEqual([
+            ["thread-1", "proj-1", "spare", "spare", told],
+            ["thread-1", "proj-1", "main", "spare", "Waiting for Fable on spare"],
+          ]);
+        });
+
+    it("with its judgment holding throughout, the move's row tells it, and the chain's next failure adds no row", async () => {
+      const h = await host(NO_FABLE, {
+        settings: { preferredModel: "Fable", maximumWaitHours: 0 },
+        threadEvents: chainLog([["creq_1"], ["creq_1b", "creq_1", 2]]),
+      });
+      dispose = () => h.harness.dispose();
+      const f = failure();
+      f.rateLimits!.windows[0]!.resetsAtMs = NOW + 9 * HOUR;
+      await h.harness.behavior.emitThreadEvent("turn.failed", f);
+      await h.harness.behavior.setSettings({ maximumWaitHours: 1 });
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ requestId: "creq_1b", attemptNumber: 2 }),
+      );
+      expect(await history(h)).toEqual([
+        ["thread-1", "proj-1", "main", "spare", `Waiting for Fable on spare. ${told}`],
+      ]);
+      // The project's latest move, kept for views older than the history:
+      // the move with its reason alone (the advice is the thread's).
+      const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+      expect(state.lastSwitch?.reason).toBe("Waiting for Fable on spare");
+    });
+  });
+
   it("a turn of the thread that starts while its failure is judged takes the banner away, and the judgment does not put it back when its reads end (Sol B2-R2-003)", async () => {
     let meanwhile: (() => Promise<unknown>) | null = null;
     const h = await host(NO_FABLE, {
