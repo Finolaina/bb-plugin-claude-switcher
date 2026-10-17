@@ -1778,7 +1778,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * (code-reviewer 0.2.20, CR-04), and the turn's retries say nothing new;
    * a new turn gets its own row, also when it is told only at a later
    * attempt (r2, R2-01; Sol B2-003). The log says each one. `turn.chain`:
-   * see chainOf, read before the judgment checked anything.
+   * see chainOf, read before the judgment checked anything. Only in the
+   * thread's generation the judgment began in, as the banner: switched off
+   * meanwhile (or a turn of it started, or it was archived), no row, and
+   * the chain is not taken for told (code-reviewer r3, N2).
    */
   async function noteAdvice(
     threadId: string,
@@ -1787,7 +1790,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     reason: string,
     turn: { requestId: string; chain: string | null },
     at: number,
+    /** The generation of the judgment that tells it (see generation). */
+    judgedIn: number,
   ): Promise<void> {
+    if (judgedIn !== generation(threadId)) return;
     if (!tellOnce(threadId, turn.chain, turn.requestId)) return;
     await addHistory({
       at,
@@ -2459,7 +2465,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         `thread ${event.threadId}: ${reason} (switched ${now - recent.at} ms ago)`,
       );
       if (told !== null)
-        await noteAdvice(event.threadId, projectId, recent.to, reason, turn, now);
+        await noteAdvice(event.threadId, projectId, recent.to, reason, turn, now, judgedIn);
       // Its queued retry says it now, or nothing is to be said.
       showAdvice(event.threadId, null, judgedIn);
       await retryTurn(event, reason, recent.sendAt);
@@ -2497,7 +2503,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           `thread ${event.threadId}: ${reason} (its turn started on ${started})`,
         );
         if (told !== null)
-          await noteAdvice(event.threadId, projectId, currentName, reason, turn, now);
+          await noteAdvice(event.threadId, projectId, currentName, reason, turn, now, judgedIn);
         showAdvice(event.threadId, null, judgedIn);
         await retryTurn(event, reason, sendAt);
         return;
@@ -2716,7 +2722,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // No retry of ours carries it (bb's provider-retry row, if any, is
       // left as it is; a rescue queues none): the history and the log say it.
       if (advice !== null && !(stuck && !current.autoSwitch))
-        await noteAdvice(event.threadId, projectId, fromName, advice, turn, now);
+        await noteAdvice(event.threadId, projectId, fromName, advice, turn, now, judgedIn);
       return;
     }
     const reason =
@@ -2768,7 +2774,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         graced: new Set(),
       });
       if (advice !== null)
-        await noteAdvice(event.threadId, projectId, fromName, reason, turn, now);
+        await noteAdvice(event.threadId, projectId, fromName, reason, turn, now, judgedIn);
     } else {
       // Retried on the project's own account: it runs there from here, so
       // a failure of it within the grace of the project's latest move is
