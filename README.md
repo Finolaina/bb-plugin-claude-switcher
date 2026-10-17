@@ -486,8 +486,9 @@ picker; it will go to <name>`, naming the account the project's next
 Opus turn would run on: the one the placement before a turn would keep
 the project on or move it to, from where the decision leaves it (a wait
 moves it to the account waited for), asked of the same function with
-the same usage reads, so an Opus turn sent after the advice runs where
-the advice said. When that placement would keep the project where Opus
+the same usage reads, so a new message sent in Opus on those reads runs
+where the advice said (see Known limitations for what it does not
+cover). When that placement would keep the project where Opus
 cannot run, nothing is said. Every account is judged there on its own
 numbers, the one the turn just failed on included: when the provider's
 report is ahead of them, the advice and the placement both name that
@@ -769,6 +770,15 @@ Coming from `claude-accounts` 0.1.x? See the upgrade note in
   the turn just failed on still shows room), the advice names that
   account, the Opus turn runs there and may fail once, then goes through
   the failure path like any other Opus turn.
+- **The account named for Opus is where a new Opus message would go,
+  on the reads of that moment.** It holds for a message sent in Opus
+  through bb's dispatch checkpoint, where the placement before a turn
+  runs, on the same usage reads. **Send now** on a queued retry's card
+  skips that checkpoint (bb bypasses it for an explicit Send now, by
+  design): the retry runs
+  where the project is, unplaced. The queued retry's card and the
+  history's row keep the name as it was when they were written; the
+  banner over the composer is asked again after every usage refresh.
 
 ## Troubleshooting
 
