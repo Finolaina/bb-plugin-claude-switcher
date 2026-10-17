@@ -392,7 +392,7 @@ export function opusInstead(
 
 /** What the thread and the history say when opusInstead names an account. */
 export function opusInsteadText(model: string, account: string): string {
-  return `No ${model} on any account: switch this thread to ${FALLBACK_MODEL} with the model picker; it will go to ${account}`;
+  return `Sin ${model} en ninguna cuenta: pasa este hilo a ${FALLBACK_MODEL} con el selector de modelo; irá a ${account}`;
 }
 
 export type PlacementDecision =
