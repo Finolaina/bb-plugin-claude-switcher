@@ -9835,6 +9835,20 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     ]);
   });
 
+  it("bb's log unreadable: a new turn's first failure is still its own chain, and gets its own row (code-reviewer r4, L3)", async () => {
+    const h = await host(NO_FABLE, {
+      settings: { preferredModel: "Fable", maximumWaitHours: 1 },
+      threadEventsError: "bb hiccup",
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure({ requestId: "creq_3" }));
+    expect(await history(h)).toEqual([
+      ["thread-1", "proj-1", "main", "main", told],
+      ["thread-1", "proj-1", "main", "main", told],
+    ]);
+  });
+
   it("a retry's failure reads bb's log once, for the model its turn was sent with and its retry chain (code-reviewer r4, L3)", async () => {
     let reads = 0;
     const h = await host(NO_FABLE, {
@@ -10411,6 +10425,33 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
         await refreshed(h);
         expect(await banner(h)).toBeNull();
       });
+
+    it("Fable back on the account the turn failed on, by its numbers: the banner goes, as a rescue's judgment counts that account too", async () => {
+      let main = () => Response.json(payload(100, 40, 100));
+      const h = await host(
+        { ...NO_FABLE, main: () => main() },
+        { settings: { preferredModel: "Fable", maximumWaitHours: 1 } },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(await banner(h)).toBe(told);
+      main = () => Response.json(payload(10, 40, 30));
+      await refreshed(h);
+      expect(await banner(h)).toBeNull();
+    });
+
+    it("the project picked onto another account by hand: the banner names where an Opus turn would go from there", async () => {
+      const h = await host(NO_FABLE, { settings: { preferredModel: "Fable", maximumWaitHours: 1 } });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(await banner(h)).toBe(told);
+      await h.harness.behavior.callRpc("project_set_account", {
+        projectId: "proj-1",
+        account: "work",
+      });
+      await refreshed(h);
+      expect(await banner(h)).toBe(toWork);
+    });
 
     it("the project's variable set outside the plugin: no placement there, the banner goes", async () => {
       const h = await host(NO_FABLE, { settings: { preferredModel: "Fable", maximumWaitHours: 1 } });
