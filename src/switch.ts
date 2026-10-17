@@ -340,7 +340,8 @@ export function mayAdviseOpus(
  */
 export function opusInstead(
   decision: SwitchDecision,
-  input: SwitchInput,
+  /** What it reads of a judgment's input: the failure itself says nothing here. */
+  input: Omit<SwitchInput, "failure" | "maximumWaitMs" | "random">,
   unread: readonly string[],
   /** The placement before an Opus turn of the project, but where it sits. */
   placement: Omit<PlacementInput, "currentAccount">,
