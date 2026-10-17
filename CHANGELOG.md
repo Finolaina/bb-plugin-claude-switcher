@@ -4,6 +4,40 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.22] - 2026-10-17
+
+### Fixed
+
+- **An account a blocked report put out is out of every choice, until
+  its reset.** In 0.2.21 only the placement before a turn and the Opus
+  advice left it out: the choice after another thread's failure, a thread
+  left in error, the release of a wait and a move ahead of the limit
+  still judged it on its numbers read before the report, and could send
+  a turn straight back to it. They all leave it out now, and a wait for
+  it lands on the reset it reported (or later, when its own numbers say
+  so).
+- **A report puts out only the account it came from.** bb sends a
+  thread's latest limit report with each failure, whichever turn it came
+  from: after a move from one account to another, a failure on the second
+  could carry the first one's report and put the second out, and the
+  Opus advice then named an account other than the one the Opus turn
+  stayed on. A report now puts its account out only when bb's log shows
+  it came while the failed turn ran (the first report or request after
+  that turn's request is a report). Otherwise, or when the log cannot be
+  read, no account is put out and the account is judged on its numbers.
+  A read of the account made after the report decides from then on.
+- **A judgment still reading does not put the banner back.** A failure
+  being judged when the automatic choice was switched off, when a turn of
+  the thread started or when the thread was archived could put the banner
+  back once its reads ended. A judgment now shows or takes away the
+  banner only if none of those happened since it began, and no banner
+  shows with the automatic choice off.
+- **The banner reads again when bb's connection comes back.** bb does not
+  replay its realtime signals: one that added or took away the advice
+  while the connection was down was lost, and the banner kept what it
+  showed until the next one. It now reads the thread's advice again when
+  the connection is back.
+
 ## [0.2.21] - 2026-10-17
 
 ### Added

@@ -488,10 +488,18 @@ run Opus there, else the best other (the account that just failed only
 when its report merely warned and its numbers leave room). A failure
 whose report blocked its account puts that account out of every turn
 until the reset it reported (for two refreshes when it names none),
-whatever its own numbers still show: the advice never names it, and
-the placement before a turn moves the project off it, so an Opus turn
-sent after the advice runs where the advice said (and a Fable turn does
-not go back there before that reset either). Another thread of the
+whatever its numbers read before the report still show: the advice
+never names it, the placement before a turn moves the project off it,
+so an Opus turn sent after the advice runs where the advice said, and
+no other choice picks it (after another failure, for a thread left in
+error, to release a wait or to move ahead of the limit); a wait for it
+lands on that reset, or later when its own numbers say so. Only a
+report that came while the failed turn ran puts its account out (bb
+sends a thread's latest report with each failure, and after a move
+that can be the other account's): bb's log has it right after that
+turn's request. When the log cannot tell, no account is put out. A read
+of the account made after the report decides from then on. Another
+thread of the
 project in the preferred model that follows the wait is told too, while
 the wait is still ahead, as the latest usage reads have it: nothing when
 one of them failed since. The history gets the text once per turn you
@@ -506,7 +514,9 @@ turn (beyond the maximum, or no account will free), the thread shows
 the text in a banner over its composer, besides the history and the
 log; the banner goes when a turn of the thread starts, when a later
 failure of it is judged without the advice, when it is archived and
-when the automatic choice is switched off. A thread whose preferred
+when the automatic choice is switched off (a judgment still reading
+then does not put it back), and it reads the advice again when bb's
+connection comes back after a drop. A thread whose preferred
 model is Opus itself is never told. Once the model is back, the queued
 wait runs as before.
 
