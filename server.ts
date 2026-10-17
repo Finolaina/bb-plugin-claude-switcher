@@ -1296,7 +1296,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         move.inFlight -= 1;
         move.epoch += 1;
         // A banners' pass left the project unread for this move: it runs
-        // again now, without being waited for (Sol B2-R6-002).
+        // again now, without being waited for (Sol B2-R6-002). With no pass
+        // under way, its part up to its first read (the bases in memory, a
+        // banner taken away) runs here, inside this `finally`.
         if (move.inFlight === 0 && passAfterMove.delete(projectId))
           askBannersAgain();
       }
