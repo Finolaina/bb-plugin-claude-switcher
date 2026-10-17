@@ -1623,20 +1623,70 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
 
   /**
-   * Per thread, the turn it was last told to switch to Opus for (see
-   * noteAdvice). Kept in memory: after a restart a thread still in error
-   * gets one more row.
+   * Per thread, the retry chain it was last told to switch to Opus for, by
+   * the chain's first request (see chainOf, noteAdvice). Kept in memory:
+   * after a restart a thread still in error gets one more row.
    */
   const advised = new Map<string, string>();
 
   /**
+   * The first request of a failed turn's retry chain, as bb keys its
+   * retries (see latestTurn): the turn's own at its first attempt, else
+   * the one its row in bb's log names (a retry's failure reports the
+   * retry's own request). Null when the log does not say: unreadable, or
+   * the request not among its latest rows.
+   */
+  async function chainOf(
+    threadId: string,
+    turn: { requestId: string; attemptNumber: number },
+  ): Promise<string | null> {
+    if (turn.attemptNumber <= 1) return turn.requestId;
+    try {
+      const rows = await bb.sdk.threads.events.list({
+        threadId,
+        types: ["client/turn/requested"],
+        order: "desc",
+        limit: "20",
+      });
+      for (const row of rows)
+        if (
+          row.type === "client/turn/requested" &&
+          row.data.requestId === turn.requestId
+        )
+          return row.data.retryOfRequestId ?? row.data.requestId;
+      return null;
+    } catch (error) {
+      bb.log.warn(
+        `thread ${threadId}: the retry chain of turn ${turn.requestId} not read from bb: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Marks the turn's chain told; false when it already was (Sol B2-003: by
+   * thread and chain, not by attempt). A retry whose chain the log does not
+   * name is taken for the chain last told, the likelier case.
+   */
+  function tellOnce(
+    threadId: string,
+    chain: string | null,
+    requestId: string,
+  ): boolean {
+    const told = advised.get(threadId);
+    if (told !== undefined && (chain === null || told === chain)) return false;
+    advised.set(threadId, chain ?? requestId);
+    return true;
+  }
+
+  /**
    * A thread told to switch to Opus where no move says it (see
    * opusInstead): a history row from its account to the same one. Once
-   * per turn sent: a thread left in error is judged on every refresh, and
-   * where an Opus turn would go can change between two (code-reviewer
-   * 0.2.20, CR-04), and the turn's retries say nothing new; a new turn
-   * (attempt 1 under another request) gets its own row (r2, R2-01). The
-   * log says each one.
+   * per turn sent, retries included: a thread left in error is judged on
+   * every refresh, and where an Opus turn would go can change between two
+   * (code-reviewer 0.2.20, CR-04), and the turn's retries say nothing new;
+   * a new turn gets its own row, also when it is told only at a later
+   * attempt (r2, R2-01; Sol B2-003). The log says each one.
    */
   async function noteAdvice(
     threadId: string,
@@ -1646,13 +1696,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     turn: { requestId: string; attemptNumber: number },
     at: number,
   ): Promise<void> {
-    const told = advised.get(threadId);
-    if (
-      told !== undefined &&
-      (told === turn.requestId || turn.attemptNumber > 1)
-    )
+    if (!tellOnce(threadId, await chainOf(threadId, turn), turn.requestId))
       return;
-    advised.set(threadId, turn.requestId);
     await addHistory({
       at,
       threadId,
@@ -2544,8 +2589,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // moving and before retrying (Codex r6, IR6-006).
     if (stuck && !current.autoSwitch) return;
     if (decision.account !== fromName) {
+      // Read before the move: none of it waits between the move and its record.
+      const chain =
+        advice === null ? null : await chainOf(event.threadId, event);
       await applyAccount(projectId, accountOrDefault(decision.account), from);
       noteMove(projectId, fromName, decision.account, model, before);
+      // The move's row tells the turn, once per chain: a retry of a turn
+      // told already records its move without the advice (Sol B2-003).
+      const retold =
+        advice !== null &&
+        decision.kind === "wait" &&
+        !tellOnce(event.threadId, chain, event.requestId);
       await recordMove(
         {
           at: now,
@@ -2553,14 +2607,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           projectId,
           from: fromName,
           to: decision.account,
-          reason,
+          reason: retold ? decision.reason : reason,
         },
         event.threadId,
         sendAt,
         carried,
       );
-      // The move's row says it: the turn is told.
-      if (advice !== null) advised.set(event.threadId, event.requestId);
     } else if (decision.kind !== "retry") {
       // A wait on this same account is still the project's latest move: a
       // leftover thread follows it (waits for the same reset) instead of
