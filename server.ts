@@ -1805,44 +1805,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
 
   /**
    * Per thread, the retry chain it was last told to switch to Opus for, by
-   * the chain's first request (see chainOf, noteAdvice). Kept in memory:
+   * the chain's first request (see loggedTurn, noteAdvice). Kept in memory:
    * after a restart a thread still in error gets one more row.
    */
   const advised = new Map<string, string>();
-
-  /**
-   * The first request of a failed turn's retry chain, as bb keys its
-   * retries (see latestTurn): the turn's own at its first attempt, else
-   * the one its row in bb's log names (a retry's failure reports the
-   * retry's own request). Null when the log does not say: unreadable, or
-   * the request not among its latest rows.
-   */
-  async function chainOf(
-    threadId: string,
-    turn: { requestId: string; attemptNumber: number },
-  ): Promise<string | null> {
-    if (turn.attemptNumber <= 1) return turn.requestId;
-    try {
-      const rows = await bb.sdk.threads.events.list({
-        threadId,
-        types: ["client/turn/requested"],
-        order: "desc",
-        limit: "20",
-      });
-      for (const row of rows)
-        if (
-          row.type === "client/turn/requested" &&
-          row.data.requestId === turn.requestId
-        )
-          return row.data.retryOfRequestId ?? row.data.requestId;
-      return null;
-    } catch (error) {
-      bb.log.warn(
-        `thread ${threadId}: the retry chain of turn ${turn.requestId} not read from bb: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      return null;
-    }
-  }
 
   /**
    * Marks the turn's chain told; false when it already was (Sol B2-003: by
@@ -1868,7 +1834,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * (code-reviewer 0.2.20, CR-04), and the turn's retries say nothing new;
    * a new turn gets its own row, also when it is told only at a later
    * attempt (r2, R2-01; Sol B2-003). The log says each one. `turn.chain`:
-   * see chainOf, read before the judgment checked anything. Only in the
+   * see loggedTurn, read before the judgment checked anything. Only in the
    * thread's generation the judgment began in, as the banner: switched off
    * meanwhile (or a turn of it started, or it was archived), no row, and
    * the chain is not taken for told (code-reviewer r3, N2).
@@ -2175,7 +2141,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // Read before the account is measured and outside the project's queue:
     // a thread whose model has no percentage costs no query (code-reviewer r1).
     const model =
-      (await loggedModel(thread.id)) ??
+      (await loggedTurn(thread.id)).model ??
       threadModel.get(thread.id) ??
       current.preferredModel;
     if (!(aheadThreshold(model) > 0)) return;
@@ -2305,42 +2271,53 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   const threadModel = new Map<string, string>();
   /**
-   * The model of the thread's latest message in bb's log, for a thread whose
+   * What bb's log says of the thread's latest message, for a thread whose
    * sending this plugin did not see (it was reloaded or restarted since: a
-   * long turn outlives both). Null when the log cannot be read or names no
-   * Claude model: the preferred model decides then.
+   * long turn outlives both), or of a failed turn (`failed`), in one read
+   * (code-reviewer r4, L3):
+   *  - `model`: the model it was sent with; null when the log cannot be
+   *    read or names no Claude model: the preferred model decides then;
+   *  - `chain`, for a failed turn: the first request of its retry chain,
+   *    as bb keys its retries (see latestTurn): the turn's own at its first
+   *    attempt, else the one its row names (a retry's failure reports the
+   *    retry's own request); null when the log does not say (unreadable, or
+   *    the request not among its latest rows).
    */
-  async function loggedModel(
+  async function loggedTurn(
     threadId: string,
-    requestId?: string,
-  ): Promise<string | null> {
+    failed?: { requestId: string; attemptNumber: number },
+  ): Promise<{ model: string | null; chain: string | null }> {
+    const first =
+      failed !== undefined && failed.attemptNumber <= 1
+        ? failed.requestId
+        : null;
     try {
       const rows = await bb.sdk.threads.events.list({
         threadId,
         types: ["client/turn/requested"],
         order: "desc",
-        limit: requestId === undefined ? "1" : "20",
+        limit: failed === undefined ? "1" : "20",
       });
+      const requested = rows.flatMap((r) =>
+        r.type === "client/turn/requested" ? [r.data] : [],
+      );
       // A failed turn is judged by what that very turn was sent with (its
       // request id), not by the latest message: the latest may be a newer
       // turn in another model (code-reviewer r2). A turn the log does not
       // name (an older id, or none) is judged by the latest message.
-      const row =
-        requestId === undefined
-          ? rows[0]
-          : (rows.find(
-              (r) =>
-                r.type === "client/turn/requested" &&
-                r.data.requestId === requestId,
-            ) ?? rows[0]);
-      return row?.type === "client/turn/requested"
-        ? modelFamily(row.data.execution?.model ?? null)
-        : null;
+      const own =
+        failed === undefined
+          ? undefined
+          : requested.find((r) => r.requestId === failed.requestId);
+      return {
+        model: modelFamily((own ?? requested[0])?.execution?.model ?? null),
+        chain: first ?? own?.retryOfRequestId ?? own?.requestId ?? null,
+      };
     } catch (error) {
       bb.log.warn(
-        `thread ${threadId}: its model not read from bb: ${error instanceof Error ? error.message : String(error)}`,
+        `thread ${threadId}: its ${failed === undefined ? "model" : "turn's model and retry chain"} not read from bb: ${error instanceof Error ? error.message : String(error)}`,
       );
-      return null;
+      return { model: null, chain: first };
     }
   }
   /** A thread in one of these has a turn under way: a message sent then waits in bb's queue. */
@@ -2499,17 +2476,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // the message before it (code-reviewer r2, same hole as thread.idle).
     // Read before the shortcuts below: a leftover is not retried on an
     // account reserved for the preferred model (Codex BM-R1-001).
+    // With its retry chain, for the Opus advice, in the same read: before
+    // anything below is checked or marked, so no read waits between those
+    // checks and a move (Sol B2-R3-005; code-reviewer r4, L3).
+    const logged = await loggedTurn(event.threadId, event);
     const model =
-      (await loggedModel(event.threadId, event.requestId)) ??
-      threadModel.get(event.threadId) ??
-      current.preferredModel;
-    // Its retry chain, for the Opus advice: read before anything below is
-    // checked or marked, so no read waits between those checks and a move
-    // (Sol B2-R3-005).
-    const turn = {
-      requestId: event.requestId,
-      chain: await chainOf(event.threadId, event),
-    };
+      logged.model ?? threadModel.get(event.threadId) ?? current.preferredModel;
+    const turn = { requestId: event.requestId, chain: logged.chain };
     const recent = recentSwitches.get(projectId);
     // Where the project is now: a leftover follows the recorded move only
     // while the project still sits where that move put it and no move is
@@ -2731,7 +2704,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     before: MoveMark,
     /** The thread's generation as the judgment began (see generation). */
     judgedIn: number,
-    /** The turn's retry chain (see chainOf), read before the judgment began. */
+    /** The turn's retry chain (see loggedTurn), read before the judgment began. */
     chain: string | null,
     ranOn?: string | null,
   ): Promise<void> {
