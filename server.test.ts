@@ -10298,6 +10298,34 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     expect((await history(h)).map((r) => r[0])).toEqual(["thread-1"]);
   });
 
+  it("a leftover whose turn started on the account waited for, within the grace of a wait already due, is not told either (R2-02, with the advice judged again: Sol B2-001)", async () => {
+    let clock = NOW;
+    const h = await host(
+      { ...NO_FABLE, main: () => Response.json(resetsAt(100, 40, NOW + 10_000)) },
+      { settings: { preferredModel: "Fable" }, clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    // thread-3's turn starts on main (no account runs Fable: it stays).
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect(await dispatch(h, "thread-3", FABLE_ID)).toEqual({ action: "proceed" });
+    await active(h, "thread-3");
+    const f = failure();
+    f.rateLimits!.windows[0]!.resetsAtMs = NOW + 10_000;
+    await h.harness.behavior.emitThreadEvent("turn.failed", f);
+    // 40 s on: within the grace, past the wait's send time. Its own account
+    // is out of the judgment, so the others alone would still say it.
+    clock = NOW + 40_000;
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ threadId: "thread-3", requestId: "creq_3" }),
+    );
+    expect(h.retries.map((r) => [r.threadId, r.reason])).toEqual([
+      ["thread-1", `Waiting for Fable on main. ${told}`],
+      ["thread-3", "Retrying on account main"],
+    ]);
+    expect((await history(h)).map((r) => r[0])).toEqual(["thread-1"]);
+  });
+
   it("a leftover after the grace whose wait is already due is retried at once and not told", async () => {
     let clock = NOW;
     let mainOut = false;
