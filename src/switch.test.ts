@@ -1641,10 +1641,12 @@ describe("opusInstead: a Fable thread no account can run is told to switch to Op
     expect(told({ kind: "decline", reason: "no-account-usable" }, stuck)).toBeNull();
   });
 
-  it("the project out of the measurements, or unknown: kept where nothing says it runs Opus, nothing said", () => {
-    // Asked straight: the placement keeps a project whose account it cannot judge.
+  it("an account whose read lacks a window: nothing said; the project on an account out of the measurements: kept there, nothing said", () => {
+    // An incomplete answer is no proof of anything: nothing is said before
+    // the placement is even asked (code-reviewer r4, N3).
     const unknown = seat("team5", { blocked: true, unknown: true, models: {} });
     expect(told({ kind: "decline", reason: "no-account-usable" }, fable({ accounts: [unknown, team1, team2] }))).toBeNull();
+    // Asked straight: the placement keeps a project whose account it cannot judge.
     expect(told({ kind: "decline", reason: "no-account-usable" }, fable({ currentAccount: "team9" }))).toBeNull();
   });
 
