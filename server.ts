@@ -58,6 +58,8 @@ import {
   MAX_ATTEMPTS,
   modelFamily,
   fullestWindow,
+  opusInstead,
+  opusInsteadText,
   RESET_BUFFER_MS,
   RESET_JITTER_MS,
   settle,
@@ -1037,6 +1039,25 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
 
   /**
+   * The accounts whose latest usage read says nothing of what they can run
+   * now (see opusInstead): never read, or its latest attempt had a problem
+   * (a 429, the endpoint down). Every judgment follows a read of all
+   * accounts, so a read that worked is fresh. An account without a login is
+   * not one of them: it runs nothing until logged in again.
+   */
+  function unreadAccounts(): string[] {
+    return accounts
+      .filter((account) => {
+        const m = collector.get(account.name);
+        return (
+          m === undefined ||
+          (m.problem !== null && m.problem.kind !== "unauthenticated")
+        );
+      })
+      .map((account) => account.name);
+  }
+
+  /**
    * `shared`: the views' list, which may reuse a recent read (see
    * sharedProjects); `need`, a project that list must have.
    */
@@ -1561,6 +1582,30 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
     }
     await addHistory(record);
+  }
+
+  /**
+   * A thread told to switch to Opus where no move says it (see
+   * opusInstead): a history row from its account to the same one. Once per
+   * thread and text: a thread left in error is judged on every refresh.
+   */
+  async function noteAdvice(
+    threadId: string,
+    projectId: string,
+    account: string,
+    reason: string,
+    at: number,
+  ): Promise<void> {
+    if (history.find((r) => r.threadId === threadId)?.reason === reason)
+      return;
+    await addHistory({
+      at,
+      threadId,
+      projectId,
+      from: account,
+      to: account,
+      reason,
+    });
   }
 
   /** Same variable state: nobody moved the project while we were deciding. */
@@ -2387,7 +2432,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         `thread ${event.threadId}: left in error by a refusal; no account marked for it (the one that refuses again marks itself)`,
       );
     }
-    const decision = decideSwitch({
+    const input = {
       failure: event,
       currentAccount: fromName,
       failedAccount: failedOn,
@@ -2401,15 +2446,23 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       now,
       random: deps.random(),
       stuck,
-    });
+    };
+    const decision = decideSwitch(input);
+    // No Fable on any account, and an account with Opus: the thread is told
+    // to switch (D3), whatever the decision's reason.
+    const opusOn = opusInstead(decision, input, unreadAccounts());
+    const advice = opusOn === null ? null : opusInsteadText(model, opusOn);
     const how = stuck ? "left in error: " : "";
     if (decision.kind === "decline") {
       // The account the project sits on is no good either: a leftover
       // thread must be judged too, not retried there at once.
       recentSwitches.delete(projectId);
       bb.log.info(
-        `thread ${event.threadId}: ${how}no switch (${decision.reason})`,
+        `thread ${event.threadId}: ${how}no switch (${decision.reason})${advice === null ? "" : `; ${advice}`}`,
       );
+      // Nothing is queued: the history says it.
+      if (advice !== null && !(stuck && !current.autoSwitch))
+        await noteAdvice(event.threadId, projectId, fromName, advice, now);
       return;
     }
     const reason =
@@ -2417,7 +2470,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         ? `Switched to account ${decision.account}${decision.model === null ? "" : ` (${decision.model})`}${refusal && failedOn !== null ? `: ${failedOn} refused the turn` : ""}`
         : decision.kind === "retry"
           ? `Retrying on account ${decision.account}${decision.model === null ? "" : ` (${decision.model})`}: it has room now`
-          : decision.reason;
+          : advice === null
+            ? decision.reason
+            : `${decision.reason}. ${advice}`;
     const sendAt = decision.kind === "wait" ? decision.sendAt : undefined;
     // A rescue runs between reads: switched off meanwhile, it stops before
     // moving and before retrying (Codex r6, IR6-006).
@@ -2450,6 +2505,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         sendAt,
         graced: new Set(),
       });
+      if (advice !== null)
+        await noteAdvice(event.threadId, projectId, fromName, reason, now);
     } else {
       // Retried on the project's own account: it runs there from here, so
       // a failure of it within the grace of the project's latest move is
