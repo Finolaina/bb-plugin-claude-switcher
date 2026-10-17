@@ -283,21 +283,24 @@ export const FALLBACK_MODEL = "Opus";
  *    weekly and the model's window all under 100 %;
  *  - an account can run Opus without spending the reserve (chooseAccount: a
  *    Max account that keeps the preferred model is never named).
- * The account the turn just failed on is out of both, by the provider's
- * report, as decideSwitch has it: bb judges a failure at once only on a
- * blocked or warning report, and the windows Claude Code reports there (the
- * five-hour and the weekly ones) count against an Opus turn too. Left in
- * error, it is judged on its numbers like the rest (a Fable limit comes
- * with no such report, measured 2026-10-17: it is judged there).
+ * The account the turn just failed on never counts as running the model:
+ * the provider refused it the turn, as decideSwitch has it. For Opus it is
+ * out by a blocked report (the windows Claude Code reports, the five-hour
+ * and the weekly ones, count against an Opus turn too); under a warning
+ * report no window is blocked and its numbers decide, read just before the
+ * judgment (code-reviewer 0.2.20, CR-03). Left in error, it is judged on
+ * its numbers like the rest (a Fable limit comes with no such report,
+ * measured 2026-10-17: it is judged there).
  * The account named is the one the placement before an Opus turn would
  * keep or move the project to, from where the decision leaves it (a wait
  * moves it to the account waited for): that account when it runs Opus,
  * else the best other.
  *
  * ponytail: an advice, not the move. SDK 0.6.15 takes no model on
- * threads.retry. threads.send and threads.update do take one (a model kept
- * for the next turns), but a retry re-submits the failed turn by reference
- * and whether it then runs in that model is not verified. Once a retry can
+ * threads.retry. threads.send and threads.update do take one (update's is
+ * presumably a model kept for the next turns: the types do not say), but a
+ * retry re-submits the failed turn by reference and whether it then runs
+ * in that model is not verified. Once a retry can
  * be sent in a model (threads.retry with `model`, or update then retry
  * measured to run in it), make the switch here (the plan's D2) instead of
  * telling it.
@@ -323,6 +326,8 @@ export function opusInstead(
       ? input.currentAccount
       : input.failedAccount;
   const ruledOut = input.stuck === true ? null : failedOn;
+  const outForOpus =
+    input.failure.rateLimits?.status === "warning" ? null : ruledOut;
   const runs = (a: AccountUsage) =>
     !a.blocked &&
     a.session.usedPercent < 100 &&
@@ -330,7 +335,7 @@ export function opusInstead(
     canRunModel(a, input.preferredModel);
   if (accounts.some((a) => a.name !== ruledOut && runs(a))) return null;
   const opus = { preferredModel: FALLBACK_MODEL, reserveModel: reserve };
-  const open = accounts.filter((a) => a.name !== ruledOut);
+  const open = accounts.filter((a) => a.name !== outForOpus);
   const from =
     decision.kind === "wait" ? decision.account : input.currentAccount;
   return (
@@ -349,7 +354,12 @@ export function opusInstead(
 
 /** What the thread and the history say when opusInstead names an account. */
 export function opusInsteadText(model: string, account: string): string {
-  return `No ${model} on any account: switch this thread to ${FALLBACK_MODEL} with the model picker; it will go to ${account}`;
+  return `${opusInsteadLead(model)}; it will go to ${account}`;
+}
+
+/** The part of opusInsteadText that names no account. */
+export function opusInsteadLead(model: string): string {
+  return `No ${model} on any account: switch this thread to ${FALLBACK_MODEL} with the model picker`;
 }
 
 export type PlacementDecision =

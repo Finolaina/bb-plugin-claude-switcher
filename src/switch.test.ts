@@ -1402,6 +1402,77 @@ describe("opusInstead: a Fable thread no account can run is told to switch to Op
     expect(advice(rescued)).toBe("team5");
   });
 
+  /** Refused for Fable while the stored report only warned on the session (bb's report lags the refusal). */
+  const warning = failure({
+    rateLimits: {
+      ...failure().rateLimits!,
+      status: "warning",
+      windows: [
+        {
+          providerKey: "primary",
+          label: "Current session",
+          status: "warning",
+          resetsAtMs: NOW + HOUR,
+        },
+      ],
+    },
+  });
+
+  it("under a warning report the account the turn failed on is judged on its numbers for Opus (no window is blocked), never for Fable", () => {
+    // Its fresh numbers: Fable spent, the session at 85 %, Opus room.
+    const warned = seat("team5", {
+      session: { usedPercent: 85, resetsAt: NOW + HOUR },
+      models: {
+        Fable: { usedPercent: 100, resetsAt: NOW + 2 * HOUR },
+        Opus: { usedPercent: 10, resetsAt: NOW + 96 * HOUR },
+      },
+    });
+    const i = fable({ failure: warning, accounts: [warned, team1, team2] });
+    expect(decideSwitch(i)).toMatchObject({ kind: "wait", account: "team5" });
+    // The wait leaves the project on team5, which runs Opus: the placement
+    // before an Opus turn keeps it there.
+    expect(advice(i)).toBe("team5");
+    // The only account that runs Opus: still said.
+    const opusOut = seat("team2", {
+      session: { usedPercent: 0, resetsAt: null },
+      models: {
+        Fable: { usedPercent: 100, resetsAt: NOW + 6 * HOUR },
+        Opus: { usedPercent: 100, resetsAt: NOW + 96 * HOUR },
+      },
+    });
+    expect(advice(fable({ failure: warning, accounts: [warned, team1, opusOut] }))).toBe("team5");
+    // Numbers read before the refusal that still show Fable: it was just
+    // refused Fable, so they do not stop the advice.
+    const stale = seat("team5", {
+      session: { usedPercent: 85, resetsAt: NOW + HOUR },
+      models: { Fable: { usedPercent: 40, resetsAt: NOW + 72 * HOUR } },
+    });
+    const j = fable({ failure: warning, accounts: [stale, team1, team2] });
+    expect(decideSwitch(j)).toMatchObject({ kind: "wait", account: "team5" });
+    expect(advice(j)).toBe("team5");
+    // Its session at 100 % by its numbers: no Opus there either.
+    const full = seat("team5", {
+      session: { usedPercent: 100, resetsAt: NOW + HOUR },
+      models: { Fable: { usedPercent: 100, resetsAt: NOW + 2 * HOUR } },
+    });
+    expect(advice(fable({ failure: warning, accounts: [full, team1, team2] }))).toBe("team2");
+  });
+
+  it("under a warning report a Max account the turn failed on, whose numbers still keep Fable, is never named for Opus (the Max accounts are Fable's)", () => {
+    const max1 = account("max1", {
+      session: { usedPercent: 85, resetsAt: NOW + HOUR },
+      weekly: { usedPercent: 50, resetsAt: NOW + 72 * HOUR },
+      models: { Fable: { usedPercent: 40, resetsAt: NOW + 72 * HOUR } },
+    });
+    const i = fable({
+      currentAccount: "max1",
+      failure: warning,
+      accounts: [max1, team1, team2],
+    });
+    expect(decideSwitch(i)).toMatchObject({ kind: "wait", account: "max1" });
+    expect(advice(i)).toBe("team2");
+  });
+
   it("an account with Fable left whose session is at 100 % has no usable Fable (S9): said", () => {
     const sessionOut = seat("team1", {
       session: { usedPercent: 100, resetsAt: NOW + HOUR },

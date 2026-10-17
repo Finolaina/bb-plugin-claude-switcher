@@ -59,6 +59,7 @@ import {
   modelFamily,
   fullestWindow,
   opusInstead,
+  opusInsteadLead,
   opusInsteadText,
   RESET_BUFFER_MS,
   RESET_JITTER_MS,
@@ -423,6 +424,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       threadId: string | null;
       /** Set when it was a wait: leftovers wait for the same reset. */
       sendAt: number | undefined;
+      /**
+       * What the wait told its thread (see opusInstead): a leftover in the
+       * preferred model that waits for the same reset is told it too.
+       */
+      advice?: string;
       /** Threads already given their one grace retry. */
       graced: Set<string>;
     }
@@ -1027,11 +1033,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     bb.realtime.publish(CHANGED, { at: deps.now() });
   }
 
-  /** Measurements recent enough to decide on (two refresh periods). */
+  /** How old a measurement may be to decide on: two refresh periods. */
+  function maxReadAgeMs(): number {
+    return 2 * Math.max(1, current.refreshMinutes) * 60_000;
+  }
+
+  /** Measurements recent enough to decide on (see maxReadAgeMs). */
   function measuredAccounts(model = current.preferredModel) {
-    const maxAgeMs = 2 * Math.max(1, current.refreshMinutes) * 60_000;
     // A refusing account is out, whatever its numbers say.
-    return collector.usable(maxAgeMs, model).map((a) => {
+    return collector.usable(maxReadAgeMs(), model).map((a) => {
       if (!refusing(a.name)) return a;
       const { unknown: _, ...known } = a;
       return { ...known, blocked: true };
@@ -1040,18 +1050,23 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
 
   /**
    * The accounts whose latest usage read says nothing of what they can run
-   * now (see opusInstead): never read, or its latest attempt had a problem
-   * (a 429, the endpoint down). Every judgment follows a read of all
-   * accounts, so a read that worked is fresh. An account without a login is
-   * not one of them: it runs nothing until logged in again.
+   * now (see opusInstead): never read, its latest attempt had a problem (a
+   * 429, the endpoint down), or it is older than two refreshes (a rescue
+   * still runs after a refresh that failed: code-reviewer 0.2.20, CR-05).
+   * An account without a login is not one of them: it runs nothing until
+   * logged in again.
    */
   function unreadAccounts(): string[] {
+    const now = deps.now();
     return accounts
       .filter((account) => {
         const m = collector.get(account.name);
+        if (m === undefined) return true;
+        if (m.problem?.kind === "unauthenticated") return false;
         return (
-          m === undefined ||
-          (m.problem !== null && m.problem.kind !== "unauthenticated")
+          m.problem !== null ||
+          m.observedAt === null ||
+          now - m.observedAt > maxReadAgeMs()
         );
       })
       .map((account) => account.name);
@@ -1566,12 +1581,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     record: SwitchRecord,
     cause: string | null,
     sendAt?: number,
+    advice?: string,
   ) {
     recentSwitches.set(record.projectId, {
       at: record.at,
       to: record.to,
       threadId: cause,
       sendAt,
+      advice,
       graced: new Set(),
     });
     try {
@@ -1584,19 +1601,38 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     await addHistory(record);
   }
 
+  /** The advice a wait carried, for a leftover that follows it in the preferred model. */
+  function followsAdvice(
+    recent: { advice?: string },
+    model: string,
+  ): string | null {
+    return recent.advice !== undefined &&
+      model.toLowerCase() === current.preferredModel.toLowerCase()
+      ? recent.advice
+      : null;
+  }
+
   /**
    * A thread told to switch to Opus where no move says it (see
-   * opusInstead): a history row from its account to the same one. Once per
-   * thread and text: a thread left in error is judged on every refresh.
+   * opusInstead): a history row from its account to the same one. Once
+   * until another row of the thread, whatever account it names: a thread
+   * left in error is judged on every refresh, and where an Opus turn would
+   * go can change between two (code-reviewer 0.2.20, CR-04); the log says
+   * each one.
    */
   async function noteAdvice(
     threadId: string,
     projectId: string,
     account: string,
     reason: string,
+    model: string,
     at: number,
   ): Promise<void> {
-    if (history.find((r) => r.threadId === threadId)?.reason === reason)
+    if (
+      history
+        .find((r) => r.threadId === threadId)
+        ?.reason.includes(opusInsteadLead(model))
+    )
       return;
     await addHistory({
       at,
@@ -2235,10 +2271,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       recent.graced.add(event.threadId);
       if (typeof started === "string" && isRefusal(event))
         markRefused(started, now, event);
-      const reason = `Retrying on account ${recent.to}`;
+      const told = followsAdvice(recent, model);
+      const reason = `Retrying on account ${recent.to}${told === null ? "" : `. ${told}`}`;
       bb.log.info(
         `thread ${event.threadId}: ${reason} (switched ${now - recent.at} ms ago)`,
       );
+      if (told !== null)
+        await noteAdvice(event.threadId, projectId, recent.to, reason, model, now);
       await retryTurn(event, reason, recent.sendAt);
       return;
     }
@@ -2265,10 +2304,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         // model's weekly for this turn's model: then it is judged below.
         // Its refusal is the old account's, wherever it runs again.
         if (isRefusal(event)) markRefused(started, now, event);
-        const reason = `Retrying on account ${currentName}`;
+        const told =
+          sendAt === undefined || recent === undefined
+            ? null
+            : followsAdvice(recent, model);
+        const reason = `Retrying on account ${currentName}${told === null ? "" : `. ${told}`}`;
         bb.log.info(
           `thread ${event.threadId}: ${reason} (its turn started on ${started})`,
         );
+        if (told !== null)
+          await noteAdvice(event.threadId, projectId, currentName, reason, model, now);
         await retryTurn(event, reason, sendAt);
         return;
       }
@@ -2460,9 +2505,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       bb.log.info(
         `thread ${event.threadId}: ${how}no switch (${decision.reason})${advice === null ? "" : `; ${advice}`}`,
       );
-      // Nothing is queued: the history says it.
+      // No retry of ours carries it (bb's provider-retry row, if any, is
+      // left as it is; a rescue queues none): the history and the log say it.
       if (advice !== null && !(stuck && !current.autoSwitch))
-        await noteAdvice(event.threadId, projectId, fromName, advice, now);
+        await noteAdvice(event.threadId, projectId, fromName, advice, model, now);
       return;
     }
     const reason =
@@ -2491,6 +2537,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         },
         event.threadId,
         sendAt,
+        advice ?? undefined,
       );
     } else if (decision.kind !== "retry") {
       // A wait on this same account is still the project's latest move: a
@@ -2503,10 +2550,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         to: decision.account,
         threadId: event.threadId,
         sendAt,
+        advice: advice ?? undefined,
         graced: new Set(),
       });
       if (advice !== null)
-        await noteAdvice(event.threadId, projectId, fromName, reason, now);
+        await noteAdvice(event.threadId, projectId, fromName, reason, model, now);
     } else {
       // Retried on the project's own account: it runs there from here, so
       // a failure of it within the grace of the project's latest move is
@@ -3102,7 +3150,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         }),
         history: cliCommand({
           summary:
-            "Show every move of a project to another account, latest first, and why",
+            "Show every move of a project to another account and every thread told to switch to Opus, latest first, and why",
           options: { json: JSON_OPTION },
           async run({ options }) {
             const s = await state();

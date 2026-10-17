@@ -688,7 +688,8 @@ function History({ state }: { state: State }) {
     <div>
       <h4 className="font-medium">History</h4>
       <p className="text-xs text-muted-foreground">
-        Every move of a project to another account, and why.
+        Every move of a project to another account, every thread told to
+        switch to Opus, and why.
       </p>
       <ol
         aria-label="Moves"
