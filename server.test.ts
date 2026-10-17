@@ -10939,6 +10939,105 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     });
   });
 
+  // Sol B2-R6-002: the account the pass reads for a project says where an
+  // Opus turn of its declined threads would go only if no move of the
+  // project crossed that read. An answer a move crossed is dropped and the
+  // pass runs again; a move still being written is waited for: the pass
+  // runs again once it is over. The banner stays as it was meanwhile.
+  describe("a move of the project that crosses the pass's read of it (Sol B2-R6-002)", () => {
+    const refreshed = (h: Awaited<ReturnType<typeof host>>) =>
+      h.harness.behavior.callRpc("accounts_refresh", null);
+    /** thread-3 (proj-1) sent its turn in Opus. */
+    const opusThread3 = {
+      "thread-3": [
+        {
+          id: "evt_creq_3",
+          scope: { kind: "thread" },
+          threadId: "thread-3",
+          seq: 1,
+          createdAt: NOW - HOUR,
+          type: "client/turn/requested",
+          data: { requestId: "creq_3", execution: { model: OPUS_ID } },
+        },
+      ],
+    };
+
+    it("another thread's failure moves the project while the pass holds the answer of its read: the answer is dropped, the pass runs again, and the banner names where an Opus turn goes from the account the project moved to", async () => {
+      const gate = envGate();
+      let armed = false;
+      let reads = 0;
+      const h = await host(
+        // main's numbers run Opus: an Opus turn of a declined thread stays there.
+        { ...NO_FABLE, main: () => Response.json(payload(1, 40, 100)) },
+        {
+          settings: { preferredModel: "Fable", maximumWaitHours: 1 },
+          threadEvents: opusThread3,
+          // Once armed, the second read of proj-1: the failure reads it
+          // first, then the pass its refresh starts reads it.
+          afterEnvRead: async (projectId) => {
+            if (!armed || projectId !== "proj-1" || ++reads !== 2) return;
+            gate.captured();
+            await gate.held;
+          },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(await banner(h)).toBe(toOpus("main").slice(2));
+      armed = true;
+      // thread-3's Opus turn fails on main, which the provider refused it:
+      // the project moves to spare while the pass's answer (main) waits.
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ threadId: "thread-3", requestId: "creq_3" }),
+      );
+      await gate.reached;
+      expect(h.retries.map((r) => [r.threadId, r.reason])).toEqual([
+        ["thread-3", "Switched to account spare (Opus)"],
+      ]);
+      expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([["proj-1", ownNote("spare")]]);
+      gate.release();
+      await vi.waitFor(async () => {
+        expect(await banner(h)).toBe(told);
+      });
+    });
+
+    it("a move of the project still being written when the pass would read it: no read, the banner stays as it was, and the pass runs again once the move is over", async () => {
+      let hold: EnvGate | null = null;
+      const h = await host(NO_FABLE, {
+        settings: { preferredModel: "Fable", maximumWaitHours: 1 },
+        beforeSet: async () => {
+          const gate = hold;
+          if (gate === null) return;
+          hold = null;
+          gate.captured();
+          await gate.held;
+        },
+      });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(await banner(h)).toBe(told);
+      const gate = envGate();
+      hold = gate;
+      // Picked onto work by hand: its write waits.
+      const picked = h.harness.behavior.callRpc("project_set_account", {
+        projectId: "proj-1",
+        account: "work",
+      });
+      await gate.reached;
+      const before = h.envReads.length;
+      await refreshed(h);
+      // Only the reads of the state the refresh answers with.
+      expect(h.envReads.slice(before)).toEqual(["proj-1", "proj-2", "personal"]);
+      expect(await banner(h)).toBe(told);
+      gate.release();
+      await picked;
+      await vi.waitFor(async () => {
+        expect(await banner(h)).toBe(toOpus("work").slice(2));
+      });
+    });
+  });
+
   // Sol B2-R5-001: a refresh that fails (the accounts directory unreadable)
   // still asks the banners: once every read is older than two refreshes,
   // the banner goes, as a judgment then says nothing; its basis stays, and

@@ -995,6 +995,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   let bannerPass: Promise<void> | null = null;
   let passAgain = false;
+  /**
+   * Projects a pass did not read because a move of theirs was under way:
+   * the pass runs again once that move is over (see applyAccount; Sol
+   * B2-R6-002).
+   */
+  const passAfterMove = new Set<string>();
   function askBannersAgain(): void {
     passAgain = true;
     bannerPass ??= (async () => {
@@ -1249,6 +1255,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       if (move !== null) {
         move.inFlight -= 1;
         move.epoch += 1;
+        // A banners' pass left the project unread for this move: it runs
+        // again now, without being waited for (Sol B2-R6-002).
+        if (move.inFlight === 0 && passAfterMove.delete(projectId))
+          askBannersAgain();
       }
     }
     if (toName !== (from.account ?? current.defaultAccountName))
@@ -1965,6 +1975,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       byProject.set(basis.projectId, threads);
     }
     for (const [projectId, threads] of byProject) {
+      // A move of the project under way: where it sits is being written.
+      // Not read now: the pass runs again once the move is over, and the
+      // banners stay as they were until then (Sol B2-R6-002).
+      const move = movesOf(projectId);
+      if (move.inFlight > 0) {
+        passAfterMove.add(projectId);
+        continue;
+      }
+      const epoch = move.epoch;
       let at: ProjectAccount;
       try {
         at = await projectAccount(projectId);
@@ -1977,6 +1996,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           // (Sol B2-R6-003).
           if (adviceBasis.get(threadId) === basis) showAdvice(threadId, null);
         }
+        continue;
+      }
+      // A move crossed the read: what it says is where the project was, or
+      // is going. Dropped, and the pass runs again (Sol B2-R6-002).
+      if (move.epoch !== epoch) {
+        passAgain = true;
         continue;
       }
       const now = deps.now();
