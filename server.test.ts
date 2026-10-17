@@ -11325,14 +11325,96 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
         },
       },
     });
+    /** A row of bb's log of thread-1, at `seq`. */
+    const logged = (seq: number, type: string, data: Record<string, unknown>): LoggedEvent => ({
+      id: `evt_${seq}`,
+      scope: { kind: "thread" },
+      threadId: "thread-1",
+      seq,
+      createdAt: NOW - HOUR,
+      type,
+      data,
+    });
+    /** How a turn of thread-1 failed, as bb logs it (`category` of its error, or the reason bb refused it at the door). */
+    const failedRow = (seq: number, how: { category: string } | { rejected: string }) =>
+      "rejected" in how
+        ? logged(seq, "client/turn/rejected", { requestId: "creq_1b", reason: how.rejected })
+        : logged(seq, "provider/error", {
+            providerThreadId: "p",
+            threadId: "thread-1",
+            message: "Provider error",
+            errorInfo: { category: how.category, providerCode: null, httpStatusCode: null },
+          });
+    /**
+     * bb's log of thread-1 after the plugin was away: its turn failed on the
+     * session, provider-retry's retry of it ran (sent in `model`) and failed
+     * as `how` says (null: not in the log yet), then the limit report.
+     */
+    const retriedLog = ({
+      model = FABLE_ID,
+      how = { category: "rate-limit" },
+    }: { model?: string; how?: { category: string } | { rejected: string } | null } = {}) => {
+      const rows: LoggedEvent[] = [
+        logged(1, "client/turn/requested", { requestId: "creq_1", execution: { model: FABLE_ID } }),
+        failedRow(2, { category: "rate-limit" }),
+        logged(3, "client/turn/requested", {
+          requestId: "creq_1b",
+          retryOfRequestId: "creq_1",
+          retryAttempt: 2,
+          execution: { model },
+        }),
+      ];
+      if (how !== null) rows.push(failedRow(4, how));
+      rows.push(logged(5, "provider/rateLimits/updated", { providerThreadId: "p", threadId: "thread-1", rateLimits: failure().rateLimits }));
+      return { "thread-1": rows };
+    };
+
     const stillWaiting: HostOptions = {
       settings: { preferredModel: "Fable", maximumWaitHours: 1 },
       threads: { "thread-1": { status: "error" } },
-      threadEvents: chainLog([["creq_1"], ["creq_1b", "creq_1", 2]]),
+      // Its turn's retry ran and failed on a limit: it waits on the chain judged.
+      threadEvents: retriedLog(),
     };
 
-    it("provider-retry's retry ran and failed again while the plugin was away: the thread waits on the chain judged, the banner comes back", async () => {
-      const h = await restarted(NO_FABLE, { threadEvents: chainLog([["creq_1"], ["creq_1b", "creq_1", 2]]) });
+    for (const [what, how] of [
+      ["on a limit", { category: "rate-limit" }],
+      ["refused (no login)", { category: "unauthorized" }],
+      ["refused at the door on a limit", { rejected: "rate_limited" }],
+    ] as const)
+      it(`provider-retry's retry ran and failed again ${what} while the plugin was away: the thread waits on the chain judged, the banner comes back`, async () => {
+        const h = await restarted(NO_FABLE, { threadEvents: retriedLog({ how }) });
+        await refreshed(h);
+        expect(await banner(h)).toBe(told);
+      });
+
+    // Sol B2-R6-001: with the plugin running, the start of that retry would
+    // have ended the banner, and only its failure's judgment could put one
+    // back. Read back, the basis stands for a later attempt of the chain
+    // only if bb's log says that attempt was sent in the model judged and
+    // failed in a way a failure's judgment takes up (a limit, a refusal).
+    for (const [what, retry] of [
+      ["failed on something other than a limit (the connection)", { how: { category: "connection-failed" } }],
+      ["was refused at the door for another reason", { how: { rejected: "thread_busy" } }],
+      ["was sent in another model (Opus) and failed on a limit", { model: OPUS_ID }],
+    ] as const)
+      it(`provider-retry's retry ${what} while the plugin was away: no banner, and nothing is read or kept for it (Sol B2-R6-001)`, async () => {
+        const h = await restarted(NO_FABLE, { threadEvents: retriedLog(retry) });
+        await refreshed(h);
+        expect(await banner(h)).toBeNull();
+        expect(await h.bb.storage.kv.get("advice-bases")).toEqual({});
+        const before = h.envReads.length;
+        await refreshed(h);
+        // The state the refresh answers with, nothing for the thread.
+        expect(h.envReads.slice(before)).toEqual(["proj-1", "proj-2", "personal"]);
+      });
+
+    it("provider-retry's retry ran and bb's log does not say yet how it failed: no banner, the basis kept, and the banner comes back once the log says it (Sol B2-R6-001)", async () => {
+      const log = retriedLog({ how: null });
+      const h = await restarted(NO_FABLE, { threadEvents: log });
+      await refreshed(h);
+      expect(await banner(h)).toBeNull();
+      expect(Object.keys((await h.bb.storage.kv.get<object>("advice-bases")) ?? {})).toEqual(["thread-1"]);
+      log["thread-1"].push(failedRow(6, { category: "rate-limit" }));
       await refreshed(h);
       expect(await banner(h)).toBe(told);
     });
