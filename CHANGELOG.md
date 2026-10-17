@@ -4,6 +4,47 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.24] - 2026-10-17
+
+### Fixed
+
+- **The banner follows the usage reads.** A declined thread's banner
+  named the account an Opus turn would go to when its failure was
+  judged, and kept it: a thread with a retry queued (bb's provider-retry
+  queues one for the session's reset) is not judged again until it runs,
+  while the numbers change. After every usage refresh the banner is now
+  asked again on the new reads, as a later judgment would ask it: it
+  names the account an Opus turn would go to now, goes when the
+  preferred model is back, no account can run Opus, a read failed or the
+  project's account was set outside the plugin, and comes back with the
+  reads. Nothing is sent, retried, moved or written for it. A turn of
+  the thread, its archiving, a later judgment without the advice and the
+  automatic choice switched off end it, also while a refresh reads.
+- **A move's history row tells the thread only while its judgment
+  holds.** A wait that moved the project wrote the advice to switch to
+  Opus in the move's row, and took the turn for told, even when the
+  automatic choice was switched off, a turn of the thread started or the
+  thread was archived while the move was made. The row now asks, as it
+  is added after the move and its store, whether the judgment still
+  holds: otherwise it records the move with its own reason, and the turn
+  is told by a later judgment. The project's latest move (kept for views
+  older than the history) records the move's own reason, without the
+  advice.
+- **Switched off during a judgment that moves the project, the move is
+  still made and recorded,** as such a judgment always did: now tested,
+  and the README and the 0.2.23 entry say so.
+
+### Changed
+
+- **One read of bb's log per failure.** A failed turn's model and its
+  retry chain come from the same read of bb's log, made before anything
+  is checked (a retry's failure read it twice).
+- **README, Known limitations: where the account named for Opus
+  holds.** For a message sent in Opus through bb's dispatch checkpoint,
+  on the reads of that moment. Send now on a queued retry's card skips
+  the checkpoint (by bb's design), and the queued card and the history
+  row keep the name they were written with.
+
 ## [0.2.23] - 2026-10-17
 
 ### Removed
@@ -27,9 +68,9 @@ project uses [Semantic Versioning](https://semver.org/).
   the project (the account waited for, or the one it sits on), so a new
   message sent in Opus on those reads runs where the advice said (not
   Send now on a queued retry, which skips the placement: README, Known
-  limitations, since 0.2.24). When that
-  placement would keep the project where Opus cannot run, nothing is
-  said. The account the turn just failed on is judged there on its
+  limitations, since 0.2.24). When that placement would keep the
+  project where Opus cannot run, nothing is said. The account the turn
+  just failed on is judged there on its
   numbers like any other: when the provider's report is ahead of them,
   the advice and the placement both name it, and the Opus turn may fail
   there once, then goes through the failure path like any Opus turn. The
