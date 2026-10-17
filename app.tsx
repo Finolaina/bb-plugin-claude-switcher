@@ -6,7 +6,9 @@
 // Provider usage panel through server.ts; this section is where you act.
 // And, in a Claude Code thread's header, the project's account with a menu
 // to change it (an experimental bb slot, registered only when the host has it);
-// the same control in the new-thread composer, for the project picked there.
+// the same control in the new-thread composer, for the project picked there;
+// and over a thread's composer, the advice to switch it to Opus when nothing
+// queued says it.
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   definePluginApp,
@@ -1042,6 +1044,57 @@ function NewThreadAccount() {
   );
 }
 
+/**
+ * Over a thread's composer: the advice of its latest failure to switch it
+ * to Opus, when nothing queued says it (a decline: beyond the maximum wait,
+ * or no account will free; D3, Sol B2-004). It only shows: switching is the
+ * user's, with bb's model picker. Read again on the server's signal for
+ * this thread; a failed read is tried again.
+ */
+function ThreadAdvice() {
+  const composer = useComposer();
+  const rpc = useRpc<typeof rpcContract>();
+  const threadId = composer.scope.kind === "thread" ? composer.scope.threadId : null;
+  const [shown, setShown] = useState<{
+    threadId: string;
+    text: string | null;
+  } | null>(null);
+  const [signals, setSignals] = useState(0);
+  useEffect(() => {
+    if (threadId === null) return;
+    let live = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let attempt = 0;
+    const ask = () => {
+      rpc.call("thread_advice", { threadId }).then(
+        ({ text }) => {
+          if (live) setShown({ threadId, text });
+        },
+        () => {
+          if (live) timer = setTimeout(ask, retryDelayMs(attempt++));
+        },
+      );
+    };
+    ask();
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [rpc, threadId, signals]);
+  useRealtime("opus-advice", (payload) => {
+    if ((payload as { threadId?: unknown } | null)?.threadId === threadId)
+      setSignals((n) => n + 1);
+  });
+  if (shown === null || shown.threadId !== threadId || shown.text === null)
+    return null;
+  return (
+    <div role="status" className="flex items-start gap-2 px-3 py-2 text-xs">
+      <Icon name="Repeat" aria-hidden className="mt-0.5 size-3.5 shrink-0" />
+      <span>{shown.text}</span>
+    </div>
+  );
+}
+
 export default definePluginApp((app) => {
   app.slots.settingsSection({
     id: "claude-switcher",
@@ -1058,10 +1111,16 @@ export default definePluginApp((app) => {
       title: "Claude account",
       component: ThreadAccount,
     });
-  if (typeof app.composer?.customize === "function")
+  if (typeof app.composer?.customize === "function") {
     app.composer.customize({
       id: "claude-account",
       scopes: ["new-thread"],
       actions: [{ id: "claude-account", component: NewThreadAccount }],
     });
+    app.composer.customize({
+      id: "claude-opus-advice",
+      scopes: ["thread"],
+      banners: [{ id: "claude-opus-advice", component: ThreadAdvice }],
+    });
+  }
 });

@@ -754,6 +754,7 @@ describe("claude accounts plugin", () => {
         "account_login_start",
         "account_login_code",
         "account_login_cancel",
+        "thread_advice",
         usageFetchMethod,
         usageListMethod,
       ].sort(),
@@ -9749,6 +9750,77 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
         e.message.includes(`no switch (beyond-maximum-wait); ${told}`),
       ),
     ).toHaveLength(2);
+  });
+
+  /** What the thread shows over its composer (Sol B2-004). */
+  const banner = async (h: Awaited<ReturnType<typeof host>>, threadId = "thread-1") =>
+    ((await h.harness.behavior.callRpc("thread_advice", { threadId })) as { text: string | null }).text;
+  const adviceSignals = (h: Awaited<ReturnType<typeof host>>) =>
+    h.harness.realtimeSignals.filter((s) => s.channel === "opus-advice").map((s) => s.payload);
+
+  it("a decline queues nothing: the thread itself shows the advice over its composer until a turn of it starts; nothing is queued, sent or moved for it (Sol B2-004)", async () => {
+    const h = await host(NO_FABLE, { settings: { preferredModel: "Fable", maximumWaitHours: 1 } });
+    dispose = () => h.harness.dispose();
+    expect(await banner(h)).toBeNull();
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(await banner(h)).toBe(told);
+    expect(adviceSignals(h)).toEqual([{ threadId: "thread-1" }]);
+    expect(h.retries).toEqual([]);
+    expect(h.sent).toEqual([]);
+    expect(h.envSet).toEqual([]);
+    expect(h.envDeleted).toEqual([]);
+    // Only that thread.
+    expect(await banner(h, "thread-3")).toBeNull();
+    // Judged again with the same advice: no new signal.
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ requestId: "creq_1b", attemptNumber: 2 }),
+    );
+    expect(adviceSignals(h)).toHaveLength(1);
+    // A turn of it starts (switched to Opus and sent, say): gone.
+    await active(h, "thread-1");
+    expect(await banner(h)).toBeNull();
+    expect(adviceSignals(h)).toEqual([{ threadId: "thread-1" }, { threadId: "thread-1" }]);
+  });
+
+  it("a later judgment of the thread without the advice takes the banner away (Sol B2-004)", async () => {
+    let workFable = 100;
+    const h = await host(
+      { ...NO_FABLE, work: () => Response.json(payload(1, 1, workFable)) },
+      { settings: { preferredModel: "Fable", maximumWaitHours: 1 } },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(await banner(h)).toBe(told);
+    // Its retry fails while work runs Fable again: switched, no advice.
+    workFable = 30;
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ requestId: "creq_1b", attemptNumber: 2 }),
+    );
+    expect(h.retries.map((r) => r.reason)).toEqual(["Switched to account work (Fable)"]);
+    expect(await banner(h)).toBeNull();
+  });
+
+  it("switching the automatic choice off takes the banner away: no turn is placed then, so the account it names no longer holds (Sol B2-004)", async () => {
+    const h = await host(NO_FABLE, { settings: { preferredModel: "Fable", maximumWaitHours: 1 } });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(await banner(h)).toBe(told);
+    await h.harness.behavior.setSettings({ preferredModel: "Fable" });
+    expect(await banner(h)).toBe(told);
+    await h.harness.behavior.setSettings({ autoSwitch: false });
+    expect(await banner(h)).toBeNull();
+    expect(adviceSignals(h)).toEqual([{ threadId: "thread-1" }, { threadId: "thread-1" }]);
+  });
+
+  it("a wait shows no banner: its queued retry says it (Sol B2-004)", async () => {
+    const h = await host(NO_FABLE, FABLE);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.retries.map((r) => r.reason)).toEqual([`Waiting for Fable on main. ${told}`]);
+    expect(await banner(h)).toBeNull();
+    expect(adviceSignals(h)).toEqual([]);
   });
 
   it("a failed read (429) of an account says nothing: the wait as before, no history row", async () => {

@@ -77,6 +77,8 @@ import { forecastLine, projectName, sharedWith } from "./src/ui.js";
 export const ENV_VAR = "CLAUDE_CONFIG_DIR";
 /** Realtime channel app.tsx listens on after any state change. */
 export const CHANGED = "accounts-changed";
+/** Realtime channel of the advice a thread shows (see thread_advice); payload `{ threadId }`. */
+export const ADVICE_CHANGED = "opus-advice";
 /**
  * After a switch, turns that were already running on the old account keep
  * failing on it for a while. A failure of another turn of the same project
@@ -260,6 +262,11 @@ export const rpcContract = defineRpcContract({
   },
   /** Stops a running login; when none runs, forgets the last outcome. */
   account_login_cancel: { input: z.null(), output: stateSchema },
+  /** The Opus advice the thread shows over its composer; null: none. */
+  thread_advice: {
+    input: z.object({ threadId: z.string() }),
+    output: z.object({ text: z.string().nullable() }),
+  },
 });
 
 export interface PluginDeps {
@@ -365,12 +372,33 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       default: true,
     },
   });
+  /**
+   * Per thread, the Opus advice of its latest judgment when nothing queued
+   * carries it (a decline: beyond the maximum wait, or no account will
+   * free): the thread shows it in a banner over its composer (D3; Sol
+   * B2-004), which schedules nothing and changes no model. Replaced by
+   * every judgment of the thread, dropped when a turn of it starts, when it
+   * is archived, and when the automatic choice is switched off (the advice
+   * names where the placement would send an Opus turn, and none is placed
+   * then). In memory: after a restart the rescue's next judgment puts it
+   * back.
+   */
+  const shownAdvice = new Map<string, string>();
+  function showAdvice(threadId: string, text: string | null): void {
+    if ((shownAdvice.get(threadId) ?? null) === text) return;
+    if (text === null) shownAdvice.delete(threadId);
+    else shownAdvice.set(threadId, text);
+    bb.realtime.publish(ADVICE_CHANGED, { threadId });
+  }
   let current = await settings.get();
   settings.onChange((next) => {
     const moved =
       next.accountsDir !== current.accountsDir ||
       next.defaultAccountName !== current.defaultAccountName;
     current = next;
+    // A Map visits no key deleted before its turn: the current one may go.
+    if (!next.autoSwitch)
+      for (const threadId of shownAdvice.keys()) showAdvice(threadId, null);
     // Found again (and stale measurements pruned) on next use: an account of
     // the old directory must not be picked.
     if (moved) accounts = [];
@@ -1308,6 +1336,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       login.cancel();
       return state();
     },
+    async thread_advice({ threadId }) {
+      return { text: shownAdvice.get(threadId) ?? null };
+    },
   });
 
   // ---- Retry of a failed turn ---------------------------------------------
@@ -2085,6 +2116,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     dispatchEpoch.delete(threadId);
   }
   bb.events.on("thread.active", async ({ thread }) => {
+    // A turn of it runs: the advice of its last failure is over.
+    showAdvice(thread.id, null);
     if (
       thread.providerId !== CLAUDE_CODE_PROVIDER ||
       notTheUsersThread(thread) !== null
@@ -2140,6 +2173,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   bb.events.on("thread.archived", async ({ thread }) => {
     forgetStart(thread.id);
     threadModel.delete(thread.id);
+    showAdvice(thread.id, null);
     // Forgotten in storage too, or the stored list only grows (Codex r8,
     // IR8-004).
     if (cancelled.delete(thread.id)) await storeCancelled(thread.id);
@@ -2402,6 +2436,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
       if (told !== null)
         await noteAdvice(event.threadId, projectId, recent.to, reason, event, now);
+      // Its queued retry says it now, or nothing is to be said.
+      showAdvice(event.threadId, null);
       await retryTurn(event, reason, recent.sendAt);
       return;
     }
@@ -2439,6 +2475,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         );
         if (told !== null)
           await noteAdvice(event.threadId, projectId, currentName, reason, event, now);
+        showAdvice(event.threadId, null);
         await retryTurn(event, reason, sendAt);
         return;
       }
@@ -2633,6 +2670,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const advice = opusOn === null ? null : opusInsteadText(model, opusOn);
     const carried = advice === null ? undefined : { model };
     const how = stuck ? "left in error: " : "";
+    // The thread shows the advice where nothing queued carries it: a
+    // decline (Sol B2-004). Any other judgment takes it away.
+    if (!(stuck && !current.autoSwitch))
+      showAdvice(event.threadId, decision.kind === "decline" ? advice : null);
     if (decision.kind === "decline") {
       // The account the project sits on is no good either: a leftover
       // thread must be judged too, not retried there at once.
