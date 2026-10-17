@@ -18,8 +18,9 @@ project uses [Semantic Versioning](https://semver.org/).
   preferred model is back, no account can run Opus, a read failed or the
   project's account was set outside the plugin, and comes back with the
   reads. Nothing is sent, retried, moved or written for it. A turn of
-  the thread, its archiving, a later judgment without the advice and the
-  automatic choice switched off end it, also while a refresh reads.
+  the thread, its archiving, a later judgment that retries, waits or
+  switches (no decline) and the automatic choice switched off end it,
+  also while a refresh reads.
 - **A move's history row tells the thread only while its judgment
   holds.** A wait that moved the project wrote the advice to switch to
   Opus in the move's row, and took the turn for told, even when the
