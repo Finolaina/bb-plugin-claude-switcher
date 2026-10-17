@@ -10748,6 +10748,33 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       expect(h.envReads.slice(before)).toEqual(["proj-1", "proj-2", "personal"]);
     });
 
+    it("the account the turn failed on measured again with room for Fable while the pass reads the project (the usage panel's refresh of it, which asks no pass): the banner goes, every account judged on its numbers as a rescue judges them", async () => {
+      let mainFable = 100;
+      let armed: (() => Promise<unknown>) | null = null;
+      const h = await host(
+        { ...NO_FABLE, main: () => Response.json(payload(mainFable === 100 ? 100 : 1, 1, mainFable)) },
+        {
+          settings: { preferredModel: "Fable", maximumWaitHours: 1 },
+          beforeEnvRead: async () => {
+            const run = armed;
+            if (run === null) return;
+            armed = null;
+            await run();
+          },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(await banner(h)).toBe(told);
+      armed = async () => {
+        mainFable = 30;
+        await h.harness.behavior.callRpc(usageFetchMethod, { resourceId: "main", refresh: true });
+      };
+      await refreshed(h);
+      expect(armed).toBeNull();
+      expect(await banner(h)).toBeNull();
+    });
+
     it("a read of the project's account that fails leaves alone the banner of a judgment of the thread made meanwhile (Sol B2-R6-003)", async () => {
       let armed: (() => Promise<unknown>) | null = null;
       const h = await host(NO_FABLE, {
@@ -11165,12 +11192,16 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       expect(await banner(h)).toBe(told);
       // A millisecond older, on the service's refresh, which fails too: gone.
       clock = NOW + 10 * 60_000 + 1;
+      const reads = h.envReads.length;
       const run = h.harness.behavior.runService("usage-refresh");
       await vi.waitFor(async () => {
         expect(await banner(h)).toBeNull();
       });
       run.controller.abort();
       await run.done;
+      // The pass does not read the project (the reads say nothing wherever
+      // it sits): its one read is the service's look at the queued retry.
+      expect(h.envReads.slice(reads)).toEqual(["proj-1"]);
       expect(
         h.harness.logEntries.some((e) => e.message.startsWith("usage refresh failed: EPERM")),
       ).toBe(true);
