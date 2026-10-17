@@ -59,7 +59,6 @@ import {
   modelFamily,
   fullestWindow,
   opusInstead,
-  opusInsteadLead,
   opusInsteadText,
   RESET_BUFFER_MS,
   RESET_JITTER_MS,
@@ -425,10 +424,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       /** Set when it was a wait: leftovers wait for the same reset. */
       sendAt: number | undefined;
       /**
-       * What the wait told its thread (see opusInstead): a leftover in the
-       * preferred model that waits for the same reset is told it too.
+       * What the wait told its thread (see opusInstead), and for a turn in
+       * which model: a leftover in that model that waits for the same reset
+       * is told it too.
        */
-      advice?: string;
+      advice?: { model: string; text: string };
       /** Threads already given their one grace retry. */
       graced: Set<string>;
     }
@@ -1581,7 +1581,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     record: SwitchRecord,
     cause: string | null,
     sendAt?: number,
-    advice?: string,
+    advice?: { model: string; text: string },
   ) {
     recentSwitches.set(record.projectId, {
       at: record.at,
@@ -1601,39 +1601,58 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     await addHistory(record);
   }
 
-  /** The advice a wait carried, for a leftover that follows it in the preferred model. */
+  /**
+   * The advice a wait carried, for a leftover in the same model that
+   * follows it while the wait is still ahead (one already due is retried at
+   * once: code-reviewer 0.2.20 r2, R2-02).
+   */
   function followsAdvice(
-    recent: { advice?: string },
+    recent: {
+      sendAt: number | undefined;
+      advice?: { model: string; text: string };
+    },
     model: string,
+    now: number,
   ): string | null {
     return recent.advice !== undefined &&
-      model.toLowerCase() === current.preferredModel.toLowerCase()
-      ? recent.advice
+      recent.sendAt !== undefined &&
+      recent.sendAt > now &&
+      recent.advice.model.toLowerCase() === model.toLowerCase()
+      ? recent.advice.text
       : null;
   }
 
   /**
+   * Per thread, the turn it was last told to switch to Opus for (see
+   * noteAdvice). Kept in memory: after a restart a thread still in error
+   * gets one more row.
+   */
+  const advised = new Map<string, string>();
+
+  /**
    * A thread told to switch to Opus where no move says it (see
    * opusInstead): a history row from its account to the same one. Once
-   * until another row of the thread, whatever account it names: a thread
-   * left in error is judged on every refresh, and where an Opus turn would
-   * go can change between two (code-reviewer 0.2.20, CR-04); the log says
-   * each one.
+   * per turn sent: a thread left in error is judged on every refresh, and
+   * where an Opus turn would go can change between two (code-reviewer
+   * 0.2.20, CR-04), and the turn's retries say nothing new; a new turn
+   * (attempt 1 under another request) gets its own row (r2, R2-01). The
+   * log says each one.
    */
   async function noteAdvice(
     threadId: string,
     projectId: string,
     account: string,
     reason: string,
-    model: string,
+    turn: { requestId: string; attemptNumber: number },
     at: number,
   ): Promise<void> {
+    const told = advised.get(threadId);
     if (
-      history
-        .find((r) => r.threadId === threadId)
-        ?.reason.includes(opusInsteadLead(model))
+      told !== undefined &&
+      (told === turn.requestId || turn.attemptNumber > 1)
     )
       return;
+    advised.set(threadId, turn.requestId);
     await addHistory({
       at,
       threadId,
@@ -1857,7 +1876,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // account listed now, measured within two refresh periods (a query that
     // keeps failing leaves an old measurement), and another Claude account
     // (a directory of the same one shares its usage and gains nothing).
-    const maxAgeMs = 2 * Math.max(1, current.refreshMinutes) * 60_000;
+    const maxAgeMs = maxReadAgeMs();
     const own = accounts.find((a) => a.name === fromName);
     const left = aheadLeft.get(projectId);
     const candidates = measuredAccounts(model).filter((usage) => {
@@ -2271,13 +2290,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       recent.graced.add(event.threadId);
       if (typeof started === "string" && isRefusal(event))
         markRefused(started, now, event);
-      const told = followsAdvice(recent, model);
+      const told = followsAdvice(recent, model, now);
       const reason = `Retrying on account ${recent.to}${told === null ? "" : `. ${told}`}`;
       bb.log.info(
         `thread ${event.threadId}: ${reason} (switched ${now - recent.at} ms ago)`,
       );
       if (told !== null)
-        await noteAdvice(event.threadId, projectId, recent.to, reason, model, now);
+        await noteAdvice(event.threadId, projectId, recent.to, reason, event, now);
       await retryTurn(event, reason, recent.sendAt);
       return;
     }
@@ -2307,13 +2326,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         const told =
           sendAt === undefined || recent === undefined
             ? null
-            : followsAdvice(recent, model);
+            : followsAdvice(recent, model, now);
         const reason = `Retrying on account ${currentName}${told === null ? "" : `. ${told}`}`;
         bb.log.info(
           `thread ${event.threadId}: ${reason} (its turn started on ${started})`,
         );
         if (told !== null)
-          await noteAdvice(event.threadId, projectId, currentName, reason, model, now);
+          await noteAdvice(event.threadId, projectId, currentName, reason, event, now);
         await retryTurn(event, reason, sendAt);
         return;
       }
@@ -2497,6 +2516,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // to switch (D3), whatever the decision's reason.
     const opusOn = opusInstead(decision, input, unreadAccounts());
     const advice = opusOn === null ? null : opusInsteadText(model, opusOn);
+    const carried = advice === null ? undefined : { model, text: advice };
     const how = stuck ? "left in error: " : "";
     if (decision.kind === "decline") {
       // The account the project sits on is no good either: a leftover
@@ -2508,7 +2528,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // No retry of ours carries it (bb's provider-retry row, if any, is
       // left as it is; a rescue queues none): the history and the log say it.
       if (advice !== null && !(stuck && !current.autoSwitch))
-        await noteAdvice(event.threadId, projectId, fromName, advice, model, now);
+        await noteAdvice(event.threadId, projectId, fromName, advice, event, now);
       return;
     }
     const reason =
@@ -2537,8 +2557,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         },
         event.threadId,
         sendAt,
-        advice ?? undefined,
+        carried,
       );
+      // The move's row says it: the turn is told.
+      if (advice !== null) advised.set(event.threadId, event.requestId);
     } else if (decision.kind !== "retry") {
       // A wait on this same account is still the project's latest move: a
       // leftover thread follows it (waits for the same reset) instead of
@@ -2550,11 +2572,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         to: decision.account,
         threadId: event.threadId,
         sendAt,
-        advice: advice ?? undefined,
+        advice: carried,
         graced: new Set(),
       });
       if (advice !== null)
-        await noteAdvice(event.threadId, projectId, fromName, reason, model, now);
+        await noteAdvice(event.threadId, projectId, fromName, reason, event, now);
     } else {
       // Retried on the project's own account: it runs there from here, so
       // a failure of it within the grace of the project's latest move is
