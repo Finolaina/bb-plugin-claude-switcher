@@ -443,19 +443,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   const adviceBasis = new Map<string, AdviceBasis>();
   /** Writes in order, like the history; awaited by nothing that decides. */
   let basesWrites: Promise<void> = Promise.resolve();
+  /** What storage keeps of a basis (see storedBasisSchema). */
+  function storedOf(basis: AdviceBasis) {
+    return {
+      projectId: basis.projectId,
+      model: basis.model,
+      reason: basis.decision.reason,
+      requestId: basis.requestId,
+      chain: basis.chain,
+      at: basis.at,
+    };
+  }
   function storeBases(): void {
     const snapshot = Object.fromEntries(
-      [...adviceBasis].map(([threadId, basis]) => [
-        threadId,
-        {
-          projectId: basis.projectId,
-          model: basis.model,
-          reason: basis.decision.reason,
-          requestId: basis.requestId,
-          chain: basis.chain,
-          at: basis.at,
-        },
-      ]),
+      [...adviceBasis].map(([threadId, basis]) => [threadId, storedOf(basis)]),
     );
     basesWrites = basesWrites.then(async () => {
       try {
@@ -505,14 +506,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // was first judged stays, and storage, which keeps nothing else that
       // changed, is not written (code-reviewer r6, N3).
       const before = adviceBasis.get(threadId);
+      const kept = before === undefined ? basis : { ...basis, at: before.at };
       const same =
         before !== undefined &&
-        before.projectId === basis.projectId &&
-        before.model === basis.model &&
-        before.decision.reason === basis.decision.reason &&
-        before.requestId === basis.requestId &&
-        before.chain === basis.chain;
-      adviceBasis.set(threadId, same ? { ...basis, at: before.at } : basis);
+        JSON.stringify(storedOf(kept)) === JSON.stringify(storedOf(before));
+      adviceBasis.set(threadId, same ? kept : basis);
       if (!same) storeBases();
     } else if (adviceBasis.delete(threadId)) storeBases();
     showAdvice(threadId, text);

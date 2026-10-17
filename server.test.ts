@@ -7730,6 +7730,30 @@ describe("a wait another account can end sooner", () => {
       expect(writes).toEqual([
         { "thread-1": expect.objectContaining({ requestId: "creq_1", reason: "beyond-maximum-wait", at: NOW }) },
       ]);
+      // Another thread's decline writes them all: thread-1's still with when
+      // it was first judged.
+      clock = NOW + 15 * 60_000;
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ threadId: "thread-3", requestId: "creq_3" }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(writes.slice(1)).toEqual([
+        {
+          "thread-1": expect.objectContaining({ requestId: "creq_1", at: NOW }),
+          "thread-3": expect.objectContaining({ requestId: "creq_3", at: NOW + 15 * 60_000 }),
+        },
+      ]);
+      // A new turn of thread-1 declined: another decline, with its own time.
+      clock = NOW + 20 * 60_000;
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure({ requestId: "creq_2" }));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(writes.slice(2)).toEqual([
+        {
+          "thread-1": expect.objectContaining({ requestId: "creq_2", at: NOW + 20 * 60_000 }),
+          "thread-3": expect.objectContaining({ requestId: "creq_3", at: NOW + 15 * 60_000 }),
+        },
+      ]);
     });
 
     it("after refreshes that failed, on readings older than two refreshes: nothing said; two refreshes old, still said (code-reviewer 0.2.20, CR-05)", async () => {
@@ -10707,6 +10731,23 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       expect(await banner(h)).toBe(told);
     });
 
+    it("Fable back on the account the turn failed on only (main, where the project sits): the banner goes without reading the project, every account judged on its numbers (Sol B2-R6-003)", async () => {
+      let mainFable = 100;
+      const h = await host(
+        { ...NO_FABLE, main: () => Response.json(payload(mainFable === 100 ? 100 : 1, 1, mainFable)) },
+        { settings: { preferredModel: "Fable", maximumWaitHours: 1 } },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(await banner(h)).toBe(told);
+      mainFable = 30;
+      const before = h.envReads.length;
+      await refreshed(h);
+      expect(await banner(h)).toBeNull();
+      // Only the reads of the state the refresh answers with.
+      expect(h.envReads.slice(before)).toEqual(["proj-1", "proj-2", "personal"]);
+    });
+
     it("a read of the project's account that fails leaves alone the banner of a judgment of the thread made meanwhile (Sol B2-R6-003)", async () => {
       let armed: (() => Promise<unknown>) | null = null;
       const h = await host(NO_FABLE, {
@@ -10992,7 +11033,10 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
 
     it("another thread's failure moves the project while the pass holds the answer of its read: the answer is dropped, the pass runs again, and the banner names where an Opus turn goes from the account the project moved to", async () => {
       const gate = envGate();
+      // The pass that runs again: its read waits too, the banner as it was meanwhile.
+      const again = envGate();
       let armed = false;
+      let rerun = false;
       let reads = 0;
       const h = await host(
         // main's numbers run Opus: an Opus turn of a declined thread stays there.
@@ -11003,7 +11047,15 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
           // Once armed, the second read of proj-1: the failure reads it
           // first, then the pass its refresh starts reads it.
           afterEnvRead: async (projectId) => {
-            if (!armed || projectId !== "proj-1" || ++reads !== 2) return;
+            if (!armed || projectId !== "proj-1") return;
+            if (rerun) {
+              // The first read of proj-1 once the held one is let go.
+              rerun = false;
+              again.captured();
+              await again.held;
+              return;
+            }
+            if (++reads !== 2) return;
             gate.captured();
             await gate.held;
           },
@@ -11024,7 +11076,11 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
         ["thread-3", "Switched to account spare (Opus)"],
       ]);
       expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([["proj-1", ownNote("spare")]]);
+      rerun = true;
       gate.release();
+      await again.reached;
+      expect(await banner(h)).toBe(toOpus("main").slice(2));
+      again.release();
       await vi.waitFor(async () => {
         expect(await banner(h)).toBe(told);
       });
@@ -11392,21 +11448,27 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
           });
     /**
      * bb's log of thread-1 after the plugin was away: its turn failed on the
-     * session, provider-retry's retry of it ran (sent in `model`) and failed
-     * as `how` says (null: not in the log yet), then the limit report.
+     * session, provider-retry's retry of it ran (sent in `model`, null: none
+     * named; as attempt `attempt`) and failed as `how` says (null: not in
+     * the log yet), then the limit report.
      */
     const retriedLog = ({
       model = FABLE_ID,
       how = { category: "rate-limit" },
-    }: { model?: string; how?: { category: string } | { rejected: string } | null } = {}) => {
+      attempt = 2,
+    }: {
+      model?: string | null;
+      how?: { category: string } | { rejected: string } | null;
+      attempt?: number;
+    } = {}) => {
       const rows: LoggedEvent[] = [
         logged(1, "client/turn/requested", { requestId: "creq_1", execution: { model: FABLE_ID } }),
         failedRow(2, { category: "rate-limit" }),
         logged(3, "client/turn/requested", {
           requestId: "creq_1b",
           retryOfRequestId: "creq_1",
-          retryAttempt: 2,
-          execution: { model },
+          retryAttempt: attempt,
+          execution: model === null ? {} : { model },
         }),
       ];
       if (how !== null) rows.push(failedRow(4, how));
@@ -11421,16 +11483,42 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       threadEvents: retriedLog(),
     };
 
-    for (const [what, how] of [
-      ["on a limit", { category: "rate-limit" }],
-      ["refused (no login)", { category: "unauthorized" }],
-      ["refused at the door on a limit", { rejected: "rate_limited" }],
+    for (const [what, retry] of [
+      ["on a limit", { how: { category: "rate-limit" } }],
+      ["refused (no login)", { how: { category: "unauthorized" } }],
+      ["refused at the door on a limit", { how: { rejected: "rate_limited" } }],
+      // A turn whose log names no Claude model is the preferred model's.
+      ["on a limit, sent in a model its log does not name", { model: null }],
+      // Judged as a rescue judges it: whatever the attempt.
+      ["on a limit at its fifth attempt", { attempt: 5 }],
     ] as const)
       it(`provider-retry's retry ran and failed again ${what} while the plugin was away: the thread waits on the chain judged, the banner comes back`, async () => {
-        const h = await restarted(NO_FABLE, { threadEvents: retriedLog({ how }) });
+        const h = await restarted(NO_FABLE, { threadEvents: retriedLog(retry) });
         await refreshed(h);
         expect(await banner(h)).toBe(told);
       });
+
+    it("the model judged and the retry's model differ only in case: the same model, the banner comes back (Sol B2-R6-001)", async () => {
+      const h = await host(NO_FABLE, {
+        ...stillWaiting,
+        settings: { preferredModel: "fable", maximumWaitHours: 1 },
+        kvPreset: {
+          "advice-bases": {
+            "thread-1": {
+              projectId: "proj-1",
+              model: "fable",
+              reason: "beyond-maximum-wait",
+              requestId: "creq_1",
+              chain: "creq_1",
+              at: NOW - HOUR,
+            },
+          },
+        },
+      });
+      dispose = () => h.harness.dispose();
+      await refreshed(h);
+      expect(await banner(h)).toBe(told.replace("No Fable", "No fable"));
+    });
 
     // Sol B2-R6-001: with the plugin running, the start of that retry would
     // have ended the banner, and only its failure's judgment could put one
