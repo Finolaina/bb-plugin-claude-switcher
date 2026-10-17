@@ -275,7 +275,8 @@ export const FALLBACK_MODEL = "Opus";
  * every account out of Fable "nothing works", while Team seats still have
  * Opus). Judged apart from the decision's reason: a wait, a wait beyond the
  * maximum and no usable account all say it. Told only when
- *  - the turn is in the preferred model (the reserved one);
+ *  - the turn is in the preferred model (the reserved one), and that model
+ *    is not Opus itself: Opus is no way out of Opus (Sol B2-005);
  *  - every account's latest read counts: `unread` names those whose read
  *    failed (a 429), is missing or is old, and an answer that lacked a
  *    window is unknown. A failed read is no proof that the model is gone;
@@ -312,7 +313,12 @@ export function opusInstead(
 ): string | null {
   const model = input.preferredModel.toLowerCase();
   const reserve = input.reserveModel ?? "";
-  if (model === "" || model !== reserve.toLowerCase()) return null;
+  if (
+    model === "" ||
+    model !== reserve.toLowerCase() ||
+    model === FALLBACK_MODEL.toLowerCase()
+  )
+    return null;
   const told =
     decision.kind === "wait" ||
     (decision.kind === "decline" &&

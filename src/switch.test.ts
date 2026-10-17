@@ -1580,6 +1580,34 @@ describe("opusInstead: a Fable thread no account can run is told to switch to Op
     expect(advice(fable({ preferredModel: "fable" }))).toBe("team2");
   });
 
+  it("Opus as the preferred model is never told to switch to Opus, also under a warning report that lets the account it failed on run Opus by its numbers (Sol B2-005)", () => {
+    // The turn failed on team5 under a warning report; its numbers still
+    // show room in the session and in Opus; every other account is out.
+    const opusLeft = seat("team5", {
+      session: { usedPercent: 10, resetsAt: NOW + HOUR },
+      models: { Opus: { usedPercent: 10, resetsAt: NOW + 96 * HOUR } },
+    });
+    const sessionOut = seat("team1", {
+      session: { usedPercent: 100, resetsAt: NOW + HOUR },
+      models: { Opus: { usedPercent: 10, resetsAt: NOW + 96 * HOUR } },
+    });
+    for (const model of ["Opus", "opus", "OPUS"]) {
+      const opusThread = fable({
+        preferredModel: model,
+        reserveModel: model,
+        failure: warning,
+        accounts: [opusLeft, sessionOut],
+      });
+      expect(decideSwitch(opusThread)).toMatchObject({ kind: "wait" });
+      expect(advice(opusThread)).toBeNull();
+      for (const decision of [
+        { kind: "decline", reason: "no-account-usable" },
+        { kind: "decline", reason: "beyond-maximum-wait" },
+      ] as const)
+        expect(opusInstead(decision, opusThread, [])).toBeNull();
+    }
+  });
+
   it("left in error, the account it ran on is judged on its numbers like any other", () => {
     // A rescue: the log's report may be an earlier account's. team5's
     // numbers say it is out of Fable: said; if they said it runs Fable,
