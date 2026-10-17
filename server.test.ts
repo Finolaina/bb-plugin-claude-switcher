@@ -9611,6 +9611,88 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     ]);
   });
 
+  /** bb's log of thread-1, oldest first: [request, the first request of its retry chain, its attempt]. */
+  const chainLog = (rows: [string, string?, number?][]) => ({
+    "thread-1": rows.map(([requestId, of, attempt], i) => ({
+      id: `evt_${requestId}`,
+      scope: { kind: "thread" },
+      threadId: "thread-1",
+      seq: i + 1,
+      createdAt: NOW - HOUR,
+      type: "client/turn/requested",
+      data: {
+        requestId,
+        ...(of === undefined ? {} : { retryOfRequestId: of, retryAttempt: attempt }),
+        execution: { model: FABLE_ID },
+      },
+    })),
+  });
+
+  it("a new turn that did not need it, told at its second attempt, gets its own row; its later attempts none (Sol B2-003)", async () => {
+    let workFable = 100;
+    const h = await host(
+      { ...NO_FABLE, work: () => Response.json(payload(1, 1, workFable)) },
+      {
+        settings: { preferredModel: "Fable", maximumWaitHours: 1 },
+        threadEvents: chainLog([
+          ["creq_1"],
+          ["creq_3"],
+          ["creq_3b", "creq_3", 2],
+          ["creq_3c", "creq_3", 3],
+        ]),
+      },
+    );
+    dispose = () => h.harness.dispose();
+    // Turn A: told.
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    // Turn B, a message sent by hand: work still runs Fable, the project
+    // moves there and nothing is told.
+    workFable = 30;
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure({ requestId: "creq_3" }));
+    // B's retry fails on work, out of Fable now as well: B's chain is told.
+    workFable = 100;
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ requestId: "creq_3b", attemptNumber: 2 }),
+    );
+    // B's third attempt: the same chain, nothing new.
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ requestId: "creq_3c", attemptNumber: 3 }),
+    );
+    expect((await history(h)).filter((r) => r[2] === r[3])).toEqual([
+      ["thread-1", "proj-1", "work", "work", told],
+      ["thread-1", "proj-1", "main", "main", told],
+    ]);
+  });
+
+  it("a retry of a told turn whose wait moves the project: the move's row records the move, not the advice again; the queued retry still says it (Sol B2-003)", async () => {
+    const h = await host(NO_FABLE, {
+      settings: { preferredModel: "Fable", maximumWaitHours: 0 },
+      threadEvents: chainLog([["creq_1"], ["creq_1b", "creq_1", 2]]),
+    });
+    dispose = () => h.harness.dispose();
+    // main's report resets last: the wait moves the project to spare, told.
+    const f = failure();
+    f.rateLimits!.windows[0]!.resetsAtMs = NOW + 9 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", f);
+    const first = `Waiting for Fable on spare. ${told}`;
+    // bb sends the timed retry; it fails on spare, whose report now resets
+    // last: the wait moves the project on to main.
+    h.queued.length = 0;
+    const g = failure({ requestId: "creq_1b", attemptNumber: 2 });
+    g.rateLimits!.windows[0]!.resetsAtMs = NOW + 9 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", g);
+    expect(h.retries.map((r) => r.reason)).toEqual([
+      first,
+      `Waiting for Fable on main${toOpus("work")}`,
+    ]);
+    expect(await history(h)).toEqual([
+      ["thread-1", "proj-1", "spare", "main", "Waiting for Fable on main"],
+      ["thread-1", "proj-1", "main", "spare", first],
+    ]);
+  });
+
   it("a wait beyond the maximum queues nothing: the history and the log say it, once however often it is judged", async () => {
     const h = await host(NO_FABLE, { settings: { preferredModel: "Fable", maximumWaitHours: 1 } });
     dispose = () => h.harness.dispose();
