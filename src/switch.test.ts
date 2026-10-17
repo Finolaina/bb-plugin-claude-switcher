@@ -1402,29 +1402,6 @@ describe("opusInstead: a Fable thread no account can run is told to switch to Op
     expect(advice(rescued)).toBe("team5");
   });
 
-  it("a blocked report not proven the failed turn's own rules no account out for Opus: the account it failed on is judged on its numbers (Sol B2-R2-002)", () => {
-    // team5's numbers show room in its session and an Opus window that runs
-    // out first; the report may be an earlier turn's, of another account.
-    const team5Now = seat("team5", {
-      session: { usedPercent: 10, resetsAt: NOW + HOUR },
-      models: {
-        Fable: { usedPercent: 100, resetsAt: NOW + 5 * HOUR },
-        Opus: { usedPercent: 10, resetsAt: NOW + 24 * HOUR },
-      },
-    });
-    const inherited = fable({ accounts: [team5Now, team1, team2], ownReport: false });
-    expect(decideSwitch(inherited)).toMatchObject({ kind: "wait", account: "team1" });
-    expect(advice(inherited)).toBe("team5");
-    // Proven its own (the default), it rules team5 out.
-    expect(advice({ ...inherited, ownReport: true })).toBe("team2");
-    // Never for Fable: the turn just failed there.
-    const fableLeft = seat("team5", {
-      session: { usedPercent: 10, resetsAt: NOW + HOUR },
-      models: { Fable: { usedPercent: 40, resetsAt: NOW + 5 * HOUR } },
-    });
-    expect(advice(fable({ accounts: [fableLeft, team1, team2], ownReport: false }))).toBe("team5");
-  });
-
   /** Refused for Fable while the stored report only warned on the session (bb's report lags the refusal). */
   const warning = failure({
     rateLimits: {
