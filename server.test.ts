@@ -9184,10 +9184,13 @@ describe("an Opus turn never retried, released or placed on a Max account that k
       workSession = 17;
       await h.harness.behavior.callRpc("accounts_refresh", null);
       armed = true;
-      const failed = h.harness.behavior.emitThreadEvent(
-        "turn.failed",
-        failure({ threadId: "thread-3", requestId: "creq_3" }),
-      );
+      // Under a warning report (bb's lags the refusal): no window blocked,
+      // so spare is not put out of the placement and the Fable turn below
+      // can still take the project home (a blocked one: see the next test).
+      const warned = failure({ threadId: "thread-3", requestId: "creq_3" });
+      warned.rateLimits!.status = "warning";
+      warned.rateLimits!.windows[0]!.status = "warning";
+      const failed = h.harness.behavior.emitThreadEvent("turn.failed", warned);
       await gate.reached;
       expect(notes(h)).toEqual([ownNote("spare"), ownNote("work")]);
       // Meanwhile provider-retry queues its row and thread-2 (Fable) takes the project home.
@@ -9226,6 +9229,44 @@ describe("an Opus turn never retried, released or placed on a Max account that k
         action: "proceed",
       });
       expect(notes(h).at(-1)).toBe(ownNote("work"));
+    });
+
+    it("a Fable turn does not go home to an account whose blocked report put it out, until the reported reset (Sol B2-002)", async () => {
+      let clock = NOW;
+      let workSession = 100;
+      const h = await host(
+        {
+          main: () => Response.json(payload(10, 10, 2)),
+          spare: () => Response.json(payload(10, 10, 5)),
+          work: () => Response.json(teamPayload(workSession, 42)),
+        },
+        { ...FABLE, clock: () => clock },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(
+        (await h.harness.behavior.runCli(["use", "Website", "spare"])).exitCode,
+      ).toBe(0);
+      expect(await dispatch(h, "thread-3", OPUS_ID)).toEqual({ action: "proceed" });
+      await active(h, "thread-3");
+      // A seat frees; the Opus turn fails on spare, its report blocking the
+      // session until +1 h: out to work.
+      workSession = 17;
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      const f = failure({ threadId: "thread-3", requestId: "creq_3" });
+      f.rateLimits!.windows[0]!.resetsAtMs = NOW + HOUR;
+      await h.harness.behavior.emitThreadEvent("turn.failed", f);
+      expect(notes(h)).toEqual([ownNote("spare"), ownNote("work")]);
+      // A Fable turn just before the reset stays on the seat, which runs Fable.
+      clock = NOW + HOUR - 1;
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "thread-2", FABLE_ID)).toEqual({ action: "proceed" });
+      expect(notes(h)).toEqual([ownNote("spare"), ownNote("work")]);
+      expect(h.envDeleted).toEqual([]);
+      // From the reset on, home again.
+      clock = NOW + HOUR;
+      expect(await dispatch(h, "thread-2", FABLE_ID)).toEqual({ action: "proceed" });
+      expect(notes(h)).toEqual([ownNote("spare"), ownNote("work"), ownNote("spare")]);
     });
   });
 
@@ -9932,6 +9973,59 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       ["thread-3", `Retrying on account spare${toOpus("work")}`],
       ["thread-1", `Waiting for Fable on spare. ${told}`],
     ]);
+  });
+
+  /** A Team seat (no weekly): its session (reset in 5 h) and its Fable window, which resets at `fableReset`. */
+  const seatAt = (session: number, fable: number, fableReset: number) => ({
+    limits: [
+      { kind: "session", percent: session, resets_at: new Date(NOW + 5 * HOUR).toISOString() },
+      {
+        kind: "weekly_scoped",
+        percent: fable,
+        resets_at: new Date(fableReset).toISOString(),
+        scope: { model: { display_name: "Fable" } },
+      },
+    ],
+    five_hour: { locked_reason: null },
+    seven_day: null,
+  });
+
+  it("the account told for Opus is the one the Opus turn then runs on: the failure's blocked report keeps its account out of the placement until the reported reset (Sol B2-002)", async () => {
+    let clock = NOW;
+    const until = NOW + 30 * 60_000;
+    const h = await host(
+      {
+        // Team A: its session at 10 %, Fable spent until +1 h.
+        main: () => Response.json(seatAt(10, 100, NOW + HOUR)),
+        // Team B: Opus free, Fable spent until +2 h.
+        spare: () => Response.json(seatAt(1, 100, NOW + 2 * HOUR)),
+      },
+      {
+        // Reads good for two hours: no refresh needed below.
+        settings: { preferredModel: "Fable", refreshMinutes: 60 },
+        dirs: () => ["spare"],
+        clock: () => clock,
+      },
+    );
+    dispose = () => h.harness.dispose();
+    // A's turn fails: its report blocks the session until +30 min. The wait
+    // is on A (its Fable is back first) and names B for Opus.
+    const f = failure();
+    f.rateLimits!.windows[0]!.resetsAtMs = until;
+    await h.harness.behavior.emitThreadEvent("turn.failed", f);
+    expect(h.retries.map((r) => [r.reason, r.sendAt])).toEqual([
+      [`Waiting for Fable on main${toOpus("spare")}`, NOW + HOUR + BUFFER],
+    ]);
+    // The thread is switched to Opus and sent before the reported reset:
+    // its turn runs on B, as told, though A's numbers show a session free.
+    clock = until - 1;
+    expect(await dispatch(h, "thread-1", OPUS_ID)).toEqual({ action: "proceed" });
+    expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([["proj-1", ownNote("spare")]]);
+    // Back on A by hand: from the reported reset on, A's numbers decide again.
+    await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: null });
+    clock = until;
+    expect(await dispatch(h, "thread-1", OPUS_ID)).toEqual({ action: "proceed" });
+    expect(h.envSet).toHaveLength(1);
   });
 
   /** An answer whose session and Fable windows reset at `reset`: the wait for it is due within seconds. */

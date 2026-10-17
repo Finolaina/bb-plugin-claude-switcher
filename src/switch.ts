@@ -154,10 +154,28 @@ function freeAt(account: AccountUsage, model: string): number | null {
   return Math.max(...blocking.map((w) => w.resetsAt as number));
 }
 
+/**
+ * When the provider's report says the account it came from runs again: the
+ * latest reset of the windows it blocked (of those it warned on, under a
+ * warning report: the one that warned is the one the provider enforced,
+ * not the one that resets last; of any, when it flags none). Null when it
+ * names none: a refusal reports no reset.
+ */
+export function reportedReset(failure: PluginTurnFailedEvent): number | null {
+  const windows = failure.rateLimits?.windows ?? [];
+  const blocked = windows.filter((w) => w.status === "blocked");
+  const warned = windows.filter((w) => w.status === "warning");
+  const flagged =
+    blocked.length > 0 ? blocked : warned.length > 0 ? warned : windows;
+  const reported = flagged
+    .map((w) => w.resetsAtMs)
+    .filter((ms): ms is number => ms !== null);
+  return reported.length === 0 ? null : Math.max(...reported);
+}
+
 export function decideSwitch(input: SwitchInput): SwitchDecision {
   const declined = declineReason(input.failure, input.stuck === true);
   if (declined !== null) return { kind: "decline", reason: declined };
-  const rateLimits = input.failure.rateLimits;
 
   const accounts = input.accounts.map((a) => settle(a, input.now));
   const stuck = input.stuck === true;
@@ -200,17 +218,7 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
   // The provider's own report wins over our (possibly stale) measurement of
   // the account that just failed: it is blocked at least until its reset.
   // A refusal reports no reset: the account that refused is never waited for.
-  // Under a warning report no window is blocked: the one that warned is the
-  // one the provider enforced, not the one that resets last.
-  const windows = rateLimits?.windows ?? [];
-  const blocked = windows.filter((w) => w.status === "blocked");
-  const warned = windows.filter((w) => w.status === "warning");
-  const flagged =
-    blocked.length > 0 ? blocked : warned.length > 0 ? warned : windows;
-  const reported = flagged
-    .map((w) => w.resetsAtMs)
-    .filter((ms): ms is number => ms !== null);
-  const failedFreeAt = reported.length === 0 ? null : Math.max(...reported);
+  const failedFreeAt = reportedReset(input.failure);
 
   // Ties: the current account (no move needed), then the name. Never the
   // order the accounts were measured in.
