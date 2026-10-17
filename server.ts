@@ -1925,7 +1925,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           holds =
             turn !== null &&
             (turn.requestId === basis.requestId ||
-              (basis.chain !== null && turn.original === basis.chain));
+              turn.original === basis.chain);
         } catch (error) {
           bb.log.warn(
             `thread ${threadId}: its banner not asked again (the thread could not be read: ${error instanceof Error ? error.message : String(error)})`,
