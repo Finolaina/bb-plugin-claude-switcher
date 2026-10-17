@@ -18,17 +18,18 @@ project uses [Semantic Versioning](https://semver.org/).
   Opus with the model picker; it will go to <name>`, naming the account
   the project's next Opus turn would run on, and so does the retry of
   another thread of the project that follows the wait; the history gets
-  the text once per thread until another row of it (from the project's
-  account to itself when nothing moved), and the log every time. With
+  the text once per turn sent (from the project's account to itself when
+  nothing moved; its retries add none), and the log every time. With
   nothing queued (beyond the maximum, or no account will free) only the
   history and the log say it. "No account can run it" means none
   unlocked with its session, weekly and the model's window all under
   100 %, the account the turn just failed on never counting; a usage
   read that failed (a 429), was never made or is older than two
   refreshes is no proof of it, and then nothing is said. Once the model
-  is back the queued wait runs as before. Measured over 9-16 October 2026 with the author's usage
-  history: 12 h in which every account was out of Fable while Team seats
-  still had Opus. The plugin still never changes a thread's model.
+  is back the queued wait runs as before. Measured over 9-16 October 2026
+  with the author's usage history: 12 h in which every account was out of
+  Fable while Team seats still had Opus. The plugin still never changes a
+  thread's model.
 
 ## [0.2.19] - 2026-10-17
 

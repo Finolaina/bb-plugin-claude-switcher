@@ -486,9 +486,10 @@ Opus turn would run on: where the wait leaves the project when it can
 run Opus there, else the best other (the account that just failed only
 when its report merely warned and its numbers leave room). Another
 thread of the project in the preferred model that follows the wait says
-the same. The history gets the text once per thread until another row
-of it (from the project's account to itself when nothing moved), and the
-log every time. A usage read that failed (a 429), was never made or is
+the same, while the wait is still ahead. The history gets the text once
+per turn you sent (from the project's account to itself when nothing
+moved): its retries and the refreshes that judge it again add none, a
+new turn gets its own; the log says it every time. A usage read that failed (a 429), was never made or is
 older than two refreshes is no proof that the model is gone: then
 nothing is said. When nothing is queued for the turn (beyond the
 maximum, or no account will free), only the history and the log say it,
