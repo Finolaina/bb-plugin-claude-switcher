@@ -24,8 +24,10 @@ project uses [Semantic Versioning](https://semver.org/).
 - **The account named for Opus is where the placement would run the
   Opus turn.** The advice asks the same function the placement before a
   turn uses, with the same usage reads, from where the decision leaves
-  the project (the account waited for, or the one it sits on), so an Opus
-  turn sent after the advice runs where the advice said. When that
+  the project (the account waited for, or the one it sits on), so a new
+  message sent in Opus on those reads runs where the advice said (not
+  Send now on a queued retry, which skips the placement: README, Known
+  limitations, since 0.2.24). When that
   placement would keep the project where Opus cannot run, nothing is
   said. The account the turn just failed on is judged there on its
   numbers like any other: when the provider's report is ahead of them,
