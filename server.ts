@@ -388,7 +388,35 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * back.
    */
   const shownAdvice = new Map<string, string>();
-  function showAdvice(threadId: string, text: string | null): void {
+  /**
+   * Per thread, the generation its judgments belong to: a judgment takes
+   * the thread's as it begins and shows or takes away the banner only while
+   * that still holds. A turn of the thread starting, its archiving and the
+   * automatic choice switched off begin a new one, so a judgment that was
+   * reading meanwhile says nothing when its reads end (Sol B2-R2-003). One
+   * counter for every thread, only growing: switching off moves them all.
+   * In memory, a number per thread whose turn started since the plugin did.
+   */
+  let generations = 0;
+  let switchedOffIn = 0;
+  const generationOf = new Map<string, number>();
+  function generation(threadId: string): number {
+    return Math.max(generationOf.get(threadId) ?? 0, switchedOffIn);
+  }
+  /** A turn of the thread starts, or it is archived: its banner goes, and what its pending judgments found with it. */
+  function adviceOver(threadId: string): void {
+    generationOf.set(threadId, ++generations);
+    showAdvice(threadId, null);
+  }
+  /** `judgedIn`: the generation of the judgment that shows or takes it (see generation). */
+  function showAdvice(
+    threadId: string,
+    text: string | null,
+    judgedIn?: number,
+  ): void {
+    if (judgedIn !== undefined && judgedIn !== generation(threadId)) return;
+    // Never a banner with the automatic choice off.
+    if (text !== null && !current.autoSwitch) return;
     if ((shownAdvice.get(threadId) ?? null) === text) return;
     if (text === null) shownAdvice.delete(threadId);
     else shownAdvice.set(threadId, text);
@@ -401,8 +429,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       next.defaultAccountName !== current.defaultAccountName;
     current = next;
     // A Map visits no key deleted before its turn: the current one may go.
-    if (!next.autoSwitch)
+    if (!next.autoSwitch) {
+      switchedOffIn = ++generations;
       for (const threadId of shownAdvice.keys()) showAdvice(threadId, null);
+    }
     // Found again (and stale measurements pruned) on next use: an account of
     // the old directory must not be picked.
     if (moved) accounts = [];
@@ -2218,7 +2248,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
   bb.events.on("thread.active", async ({ thread }) => {
     // A turn of it runs: the advice of its last failure is over.
-    showAdvice(thread.id, null);
+    adviceOver(thread.id);
     if (
       thread.providerId !== CLAUDE_CODE_PROVIDER ||
       notTheUsersThread(thread) !== null
@@ -2274,7 +2304,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   bb.events.on("thread.archived", async ({ thread }) => {
     forgetStart(thread.id);
     threadModel.delete(thread.id);
-    showAdvice(thread.id, null);
+    adviceOver(thread.id);
     // Forgotten in storage too, or the stored list only grows (Codex r8,
     // IR8-004).
     if (cancelled.delete(thread.id)) await storeCancelled(thread.id);
@@ -2479,6 +2509,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     event: PluginTurnFailedEvent,
     projectId: string,
     started: string | null | undefined,
+    /** The thread's generation as its failure came (see generation). */
+    judgedIn: number,
   ): Promise<void> {
     const now = deps.now();
     // The log first, for the turn that failed: a Send now or an edited
@@ -2538,7 +2570,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       if (told !== null)
         await noteAdvice(event.threadId, projectId, recent.to, reason, event, now);
       // Its queued retry says it now, or nothing is to be said.
-      showAdvice(event.threadId, null);
+      showAdvice(event.threadId, null, judgedIn);
       await retryTurn(event, reason, recent.sendAt);
       return;
     }
@@ -2576,7 +2608,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         );
         if (told !== null)
           await noteAdvice(event.threadId, projectId, currentName, reason, event, now);
-        showAdvice(event.threadId, null);
+        showAdvice(event.threadId, null, judgedIn);
         await retryTurn(event, reason, sendAt);
         return;
       }
@@ -2600,6 +2632,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       deps.now(),
       false,
       before,
+      judgedIn,
       started,
     );
   }
@@ -2709,6 +2742,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     stuck: boolean,
     /** The project's moves and picks before `from` was read (see noteMove). */
     before: MoveMark,
+    /** The thread's generation as the judgment began (see generation). */
+    judgedIn: number,
     ranOn?: string | null,
   ): Promise<void> {
     const fromName = from.account ?? current.defaultAccountName;
@@ -2773,9 +2808,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const carried = advice === null ? undefined : { model };
     const how = stuck ? "left in error: " : "";
     // The thread shows the advice where nothing queued carries it: a
-    // decline (Sol B2-004). Any other judgment takes it away.
-    if (!(stuck && !current.autoSwitch))
-      showAdvice(event.threadId, decision.kind === "decline" ? advice : null);
+    // decline (Sol B2-004). Any other judgment takes it away. Unless a turn
+    // of it started, it was archived or the automatic choice was switched
+    // off while this one read (Sol B2-R2-003).
+    showAdvice(
+      event.threadId,
+      decision.kind === "decline" ? advice : null,
+      judgedIn,
+    );
     if (decision.kind === "decline") {
       // The account the project sits on is no good either: a leftover
       // thread must be judged too, not retried there at once.
@@ -2867,6 +2907,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // failure: a failure declined below ends the turn as well, with no
     // `thread.idle` (Codex IR13-001, code-reviewer r13).
     const started = startedOn.get(event.threadId);
+    // Its judgment's generation, taken before any read (see generation).
+    const judgedIn = generation(event.threadId);
     forgetStart(event.threadId);
     if (!current.autoSwitch) return;
     // Pure guards first: another provider's limit must not query every account.
@@ -2895,7 +2937,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       turnReports.add(event);
     try {
       await inProjectQueue(thread.projectId, () =>
-        handleFailure(event, thread.projectId, started),
+        handleFailure(event, thread.projectId, started, judgedIn),
       );
     } catch (error) {
       // A retry of the turn is already on its way (queued by another plugin,
@@ -3014,6 +3056,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** The thread's failure as bb logged it, judged as a failure would be. */
   async function rescueThread(thread: ListedThread): Promise<void> {
     const threadId = thread.id;
+    // Taken before any read (see generation).
+    const judgedIn = generation(threadId);
     // Read again in the project's queue: archived, running again, moved or
     // retried meanwhile (Codex r6, IR6-005).
     if (!current.autoSwitch) return;
@@ -3081,6 +3125,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       deps.now(),
       true,
       before,
+      judgedIn,
     );
   }
   /** What bb's failure event says of a turn rejected at the door (bb 0.45, `doorRejectionErrorInfo`). */
