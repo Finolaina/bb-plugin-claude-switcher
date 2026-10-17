@@ -4,6 +4,73 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.26] - 2026-10-17
+
+### Fixed
+
+- **A banner read back after a restart stands only on what bb logged of
+  the retry that followed.** After a restart, a declined thread's banner
+  came back when bb said its latest turn was the one judged or any later
+  retry of its chain. With the plugin running, that retry's start ends
+  the banner, and only its failure's judgment brings one back. A later
+  retry now counts only when bb's log says it was sent in the model
+  judged and failed on a limit or was refused; another failure or
+  another model drops what was kept, and a failure not yet in the log
+  keeps it, unshown, until the log says it.
+- **The banners' pass does not trust a read that a move crossed.** The
+  pass could read a project's account while another thread's failure
+  was moving it, and name the account the project was leaving. It no
+  longer reads a project whose move is being written (it runs again
+  once the move is over) and drops a read that a move crossed, running
+  again at once; the banners stay as they were meanwhile.
+- **Fable back takes the banner away without reading the project.** A
+  banner went only once the project's account was read, and a read that
+  failed left it up. It now goes before that read whenever nothing is to
+  be told wherever the project sits (the preferred model back on an
+  account, a read that says nothing, the model no longer preferred), and
+  also when the project's account cannot be read. What it is asked on
+  stays for the reads to come back, and a judgment of the thread made
+  meanwhile keeps its own banner.
+- **A queued retry's reason is asked as the retry is queued.** A wait's
+  or a leftover's retry took its reason before the look at the queue and
+  the removal of the row it replaces: with the automatic choice switched
+  off meanwhile, the reason still named where an Opus turn would go. It
+  is now asked right before the retry is queued.
+- **No account found, no read counts.** After the accounts directory
+  changed to one that cannot be read, the readings in memory of the
+  accounts found before still counted, and never grew old. With no
+  account found, none counts: the banner goes (what it is asked on
+  stays), and a judgment says nothing.
+- **What a banner is asked on, read back after a restart, does not stay
+  forever.** It was skipped unchecked while the preferred model was
+  another or an account was never read, and a thread that could not be
+  read was warned about at every refresh. It is now checked against bb
+  before anything else, and only for so long: one whose decline was
+  first judged more than 7 days before is dropped without reading its
+  thread (every window of a limit has reset since), and one that 5
+  refreshes in a row could not check (the thread could not be read, or
+  bb's log does not say how its retry failed) is dropped at the fifth.
+- **Storage of a shape that cannot be read is written again.** It was
+  said in the log at every start.
+- **The same decline judged again writes nothing.** A thread left in
+  error and judged at every refresh had what its banner is asked on
+  written each time, though only the time had changed. When the decline
+  was first judged now stays, and nothing is written.
+
+### Changed
+
+- **README.** The table of bb surfaces lists the composer banner,
+  `thread.active`, `thread.archived`, `thread.deleted` and
+  `message.cancelled`, and says the storage keeps what each banner is
+  asked on and the retries cancelled by hand. Known limitations: the
+  banner also comes back at the refresh whose reads show the preferred
+  model out again; the write of what a banner is asked on is not waited
+  for, so a restart before it lands loses it with no line in the log;
+  and what was read back is checked for 7 days and up to 5 refreshes.
+- **The 0.2.25 entry** says the pass keeps a basis only for the declines
+  a banner can follow, and that the banner also comes back at the
+  refresh whose reads show it out again.
+
 ## [0.2.25] - 2026-10-17
 
 ### Fixed
@@ -15,8 +82,8 @@ project uses [Semantic Versioning](https://semver.org/).
   at the waiting turns waited for that refresh: twenty declined threads
   of one project with two-second reads held another project's failure
   for forty seconds. The pass now runs after the refresh without being
-  waited for, reads each project's account once, is kept only for the
-  declines a banner can follow (in the preferred model, beyond the
+  waited for, reads each project's account once, keeps a basis only for
+  the declines a banner can follow (in the preferred model, beyond the
   maximum wait or with no account usable), and a refresh that ends
   while it runs gets one more pass after it, not a second one at once.
   A refresh asked by hand (the section's refresh, `bb claude-switcher
@@ -49,8 +116,9 @@ project uses [Semantic Versioning](https://semver.org/).
 - **README, Known limitations.** The banner follows the numbers of the
   account the turn failed on: when they show room for the preferred
   model again, it goes at the next usage refresh, while provider-retry
-  still waits, and comes back with the turn's next failure. And a
-  banner after a restart comes from the plugin's storage.
+  still waits, and comes back with the turn's next failure or at the
+  refresh whose reads show it out again. And a banner after a restart
+  comes from the plugin's storage.
 - **The 0.2.24 and 0.2.23 entries** say which judgment ends a banner and
   what a switch-off leaves to be made, and no line is cut short.
 

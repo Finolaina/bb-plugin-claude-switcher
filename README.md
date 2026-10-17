@@ -520,13 +520,18 @@ provider-retry keeps a retry of the turn queued (a thread with a retry
 queued is not judged again until it runs): it names the account an
 Opus turn would go to now, goes when the preferred model is back, no
 account can run Opus, a read failed or is older than two refreshes, or
-the project's account was set outside the plugin, and comes back with
-the reads. Nothing is sent, retried, moved or written for it, and
-nothing that decides waits for it: it reads each project's account
-once, after the refresh. What it is asked on is kept in the plugin's
-storage, so after a restart the usage refresh at start asks it again,
-if bb says the thread still waits on the turn it was judged on. A
-thread whose preferred model is Opus itself is never told.
+the project's account was set outside the plugin or could not be read,
+and comes back with the reads. Nothing is sent, retried, moved or
+written for it, and nothing that decides waits for it: it reads each
+project's account once, after the refresh, and not while a move of the
+project is being written (it reads it again once the move is over).
+What it is asked on is kept in the plugin's storage, so after a restart
+the usage refresh at start asks it again, if bb says the thread still
+waits on the turn it was judged on (a later retry of that turn counts
+only when it was sent in the same model and failed on a limit or was
+refused); one judged more than seven days before, or that five
+refreshes in a row could not check, is dropped. A thread whose
+preferred model is Opus itself is never told.
 Once the model is back, the queued wait runs as before.
 
 A queued wait is looked at again after every usage refresh: an account
@@ -592,13 +597,17 @@ executable (`claude auth login`) as a child process of bb's server.
 | `turn.failed` event                                              | Detects subscription-window rate limits of the Claude Code provider, and refused turns.                                                                                             |
 | `thread.created` event and `projects.get`                        | Places a project when one of its threads is created (a new project by its creation date).                                                                                           |
 | `thread.idle` event                                              | With `switchAheadPercent` or `switchAheadOtherPercent` set, reads the thread's model, measures the account when a turn ends and moves the project.                                                                                         |
+| `thread.active` event                                            | Notes the account a turn of the thread started on, so a failure after a move is told from one of the new account; a turn starting ends the thread's banner.                         |
 | Project machine environment variables                            | Sets `CLAUDE_CONFIG_DIR` on the project, with a note naming the account.                                                                                                            |
 | `threads.retry` and queued messages                              | Retries the failed turn now, or at a reset, and replaces the retry provider-retry queued.                                                                                             |
 | Settings and a settings section                                  | The ten settings, plus the per-project picker, the account cards, the login and the history.                                                                                       |
 | `experimental_threadHeaderAction` slot and `threads.get`         | The account control in a Claude Code thread's header. Experimental in bb: it may change.                                                                                            |
 | `composer.customize` (a new-thread action) and `useComposer`     | The account control in the new-thread composer, for the project picked there.                                                                                                       |
+| `composer.customize` (a thread's composer banner), an RPC and a realtime signal | The banner over a declined thread's composer telling it to switch to Opus (since 0.2.21), asked again after every usage refresh.                                                    |
+| `thread.archived` and `thread.deleted` events                    | The thread's banner and what it is asked on go; the model seen in it and a retry cancelled by hand are forgotten.                                                                   |
+| `message.cancelled` event                                        | Tells a queued retry the user cancelled by hand (the thread is left alone until a new turn of it) from the plugin's own replacements.                                               |
 | CLI registration                                                 | `bb claude-switcher list`, `refresh`, `history`, `use` and `release`.                                                                                                               |
-| Background service, key-value storage, realtime signals, logging | Periodic usage refresh, the history of moves, the usage samples behind the forecast, the install time and the new projects already handled, live updates of the section, and a log. |
+| Background service, key-value storage, realtime signals, logging | Periodic usage refresh, the history of moves, the usage samples behind the forecast, the install time, the new projects already handled, what each declined thread's banner is asked on and the retries cancelled by hand, live updates of the section, and a log. |
 
 </details>
 
@@ -786,13 +795,19 @@ Coming from `claude-accounts` 0.1.x? See the upgrade note in
   numbers: when those of the account the turn failed on show room for
   the preferred model again, it goes at the next usage refresh, while
   bb's provider-retry still waits for that account's reset, and comes
-  back with the turn's next failure.
+  back with the turn's next failure or at the refresh whose reads show
+  it out again.
 - **A banner after a restart comes from the plugin's storage.** What a
   declined thread's banner is asked on is written there, and the usage
   refresh at start asks it again if bb says the thread still waits on
   the turn it was judged on. When the store rejected that write (the log
   says so), the banner is back only with the thread's next judgment, and
-  a thread with a retry queued is not judged again until it runs.
+  a thread with a retry queued is not judged again until it runs. The
+  write is not waited for: a restart before it lands loses it the same
+  way, and then the log says nothing. What was read back is checked for
+  seven days after its decline was first judged, and dropped after five
+  refreshes in a row that could not check it (the thread could not be
+  read, or bb's log does not say yet how its retry failed).
 - **The account named for Opus is where a new Opus message would go,
   on the reads of that moment.** It holds for a message sent in Opus
   through bb's dispatch checkpoint, where the placement before a turn
