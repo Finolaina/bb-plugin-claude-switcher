@@ -11312,6 +11312,23 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       expect(Object.keys((await h.bb.storage.kv.get<object>("advice-bases")) ?? {})).toEqual(["thread-1"]);
     });
 
+    it("storage of a shape that cannot be read: said in the log once, and written again empty, so the next start says nothing (code-reviewer r6, N1)", async () => {
+      const warned = (h: Awaited<ReturnType<typeof host>>) =>
+        h.harness.logEntries.some(
+          (e) => e.level === "warn" && e.message.includes("an unreadable shape"),
+        );
+      const first = await host(NO_FABLE, { kvPreset: { "advice-bases": ["thread-1"] } });
+      expect(warned(first)).toBe(true);
+      await vi.waitFor(async () => {
+        expect(await first.bb.storage.kv.get("advice-bases")).toEqual({});
+      });
+      const kept = await first.bb.storage.kv.get("advice-bases");
+      await first.harness.dispose();
+      const h = await host(NO_FABLE, { kvPreset: { "advice-bases": kept } });
+      dispose = () => h.harness.dispose();
+      expect(warned(h)).toBe(false);
+    });
+
     /** What thread-1's banner was asked on (judged at `at`), as storage keeps it. */
     const storedBasis = (requestId: string, chain: string | null, at = NOW - HOUR) => ({
       "advice-bases": {

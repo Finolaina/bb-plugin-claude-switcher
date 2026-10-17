@@ -741,7 +741,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       bb.log.warn(
         `what the banners are asked on had ${unreadable > 0 ? `${unreadable} unreadable thread${unreadable === 1 ? "" : "s"}` : "an unreadable shape"}; kept the rest`,
       );
-    if (adviceBasis.size !== entries.length) storeBases();
+    // Written again without what could not be read, so the next start
+    // reads it all and says nothing (code-reviewer r6, N1).
+    if (
+      adviceBasis.size !== entries.length ||
+      (stored != null && !byThread.success)
+    )
+      storeBases();
   } catch (error) {
     bb.log.warn(
       `could not read what the banners are asked on; they come back with the next judgments: ${error instanceof Error ? error.message : String(error)}`,
