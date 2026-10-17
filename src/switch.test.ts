@@ -9,6 +9,8 @@ import {
   decidePlacement,
   decideSwitch,
   modelFamily,
+  opusInstead,
+  opusInsteadText,
   settle,
   type SwitchInput,
 } from "./switch.js";
@@ -1235,6 +1237,294 @@ describe("reserveModel reaches each decision", () => {
     expect(bestAccount([keepsFable, noFable], "Opus", NOW)).toBe("keepsFable");
     expect(bestAccount([keepsFable, noFable], "Opus", NOW, "Fable")).toBe(
       "noFable",
+    );
+  });
+});
+
+// D3 (2026-10-17): bb gives a plugin no model for a retry, so a thread in
+// the preferred model that no account can run is told to switch to Opus,
+// naming where an Opus turn of it would go. Whether Fable is left is judged
+// apart from the decision's reason: a wait, a wait beyond the maximum and
+// no usable account all say it.
+describe("opusInstead: a Fable thread no account can run is told to switch to Opus (D3, S15)", () => {
+  /** A Team seat: no general weekly (measured 2026-10-11). */
+  const seat = (name: string, overrides: Partial<AccountUsage> = {}) =>
+    account(name, {
+      weekly: { usedPercent: 0, resetsAt: null, absent: true },
+      ...overrides,
+    });
+  // Where the turn failed: its report (a blocked session) and its numbers agree.
+  const team5 = seat("team5", {
+    session: { usedPercent: 100, resetsAt: NOW + 2 * HOUR },
+    models: { Fable: { usedPercent: 100, resetsAt: NOW + 5 * HOUR } },
+  });
+  // Fable back first, but its session is out: no Opus there now either.
+  const team1 = seat("team1", {
+    session: { usedPercent: 100, resetsAt: NOW + HOUR },
+    models: { Fable: { usedPercent: 100, resetsAt: NOW + 3 * HOUR } },
+  });
+  const team2 = seat("team2", {
+    session: { usedPercent: 0, resetsAt: null },
+    models: {
+      Fable: { usedPercent: 100, resetsAt: NOW + 6 * HOUR },
+      Opus: { usedPercent: 20, resetsAt: NOW + 96 * HOUR },
+    },
+  });
+  const fable = (overrides: Partial<SwitchInput> = {}) =>
+    input({
+      currentAccount: "team5",
+      accounts: [team5, team1, team2],
+      preferredModel: "Fable",
+      reserveModel: "Fable",
+      ...overrides,
+    });
+  const advice = (i: SwitchInput, unread: string[] = []) =>
+    opusInstead(decideSwitch(i), i, unread);
+
+  it("S15: every Fable at 100 % with a known reset (a wait) and team2 with Opus: the wait stands and names team2 for Opus", () => {
+    const i = fable();
+    expect(decideSwitch(i)).toEqual({
+      kind: "wait",
+      account: "team1",
+      sendAt: NOW + 3 * HOUR + BUFFER,
+      reason: "Waiting for Fable on team1",
+    });
+    expect(advice(i)).toBe("team2");
+  });
+
+  it("says it on a wait beyond the maximum too", () => {
+    const i = fable({ maximumWaitMs: HOUR });
+    expect(decideSwitch(i)).toEqual({
+      kind: "decline",
+      reason: "beyond-maximum-wait",
+    });
+    expect(advice(i)).toBe("team2");
+  });
+
+  it("says it when no account is usable at all (no reset known)", () => {
+    const unknownReset = (a: AccountUsage): AccountUsage => ({
+      ...a,
+      models: {
+        ...a.models,
+        Fable: { usedPercent: 100, resetsAt: null },
+      },
+    });
+    const i = fable({
+      accounts: [team5, team1, team2].map(unknownReset),
+      failure: failure({
+        rateLimits: { ...failure().rateLimits!, windows: [] },
+      }),
+    });
+    expect(decideSwitch(i)).toEqual({
+      kind: "decline",
+      reason: "no-account-usable",
+    });
+    expect(advice(i)).toBe("team2");
+  });
+
+  it("without an account that can run Opus, says nothing (the wait as before)", () => {
+    const opusOut = seat("team2", {
+      session: { usedPercent: 0, resetsAt: null },
+      models: {
+        Fable: { usedPercent: 100, resetsAt: NOW + 6 * HOUR },
+        Opus: { usedPercent: 100, resetsAt: NOW + 96 * HOUR },
+      },
+    });
+    const i = fable({ accounts: [team5, team1, opusOut] });
+    expect(decideSwitch(i)).toMatchObject({ kind: "wait", account: "team1" });
+    expect(advice(i)).toBeNull();
+  });
+
+  it("a failed read (429) of the only account with Fable is no proof that Fable is gone: nothing said", () => {
+    // Its last good numbers may show Fable spent; its latest read failed.
+    const team3 = seat("team3", {
+      models: { Fable: { usedPercent: 100, resetsAt: NOW + 4 * HOUR } },
+    });
+    const i = fable({ accounts: [team5, team1, team2, team3] });
+    expect(advice(i, ["team3"])).toBeNull();
+    // Left out of the measurements altogether (stale and failing): the same.
+    expect(advice(fable(), ["team3"])).toBeNull();
+    // Read, the same numbers say it.
+    expect(advice(i)).toBe("team2");
+  });
+
+  it("an account whose answer lacked a window is unknown, not out of Fable: nothing said", () => {
+    const unknown = seat("team3", {
+      blocked: true,
+      unknown: true,
+      models: {},
+    });
+    expect(advice(fable({ accounts: [team5, team1, team2, unknown] }))).toBeNull();
+  });
+
+  it("a Max account with Fable usable as the only one that could run Opus: nothing said (it has Fable, and the Max accounts are Fable's)", () => {
+    const max1 = account("max1", {
+      session: { usedPercent: 30, resetsAt: NOW + 3 * HOUR },
+      weekly: { usedPercent: 50, resetsAt: NOW + 72 * HOUR },
+      models: { Fable: { usedPercent: 40, resetsAt: NOW + 72 * HOUR } },
+    });
+    // A leftover: the turn ran on team5; the project already sits on max1.
+    const leftover = fable({
+      currentAccount: "max1",
+      failedAccount: "team5",
+      accounts: [team5, team1, max1],
+    });
+    expect(decideSwitch(leftover)).toMatchObject({ kind: "wait", account: "max1" });
+    expect(advice(leftover)).toBeNull();
+    // The turn failed on it: its report rules it out, while its numbers,
+    // not read again yet, still keep Fable. Never named for Opus.
+    const failedOnMax = fable({ currentAccount: "max1", accounts: [max1, team1] });
+    expect(decideSwitch(failedOnMax)).toMatchObject({ kind: "wait", account: "max1" });
+    expect(advice(failedOnMax)).toBeNull();
+    // With a seat that can run Opus, that seat is named, not the Max.
+    expect(advice(fable({ currentAccount: "max1", accounts: [max1, team1, team2] }))).toBe("team2");
+  });
+
+  it("never names the account the turn just failed on, whose report blocked a window an Opus turn counts against; left in error, its numbers decide", () => {
+    // team5's numbers predate its failure: they still show room in its
+    // session, and an Opus window that runs out first.
+    const stale = seat("team5", {
+      session: { usedPercent: 10, resetsAt: NOW + HOUR },
+      models: {
+        Fable: { usedPercent: 100, resetsAt: NOW + 5 * HOUR },
+        Opus: { usedPercent: 10, resetsAt: NOW + 24 * HOUR },
+      },
+    });
+    const failed = fable({ accounts: [stale, team1, team2] });
+    expect(decideSwitch(failed)).toMatchObject({ kind: "wait", account: "team1" });
+    expect(advice(failed)).toBe("team2");
+    // Declined, the project stays on team5: still not named.
+    expect(opusInstead({ kind: "decline", reason: "no-account-usable" }, failed, [])).toBe("team2");
+    // Left in error the report may be an earlier account's: team5 is
+    // judged on its numbers, and its Opus window runs out first.
+    const rescued = { ...failed, stuck: true };
+    expect(decideSwitch(rescued)).toMatchObject({ kind: "wait", account: "team1" });
+    expect(advice(rescued)).toBe("team5");
+  });
+
+  it("an account with Fable left whose session is at 100 % has no usable Fable (S9): said", () => {
+    const sessionOut = seat("team1", {
+      session: { usedPercent: 100, resetsAt: NOW + HOUR },
+      models: { Fable: { usedPercent: 23, resetsAt: NOW + 72 * HOUR } },
+    });
+    const i = fable({ accounts: [team5, sessionOut, team2] });
+    expect(decideSwitch(i)).toMatchObject({ kind: "wait", account: "team1" });
+    expect(advice(i)).toBe("team2");
+  });
+
+  it("an account with Fable left whose weekly is at 100 % has no usable Fable: said", () => {
+    const weeklyOut = account("max2", {
+      session: { usedPercent: 10, resetsAt: NOW + 3 * HOUR },
+      weekly: { usedPercent: 100, resetsAt: NOW + 4 * HOUR },
+      models: { Fable: { usedPercent: 60, resetsAt: NOW + 4 * HOUR } },
+    });
+    const i = fable({ accounts: [team5, team1, team2, weeklyOut] });
+    expect(decideSwitch(i)).toMatchObject({ kind: "wait", account: "team1" });
+    expect(advice(i)).toBe("team2");
+  });
+
+  it("a locked account with Fable left has no usable Fable: said", () => {
+    const locked = seat("team3", {
+      blocked: true,
+      models: { Fable: { usedPercent: 10, resetsAt: NOW + 72 * HOUR } },
+    });
+    const i = fable({ accounts: [team5, team1, team2, locked] });
+    expect(decideSwitch(i)).toMatchObject({ kind: "wait", account: "team1" });
+    expect(advice(i)).toBe("team2");
+  });
+
+  it("while an account other than the failed one can run Fable, nothing said, whatever the decision", () => {
+    // A leftover: the turn ran on team5, the project already sits on team3,
+    // which its numbers say runs Fable: the decision waits a moment there.
+    const team3 = seat("team3", {
+      models: { Fable: { usedPercent: 30, resetsAt: NOW + 72 * HOUR } },
+    });
+    const leftover = fable({
+      currentAccount: "team3",
+      failedAccount: "team5",
+      accounts: [team5, team1, team2, team3],
+    });
+    expect(decideSwitch(leftover)).toMatchObject({
+      kind: "wait",
+      account: "team3",
+    });
+    expect(advice(leftover)).toBeNull();
+    // Asked straight, with any decision that could carry it.
+    for (const decision of [
+      { kind: "decline", reason: "no-account-usable" },
+      { kind: "decline", reason: "beyond-maximum-wait" },
+    ] as const)
+      expect(opusInstead(decision, leftover, [])).toBeNull();
+  });
+
+  it("names the account the project waits on when it can run Opus, as the placement before the turn would keep it there", () => {
+    // team1's session is half spent (a higher quarter than team2's), yet an
+    // Opus turn of a project on team1 stays on team1: it runs Opus there.
+    const halfSession = seat("team1", {
+      session: { usedPercent: 60, resetsAt: NOW + HOUR },
+      models: {
+        Fable: { usedPercent: 100, resetsAt: NOW + 3 * HOUR },
+        Opus: { usedPercent: 10, resetsAt: NOW + 96 * HOUR },
+      },
+    });
+    const i = fable({ accounts: [team5, halfSession, team2] });
+    expect(decideSwitch(i)).toMatchObject({ kind: "wait", account: "team1" });
+    expect(advice(i)).toBe("team1");
+    // Declined, the project stays on team5, which cannot run Opus: team2.
+    expect(opusInstead({ kind: "decline", reason: "no-account-usable" }, i, [])).toBe("team2");
+  });
+
+  it("says nothing for a switch, a retry or any other decline", () => {
+    const i = fable();
+    for (const decision of [
+      { kind: "switch", account: "team2", model: "Fable" },
+      { kind: "retry", account: "team5", model: "Fable" },
+      { kind: "decline", reason: "attempts-exhausted" },
+      { kind: "decline", reason: "not-rate-limit" },
+      { kind: "decline", reason: "reserved-for-preferred-model" },
+    ] as const)
+      expect(opusInstead(decision, i, [])).toBeNull();
+  });
+
+  it("only for a thread in the preferred model: not for an Opus thread, nor without a preferred model", () => {
+    expect(advice(fable({ preferredModel: "Opus" }))).toBeNull();
+    expect(advice(fable({ reserveModel: "" }))).toBeNull();
+    expect(advice(fable({ reserveModel: undefined }))).toBeNull();
+    // Opus as the preferred model: Opus is no way out of itself, even when
+    // the account that just refused it still shows Opus in its numbers.
+    const opusLeft = seat("team5", {
+      models: { Opus: { usedPercent: 10, resetsAt: NOW + 96 * HOUR } },
+    });
+    const opusThread = fable({
+      preferredModel: "Opus",
+      reserveModel: "Opus",
+      accounts: [opusLeft, team1],
+    });
+    expect(decideSwitch(opusThread)).toMatchObject({
+      kind: "wait",
+      account: "team1",
+    });
+    expect(advice(opusThread)).toBeNull();
+    // The model's case does not matter (bb's family vs. the setting).
+    expect(advice(fable({ preferredModel: "fable" }))).toBe("team2");
+  });
+
+  it("left in error, the account it ran on is judged on its numbers like any other", () => {
+    // A rescue: the log's report may be an earlier account's. team5's
+    // numbers say it is out of Fable: said; if they said it runs Fable,
+    // the rescue would retry there and say nothing.
+    expect(advice(fable({ stuck: true }))).toBe("team2");
+    const fresh = seat("team5", {
+      models: { Fable: { usedPercent: 30, resetsAt: NOW + 72 * HOUR } },
+    });
+    const stuck = fable({ stuck: true, accounts: [fresh, team1, team2] });
+    expect(decideSwitch(stuck)).toMatchObject({ kind: "retry" });
+    expect(opusInstead({ kind: "decline", reason: "no-account-usable" }, stuck, [])).toBeNull();
+  });
+
+  it("the text names the model, Opus and the account", () => {
+    expect(opusInsteadText("Fable", "team2")).toBe(
+      "No Fable on any account: switch this thread to Opus with the model picker; it will go to team2",
     );
   });
 });

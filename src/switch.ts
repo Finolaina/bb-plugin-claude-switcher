@@ -266,6 +266,92 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
   };
 }
 
+/** The model a thread is told to switch to when no account can run the preferred one. */
+export const FALLBACK_MODEL = "Opus";
+
+/**
+ * Where an Opus turn of the failed thread would go, when the thread is told
+ * to switch to Opus; null when there is nothing to tell (D3, 2026-10-17: with
+ * every account out of Fable "nothing works", while Team seats still have
+ * Opus). Judged apart from the decision's reason: a wait, a wait beyond the
+ * maximum and no usable account all say it. Told only when
+ *  - the turn is in the preferred model (the reserved one);
+ *  - every account's latest read counts: `unread` names those whose read
+ *    failed (a 429), is missing or is old, and an answer that lacked a
+ *    window is unknown. A failed read is no proof that the model is gone;
+ *  - no account can run the model: none unlocked with its session, its
+ *    weekly and the model's window all under 100 %;
+ *  - an account can run Opus without spending the reserve (chooseAccount: a
+ *    Max account that keeps the preferred model is never named).
+ * The account the turn just failed on is out of both, by the provider's
+ * report, as decideSwitch has it: bb judges a failure at once only on a
+ * blocked or warning report, and the windows Claude Code reports there (the
+ * five-hour and the weekly ones) count against an Opus turn too. Left in
+ * error, it is judged on its numbers like the rest (a Fable limit comes
+ * with no such report, measured 2026-10-17: it is judged there).
+ * The account named is the one the placement before an Opus turn would
+ * keep or move the project to, from where the decision leaves it (a wait
+ * moves it to the account waited for): that account when it runs Opus,
+ * else the best other.
+ *
+ * ponytail: an advice, not the move. SDK 0.6.15 takes no model on
+ * threads.retry. threads.send and threads.update do take one (a model kept
+ * for the next turns), but a retry re-submits the failed turn by reference
+ * and whether it then runs in that model is not verified. Once a retry can
+ * be sent in a model (threads.retry with `model`, or update then retry
+ * measured to run in it), make the switch here (the plan's D2) instead of
+ * telling it.
+ */
+export function opusInstead(
+  decision: SwitchDecision,
+  input: SwitchInput,
+  unread: readonly string[],
+): string | null {
+  const model = input.preferredModel.toLowerCase();
+  const reserve = input.reserveModel ?? "";
+  if (model === "" || model !== reserve.toLowerCase()) return null;
+  const told =
+    decision.kind === "wait" ||
+    (decision.kind === "decline" &&
+      (decision.reason === "no-account-usable" ||
+        decision.reason === "beyond-maximum-wait"));
+  if (!told || unread.length > 0) return null;
+  const accounts = input.accounts.map((a) => settle(a, input.now));
+  if (accounts.some((a) => a.unknown === true)) return null;
+  const failedOn =
+    input.failedAccount === undefined
+      ? input.currentAccount
+      : input.failedAccount;
+  const ruledOut = input.stuck === true ? null : failedOn;
+  const runs = (a: AccountUsage) =>
+    !a.blocked &&
+    a.session.usedPercent < 100 &&
+    a.weekly.usedPercent < 100 &&
+    canRunModel(a, input.preferredModel);
+  if (accounts.some((a) => a.name !== ruledOut && runs(a))) return null;
+  const opus = { preferredModel: FALLBACK_MODEL, reserveModel: reserve };
+  const open = accounts.filter((a) => a.name !== ruledOut);
+  const from =
+    decision.kind === "wait" ? decision.account : input.currentAccount;
+  return (
+    (
+      chooseAccount(
+        open.filter((a) => a.name === from),
+        opus,
+      ) ??
+      chooseAccount(
+        open.filter((a) => a.name !== from),
+        opus,
+      )
+    )?.account ?? null
+  );
+}
+
+/** What the thread and the history say when opusInstead names an account. */
+export function opusInsteadText(model: string, account: string): string {
+  return `No ${model} on any account: switch this thread to ${FALLBACK_MODEL} with the model picker; it will go to ${account}`;
+}
+
 export type PlacementDecision =
   /** `why`: kept although its account spends the reserve, because no account spares it. */
   | { kind: "keep"; why?: "current-reserved" }
