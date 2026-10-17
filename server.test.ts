@@ -11312,8 +11312,8 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       expect(Object.keys((await h.bb.storage.kv.get<object>("advice-bases")) ?? {})).toEqual(["thread-1"]);
     });
 
-    /** What thread-1's banner was asked on, as storage keeps it. */
-    const storedBasis = (requestId: string, chain: string | null) => ({
+    /** What thread-1's banner was asked on (judged at `at`), as storage keeps it. */
+    const storedBasis = (requestId: string, chain: string | null, at = NOW - HOUR) => ({
       "advice-bases": {
         "thread-1": {
           projectId: "proj-1",
@@ -11321,7 +11321,7 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
           reason: "beyond-maximum-wait",
           requestId,
           chain,
-          at: NOW - HOUR,
+          at,
         },
       },
     });
@@ -11478,6 +11478,82 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       await refreshed(h);
       expect(gets).toBe(1);
     });
+
+    // code-reviewer r6, CR-L2: a basis read back is checked against bb
+    // before anything else is asked of it, and only for so long: one judged
+    // more than 7 days before is dropped without reading the thread, and
+    // one whose check could not tell 5 refreshes in a row (the thread could
+    // not be read, or bb's log does not say how its retry failed) is
+    // dropped at the fifth.
+    for (const [what, usage, settings] of [
+      ["Fable no longer the preferred model", NO_FABLE, { preferredModel: "", maximumWaitHours: 1 }],
+      [
+        "an account whose read fails",
+        { ...NO_FABLE, spare: () => new Response("", { status: 429 }) },
+        { preferredModel: "Fable", maximumWaitHours: 1 },
+      ],
+    ] as const)
+      it(`the thread moved on while the plugin was away, with ${what}: it is checked all the same, and nothing is kept for it (code-reviewer r6, CR-L2)`, async () => {
+        const h = await host(usage, {
+          ...stillWaiting,
+          settings,
+          threads: { "thread-1": { status: "idle" } },
+          kvPreset: storedBasis("creq_1", "creq_1"),
+        });
+        dispose = () => h.harness.dispose();
+        await refreshed(h);
+        expect(await banner(h)).toBeNull();
+        expect(await h.bb.storage.kv.get("advice-bases")).toEqual({});
+      });
+
+    for (const [age, kept] of [
+      [7 * 24 * HOUR, true],
+      [7 * 24 * HOUR + 1, false],
+    ] as const)
+      it(`a basis judged ${age} ms before the first refresh: ${kept ? "checked, the banner back" : "dropped without reading the thread"} (code-reviewer r6, CR-L2)`, async () => {
+        let gets = 0;
+        const h = await host(NO_FABLE, {
+          ...stillWaiting,
+          kvPreset: storedBasis("creq_1", "creq_1", NOW - age),
+          beforeThreadGet: async () => {
+            gets += 1;
+          },
+        });
+        dispose = () => h.harness.dispose();
+        await refreshed(h);
+        expect(await banner(h)).toBe(kept ? told : null);
+        expect(gets).toBe(kept ? 1 : 0);
+        expect(Object.keys((await h.bb.storage.kv.get<object>("advice-bases")) ?? {})).toEqual(
+          kept ? ["thread-1"] : [],
+        );
+      });
+
+    for (const [what, unreadable, threadEvents] of [
+      ["the thread cannot be read", true, retriedLog()],
+      ["bb's log never says how its retry failed", false, retriedLog({ how: null })],
+    ] as const)
+      it(`${what}, refresh after refresh: the basis is kept for four, dropped at the fifth, and the thread is not read again (code-reviewer r6, CR-L2)`, async () => {
+        let gets = 0;
+        const h = await host(NO_FABLE, {
+          ...stillWaiting,
+          threadEvents,
+          kvPreset: storedBasis("creq_1", "creq_1"),
+          beforeThreadGet: async () => {
+            gets += 1;
+            if (unreadable) throw new Error("thread not found");
+          },
+        });
+        dispose = () => h.harness.dispose();
+        for (let i = 0; i < 4; i += 1) await refreshed(h);
+        expect(gets).toBe(4);
+        expect(Object.keys((await h.bb.storage.kv.get<object>("advice-bases")) ?? {})).toEqual(["thread-1"]);
+        await refreshed(h);
+        expect(gets).toBe(5);
+        expect(await h.bb.storage.kv.get("advice-bases")).toEqual({});
+        await refreshed(h);
+        expect(gets).toBe(5);
+        expect(await banner(h)).toBeNull();
+      });
 
     it("a failure of the thread judged while the first refresh reads it back: what that judgment keeps stays", async () => {
       let armed: (() => Promise<unknown>) | null = null;

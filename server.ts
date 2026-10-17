@@ -150,6 +150,16 @@ const storedBasisSchema = z.object({
   chain: z.string().nullable(),
   at: z.number(),
 });
+/**
+ * How long a basis read back after a restart is checked against bb (see
+ * restoredHolds; code-reviewer r6, CR-L2): one judged longer ago than this
+ * is dropped without reading its thread (every window of a limit has reset
+ * since), and one whose check could not tell this many refreshes in a row
+ * (the thread could not be read, or bb's log does not say how its retry
+ * failed) is dropped at the last.
+ */
+const RESTORED_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
+const RESTORED_CHECKS = 5;
 
 /**
  * A hidden thread (a plugin's worker, a summary): moving the whole project
@@ -423,6 +433,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     at: number;
     /** Read back from storage, not yet checked against bb (see reviseAdvice). */
     restored?: boolean;
+    /** Checks of it read back that could not tell, in a row (see restoredHolds). */
+    misses?: number;
   };
   const adviceBasis = new Map<string, AdviceBasis>();
   /** Writes in order, like the history; awaited by nothing that decides. */
@@ -1907,7 +1919,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * ask it: the account the turn failed on judged on its numbers like the
    * rest, from where the project sits now, with the same function and the
    * same placement (opusInstead): a new account, the banner gone (Fable
-   * back, no account for Opus, a read that failed) or back. Only the
+   * back, no account for Opus, a read that failed) or back. A basis read
+   * back after a restart is checked against bb before anything else is
+   * asked of it (see restoredHolds; code-reviewer r6, CR-L2). Only the
    * banner: nothing sent, retried, moved, queued or written. One read of
    * each project's account for all its threads (Sol B2-R5-003), none for a
    * banner that goes whatever the project's account (see adviseOpus): its
@@ -1923,12 +1937,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   async function reviseAdvice(): Promise<void> {
     const byProject = new Map<string, [string, AdviceBasis][]>();
     for (const [threadId, stored] of adviceBasis) {
+      const basis =
+        stored.restored === true ? await restoredHolds(threadId, stored) : stored;
+      if (basis === null) continue;
       if (
         !adviseOpus(
-          stored.decision,
+          basis.decision,
           {
-            accounts: measuredAccounts(stored.model),
-            preferredModel: stored.model,
+            accounts: measuredAccounts(basis.model),
+            preferredModel: basis.model,
             reserveModel: current.preferredModel,
             now: deps.now(),
           },
@@ -1940,9 +1957,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         showAdvice(threadId, null);
         continue;
       }
-      const basis =
-        stored.restored === true ? await restoredHolds(threadId, stored) : stored;
-      if (basis === null) continue;
       const threads = byProject.get(basis.projectId) ?? [];
       threads.push([threadId, basis]);
       byProject.set(basis.projectId, threads);
@@ -2010,22 +2024,40 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * checked, now the thread's; null when it is dropped, when a judgment of
    * the thread replaced it meanwhile, or when bb could not be read or does
    * not say yet (kept, unchecked and not shown: asked again by the next
-   * pass).
+   * pass, up to RESTORED_CHECKS in a row). One judged more than
+   * RESTORED_MAX_AGE_MS before is dropped unread (code-reviewer r6, CR-L2).
    */
   async function restoredHolds(
     threadId: string,
     basis: AdviceBasis,
   ): Promise<AdviceBasis | null> {
-    let holds: boolean | null;
-    try {
-      holds = await stillWaits(threadId, basis);
-    } catch (error) {
-      bb.log.warn(
-        `thread ${threadId}: its banner not asked again (the thread could not be read: ${error instanceof Error ? error.message : String(error)})`,
+    let holds: boolean | null = false;
+    if (deps.now() - basis.at > RESTORED_MAX_AGE_MS)
+      bb.log.debug(
+        `thread ${threadId}: what its banner was asked on is dropped (judged more than 7 days ago)`,
       );
-      return null;
+    else {
+      try {
+        holds = await stillWaits(threadId, basis);
+      } catch (error) {
+        bb.log.warn(
+          `thread ${threadId}: its banner not asked again (the thread could not be read: ${error instanceof Error ? error.message : String(error)})`,
+        );
+        holds = null;
+      }
+      if (adviceBasis.get(threadId) !== basis) return null;
+      if (holds === null) {
+        const misses = (basis.misses ?? 0) + 1;
+        if (misses < RESTORED_CHECKS) {
+          adviceBasis.set(threadId, { ...basis, misses });
+          return null;
+        }
+        bb.log.debug(
+          `thread ${threadId}: what its banner was asked on is dropped (${RESTORED_CHECKS} checks in a row could not tell)`,
+        );
+        holds = false;
+      }
     }
-    if (adviceBasis.get(threadId) !== basis || holds === null) return null;
     if (!holds) {
       adviceBasis.delete(threadId);
       storeBases();
