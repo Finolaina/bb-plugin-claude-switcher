@@ -776,7 +776,11 @@ Coming from `claude-accounts` 0.1.x? See the upgrade note in
   reads. When the provider's limit report is ahead of them (the account
   the turn just failed on still shows room), the advice names that
   account, the Opus turn runs there and may fail once, then goes through
-  the failure path like any other Opus turn.
+  the failure path like any other Opus turn. The banner follows the same
+  numbers: when those of the account the turn failed on show room for
+  the preferred model again, it goes at the next usage refresh, while
+  bb's provider-retry still waits for that account's reset, and comes
+  back with the turn's next failure.
 - **The account named for Opus is where a new Opus message would go,
   on the reads of that moment.** It holds for a message sent in Opus
   through bb's dispatch checkpoint, where the placement before a turn
