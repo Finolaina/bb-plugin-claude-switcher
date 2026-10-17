@@ -1,5 +1,8 @@
 // Pure helpers of the settings page (app.tsx has no DOM tests; these do).
-import type { PluginComposerScope } from "@get-bb/plugin-sdk/app";
+import type {
+  PluginComposerScope,
+  PluginRealtimeConnectionState,
+} from "@get-bb/plugin-sdk/app";
 import { CLAUDE_CODE_PROVIDER } from "./switch.js";
 
 /** The notice "No Claude Code login found" applies when no listed account has a login. */
@@ -189,6 +192,24 @@ export function windowForecast(
  */
 export function retryDelayMs(attempt: number): number {
   return [2_000, 5_000, 15_000, 30_000][attempt] ?? 60_000;
+}
+
+/**
+ * Whether bb's realtime connection, `previous` at the view's last look and
+ * `next` now, is back after it was down: its signals are ephemeral (SDK
+ * 0.6.15, useRealtimeConnectionState), so one sent meanwhile is lost and a
+ * view that reads on them reads again (Sol B2-R2-004). So too after a first
+ * connection the view mounted before: a signal between its first read and
+ * that connection is lost as well. Not on the view's first look
+ * (`previous` undefined): it reads as it mounts.
+ */
+export function signalsBack(
+  previous: PluginRealtimeConnectionState | undefined,
+  next: PluginRealtimeConnectionState,
+): boolean {
+  return (
+    previous !== undefined && previous !== "connected" && next === "connected"
+  );
 }
 
 /**

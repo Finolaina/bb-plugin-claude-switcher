@@ -14,6 +14,7 @@ import {
   definePluginApp,
   useComposer,
   useRealtime,
+  useRealtimeConnectionState,
   useRpc,
   useSdk,
 } from "@get-bb/plugin-sdk/app";
@@ -30,6 +31,7 @@ import {
   projectRead,
   retryDelayMs,
   sharedWith,
+  signalsBack,
   windowForecast,
   windowPercent,
 } from "./src/ui";
@@ -1085,6 +1087,14 @@ function ThreadAdvice() {
     if ((payload as { threadId?: unknown } | null)?.threadId === threadId)
       setSignals((n) => n + 1);
   });
+  // A signal sent while bb's connection was down is lost, whether it added
+  // the advice or took it away: read again when it is back (Sol B2-R2-004).
+  const connection = useRealtimeConnectionState();
+  const seen = useRef<typeof connection | undefined>(undefined);
+  useEffect(() => {
+    if (signalsBack(seen.current, connection)) setSignals((n) => n + 1);
+    seen.current = connection;
+  }, [connection]);
   if (shown === null || shown.threadId !== threadId || shown.text === null)
     return null;
   return (

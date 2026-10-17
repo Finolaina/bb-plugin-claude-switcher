@@ -11,6 +11,7 @@ import {
   projectName,
   retryDelayMs,
   sharedWith,
+  signalsBack,
   windowForecast,
 } from "./ui.js";
 
@@ -455,5 +456,26 @@ describe("projectRead", () => {
 
   it("is done when the newer list shown has the project", () => {
     expect(projectRead(list("old"), list("old", "new"), "new")).toBe(true);
+  });
+});
+
+// bb's realtime signals are ephemeral: one sent while the connection was
+// down is lost, so a view that reads on them reads again when it is back
+// (Sol B2-R2-004).
+describe("signalsBack", () => {
+  it("is true when the connection is back after a drop: a signal to add or to take away the advice may have been lost", () => {
+    expect(signalsBack("reconnecting", "connected")).toBe(true);
+    expect(signalsBack("connecting", "connected")).toBe(true);
+  });
+
+  it("is false while it stays connected, and while it is down: nothing to read then", () => {
+    expect(signalsBack("connected", "connected")).toBe(false);
+    expect(signalsBack("connected", "reconnecting")).toBe(false);
+    expect(signalsBack("reconnecting", "connecting")).toBe(false);
+  });
+
+  it("is false on the view's first look, connected or not: it reads as it mounts", () => {
+    expect(signalsBack(undefined, "connected")).toBe(false);
+    expect(signalsBack(undefined, "connecting")).toBe(false);
   });
 });

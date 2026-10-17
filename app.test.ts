@@ -155,6 +155,21 @@ describe("the plugin's frontend registration", () => {
     expect(banner).not.toMatch(/threads\.(send|retry|update)|queuedMessages|setProjectAccount/);
   });
 
+  it("the advice banner reads again when bb's connection is back: a signal that added or took away the advice while it was down is lost (Sol B2-R2-004)", async () => {
+    const source = await readFile(new URL("./app.tsx", import.meta.url), "utf8");
+    const banner = source.slice(source.indexOf("function ThreadAdvice()"), source.indexOf("export default definePluginApp"));
+    // The connection's change decides (signalsBack, tested in src/ui.test.ts)...
+    expect(banner).toContain("const connection = useRealtimeConnectionState();");
+    expect(banner).toContain("if (signalsBack(seen.current, connection)) setSignals((n) => n + 1);");
+    expect(banner).toContain("seen.current = connection;");
+    expect(banner).toContain("}, [connection]);");
+    // ...and counts as a signal: the read starts afresh, and the answer of
+    // a read begun before is dropped (`live`).
+    expect(banner).toContain("}, [rpc, threadId, signals]);");
+    expect(banner).toContain("if (live) setShown({ threadId, text });");
+    expect(banner).toContain("live = false;");
+  });
+
   it("keeps the other controls on a host without composer customization", async () => {
     const { registered, customized } = await register(["settingsSection", "experimental_threadHeaderAction"]);
     expect(customized).toEqual([]);
