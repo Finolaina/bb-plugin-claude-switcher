@@ -10628,7 +10628,10 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       expect(await banner(h)).toBeNull();
     });
 
-    it("the project's account cannot be read: the banner stays as it was, and the log says why", async () => {
+    // Sol B2-R6-003: a banner names where an Opus turn would go from where
+    // the project sits; when that cannot be read, the banner goes and its
+    // basis stays for the next read.
+    it("the project's account cannot be read: the banner goes, the log says why, and it comes back with the read (Sol B2-R6-003)", async () => {
       let spare = () => Response.json(payload(1, 1, 100));
       const failEnvRead: string[] = [];
       const h = await host(
@@ -10637,16 +10640,68 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       );
       dispose = () => h.harness.dispose();
       await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(await banner(h)).toBe(told);
       spare = () => Response.json(payload(100, 1, 100));
       failEnvRead.push("proj-1");
       // The refresh's own list of projects fails too; the banner was asked first.
       await expect(refreshed(h)).rejects.toThrow(/could not read proj-1/);
-      expect(await banner(h)).toBe(told);
+      expect(await banner(h)).toBeNull();
       expect(
         h.harness.logEntries.some(
           (e) => e.level === "warn" && e.message.includes("thread thread-1: its banner not asked again"),
         ),
       ).toBe(true);
+      failEnvRead.length = 0;
+      await refreshed(h);
+      expect(await banner(h)).toBe(toWork);
+    });
+
+    it("Fable back on reads that all count, while the project's account cannot be read: the banner goes without reading it, and comes back when Fable runs out again (Sol B2-R6-003)", async () => {
+      let workFable = 100;
+      const failEnvRead: string[] = [];
+      const h = await host(
+        { ...NO_FABLE, work: () => Response.json(payload(1, 1, workFable)) },
+        { settings: { preferredModel: "Fable", maximumWaitHours: 1 }, failEnvRead },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(await banner(h)).toBe(told);
+      workFable = 30;
+      failEnvRead.push("proj-1");
+      const before = h.envReads.length;
+      await expect(refreshed(h)).rejects.toThrow(/could not read proj-1/);
+      expect(await banner(h)).toBeNull();
+      // Only the reads of the state the refresh answers with.
+      expect(h.envReads.slice(before)).toEqual(["proj-1", "proj-2", "personal"]);
+      workFable = 100;
+      failEnvRead.length = 0;
+      await refreshed(h);
+      expect(await banner(h)).toBe(told);
+    });
+
+    it("a read of the project's account that fails leaves alone the banner of a judgment of the thread made meanwhile (Sol B2-R6-003)", async () => {
+      let armed: (() => Promise<unknown>) | null = null;
+      const h = await host(NO_FABLE, {
+        settings: { preferredModel: "Fable", maximumWaitHours: 1 },
+        beforeEnvRead: async () => {
+          const run = armed;
+          if (run === null) return;
+          armed = null;
+          await run();
+          throw new Error("HTTP 503: could not read proj-1");
+        },
+      });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(await banner(h)).toBe(told);
+      // While the refresh's pass reads the project, the thread's next turn
+      // fails and is judged (its banner the same), then the read fails.
+      armed = () => h.harness.behavior.emitThreadEvent("turn.failed", failure({ requestId: "creq_2" }));
+      await refreshed(h);
+      expect(armed).toBeNull();
+      expect(await banner(h)).toBe(told);
+      // Shown once: neither taken away nor put back since.
+      expect(adviceSignals(h)).toEqual([{ threadId: "thread-1" }]);
     });
   });
 

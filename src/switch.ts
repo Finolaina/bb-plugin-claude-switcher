@@ -301,23 +301,54 @@ export function mayAdviseOpus(
 }
 
 /**
- * Where an Opus turn of the failed thread would go, when the thread is told
- * to switch to Opus; null when there is nothing to tell (D3, 2026-10-17: with
- * every account out of Fable "nothing works", while Team seats still have
- * Opus). Judged apart from the decision's reason: a wait, a wait beyond the
- * maximum and no usable account all say it. Told only when
+ * Whether the thread is to be told to switch to Opus, wherever an Opus turn
+ * of it would then go (see opusInstead): with no account able to run the
+ * model, on reads that all count. Judged apart from the decision's reason:
+ * a wait, a wait beyond the maximum and no usable account all say it. Only
+ * when
  *  - the turn is in the preferred model (the reserved one), and that model
  *    is not Opus itself: Opus is no way out of Opus (Sol B2-005);
  *  - every account's latest read counts: `unread` names those whose read
  *    failed (a 429), is missing or is old, and an answer that lacked a
  *    window is unknown. A failed read is no proof that the model is gone;
  *  - no account can run the model: none unlocked with its session, its
- *    weekly and the model's window all under 100 %;
- *  - an account can run Opus without spending the reserve (chooseAccount: a
- *    Max account that keeps the preferred model is never named).
- * The account the turn just failed on never counts as running the model:
- * the provider refused it the turn, as decideSwitch has it. Left in error,
- * it is judged on its numbers like the rest.
+ *    weekly and the model's window all under 100 %.
+ * `ruledOut`, the account the turn just failed on, never counts as running
+ * the model: the provider refused it the turn, as decideSwitch has it.
+ * Null for a thread left in error: every account is judged on its numbers.
+ * Where the project sits plays no part: the banners' pass asks it before
+ * reading that (Sol B2-R6-003).
+ */
+export function adviseOpus(
+  decision: SwitchDecision,
+  input: Pick<SwitchInput, "accounts" | "preferredModel" | "reserveModel" | "now">,
+  unread: readonly string[],
+  ruledOut: string | null,
+): boolean {
+  if (
+    !mayAdviseOpus(decision, input.preferredModel, input.reserveModel) ||
+    unread.length > 0
+  )
+    return false;
+  const accounts = input.accounts.map((a) => settle(a, input.now));
+  if (accounts.some((a) => a.unknown === true)) return false;
+  const runs = (a: AccountUsage) =>
+    !a.blocked &&
+    a.session.usedPercent < 100 &&
+    a.weekly.usedPercent < 100 &&
+    canRunModel(a, input.preferredModel);
+  return !accounts.some((a) => a.name !== ruledOut && runs(a));
+}
+
+/**
+ * Where an Opus turn of the failed thread would go, when the thread is told
+ * to switch to Opus (see adviseOpus); null when there is nothing to tell (D3,
+ * 2026-10-17: with every account out of Fable "nothing works", while Team
+ * seats still have Opus). Told only when an account can also run Opus
+ * without spending the reserve (chooseAccount: a Max account that keeps the
+ * preferred model is never named). The account the turn just failed on is
+ * ruled out of running the model, as decideSwitch has it; left in error, it
+ * is judged on its numbers like the rest.
  * The account named is the one the dispatch would run an Opus turn of the
  * thread on (placedOn, given `placement`: the dispatch's own inputs for an
  * Opus turn of the project), from where the decision leaves the project (a
@@ -346,24 +377,12 @@ export function opusInstead(
   /** The placement before an Opus turn of the project, but where it sits. */
   placement: Omit<PlacementInput, "currentAccount">,
 ): string | null {
-  if (
-    !mayAdviseOpus(decision, input.preferredModel, input.reserveModel) ||
-    unread.length > 0
-  )
-    return null;
-  const accounts = input.accounts.map((a) => settle(a, input.now));
-  if (accounts.some((a) => a.unknown === true)) return null;
   const failedOn =
     input.failedAccount === undefined
       ? input.currentAccount
       : input.failedAccount;
-  const ruledOut = input.stuck === true ? null : failedOn;
-  const runs = (a: AccountUsage) =>
-    !a.blocked &&
-    a.session.usedPercent < 100 &&
-    a.weekly.usedPercent < 100 &&
-    canRunModel(a, input.preferredModel);
-  if (accounts.some((a) => a.name !== ruledOut && runs(a))) return null;
+  if (!adviseOpus(decision, input, unread, input.stuck === true ? null : failedOn))
+    return null;
   return placedOn({
     ...placement,
     currentAccount:
