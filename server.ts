@@ -2713,7 +2713,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         await noteAdvice(event.threadId, projectId, recent.to, reason, turn, now, judgedIn);
       // Its queued retry says it now, or nothing is to be said.
       judgedAdvice(event.threadId, null, judgedIn, null);
-      await retryTurn(event, reason, recent.sendAt);
+      // The advice too only while the judgment's generation holds, as its
+      // row (code-reviewer r5, nit 1).
+      await retryTurn(
+        event,
+        judgedIn === generation(event.threadId)
+          ? reason
+          : `Retrying on account ${recent.to}`,
+        recent.sendAt,
+      );
       return;
     }
     if (typeof started === "string") {
@@ -2750,7 +2758,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         if (told !== null)
           await noteAdvice(event.threadId, projectId, currentName, reason, turn, now, judgedIn);
         judgedAdvice(event.threadId, null, judgedIn, null);
-        await retryTurn(event, reason, sendAt);
+        await retryTurn(
+          event,
+          judgedIn === generation(event.threadId)
+            ? reason
+            : `Retrying on account ${currentName}`,
+          sendAt,
+        );
         return;
       }
     }
@@ -3057,7 +3071,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       bb.log.info(
         `thread ${event.threadId}: ${how}${reason} until ${new Date(decision.sendAt).toISOString()}`,
       );
-      await retryTurn(event, reason, decision.sendAt, stuck);
+      // The advice only while the judgment's generation holds, as its rows
+      // (code-reviewer r5, nit 1): otherwise the wait alone.
+      await retryTurn(
+        event,
+        judgedIn === generation(event.threadId) ? reason : decision.reason,
+        decision.sendAt,
+        stuck,
+      );
       return;
     }
     bb.log.info(`thread ${event.threadId}: ${how}${reason}`);
