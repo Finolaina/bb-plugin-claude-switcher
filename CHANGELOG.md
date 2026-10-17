@@ -4,21 +4,66 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.23] - 2026-10-17
+
+### Removed
+
+- **The veto of a blocked report.** Since 0.2.21 a failure's blocked
+  limit report put its account out of every turn until the reset it
+  reported, and 0.2.22 extended that to every choice and read bb's log to
+  tell whose report a failure carried. It changed how every thread's
+  turns were placed, waited for and released, for an advice that only
+  tells, and each review found new ways it crossed the waits, the grace
+  after a move, the filter of old measurements and the report's date.
+  Every choice judges each account on its own numbers again, as in
+  0.2.20, and the plugin no longer reads bb's log to tell whose report it
+  is.
+
+### Changed
+
+- **The account named for Opus is where the placement would run the
+  Opus turn.** The advice asks the same function the placement before a
+  turn uses, with the same usage reads, from where the decision leaves
+  the project (the account waited for, or the one it sits on), so an Opus
+  turn sent after the advice runs where the advice said. When that
+  placement would keep the project where Opus cannot run, nothing is
+  said. The account the turn just failed on is judged there on its
+  numbers like any other: when the provider's report is ahead of them,
+  the advice and the placement both name it, and the Opus turn may fail
+  there once, then goes through the failure path like any Opus turn. The
+  README lists it under Known limitations, with a wait that can follow
+  another account's report (older than the advice, not fixed yet).
+
+### Fixed
+
+- **Switched off during a rescue, the project stays.** The retry chain
+  the advice is told once for was read after a rescue checked that the
+  automatic choice was still on, and before it moved the project:
+  switched off meanwhile, the project still moved (no retry was queued).
+  A failure now reads the chain before anything is checked, and a rescue
+  takes it from the turn it had already read.
+- **Switched off during a judgment, no history row for the advice.** A
+  failure judged while the automatic choice was switched off, a turn of
+  the thread started or the thread was archived still wrote the row
+  telling the thread to switch to Opus. As with the banner, the row is
+  only written when none of those happened since the judgment began.
+
 ## [0.2.22] - 2026-10-17
 
 ### Fixed
 
 - **An account a blocked report put out is out of every choice, until
-  its reset.** In 0.2.21 only the placement before a turn and the Opus
-  advice left it out: the choice after another thread's failure, a thread
-  left in error, the release of a wait and a move ahead of the limit
-  still judged it on its numbers read before the report, and could send
-  a turn straight back to it. They all leave it out now, and a wait for
-  it lands on the reset it reported (or later, when its own numbers say
-  so).
-- **A report puts out only the account it came from.** bb sends a
-  thread's latest limit report with each failure, whichever turn it came
-  from: after a move from one account to another, a failure on the second
+  its reset.** (Removed in 0.2.23, with the next item.) In 0.2.21 only
+  the placement before a turn and the Opus advice left it out: the
+  choice after another thread's failure, a thread left in error, the
+  release of a wait and a move ahead of the limit still judged it on its
+  numbers read before the report, and could send a turn straight back to
+  it. They all leave it out now, and a wait for it lands on the reset it
+  reported (or later, when its own numbers say so).
+- **A report puts out only the account it came from.** (Removed in
+  0.2.23.) bb sends a thread's latest limit report with each failure,
+  whichever turn it came from: after a move from one account to another,
+  a failure on the second
   could carry the first one's report and put the second out, and the
   Opus advice then named an account other than the one the Opus turn
   stayed on. A report now puts its account out only when bb's log shows
@@ -54,8 +99,10 @@ project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- **The account named for Opus is the one the Opus turn runs on.** The
-  advice left out the account the turn failed on when its report blocked
+- **The account named for Opus is the one the Opus turn runs on.** (The
+  report's veto below was removed in 0.2.23: the advice now asks the
+  placement itself.) The advice left out the account the turn failed on
+  when its report blocked
   a window, while the placement before the next turn judged that account
   on its own numbers, which can still show room: the thread was told one
   account and its Opus turn stayed on the other. A blocked report now puts
