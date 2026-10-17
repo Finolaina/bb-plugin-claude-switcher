@@ -439,7 +439,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     showAdvice(threadId, text);
   }
   function showAdvice(threadId: string, text: string | null): void {
-    // Never a banner with the automatic choice off.
+    // Never a banner with the automatic choice off. A second guard (a
+    // mutant of it is equivalent): every text comes from a judgment that
+    // began with it on or from a basis kept since, and switching off ends
+    // both (see generation, adviceBasis) (code-reviewer r4, N1).
     if (text !== null && !current.autoSwitch) return;
     if ((shownAdvice.get(threadId) ?? null) === text) return;
     if (text === null) shownAdvice.delete(threadId);
