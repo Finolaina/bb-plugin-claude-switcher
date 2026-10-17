@@ -1902,7 +1902,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   async function reviseAdvice(): Promise<void> {
     const byProject = new Map<string, [string, AdviceBasis][]>();
     const unread = unreadAccounts().length > 0;
-    for (const [threadId, basis] of [...adviceBasis]) {
+    for (const [threadId, basis] of adviceBasis) {
       if (
         unread ||
         !mayAdviseOpus(basis.decision, basis.model, current.preferredModel)
