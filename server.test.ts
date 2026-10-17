@@ -7692,7 +7692,7 @@ describe("a wait another account can end sooner", () => {
       expect(h.retries).toEqual([]);
     });
 
-    it("after a refresh that failed, on readings older than two refreshes: nothing said (code-reviewer 0.2.20, CR-05)", async () => {
+    it("after refreshes that failed, on readings older than two refreshes: nothing said; two refreshes old, still said (code-reviewer 0.2.20, CR-05)", async () => {
       let clock = NOW;
       let broken = false;
       const h = await host(
@@ -7713,25 +7713,31 @@ describe("a wait another account can end sooner", () => {
       );
       dispose = () => h.harness.dispose();
       await onePass(h);
-      expect(judgedPast(h)).toEqual([
-        `thread thread-1: left in error: no switch (beyond-maximum-wait); ${toOpus("spare")}`,
-      ]);
-      // Eleven minutes on (a refresh every five), the accounts directory
-      // unreadable: the refresh fails and the thread is judged on old readings.
-      clock = NOW + 11 * 60_000;
+      // The accounts directory unreadable from here: each refresh fails and
+      // the thread is judged on the readings made at NOW.
       broken = true;
-      const run = h.harness.behavior.runService("usage-refresh");
-      await vi.waitFor(() => {
-        expect(judgedPast(h)).toHaveLength(2);
-      });
-      run.controller.abort();
-      await run.done;
+      async function failedPass(judged: number) {
+        const run = h.harness.behavior.runService("usage-refresh");
+        await vi.waitFor(() => {
+          expect(judgedPast(h)).toHaveLength(judged);
+        });
+        run.controller.abort();
+        await run.done;
+      }
+      // Two refreshes (of five minutes) old: still said.
+      clock = NOW + 10 * 60_000;
+      await failedPass(2);
+      // A millisecond older: nothing said.
+      clock = NOW + 10 * 60_000 + 1;
+      await failedPass(3);
       expect(
         h.harness.logEntries.some((e) => e.message.startsWith("usage refresh failed: EPERM")),
       ).toBe(true);
-      expect(judgedPast(h)[1]).toBe(
+      expect(judgedPast(h)).toEqual([
+        `thread thread-1: left in error: no switch (beyond-maximum-wait); ${toOpus("spare")}`,
+        `thread thread-1: left in error: no switch (beyond-maximum-wait); ${toOpus("spare")}`,
         "thread thread-1: left in error: no switch (beyond-maximum-wait)",
-      );
+      ]);
     });
 
     it("retries it on an account that can run it, from bb's log alone", async () => {
@@ -9569,7 +9575,7 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     expect(await history(h)).toEqual([["thread-1", "proj-1", "main", "main", reason]]);
   });
 
-  it("a wait that moves the project: the move's row in the history says it", async () => {
+  it("a wait that moves the project: the move's row in the history says it, and a retry of that turn failing again adds none", async () => {
     const h = await host(NO_FABLE, { settings: { preferredModel: "Fable", maximumWaitHours: 0 } });
     dispose = () => h.harness.dispose();
     // main's report resets last: spare's Fable comes back first.
@@ -9580,6 +9586,29 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       "Waiting for Fable on spare. No Fable on any account: switch this thread to Opus with the model picker; it will go to spare";
     expect(h.retries.map((r) => r.reason)).toEqual([reason]);
     expect(await history(h)).toEqual([["thread-1", "proj-1", "main", "spare", reason]]);
+    // Its retry fails on spare: a wait there, said in the queue (spare is
+    // out by its report now: work), no new row.
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ requestId: "creq_1b", attemptNumber: 2 }),
+    );
+    expect(h.retries.map((r) => r.reason)).toEqual([
+      reason,
+      "Waiting for Fable on spare. No Fable on any account: switch this thread to Opus with the model picker; it will go to work",
+    ]);
+    expect(await history(h)).toHaveLength(1);
+  });
+
+  it("a new turn of the thread, told again, gets its own row (code-reviewer 0.2.20 r2, R2-01)", async () => {
+    const h = await host(NO_FABLE, { settings: { preferredModel: "Fable", maximumWaitHours: 1 } });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    // A message sent by hand afterwards: a new turn (attempt 1) that fails the same way.
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure({ requestId: "creq_3" }));
+    expect(await history(h)).toEqual([
+      ["thread-1", "proj-1", "main", "main", told],
+      ["thread-1", "proj-1", "main", "main", told],
+    ]);
   });
 
   it("a wait beyond the maximum queues nothing: the history and the log say it, once however often it is judged", async () => {
@@ -9727,6 +9756,80 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       ["thread-3", "proj-1", "spare", "spare", followed],
       ["thread-1", "proj-1", "main", "spare", waited],
     ]);
+  });
+
+  /** An answer whose session and Fable windows reset at `reset`: the wait for it is due within seconds. */
+  const resetsAt = (session: number, weekly: number, reset: number) => ({
+    limits: [
+      { kind: "session", percent: session, resets_at: new Date(reset).toISOString() },
+      { kind: "weekly_all", percent: weekly, resets_at: new Date(NOW + 72 * HOUR).toISOString() },
+      {
+        kind: "weekly_scoped",
+        percent: 100,
+        resets_at: new Date(reset).toISOString(),
+        scope: { model: { display_name: "Fable" } },
+      },
+    ],
+    five_hour: { locked_reason: null },
+    seven_day: { locked_reason: null },
+  });
+
+  it("a leftover within the grace of a wait already due is retried at once and not told (code-reviewer 0.2.20 r2, R2-02)", async () => {
+    let clock = NOW;
+    const h = await host(
+      { ...NO_FABLE, main: () => Response.json(resetsAt(100, 40, NOW + 10_000)) },
+      { settings: { preferredModel: "Fable" }, clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    const f = failure();
+    f.rateLimits!.windows[0]!.resetsAtMs = NOW + 10_000;
+    await h.harness.behavior.emitThreadEvent("turn.failed", f);
+    // 40 s on: within the 60 s grace, 15 s past the wait's send time.
+    clock = NOW + 40_000;
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ threadId: "thread-3", requestId: "creq_3" }),
+    );
+    expect(h.retries.map((r) => [r.threadId, r.reason, r.sendAt])).toEqual([
+      ["thread-1", `Waiting for Fable on main. ${told}`, NOW + 10_000 + BUFFER],
+      ["thread-3", "Retrying on account main", NOW + 10_000 + BUFFER],
+    ]);
+    expect((await history(h)).map((r) => r[0])).toEqual(["thread-1"]);
+  });
+
+  it("a leftover after the grace whose wait is already due is retried at once and not told", async () => {
+    let clock = NOW;
+    let mainOut = false;
+    const h = await host(
+      {
+        ...NO_FABLE,
+        main: () =>
+          Response.json(mainOut ? payload(100, 40, 100) : payload(10, 40, 30)),
+        spare: () => Response.json(resetsAt(1, 1, NOW + 10_000)),
+      },
+      {
+        settings: { preferredModel: "Fable", maximumWaitHours: 0 },
+        clock: () => clock,
+      },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect(await dispatch(h, "thread-3", FABLE_ID)).toEqual({ action: "proceed" });
+    await active(h, "thread-3");
+    mainOut = true;
+    const f = failure();
+    f.rateLimits!.windows[0]!.resetsAtMs = NOW + 9 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", f);
+    clock = NOW + 70_000;
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ threadId: "thread-3", requestId: "creq_3" }),
+    );
+    expect(h.retries.map((r) => [r.threadId, r.reason, r.sendAt])).toEqual([
+      ["thread-1", `Waiting for Fable on spare. ${told}`, NOW + 10_000 + BUFFER],
+      ["thread-3", "Retrying on account spare", undefined],
+    ]);
+    expect((await history(h)).map((r) => r[0])).toEqual(["thread-1"]);
   });
 
   it("with no account that can run Opus: nothing said, no history row", async () => {
