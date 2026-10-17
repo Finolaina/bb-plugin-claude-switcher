@@ -424,11 +424,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       /** Set when it was a wait: leftovers wait for the same reset. */
       sendAt: number | undefined;
       /**
-       * What the wait told its thread (see opusInstead), and for a turn in
-       * which model: a leftover in that model that waits for the same reset
-       * is told it too.
+       * Set when the wait told its thread to switch to Opus (see
+       * opusInstead), for a turn in that model: a leftover in that model
+       * that waits for the same reset is told it too, as the latest reads
+       * have it (see followsAdvice).
        */
-      advice?: { model: string; text: string };
+      advice?: { model: string };
       /** Threads already given their one grace retry. */
       graced: Set<string>;
     }
@@ -1581,7 +1582,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     record: SwitchRecord,
     cause: string | null,
     sendAt?: number,
-    advice?: { model: string; text: string },
+    advice?: { model: string },
   ) {
     recentSwitches.set(record.projectId, {
       at: record.at,
@@ -1602,24 +1603,49 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
 
   /**
-   * The advice a wait carried, for a leftover in the same model that
-   * follows it while the wait is still ahead (one already due is retried at
-   * once: code-reviewer 0.2.20 r2, R2-02).
+   * What a leftover in the same model is told when it follows a wait that
+   * told its thread to switch to Opus, while the wait is still ahead (one
+   * already due is retried at once: code-reviewer 0.2.20 r2, R2-02). Judged
+   * again on the latest reads, not copied (Sol B2-001): a refresh since may
+   * show the account named out of Opus, or fail to read one, and then
+   * nothing is said. From where the wait leaves the project, the account
+   * the leftover's turn started on ruled out as the failure's (unknown:
+   * none). No read here: the measurements as they stand.
    */
   function followsAdvice(
     recent: {
+      to: string;
       sendAt: number | undefined;
-      advice?: { model: string; text: string };
+      advice?: { model: string };
     },
     model: string,
     now: number,
+    event: PluginTurnFailedEvent,
+    started: string | null | undefined,
   ): string | null {
-    return recent.advice !== undefined &&
-      recent.sendAt !== undefined &&
-      recent.sendAt > now &&
-      recent.advice.model.toLowerCase() === model.toLowerCase()
-      ? recent.advice.text
-      : null;
+    if (
+      recent.advice === undefined ||
+      recent.sendAt === undefined ||
+      recent.sendAt <= now ||
+      recent.advice.model.toLowerCase() !== model.toLowerCase()
+    )
+      return null;
+    const on = opusInstead(
+      { kind: "wait", account: recent.to, sendAt: recent.sendAt, reason: "" },
+      {
+        failure: event,
+        currentAccount: recent.to,
+        failedAccount: typeof started === "string" ? started : null,
+        accounts: measuredAccounts(model),
+        preferredModel: model,
+        reserveModel: current.preferredModel,
+        maximumWaitMs: null,
+        now,
+        random: 0,
+      },
+      unreadAccounts(),
+    );
+    return on === null ? null : opusInsteadText(model, on);
   }
 
   /**
@@ -2335,7 +2361,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       recent.graced.add(event.threadId);
       if (typeof started === "string" && isRefusal(event))
         markRefused(started, now, event);
-      const told = followsAdvice(recent, model, now);
+      const told = followsAdvice(recent, model, now, event, started);
       const reason = `Retrying on account ${recent.to}${told === null ? "" : `. ${told}`}`;
       bb.log.info(
         `thread ${event.threadId}: ${reason} (switched ${now - recent.at} ms ago)`,
@@ -2371,7 +2397,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         const told =
           sendAt === undefined || recent === undefined
             ? null
-            : followsAdvice(recent, model, now);
+            : followsAdvice(recent, model, now, event, started);
         const reason = `Retrying on account ${currentName}${told === null ? "" : `. ${told}`}`;
         bb.log.info(
           `thread ${event.threadId}: ${reason} (its turn started on ${started})`,
@@ -2561,7 +2587,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // to switch (D3), whatever the decision's reason.
     const opusOn = opusInstead(decision, input, unreadAccounts());
     const advice = opusOn === null ? null : opusInsteadText(model, opusOn);
-    const carried = advice === null ? undefined : { model, text: advice };
+    const carried = advice === null ? undefined : { model };
     const how = stuck ? "left in error: " : "";
     if (decision.kind === "decline") {
       // The account the project sits on is no good either: a leftover

@@ -9840,6 +9840,100 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     ]);
   });
 
+  it("a leftover within the grace is told only what the latest reads say: the account for Opus as it stands now, nothing after a failed read (Sol B2-001)", async () => {
+    let spare = () => Response.json(payload(1, 1, 100));
+    const h = await host({ ...NO_FABLE, spare: () => spare() }, FABLE);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.retries.map((r) => r.reason)).toEqual([`Waiting for Fable on main. ${told}`]);
+    // A refresh measures spare with its session at 100 %: work runs Opus.
+    spare = () => Response.json(payload(100, 1, 100));
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ threadId: "thread-3", requestId: "creq_3" }),
+    );
+    // Another refresh: spare's read fails (a 429), no proof of anything.
+    spare = () => new Response("", { status: 429 });
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ threadId: "thread-4", requestId: "creq_4" }),
+    );
+    expect(h.retries.map((r) => [r.threadId, r.reason, r.sendAt])).toEqual([
+      ["thread-1", `Waiting for Fable on main. ${told}`, NOW + 4 * HOUR + BUFFER],
+      ["thread-3", `Retrying on account main${toOpus("work")}`, NOW + 4 * HOUR + BUFFER],
+      ["thread-4", "Retrying on account main", NOW + 4 * HOUR + BUFFER],
+    ]);
+    expect((await history(h)).map((r) => [r[0], r[4]])).toEqual([
+      ["thread-3", `Retrying on account main${toOpus("work")}`],
+      ["thread-1", `Waiting for Fable on main. ${told}`],
+    ]);
+  });
+
+  it("a leftover after the grace is told only what the latest reads say: the account for Opus as it stands now, nothing after a failed read (Sol B2-001)", async () => {
+    let clock = NOW;
+    let mainOut = false;
+    let spare = () => Response.json(payload(1, 1, 100));
+    const h = await host(
+      {
+        ...NO_FABLE,
+        main: () =>
+          Response.json(mainOut ? payload(100, 40, 100) : payload(10, 40, 30)),
+        spare: () => spare(),
+      },
+      {
+        settings: { preferredModel: "Fable", maximumWaitHours: 0 },
+        clock: () => clock,
+      },
+    );
+    dispose = () => h.harness.dispose();
+    // thread-3 and thread-4 start on main, while main can run Fable.
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    for (const t of ["thread-3", "thread-4"]) {
+      expect(await dispatch(h, t, FABLE_ID)).toEqual({ action: "proceed" });
+      await active(h, t);
+    }
+    mainOut = true;
+    // thread-1 fails on main; spare's Fable is back first: the wait moves the project there.
+    const f = failure();
+    f.rateLimits!.windows[0]!.resetsAtMs = NOW + 9 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", f);
+    // Past the grace, a refresh measures spare with its Opus window at
+    // 100 % (it still runs a turn, so the leftover follows the wait): work
+    // runs Opus.
+    clock = NOW + 61_000;
+    const opusSpent = payload(1, 1, 100);
+    (opusSpent.limits as unknown[]).push({
+      kind: "weekly_scoped",
+      percent: 100,
+      resets_at: new Date(NOW + 96 * HOUR).toISOString(),
+      scope: { model: { display_name: "Opus" } },
+    });
+    spare = () => Response.json(opusSpent);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ threadId: "thread-3", requestId: "creq_3" }),
+    );
+    // Another refresh: spare's read fails (a 429).
+    spare = () => new Response("", { status: 429 });
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ threadId: "thread-4", requestId: "creq_4" }),
+    );
+    expect(h.retries.map((r) => [r.threadId, r.reason, r.sendAt])).toEqual([
+      ["thread-1", `Waiting for Fable on spare. ${told}`, NOW + 4 * HOUR + BUFFER],
+      ["thread-3", `Retrying on account spare${toOpus("work")}`, NOW + 4 * HOUR + BUFFER],
+      ["thread-4", "Retrying on account spare", NOW + 4 * HOUR + BUFFER],
+    ]);
+    expect((await history(h)).map((r) => [r[0], r[4]])).toEqual([
+      ["thread-3", `Retrying on account spare${toOpus("work")}`],
+      ["thread-1", `Waiting for Fable on spare. ${told}`],
+    ]);
+  });
+
   /** An answer whose session and Fable windows reset at `reset`: the wait for it is due within seconds. */
   const resetsAt = (session: number, weekly: number, reset: number) => ({
     limits: [
