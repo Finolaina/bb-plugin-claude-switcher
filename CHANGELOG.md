@@ -47,6 +47,8 @@ project uses [Semantic Versioning](https://semver.org/).
   the thread started or the thread was archived still wrote the row
   telling the thread to switch to Opus. As with the banner, the row is
   only written when none of those happened since the judgment began.
+  (Not yet in the row of a move the judgment still made: fixed in
+  0.2.24.)
 
 ## [0.2.22] - 2026-10-17
 

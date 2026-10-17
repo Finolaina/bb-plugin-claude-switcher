@@ -507,12 +507,13 @@ turn (beyond the maximum, or no account will free), the thread shows
 the text in a banner over its composer, besides the history and the
 log; the banner goes when a turn of the thread starts, when a later
 failure of it is judged without the advice, when it is archived and
-when the automatic choice is switched off (a judgment still reading
-then puts back neither the banner nor a history row), and it reads the
-advice again when bb's connection comes back after a drop. A thread
-whose preferred
-model is Opus itself is never told. Once the model is back, the queued
-wait runs as before.
+when the automatic choice is switched off (a judgment still reading or
+moving the project then puts back neither the banner nor the text in a
+history row: a move it still makes is recorded with its own reason,
+without the text, and the turn is told by a later judgment), and it
+reads the advice again when bb's connection comes back after a drop. A
+thread whose preferred model is Opus itself is never told. Once the
+model is back, the queued wait runs as before.
 
 A queued wait is looked at again after every usage refresh: an account
 that could not be measured when the wait was chosen may have room now.

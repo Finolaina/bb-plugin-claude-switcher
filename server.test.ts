@@ -10090,6 +10090,25 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       ]);
       expect((await history(h)).map((r) => r[0])).toEqual(["thread-1"]);
     });
+
+    it("a wait that moves the project: the move is made, as a failure judged then always was, and its row records it with its reason alone; the turn's chain is not taken for told (code-reviewer r4, L2)", async () => {
+      const { h, switchOff } = await offHost({ maximumWaitHours: 0 });
+      switchOff.armed = true;
+      // main's report resets last: the wait moves the project to spare.
+      const f = failure();
+      f.rateLimits!.windows[0]!.resetsAtMs = NOW + 9 * HOUR;
+      await h.harness.behavior.emitThreadEvent("turn.failed", f);
+      expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([["proj-1", ownNote("spare")]]);
+      expect(h.retries.map((r) => r.reason)).toEqual([`Waiting for Fable on spare. ${told}`]);
+      expect(await history(h)).toEqual([["thread-1", "proj-1", "main", "spare", "Waiting for Fable on spare"]]);
+      // On again, its retry declined beyond the maximum: told then, once.
+      await h.harness.behavior.setSettings({ autoSwitch: true, maximumWaitHours: 1 });
+      await retried(h);
+      expect(await history(h)).toEqual([
+        ["thread-1", "proj-1", "spare", "spare", told],
+        ["thread-1", "proj-1", "main", "spare", "Waiting for Fable on spare"],
+      ]);
+    });
   });
 
   // Sol B2-R4-002: a judgment whose wait moves the project tells the thread
