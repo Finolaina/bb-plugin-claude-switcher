@@ -11687,6 +11687,13 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
         await refreshed(h);
         expect(await banner(h)).toBe(kept ? told : null);
         expect(gets).toBe(kept ? 1 : 0);
+        expect(
+          h.harness.logEntries.some(
+            (e) =>
+              e.message ===
+              "thread thread-1: what its banner was asked on is dropped (judged more than 7 days ago)",
+          ),
+        ).toBe(!kept);
         expect(Object.keys((await h.bb.storage.kv.get<object>("advice-bases")) ?? {})).toEqual(
           kept ? ["thread-1"] : [],
         );
