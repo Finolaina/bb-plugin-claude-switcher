@@ -8534,6 +8534,48 @@ describe("a wait another account can end sooner", () => {
       expect(h.retries).toEqual([]);
       expect(h.envSet).toEqual([]);
     });
+
+    it("archived while its rescue reads bb's log, the judgment does not put back the banner the archiving took away (Sol B2-R2-003)", async () => {
+      let meanwhile: (() => Promise<unknown>) | null = null;
+      const h = await host(
+        {
+          main: () => Response.json(payload(100, 40, 100)),
+          spare: () => Response.json(payload(1, 1, 100)),
+          work: () => Response.json(payload(1, 1, 100)),
+        },
+        {
+          ...stuck(failedLog("thread-1", "creq_1", FABLE_ID)),
+          ...PAST_MAXIMUM,
+          beforeEvents: async () => {
+            const archive = meanwhile;
+            meanwhile = null;
+            await archive?.();
+          },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      // A turn of it ran, before it was left in error.
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "thread-1", projectId: "proj-1" }),
+      });
+      const banner = async () =>
+        (
+          (await h.harness.behavior.callRpc("thread_advice", { threadId: "thread-1" })) as {
+            text: string | null;
+          }
+        ).text;
+      await onePass(h);
+      expect(await banner()).toBe(toOpus("spare"));
+      meanwhile = () =>
+        h.harness.behavior.emitThreadEvent("thread.archived", {
+          thread: thread({ id: "thread-1", projectId: "proj-1" }),
+        });
+      await onePass(h);
+      expect(await banner()).toBeNull();
+      expect(
+        h.harness.realtimeSignals.filter((s) => s.channel === "opus-advice"),
+      ).toHaveLength(2);
+    });
   });
 
   it("judges a wait by the model its retry runs with, not by the model the thread used last", async () => {
@@ -9913,6 +9955,126 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     expect(await banner(h)).toBeNull();
     expect(adviceSignals(h)).toEqual([{ threadId: "thread-1" }, { threadId: "thread-1" }]);
   });
+
+  it("switched off while a failure is judged, the judgment shows no banner when its reads end, nor when switched back on meanwhile (Sol B2-R2-003)", async () => {
+    let meanwhile: (() => void) | null = null;
+    const h = await host(
+      {
+        ...NO_FABLE,
+        // Read in the refresh before the judgment: the user flips the toggle then.
+        spare: () => {
+          const flip = meanwhile;
+          meanwhile = null;
+          flip?.();
+          return Response.json(payload(1, 1, 100));
+        },
+      },
+      { settings: { preferredModel: "Fable", maximumWaitHours: 1 } },
+    );
+    dispose = () => h.harness.dispose();
+    meanwhile = () => void h.harness.behavior.setSettings({ autoSwitch: false });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(await banner(h)).toBeNull();
+    expect(adviceSignals(h)).toEqual([]);
+    // On again; off and on while the next failure's reads are pending: the
+    // judgment began before, and says nothing.
+    await h.harness.behavior.setSettings({ autoSwitch: true });
+    meanwhile = () => {
+      void h.harness.behavior.setSettings({ autoSwitch: false });
+      void h.harness.behavior.setSettings({ autoSwitch: true });
+    };
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ requestId: "creq_1b", attemptNumber: 2 }),
+    );
+    expect(await banner(h)).toBeNull();
+    expect(adviceSignals(h)).toEqual([]);
+    // Judged with it on throughout: shown.
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ requestId: "creq_1c", attemptNumber: 3 }),
+    );
+    expect(await banner(h)).toBe(told);
+  });
+
+  it("a turn of the thread that starts while its failure is judged takes the banner away, and the judgment does not put it back when its reads end (Sol B2-R2-003)", async () => {
+    let meanwhile: (() => Promise<unknown>) | null = null;
+    const h = await host(NO_FABLE, {
+      settings: { preferredModel: "Fable", maximumWaitHours: 1 },
+      beforeEvents: async () => {
+        const start = meanwhile;
+        meanwhile = null;
+        await start?.();
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(await banner(h)).toBe(told);
+    // Its retry fails; while bb's log is read for that failure, a turn of
+    // the thread starts (switched to Opus and sent by hand).
+    meanwhile = () => active(h, "thread-1");
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ requestId: "creq_1b", attemptNumber: 2 }),
+    );
+    expect(await banner(h)).toBeNull();
+    expect(adviceSignals(h)).toEqual([{ threadId: "thread-1" }, { threadId: "thread-1" }]);
+    // A failure of that new turn is judged afresh: shown again.
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ requestId: "creq_2" }),
+    );
+    expect(await banner(h)).toBe(told);
+  });
+
+  for (const [when, late] of [
+    ["within the grace of a move", false],
+    ["past the grace of a move, begun on the old account", true],
+  ] as const)
+    it(`an older failure retried as a leftover ${when} leaves alone the banner a newer turn's failure put up while it read (Sol B2-R2-003)`, async () => {
+      let clock = NOW;
+      let workFable = 100;
+      let meanwhile: (() => Promise<void>) | null = null;
+      const h = await host(
+        { ...NO_FABLE, work: () => Response.json(payload(1, 1, workFable)) },
+        {
+          settings: { preferredModel: "Fable", maximumWaitHours: 1 },
+          clock: () => clock,
+          beforeEvents: async () => {
+            const run = meanwhile;
+            meanwhile = null;
+            await run?.();
+          },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      // A turn of thread-1 is sent and starts on main.
+      expect(await dispatch(h, "thread-1", FABLE_ID)).toEqual({ action: "proceed" });
+      await active(h, "thread-1");
+      meanwhile = async () => {
+        // While bb's log is read for its failure, a new turn of the thread
+        // starts and fails: no Fable anywhere, the banner says so.
+        await active(h, "thread-1");
+        await h.harness.behavior.emitThreadEvent("turn.failed", failure({ requestId: "creq_2" }));
+        expect(await banner(h)).toBe(told);
+        // Then work runs Fable again, and thread-3's failure moves the project there.
+        workFable = 30;
+        await h.harness.behavior.emitThreadEvent(
+          "turn.failed",
+          failure({ threadId: "thread-3", requestId: "creq_3" }),
+        );
+        // Past the minute of grace.
+        if (late) clock = NOW + 61_000;
+      };
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      // The older failure's turn runs again on work, as a leftover...
+      expect(h.retries.map((r) => [r.threadId, r.turnRequestId, r.reason])).toEqual([
+        ["thread-3", "creq_3", "Switched to account work (Fable)"],
+        ["thread-1", "creq_1", "Retrying on account work"],
+      ]);
+      // ...and says nothing of the newer turn's banner.
+      expect(await banner(h)).toBe(told);
+    });
 
   it("a wait shows no banner: its queued retry says it (Sol B2-004)", async () => {
     const h = await host(NO_FABLE, FABLE);
