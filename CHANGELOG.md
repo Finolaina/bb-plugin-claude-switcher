@@ -4,6 +4,48 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.21] - 2026-10-17
+
+### Added
+
+- **The thread shows the advice to switch to Opus when nothing is
+  queued.** Beyond `maximumWaitHours`, or when no account will free, a
+  thread told to switch to Opus had the text only in the history and the
+  log. It now shows in a banner over the thread's composer (bb's composer
+  banner, scoped to threads), which schedules nothing and changes no
+  model: the switch stays yours. The banner goes when a turn of the thread
+  starts, when a later failure of it is judged without the advice, when
+  the thread is archived and when the automatic choice is switched off. A
+  wait still says it in its queued retry and shows no banner.
+
+### Fixed
+
+- **The account named for Opus is the one the Opus turn runs on.** The
+  advice left out the account the turn failed on when its report blocked
+  a window, while the placement before the next turn judged that account
+  on its own numbers, which can still show room: the thread was told one
+  account and its Opus turn stayed on the other. A blocked report now puts
+  its account out of every turn until the reset it reported (for two
+  refreshes when it names none), for the advice and for the placement
+  alike, also when the failure is a leftover's. A warning report puts no
+  account out. A turn in the preferred model does not go back to such an
+  account before that reset either.
+- **Another thread that follows the wait is told what the latest reads
+  say.** It used to copy the wait's text, so after a refresh that found
+  the account named out of Opus, or failed to read one (a 429), it named
+  that account or said the model was gone on a failed read. The advice is
+  now judged again on the measurements as they stand, and a failed, missing
+  or old read says nothing.
+- **One history row per turn, its retries included, also in a move.** A
+  retry was taken for the turn told before whatever turn it belonged to,
+  so a new turn told only at its second attempt got no row; and a retry
+  whose wait moved the project wrote the text again in the move's row. The
+  turn is now its retry chain, as bb's log names it, and a move of a turn
+  already told is recorded without the text.
+- **A thread whose preferred model is Opus is never told to switch to
+  Opus.** Under a warning report the account it failed on could still be
+  named by its numbers.
+
 ## [0.2.20] - 2026-10-17
 
 ### Added

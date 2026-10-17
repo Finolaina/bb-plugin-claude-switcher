@@ -301,6 +301,7 @@ starts on a fresh account runs without your settings, hooks and
 | **Settings → Claude Switcher**                       | The ten settings, a card per account with its windows and their forecast, **Add account** and **Log in**, the account each project runs on (with a picker), **Refresh usage**, and the history of moves.                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | **Settings → Provider usage** (and its sidebar card) | Pick **Claude accounts** in the source menu to see every account's session, weekly and per-model windows.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | **A thread's retry reason**                          | `Switched to account <name>`, `Waiting for <name>` or `Retrying on account <name>`, wherever bb shows why a turn was retried; a wait for the preferred model with no account left that has it may end with `No <model> on any account: switch this thread to Opus with the model picker; it will go to <name>`.                                                                                                                                                                                                                                                                                                                         |
+| **A thread's composer**                              | When a failed turn in the preferred model is left with nothing queued (beyond the maximum wait, or no account will free) and an account can run Opus: a banner saying `No <model> on any account: switch this thread to Opus with the model picker; it will go to <name>`. It only shows: the switch is yours.                                                                                                                                                                                                                                                                                                                          |
 | **`bb plugin logs claude-switcher`**                 | Every switch, wait and decline, with its reason.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | **`bb claude-switcher`**                             | The CLI: `list`, `refresh`, `history`, `use`, `release`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
@@ -484,16 +485,30 @@ preferred model's weekly. A wait's retry reason then ends with `. No
 picker; it will go to <name>`, naming the account the project's next
 Opus turn would run on: where the wait leaves the project when it can
 run Opus there, else the best other (the account that just failed only
-when its report merely warned and its numbers leave room). Another
-thread of the project in the preferred model that follows the wait says
-the same, while the wait is still ahead. The history gets the text once
-per turn you sent (from the project's account to itself when nothing
-moved): its retries and the refreshes that judge it again add none, a
-new turn gets its own; the log says it every time. A usage read that failed (a 429), was never made or is
-older than two refreshes is no proof that the model is gone: then
-nothing is said. When nothing is queued for the turn (beyond the
-maximum, or no account will free), only the history and the log say it,
-not the thread. Once the model is back, the queued wait runs as before.
+when its report merely warned and its numbers leave room). A failure
+whose report blocked its account puts that account out of every turn
+until the reset it reported (for two refreshes when it names none),
+whatever its own numbers still show: the advice never names it, and
+the placement before a turn moves the project off it, so an Opus turn
+sent after the advice runs where the advice said (and a Fable turn does
+not go back there before that reset either). Another thread of the
+project in the preferred model that follows the wait is told too, while
+the wait is still ahead, as the latest usage reads have it: nothing when
+one of them failed since. The history gets the text once per turn you
+sent, its retries included (bb's log names the first request of each
+retry chain), from the project's account to itself when nothing moved;
+the refreshes that judge it again add none, a new turn gets its own, and
+a retry whose wait moves the project records the move without the text
+again; the log says it every time. A usage read that failed (a 429),
+was never made or is older than two refreshes is no proof that the
+model is gone: then nothing is said. When nothing is queued for the
+turn (beyond the maximum, or no account will free), the thread shows
+the text in a banner over its composer, besides the history and the
+log; the banner goes when a turn of the thread starts, when a later
+failure of it is judged without the advice, when it is archived and
+when the automatic choice is switched off. A thread whose preferred
+model is Opus itself is never told. Once the model is back, the queued
+wait runs as before.
 
 A queued wait is looked at again after every usage refresh: an account
 that could not be measured when the wait was chosen may have room now.
