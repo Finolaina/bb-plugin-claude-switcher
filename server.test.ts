@@ -7704,6 +7704,34 @@ describe("a wait another account can end sooner", () => {
       expect(h.retries).toEqual([]);
     });
 
+    it("told to switch to Opus on every refresh, the same decline each time: what its banner is asked on is written once, with when it was first judged (code-reviewer r6, N3)", async () => {
+      let clock = NOW;
+      const h = await host(
+        {
+          main: () => Response.json(payload(100, 40, 100)),
+          spare: () => Response.json(payload(1, 1, 100)),
+          work: () => Response.json(payload(30, 1, 100)),
+        },
+        { ...stuck(failedLog("thread-1", "creq_1", FABLE_ID)), ...PAST_MAXIMUM, clock: () => clock },
+      );
+      dispose = () => h.harness.dispose();
+      const writes: unknown[] = [];
+      const set = h.bb.storage.kv.set;
+      h.bb.storage.kv.set = async (key: string, value: unknown) => {
+        if (key === "advice-bases") writes.push(value);
+        return set(key, value);
+      };
+      for (const step of [0, 1, 2]) {
+        clock = NOW + step * 5 * 60_000;
+        await onePass(h);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(judgedPast(h)).toHaveLength(3);
+      expect(writes).toEqual([
+        { "thread-1": expect.objectContaining({ requestId: "creq_1", reason: "beyond-maximum-wait", at: NOW }) },
+      ]);
+    });
+
     it("after refreshes that failed, on readings older than two refreshes: nothing said; two refreshes old, still said (code-reviewer 0.2.20, CR-05)", async () => {
       let clock = NOW;
       let broken = false;
