@@ -1652,7 +1652,7 @@ describe("opusInstead: a Fable thread no account can run is told to switch to Op
 
   it("the text names the model, Opus and the account", () => {
     expect(opusInsteadText("Fable", "team2")).toBe(
-      "No Fable on any account: switch this thread to Opus with the model picker; it will go to team2",
+      "Sin Fable en ninguna cuenta: pasa este hilo a Opus con el selector de modelo; irá a team2",
     );
   });
 });

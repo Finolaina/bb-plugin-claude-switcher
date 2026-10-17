@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.28] - 2026-10-17
+
+### Changed
+
+- **The advice to switch to Opus is in Spanish.** The retry reason, the
+  composer's banner, the history and the log now say `Sin <model> en
+  ninguna cuenta: pasa este hilo a Opus con el selector de modelo; irá a
+  <name>`. Only the text changes: when it is said, and the account it
+  names, stay as they were. The rest of the plugin stays in English.
+
 ## [0.2.27] - 2026-10-17
 
 ### Fixed

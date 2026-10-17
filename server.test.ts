@@ -29,7 +29,7 @@ const ACCOUNTS = `${HOME}/.claude-accounts`;
 const BUFFER = 15_000;
 /** What a wait for Fable adds when no account has Fable left and one can run Opus (D3); literal on purpose. */
 const toOpus = (account: string) =>
-  `. No Fable on any account: switch this thread to Opus with the model picker; it will go to ${account}`;
+  `. Sin Fable en ninguna cuenta: pasa este hilo a Opus con el selector de modelo; irá a ${account}`;
 
 type Payload = Record<string, unknown>;
 
@@ -7668,7 +7668,7 @@ describe("a wait another account can end sooner", () => {
     /** Every account out of Fable until +4 h, main's session out too: a stuck Fable thread past a one-hour maximum is told to switch to Opus. */
     const PAST_MAXIMUM = { settings: { preferredModel: "Fable", maximumWaitHours: 1 } };
     const toOpus = (account: string) =>
-      `No Fable on any account: switch this thread to Opus with the model picker; it will go to ${account}`;
+      `Sin Fable en ninguna cuenta: pasa este hilo a Opus con el selector de modelo; irá a ${account}`;
     const judgedPast = (h: Awaited<ReturnType<typeof host>>) =>
       h.harness.logEntries
         .map((e) => e.message)
@@ -9763,7 +9763,7 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     work: () => Response.json(payload(1, 1, 100)),
   };
   const told =
-    "No Fable on any account: switch this thread to Opus with the model picker; it will go to spare";
+    "Sin Fable en ninguna cuenta: pasa este hilo a Opus con el selector de modelo; irá a spare";
   async function history(h: Awaited<ReturnType<typeof host>>) {
     const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
     return state.history.map((r) => [r.threadId, r.projectId, r.from, r.to, r.reason]);
@@ -9794,7 +9794,7 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     f.rateLimits!.windows[0]!.resetsAtMs = NOW + 9 * HOUR;
     await h.harness.behavior.emitThreadEvent("turn.failed", f);
     const reason =
-      "Waiting for Fable on spare. No Fable on any account: switch this thread to Opus with the model picker; it will go to spare";
+      "Waiting for Fable on spare. Sin Fable en ninguna cuenta: pasa este hilo a Opus con el selector de modelo; irá a spare";
     expect(h.retries.map((r) => r.reason)).toEqual([reason]);
     expect(await history(h)).toEqual([["thread-1", "proj-1", "main", "spare", reason]]);
     // Its retry fails on spare: a wait there, said in the queue (spare's
@@ -11548,7 +11548,7 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       });
       dispose = () => h.harness.dispose();
       await refreshed(h);
-      expect(await banner(h)).toBe(told.replace("No Fable", "No fable"));
+      expect(await banner(h)).toBe(told.replace("Sin Fable", "Sin fable"));
     });
 
     // Sol B2-R6-001: with the plugin running, the start of that retry would
@@ -12079,7 +12079,7 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     dispose = () => h.harness.dispose();
     await h.harness.behavior.emitThreadEvent("turn.failed", failure());
     expect(h.retries.map((r) => r.reason)).toEqual([
-      "Waiting for Fable on main. No Fable on any account: switch this thread to Opus with the model picker; it will go to work",
+      "Waiting for Fable on main. Sin Fable en ninguna cuenta: pasa este hilo a Opus con el selector de modelo; irá a work",
     ]);
   });
 
