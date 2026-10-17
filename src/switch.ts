@@ -269,6 +269,37 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
 /** The model a thread is told to switch to when no account can run the preferred one. */
 export const FALLBACK_MODEL = "Opus";
 
+/** The declines whose thread can be told to switch to Opus (see opusInstead): no account will free, or not soon enough. */
+export const ADVISED_DECLINES = [
+  "no-account-usable",
+  "beyond-maximum-wait",
+] as const satisfies readonly DeclineReason[];
+
+/**
+ * Whether a judgment of a turn in `model` can tell its thread to switch to
+ * Opus (see opusInstead), before any account is looked at: the turn is in
+ * the preferred model (`reserveModel`), that model is not Opus itself, and
+ * the decision is a wait or one of ADVISED_DECLINES.
+ */
+export function mayAdviseOpus(
+  decision: SwitchDecision,
+  model: string,
+  reserveModel: string | undefined,
+): boolean {
+  const m = model.toLowerCase();
+  if (
+    m === "" ||
+    m !== (reserveModel ?? "").toLowerCase() ||
+    m === FALLBACK_MODEL.toLowerCase()
+  )
+    return false;
+  return (
+    decision.kind === "wait" ||
+    (decision.kind === "decline" &&
+      (ADVISED_DECLINES as readonly DeclineReason[]).includes(decision.reason))
+  );
+}
+
 /**
  * Where an Opus turn of the failed thread would go, when the thread is told
  * to switch to Opus; null when there is nothing to tell (D3, 2026-10-17: with
@@ -314,20 +345,11 @@ export function opusInstead(
   /** The placement before an Opus turn of the project, but where it sits. */
   placement: Omit<PlacementInput, "currentAccount">,
 ): string | null {
-  const model = input.preferredModel.toLowerCase();
-  const reserve = input.reserveModel ?? "";
   if (
-    model === "" ||
-    model !== reserve.toLowerCase() ||
-    model === FALLBACK_MODEL.toLowerCase()
+    !mayAdviseOpus(decision, input.preferredModel, input.reserveModel) ||
+    unread.length > 0
   )
     return null;
-  const told =
-    decision.kind === "wait" ||
-    (decision.kind === "decline" &&
-      (decision.reason === "no-account-usable" ||
-        decision.reason === "beyond-maximum-wait"));
-  if (!told || unread.length > 0) return null;
   const accounts = input.accounts.map((a) => settle(a, input.now));
   if (accounts.some((a) => a.unknown === true)) return null;
   const failedOn =

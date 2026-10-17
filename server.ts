@@ -57,6 +57,7 @@ import {
   FALLBACK_MODEL,
   isRefusal,
   MAX_ATTEMPTS,
+  mayAdviseOpus,
   modelFamily,
   fullestWindow,
   opusInstead,
@@ -899,12 +900,50 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return accounts;
   }
 
+  /**
+   * The banners' pass under way (see reviseAdvice), and whether one was
+   * asked for since it began. The pass only tells, so nothing that decides
+   * waits for it (Sol B2-R5-003): a refresh asks for it and goes on. One at
+   * a time: asked while one runs, it runs once more after it, on the reads
+   * of then.
+   */
+  let bannerPass: Promise<void> | null = null;
+  let passAgain = false;
+  function askBannersAgain(): void {
+    passAgain = true;
+    bannerPass ??= (async () => {
+      try {
+        while (passAgain) {
+          passAgain = false;
+          try {
+            await reviseAdvice();
+          } catch (error) {
+            bb.log.warn(
+              `the banners were not asked again: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+      } finally {
+        bannerPass = null;
+      }
+    })();
+  }
+
   async function refreshAll(): Promise<void> {
     const found = await discover();
     await collector.collectAll(found);
     await recordSamples();
     bb.realtime.publish(CHANGED, { at: deps.now() });
-    await reviseAdvice();
+    askBannersAgain();
+  }
+
+  /** A refresh asked for (Settings, the CLI): it answers once the banners are asked again on its reads too. */
+  async function refreshByHand(): Promise<void> {
+    try {
+      await refreshAll();
+    } finally {
+      await bannerPass;
+    }
   }
 
   // ponytail: bb has no batch read of machine environments, so a list costs
@@ -1340,7 +1379,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   bb.rpc.register(rpcContract, {
     accounts_list: (input) => state({ shared: true, need: input?.project }),
     async accounts_refresh() {
-      await refreshAll();
+      await refreshByHand();
       return state();
     },
     async project_set_account({ projectId, account }) {
@@ -1754,55 +1793,70 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
 
   /**
-   * After a usage refresh: the banner of each thread whose latest judgment
-   * declined its turn, asked again on the new reads (Sol B2-R4-001). A
-   * thread with a retry queued (bb's provider-retry) is never judged again
-   * until that retry runs, while the account an Opus turn would go to
-   * changes with the numbers. As a rescue's judgment would ask it: the
-   * account the turn failed on judged on its numbers like the rest, from
-   * where the project sits now, with the same function and the same
-   * placement (opusInstead): a new account, the banner gone (Fable back, no
-   * account for Opus, a read that failed) or back. Only the banner: nothing
-   * sent, retried, moved, queued or written. A judgment of the thread, a
-   * turn of it, its archiving or the automatic choice switched off while
-   * the project is read leave a basis other than the one read: what was
-   * read says nothing.
+   * After a usage refresh (see askBannersAgain): the banner of each thread
+   * whose latest judgment declined its turn, asked again on the new reads
+   * (Sol B2-R4-001). A thread with a retry queued (bb's provider-retry) is
+   * never judged again until that retry runs, while the account an Opus
+   * turn would go to changes with the numbers. As a rescue's judgment would
+   * ask it: the account the turn failed on judged on its numbers like the
+   * rest, from where the project sits now, with the same function and the
+   * same placement (opusInstead): a new account, the banner gone (Fable
+   * back, no account for Opus, a read that failed) or back. Only the
+   * banner: nothing sent, retried, moved, queued or written. One read of
+   * each project's account for all its threads, none for a basis whose
+   * model is no longer the preferred one (Sol B2-R5-003). A judgment of the
+   * thread, a turn of it, its archiving or the automatic choice switched
+   * off while the project is read leave a basis other than the one read:
+   * what was read says nothing.
    */
   async function reviseAdvice(): Promise<void> {
+    const byProject = new Map<string, [string, AdviceBasis][]>();
     for (const [threadId, basis] of adviceBasis) {
-      let at: ProjectAccount;
-      try {
-        at = await projectAccount(basis.projectId);
-      } catch (error) {
-        bb.log.warn(
-          `thread ${threadId}: its banner not asked again (the project's account could not be read: ${error instanceof Error ? error.message : String(error)})`,
-        );
-        continue;
-      }
-      if (adviceBasis.get(threadId) !== basis) continue;
-      // Set outside this plugin: no placement there (see placeTurn).
-      if (at.external) {
+      if (!mayAdviseOpus(basis.decision, basis.model, current.preferredModel)) {
         showAdvice(threadId, null);
         continue;
       }
+      const threads = byProject.get(basis.projectId) ?? [];
+      threads.push([threadId, basis]);
+      byProject.set(basis.projectId, threads);
+    }
+    for (const [projectId, threads] of byProject) {
+      let at: ProjectAccount;
+      try {
+        at = await projectAccount(projectId);
+      } catch (error) {
+        for (const [threadId] of threads)
+          bb.log.warn(
+            `thread ${threadId}: its banner not asked again (the project's account could not be read: ${error instanceof Error ? error.message : String(error)})`,
+          );
+        continue;
+      }
       const now = deps.now();
-      const on = opusInstead(
-        basis.decision,
-        {
-          failure: basis.failure,
-          currentAccount: at.account ?? current.defaultAccountName,
-          accounts: measuredAccounts(basis.model),
-          preferredModel: basis.model,
-          reserveModel: current.preferredModel,
-          maximumWaitMs: null,
-          now,
-          random: 0,
-          stuck: true,
-        },
-        unreadAccounts(),
-        placementOf(basis.projectId, FALLBACK_MODEL, now),
-      );
-      showAdvice(threadId, on === null ? null : opusInsteadText(basis.model, on));
+      for (const [threadId, basis] of threads) {
+        if (adviceBasis.get(threadId) !== basis) continue;
+        // Set outside this plugin: no placement there (see placeTurn).
+        if (at.external) {
+          showAdvice(threadId, null);
+          continue;
+        }
+        const on = opusInstead(
+          basis.decision,
+          {
+            failure: basis.failure,
+            currentAccount: at.account ?? current.defaultAccountName,
+            accounts: measuredAccounts(basis.model),
+            preferredModel: basis.model,
+            reserveModel: current.preferredModel,
+            maximumWaitMs: null,
+            now,
+            random: 0,
+            stuck: true,
+          },
+          unreadAccounts(),
+          placementOf(projectId, FALLBACK_MODEL, now),
+        );
+        showAdvice(threadId, on === null ? null : opusInsteadText(basis.model, on));
+      }
     }
   }
 
@@ -2774,11 +2828,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // B2-R4-001). Any other judgment takes it away. Unless a turn of it
     // started, it was archived or the automatic choice was switched off
     // while this one read (Sol B2-R2-003).
+    // A basis only for a decline that can tell it (Sol B2-R5-003).
     judgedAdvice(
       event.threadId,
       decision.kind === "decline" ? advice : null,
       judgedIn,
-      decision.kind === "decline"
+      decision.kind === "decline" &&
+        mayAdviseOpus(decision, model, current.preferredModel)
         ? { projectId, model, failure: event, decision }
         : null,
     );
@@ -3446,7 +3502,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           summary: "Query the usage of every account now",
           options: { json: JSON_OPTION },
           async run({ options }) {
-            await refreshAll();
+            await refreshByHand();
             const s = await state();
             return {
               exitCode: 0,

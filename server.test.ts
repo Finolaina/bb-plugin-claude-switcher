@@ -10485,6 +10485,215 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     });
   });
 
+  // Sol B2-R5-003: the banners' pass after a refresh is informative. A
+  // failure's judgment, the service's look at the waits and a new thread's
+  // placement never wait for it; it reads each project's account once, keeps
+  // a basis only for a decline that can tell the thread, and a refresh asked
+  // while it runs adds one pass after it.
+  describe("the banners' pass holds nothing up and reads each project once (Sol B2-R5-003)", () => {
+    const refreshed = (h: Awaited<ReturnType<typeof host>>) =>
+      h.harness.behavior.callRpc("accounts_refresh", null);
+    /** thr-2 (project proj-2) sent its turn in Opus. */
+    const opusTurn = {
+      "thr-2": [
+        {
+          id: "evt_creq_2",
+          scope: { kind: "thread" },
+          threadId: "thr-2",
+          seq: 1,
+          createdAt: NOW - HOUR,
+          type: "client/turn/requested",
+          data: { requestId: "creq_2", execution: { model: OPUS_ID } },
+        },
+      ],
+    };
+    /** A host whose next read of proj-1's account, once `hold.gate` is set, waits on that gate. */
+    async function heldHost(extra: HostOptions = {}, usage: Record<string, () => Response> = NO_FABLE) {
+      const hold: { gate: EnvGate | null } = { gate: null };
+      const h = await host(usage, {
+        settings: { preferredModel: "Fable", maximumWaitHours: 1 },
+        threadEvents: opusTurn,
+        ...extra,
+        beforeEnvRead: async (projectId) => {
+          const gate = hold.gate;
+          if (projectId !== "proj-1" || gate === null) return;
+          hold.gate = null;
+          gate.captured();
+          await gate.held;
+        },
+      });
+      dispose = () => h.harness.dispose();
+      return { h, hold };
+    }
+
+    it("a failure of another project is judged, moved and retried while the pass waits on a read of a declined thread's project", async () => {
+      const { h, hold } = await heldHost();
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(await banner(h)).toBe(told);
+      const gate = envGate();
+      hold.gate = gate;
+      // thr-2's Opus turn fails on main: the refresh its judgment makes
+      // asks thread-1's banner again, and that read of proj-1 waits.
+      const judged = h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ threadId: "thr-2", requestId: "creq_2" }),
+      );
+      await gate.reached;
+      await vi.waitFor(() => {
+        expect(h.retries.map((r) => [r.threadId, r.reason])).toEqual([
+          ["thr-2", "Switched to account spare (Opus)"],
+        ]);
+      });
+      expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([["proj-2", ownNote("spare")]]);
+      gate.release();
+      await judged;
+      expect(await banner(h)).toBe(told);
+    });
+
+    it("the service's look at the waits runs while the pass waits on a read", async () => {
+      // thr-2's Opus retry waits three hours for main's session.
+      const row: QueuedRow = {
+        id: "r2",
+        threadId: "thr-2",
+        payload: {
+          kind: "retry",
+          attempt: 2,
+          reason: "Waiting for the session of main",
+          retryOfTurnRequestId: "creq_2",
+        },
+        sendAt: NOW + 3 * HOUR,
+        waitingOn: { kind: "time" },
+        createdAt: NOW - HOUR,
+        model: OPUS_ID,
+      };
+      const { h, hold } = await heldHost({
+        queued: [row],
+        threads: { "thr-2": { status: "error" } },
+      });
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(await banner(h)).toBe(told);
+      const gate = envGate();
+      hold.gate = gate;
+      const run = h.harness.behavior.runService("usage-refresh");
+      await gate.reached;
+      await vi.waitFor(() => {
+        expect(h.retries.map((r) => r.threadId)).toEqual(["thr-2"]);
+      });
+      expect(h.deleted).toEqual(["r2"]);
+      expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([["proj-2", ownNote("spare")]]);
+      gate.release();
+      run.controller.abort();
+      await run.done;
+    });
+
+    it("a new project's first thread is placed while the pass waits on a read", async () => {
+      let dirs = ["spare", "work"];
+      const { h, hold } = await heldHost(
+        { dirs: () => dirs },
+        { ...NO_FABLE, default: () => Response.json(payload(1, 1, 100)) },
+      );
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(await banner(h)).toBe(told);
+      // An account added since the last refresh: a new project's placement measures every account first.
+      dirs = ["spare", "work", "default"];
+      const gate = envGate();
+      hold.gate = gate;
+      const created = h.harness.behavior.emitThreadEvent("thread.created", {
+        thread: thread({ id: "thr-new", projectId: "proj-new" }),
+      });
+      await gate.reached;
+      await vi.waitFor(() => {
+        expect(
+          h.harness.logEntries.some((e) => e.message.startsWith("thread thr-new: project left on account main")),
+        ).toBe(true);
+      });
+      gate.release();
+      await created;
+    });
+
+    it("one read of each project's account per pass, however many of its threads were declined", async () => {
+      const h = await host(NO_FABLE, { settings: { preferredModel: "Fable", maximumWaitHours: 1 } });
+      dispose = () => h.harness.dispose();
+      for (const [threadId, requestId] of [
+        ["thread-1", "creq_1"],
+        ["thr-2", "creq_2"],
+        ["thread-3", "creq_3"],
+        ["thread-4", "creq_4"],
+      ] as const) {
+        await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId, requestId }));
+        expect(await banner(h, threadId)).toBe(told);
+      }
+      const before = h.envReads.length;
+      await refreshed(h);
+      // The pass's reads (proj-1 for three threads, proj-2 for one), then
+      // the state the refresh answers with.
+      expect(h.envReads.slice(before)).toEqual(["proj-1", "proj-2", "proj-1", "proj-2", "personal"]);
+    });
+
+    it("no basis for a decline that cannot tell its thread (an Opus turn): its refresh reads nothing for it", async () => {
+      // Every session spent until +2 h, beyond the one-hour maximum.
+      const h = await host(
+        {
+          main: () => Response.json(payload(100, 40, 100)),
+          spare: () => Response.json(payload(100, 1, 100)),
+          work: () => Response.json(payload(100, 1, 100)),
+        },
+        { settings: { preferredModel: "Fable", maximumWaitHours: 1 }, threadEvents: opusTurn },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "thr-2", requestId: "creq_2" }));
+      expect(
+        h.harness.logEntries.some((e) => e.message === "thread thr-2: no switch (beyond-maximum-wait)"),
+      ).toBe(true);
+      const before = h.envReads.length;
+      await refreshed(h);
+      expect(h.envReads.slice(before)).toEqual(["proj-1", "proj-2", "personal"]);
+    });
+
+    it("a basis whose model is no longer the preferred one: the banner goes without a read", async () => {
+      const h = await host(NO_FABLE, { settings: { preferredModel: "Fable", maximumWaitHours: 1 } });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(await banner(h)).toBe(told);
+      await h.harness.behavior.setSettings({ preferredModel: "" });
+      const before = h.envReads.length;
+      await refreshed(h);
+      expect(await banner(h)).toBeNull();
+      expect(h.envReads.slice(before)).toEqual(["proj-1", "proj-2", "personal"]);
+    });
+
+    it("refreshes asked while a pass waits on a read add one pass after it, not one each", async () => {
+      const { h, hold } = await heldHost();
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(await banner(h)).toBe(told);
+      const gate = envGate();
+      hold.gate = gate;
+      const first = refreshed(h);
+      await gate.reached;
+      const mark = h.envReads.length;
+      const changes = () => h.harness.realtimeSignals.filter((s) => s.channel === "accounts-changed").length;
+      const more: Promise<unknown>[] = [];
+      for (let i = 0; i < 2; i++) {
+        const n = changes();
+        more.push(refreshed(h));
+        // Its usage read and announced.
+        await vi.waitFor(() => {
+          expect(changes()).toBeGreaterThan(n);
+        });
+      }
+      // Their pass waits for the one under way.
+      expect(h.envReads.slice(mark)).toEqual([]);
+      gate.release();
+      await Promise.all([first, ...more]);
+      // One more pass and its one read, then the state each refresh answers with.
+      expect(h.envReads.slice(mark)).toEqual([
+        "proj-1",
+        ...Array.from({ length: 3 }, () => ["proj-1", "proj-2", "personal"]).flat(),
+      ]);
+      expect(await banner(h)).toBe(told);
+    });
+  });
+
   it("a turn of the thread that starts while its failure is judged takes the banner away, and the judgment does not put it back when its reads end (Sol B2-R2-003)", async () => {
     let meanwhile: (() => Promise<unknown>) | null = null;
     const h = await host(NO_FABLE, {
