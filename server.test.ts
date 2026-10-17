@@ -11098,5 +11098,36 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
         await h.harness.behavior.emitThreadEvent("turn.failed", failure());
         expect(h.retries.at(-1)!.reason).toBe(reason);
       });
+
+    it("past its reported reset, though no read came since, the account is judged on its own numbers again, not as one whose session just reset", async () => {
+      let clock = NOW;
+      let spareDown = false;
+      const h = await host(
+        {
+          main: () => Response.json(payload(40, 40, 30)),
+          // Its session at 60 % when read, before its report.
+          spare: () =>
+            spareDown ? new Response("", { status: 429 }) : Response.json(payload(60, 1, 30)),
+          work: () => Response.json(payload(10, 20, 30)),
+        },
+        {
+          settings: { preferredModel: "Fable", refreshMinutes: 60 },
+          clock: () => clock,
+          threadEvents: {
+            "thread-3": reportedLog("thread-3", [["creq_3"]]),
+            "thread-1": reportedLog("thread-1", [["creq_1"]]),
+          },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      await putSpareOut(h, (t) => (clock = t), out);
+      expect(h.retries.map((r) => r.reason)).toEqual(["Switched to account work (Fable)"]);
+      spareDown = true;
+      // At spare's reported reset, thread-1's turn fails on work: main's
+      // session (40 %) is lower than spare's (60 %).
+      clock = out;
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(h.retries.at(-1)!.reason).toBe("Switched to account main (Fable)");
+    });
   });
 });
