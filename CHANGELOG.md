@@ -4,6 +4,56 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.25] - 2026-10-17
+
+### Fixed
+
+- **The banners' pass holds nothing up.** Since 0.2.24 every usage
+  refresh waited for the banners to be asked again, one read of the
+  project's account per declined thread, one after another, and a
+  failure's judgment, a new project's placement and the periodic look
+  at the waiting turns waited for that refresh: twenty declined threads
+  of one project with two-second reads held another project's failure
+  for forty seconds. The pass now runs after the refresh without being
+  waited for, reads each project's account once, is kept only for the
+  declines a banner can follow (in the preferred model, beyond the
+  maximum wait or with no account usable), and a refresh that ends
+  while it runs gets one more pass after it, not a second one at once.
+  A refresh asked by hand (the section's refresh, `bb claude-switcher
+  refresh`) still answers once the banners are asked.
+- **A refresh that fails still asks the banners.** When the accounts
+  directory could not be read, the refresh stopped before the banners
+  were asked, and a thread with provider-retry's retry queued (not
+  judged again until it runs) kept a banner on reads hours old. The
+  banners are now asked after every refresh, one that failed included:
+  a banner goes when the reads are older than two refreshes, and comes
+  back with them.
+- **A declined thread's banner survives a restart.** What a banner is
+  asked on was kept in memory only: after a restart or a reload, a
+  thread with a retry queued hours ahead lost its banner until the
+  retry ran. It is now kept in the plugin's storage, and the usage
+  refresh at start asks it again if bb says the thread still waits on
+  the turn it was judged on; a thread that moved on meanwhile keeps
+  nothing. The queue is left as it is.
+- **A deleted thread is treated as an archived one.** Its banner and
+  what it is asked on go, and the model last seen in it and a retry
+  cancelled by hand are forgotten: they were kept until a restart, and
+  its project was read again at every refresh.
+- **A queued retry tells only while its judgment holds.** With the
+  automatic choice switched off during a failure's judgment, the queued
+  retry's card still named the account an Opus turn would go to; it now
+  gives its own reason, as the history row does since 0.2.24.
+
+### Changed
+
+- **README, Known limitations.** The banner follows the numbers of the
+  account the turn failed on: when they show room for the preferred
+  model again, it goes at the next usage refresh, while provider-retry
+  still waits, and comes back with the turn's next failure. And a
+  banner after a restart comes from the plugin's storage.
+- **The 0.2.24 and 0.2.23 entries** say which judgment ends a banner and
+  what a switch-off leaves to be made, and no line is cut short.
+
 ## [0.2.24] - 2026-10-17
 
 ### Fixed
