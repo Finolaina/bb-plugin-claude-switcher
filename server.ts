@@ -2057,7 +2057,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     let holds: boolean | null = false;
     if (deps.now() - basis.at > RESTORED_MAX_AGE_MS)
       bb.log.debug(
-        `thread ${threadId}: what its banner was asked on is dropped (judged more than 7 days ago)`,
+        `thread ${threadId}: what its banner was asked on is dropped (judged more than ${RESTORED_MAX_AGE_MS / 86_400_000} days ago)`,
       );
     else {
       try {
