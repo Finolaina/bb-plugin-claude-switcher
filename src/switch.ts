@@ -285,17 +285,18 @@ export const FALLBACK_MODEL = "Opus";
  *  - an account can run Opus without spending the reserve (chooseAccount: a
  *    Max account that keeps the preferred model is never named).
  * The account the turn just failed on never counts as running the model:
- * the provider refused it the turn, as decideSwitch has it. For Opus it is
- * out by a blocked report (the windows Claude Code reports, the five-hour
- * and the weekly ones, count against an Opus turn too); under a warning
- * report no window is blocked and its numbers decide, read just before the
- * judgment (code-reviewer 0.2.20, CR-03). Left in error, it is judged on
- * its numbers like the rest (a Fable limit comes with no such report,
- * measured 2026-10-17: it is judged there).
- * The account named is the one the placement before an Opus turn would
- * keep or move the project to, from where the decision leaves it (a wait
- * moves it to the account waited for): that account when it runs Opus,
- * else the best other.
+ * the provider refused it the turn, as decideSwitch has it. Left in error,
+ * it is judged on its numbers like the rest.
+ * The account named is the one the dispatch would run an Opus turn of the
+ * thread on (placedOn, given `placement`: the dispatch's own inputs for an
+ * Opus turn of the project), from where the decision leaves the project (a
+ * wait moves it to the account waited for): one function and the same
+ * numbers, so the thread is told what the dispatch then does (Sol B2-002;
+ * fix-B2-r3). Kept where it cannot run Opus: nothing said. Every account is
+ * judged there on its numbers alone, the one the turn just failed on
+ * included: when the provider's report is ahead of them, the advice and the
+ * dispatch both name that account, and the Opus turn may fail there once,
+ * then takes the failure path like any Opus turn.
  *
  * ponytail: an advice, not the move. SDK 0.6.15 takes no model on
  * threads.retry. threads.send and threads.update do take one (update's is
@@ -310,6 +311,8 @@ export function opusInstead(
   decision: SwitchDecision,
   input: SwitchInput,
   unread: readonly string[],
+  /** The placement before an Opus turn of the project, but where it sits. */
+  placement: Omit<PlacementInput, "currentAccount">,
 ): string | null {
   const model = input.preferredModel.toLowerCase();
   const reserve = input.reserveModel ?? "";
@@ -332,30 +335,17 @@ export function opusInstead(
       ? input.currentAccount
       : input.failedAccount;
   const ruledOut = input.stuck === true ? null : failedOn;
-  const outForOpus =
-    input.failure.rateLimits?.status === "warning" ? null : ruledOut;
   const runs = (a: AccountUsage) =>
     !a.blocked &&
     a.session.usedPercent < 100 &&
     a.weekly.usedPercent < 100 &&
     canRunModel(a, input.preferredModel);
   if (accounts.some((a) => a.name !== ruledOut && runs(a))) return null;
-  const opus = { preferredModel: FALLBACK_MODEL, reserveModel: reserve };
-  const open = accounts.filter((a) => a.name !== outForOpus);
-  const from =
-    decision.kind === "wait" ? decision.account : input.currentAccount;
-  return (
-    (
-      chooseAccount(
-        open.filter((a) => a.name === from),
-        opus,
-      ) ??
-      chooseAccount(
-        open.filter((a) => a.name !== from),
-        opus,
-      )
-    )?.account ?? null
-  );
+  return placedOn({
+    ...placement,
+    currentAccount:
+      decision.kind === "wait" ? decision.account : input.currentAccount,
+  });
 }
 
 /** What the thread and the history say when opusInstead names an account. */
@@ -473,6 +463,29 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     account: choice.account,
     why: runs ? "current-reserved" : "current-blocked",
   };
+}
+
+/**
+ * The account a turn placed as `input` runs on (see decidePlacement): the
+ * one the placement moves the project to, or the one it keeps it on when
+ * that account runs the turn's model without spending the reserve
+ * (chooseAccount: the Max accounts are Fable's). Null when it keeps the
+ * project where the turn cannot run so, or where nothing is known of it.
+ */
+export function placedOn(input: PlacementInput): string | null {
+  const decision = decidePlacement(input);
+  if (decision.kind === "move") return decision.account;
+  return (
+    chooseAccount(
+      input.accounts
+        .filter((a) => a.name === input.currentAccount)
+        .map((a) => settle(a, input.now)),
+      {
+        preferredModel: input.preferredModel,
+        reserveModel: input.reserveModel,
+      },
+    )?.account ?? null
+  );
 }
 
 export type AheadDecision =

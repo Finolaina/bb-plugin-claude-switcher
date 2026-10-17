@@ -54,6 +54,7 @@ import {
   decideAhead,
   decidePlacement,
   decideSwitch,
+  FALLBACK_MODEL,
   isRefusal,
   MAX_ATTEMPTS,
   modelFamily,
@@ -63,6 +64,7 @@ import {
   RESET_BUFFER_MS,
   RESET_JITTER_MS,
   settle,
+  type PlacementInput,
 } from "./src/switch.js";
 import { reserving, spendsReservedWeekly } from "./src/policy.js";
 import {
@@ -1683,6 +1685,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     now: number,
     event: PluginTurnFailedEvent,
     started: string | null | undefined,
+    projectId: string,
   ): string | null {
     if (
       recent.advice === undefined ||
@@ -1705,6 +1708,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         random: 0,
       },
       unreadAccounts(),
+      placementOf(projectId, FALLBACK_MODEL, now),
     );
     return on === null ? null : opusInsteadText(model, on);
   }
@@ -2250,6 +2254,27 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     "stopping",
   ]);
   /**
+   * What the placement before a turn in `model` of the project decides on,
+   * but the account the project sits on (see decidePlacement): placeTurn's,
+   * and the Opus advice's, which names where an Opus turn would run (Sol
+   * B2-002; fix-B2-r3: one function, the same numbers).
+   */
+  function placementOf(
+    projectId: string,
+    model: string,
+    now: number,
+  ): Omit<PlacementInput, "currentAccount"> {
+    const measured = measuredAccounts(model);
+    return {
+      isNew: false,
+      accounts: measured,
+      preferredModel: model,
+      reserveModel: current.preferredModel,
+      excursionFrom: wayHome(projectId, model, measured, now),
+      now,
+    };
+  }
+  /**
    * Before a turn starts: when the project's account is MEASURED unable to
    * run the model the turn is sent with and another account can, the project
    * moves there first. The preferred model does not decide here: a thread
@@ -2270,16 +2295,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (from.external) return;
     const fromName = from.account ?? current.defaultAccountName;
     const now = deps.now();
-    const measured = measuredAccounts(model);
     const excursion = excursions.get(projectId);
     const decision = decidePlacement({
+      ...placementOf(projectId, model, now),
       currentAccount: fromName,
-      isNew: false,
-      accounts: measured,
-      preferredModel: model,
-      reserveModel: current.preferredModel,
-      excursionFrom: wayHome(projectId, model, measured, now),
-      now,
     });
     if (decision.kind === "keep") {
       // bb never refuses a message: the turn runs where the project is.
@@ -2427,7 +2446,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       recent.graced.add(event.threadId);
       if (typeof started === "string" && isRefusal(event))
         markRefused(started, now, event);
-      const told = followsAdvice(recent, model, now, event, started);
+      const told = followsAdvice(recent, model, now, event, started, projectId);
       const reason = `Retrying on account ${recent.to}${told === null ? "" : `. ${told}`}`;
       bb.log.info(
         `thread ${event.threadId}: ${reason} (switched ${now - recent.at} ms ago)`,
@@ -2465,7 +2484,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         const told =
           sendAt === undefined || recent === undefined
             ? null
-            : followsAdvice(recent, model, now, event, started);
+            : followsAdvice(recent, model, now, event, started, projectId);
         const reason = `Retrying on account ${currentName}${told === null ? "" : `. ${told}`}`;
         bb.log.info(
           `thread ${event.threadId}: ${reason} (its turn started on ${started})`,
@@ -2656,8 +2675,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     };
     const decision = decideSwitch(input);
     // No Fable on any account, and an account with Opus: the thread is told
-    // to switch (D3), whatever the decision's reason.
-    const opusOn = opusInstead(decision, input, unreadAccounts());
+    // to switch (D3), whatever the decision's reason, naming where the
+    // dispatch would run its Opus turn (Sol B2-002: the same placement).
+    const opusOn = opusInstead(
+      decision,
+      input,
+      unreadAccounts(),
+      placementOf(projectId, FALLBACK_MODEL, now),
+    );
     const advice = opusOn === null ? null : opusInsteadText(model, opusOn);
     const carried = advice === null ? undefined : { model };
     const how = stuck ? "left in error: " : "";
