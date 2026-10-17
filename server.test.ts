@@ -10620,8 +10620,12 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       await created;
     });
 
-    it("one read of each project's account per pass, however many of its threads were declined", async () => {
-      const h = await host(NO_FABLE, { settings: { preferredModel: "Fable", maximumWaitHours: 1 } });
+    it("one read of each project's account per pass, however many of its threads were declined, and every banner follows it", async () => {
+      let spare = () => Response.json(payload(1, 1, 100));
+      const h = await host(
+        { ...NO_FABLE, spare: () => spare() },
+        { settings: { preferredModel: "Fable", maximumWaitHours: 1 } },
+      );
       dispose = () => h.harness.dispose();
       for (const [threadId, requestId] of [
         ["thread-1", "creq_1"],
@@ -10632,11 +10636,15 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
         await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId, requestId }));
         expect(await banner(h, threadId)).toBe(told);
       }
+      // spare's session spent: an Opus turn of either project would go to work.
+      spare = () => Response.json(payload(100, 1, 100));
       const before = h.envReads.length;
       await refreshed(h);
       // The pass's reads (proj-1 for three threads, proj-2 for one), then
       // the state the refresh answers with.
       expect(h.envReads.slice(before)).toEqual(["proj-1", "proj-2", "proj-1", "proj-2", "personal"]);
+      for (const threadId of ["thread-1", "thr-2", "thread-3", "thread-4"])
+        expect(await banner(h, threadId)).toBe(toOpus("work").slice(2));
     });
 
     it("no basis for a decline that cannot tell its thread (an Opus turn): its refresh reads nothing for it", async () => {
@@ -10654,6 +10662,7 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       expect(
         h.harness.logEntries.some((e) => e.message === "thread thr-2: no switch (beyond-maximum-wait)"),
       ).toBe(true);
+      expect(Object.keys((await h.bb.storage.kv.get<object>("advice-bases")) ?? {})).toEqual([]);
       const before = h.envReads.length;
       await refreshed(h);
       expect(h.envReads.slice(before)).toEqual(["proj-1", "proj-2", "personal"]);
@@ -10700,6 +10709,22 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
         ...Array.from({ length: 3 }, () => ["proj-1", "proj-2", "personal"]).flat(),
       ]);
       expect(await banner(h)).toBe(told);
+    });
+
+    it("the reads grow older than two refreshes while the pass waits on a read: the banner goes", async () => {
+      let clock = NOW;
+      const { h, hold } = await heldHost({ clock: () => clock });
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(await banner(h)).toBe(told);
+      const gate = envGate();
+      hold.gate = gate;
+      const asked = refreshed(h);
+      await gate.reached;
+      // No refresh meanwhile: what the pass judges on is old by its answer.
+      clock = NOW + 10 * 60_000 + 1;
+      gate.release();
+      await asked;
+      expect(await banner(h)).toBeNull();
     });
   });
 
@@ -10895,7 +10920,16 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
               chain: "creq_1",
               at: NOW - HOUR,
             },
-            "thread-3": { projectId: "proj-1", model: "Fable", reason: "not-rate-limit" },
+            // A decline that cannot tell its thread, and one stored without its turn.
+            "thread-3": {
+              projectId: "proj-1",
+              model: "Fable",
+              reason: "not-rate-limit",
+              requestId: "creq_3",
+              chain: "creq_3",
+              at: NOW - HOUR,
+            },
+            "thread-4": { projectId: "proj-1", model: "Fable", reason: "beyond-maximum-wait" },
           },
         },
       });
@@ -10903,11 +10937,162 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       await refreshed(h);
       expect(await banner(h)).toBe(told);
       expect(await banner(h, "thread-3")).toBeNull();
+      expect(await banner(h, "thread-4")).toBeNull();
       expect(
         h.harness.logEntries.some(
-          (e) => e.level === "warn" && e.message.includes("1 unreadable"),
+          (e) => e.level === "warn" && e.message.includes("2 unreadable threads"),
         ),
       ).toBe(true);
+      // Written again without them.
+      expect(Object.keys((await h.bb.storage.kv.get<object>("advice-bases")) ?? {})).toEqual(["thread-1"]);
+    });
+
+    /** What thread-1's banner was asked on, as storage keeps it. */
+    const storedBasis = (requestId: string, chain: string | null) => ({
+      "advice-bases": {
+        "thread-1": {
+          projectId: "proj-1",
+          model: "Fable",
+          reason: "beyond-maximum-wait",
+          requestId,
+          chain,
+          at: NOW - HOUR,
+        },
+      },
+    });
+    const stillWaiting: HostOptions = {
+      settings: { preferredModel: "Fable", maximumWaitHours: 1 },
+      threads: { "thread-1": { status: "error" } },
+      threadEvents: chainLog([["creq_1"], ["creq_1b", "creq_1", 2]]),
+    };
+
+    it("provider-retry's retry ran and failed again while the plugin was away: the thread waits on the chain judged, the banner comes back", async () => {
+      const h = await restarted(NO_FABLE, { threadEvents: chainLog([["creq_1"], ["creq_1b", "creq_1", 2]]) });
+      await refreshed(h);
+      expect(await banner(h)).toBe(told);
+    });
+
+    it("judged where bb's log named no chain: its latest turn the request judged, the banner comes back", async () => {
+      const h = await host(NO_FABLE, { ...stillWaiting, kvPreset: storedBasis("creq_1b", null) });
+      dispose = () => h.harness.dispose();
+      await refreshed(h);
+      expect(await banner(h)).toBe(told);
+    });
+
+    it("the thread now in another project: no banner, and nothing is kept for it", async () => {
+      const h = await host(NO_FABLE, {
+        ...stillWaiting,
+        threads: { "thread-1": { status: "error", projectId: "proj-2" } },
+        kvPreset: storedBasis("creq_1", "creq_1"),
+      });
+      dispose = () => h.harness.dispose();
+      await refreshed(h);
+      expect(await banner(h)).toBeNull();
+      expect(await h.bb.storage.kv.get("advice-bases")).toEqual({});
+    });
+
+    it("the thread could not be read back: no banner yet, the log says why, and the next refresh asks again", async () => {
+      let broken = true;
+      const h = await host(NO_FABLE, {
+        ...stillWaiting,
+        kvPreset: storedBasis("creq_1", "creq_1"),
+        beforeThreadGet: async () => {
+          if (broken) throw new Error("bb is restarting");
+        },
+      });
+      dispose = () => h.harness.dispose();
+      await refreshed(h);
+      expect(await banner(h)).toBeNull();
+      expect(
+        h.harness.logEntries.some(
+          (e) =>
+            e.level === "warn" &&
+            e.message === "thread thread-1: its banner not asked again (the thread could not be read: bb is restarting)",
+        ),
+      ).toBe(true);
+      broken = false;
+      await refreshed(h);
+      expect(await banner(h)).toBe(told);
+    });
+
+    it("read back once: the refreshes after the first do not read the thread again", async () => {
+      let gets = 0;
+      const h = await host(NO_FABLE, {
+        ...stillWaiting,
+        kvPreset: storedBasis("creq_1", "creq_1"),
+        beforeThreadGet: async () => {
+          gets += 1;
+        },
+      });
+      dispose = () => h.harness.dispose();
+      await refreshed(h);
+      expect(await banner(h)).toBe(told);
+      expect(gets).toBe(1);
+      await refreshed(h);
+      expect(gets).toBe(1);
+    });
+
+    it("a failure of the thread judged while the first refresh reads it back: what that judgment keeps stays", async () => {
+      let armed: (() => Promise<unknown>) | null = null;
+      const h = await host(NO_FABLE, {
+        ...stillWaiting,
+        // A turn sent since the stored judgment: that one no longer holds.
+        threadEvents: chainLog([["creq_1"], ["creq_2"]]),
+        kvPreset: storedBasis("creq_1", "creq_1"),
+        beforeThreadGet: async () => {
+          const run = armed;
+          armed = null;
+          await run?.();
+        },
+      });
+      dispose = () => h.harness.dispose();
+      armed = () => h.harness.behavior.emitThreadEvent("turn.failed", failure({ requestId: "creq_2" }));
+      await refreshed(h);
+      expect(armed).toBeNull();
+      expect(await banner(h)).toBe(told);
+      expect(await h.bb.storage.kv.get("advice-bases")).toMatchObject({
+        "thread-1": { requestId: "creq_2" },
+      });
+    });
+
+    it("the automatic choice off when the plugin starts: nothing is read back, and storage is cleared", async () => {
+      const h = await host(NO_FABLE, {
+        ...stillWaiting,
+        settings: { preferredModel: "Fable", maximumWaitHours: 1, autoSwitch: false },
+        kvPreset: storedBasis("creq_1", "creq_1"),
+      });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.setSettings({ autoSwitch: true });
+      await refreshed(h);
+      expect(await banner(h)).toBeNull();
+      expect(await h.bb.storage.kv.get("advice-bases")).toEqual({});
+    });
+
+    it("a later judgment that is no decline takes it out of storage too", async () => {
+      let workFable = 100;
+      const h = await host(
+        { ...NO_FABLE, work: () => Response.json(payload(1, 1, workFable)) },
+        { settings: { preferredModel: "Fable", maximumWaitHours: 1 } },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(Object.keys((await h.bb.storage.kv.get("advice-bases")) as object)).toEqual(["thread-1"]);
+      workFable = 30;
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ requestId: "creq_1b", attemptNumber: 2 }),
+      );
+      expect(h.retries.map((r) => r.reason)).toContain("Switched to account work (Fable)");
+      expect(await h.bb.storage.kv.get("advice-bases")).toEqual({});
+    });
+
+    it("the automatic choice switched off takes it out of storage too", async () => {
+      const h = await host(NO_FABLE, { settings: { preferredModel: "Fable", maximumWaitHours: 1 } });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(Object.keys((await h.bb.storage.kv.get("advice-bases")) as object)).toEqual(["thread-1"]);
+      await h.harness.behavior.setSettings({ autoSwitch: false });
+      expect(await h.bb.storage.kv.get("advice-bases")).toEqual({});
     });
   });
 
