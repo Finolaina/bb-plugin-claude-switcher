@@ -756,6 +756,28 @@ function ownNote(name: string) {
   return `Claude Code account "${name}" (set by the Claude Switcher plugin)`;
 }
 
+/** A filesystem where the project's one session, in main's directory, is linked into the target (`order` gets "link"; `link` may hold it). */
+function oneSessionIo(order: string[], link?: () => Promise<void>): SessionsIo {
+  const sessions = `${HOME}/.claude/projects/-home-someone-site`;
+  return {
+    exists: async (path) => path === "/home/someone/site",
+    realpath: async (path) => {
+      if (path.startsWith(`${ACCOUNTS}/spare`))
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      return path;
+    },
+    entries: async (dir) =>
+      dir === sessions ? [{ name: "s1.jsonl", directory: false }] : [],
+    mkdir: async () => {},
+    link: async () => {
+      order.push("link");
+      await link?.();
+    },
+    symlink: async () => {},
+  };
+}
+const SITE = { "proj-1": [{ path: "/home/someone/site" }] };
+
 let dispose: (() => void) | null = null;
 afterEach(() => {
   dispose?.();
@@ -3348,27 +3370,6 @@ describe("claude accounts plugin", () => {
     );
   });
 
-  /** A filesystem where the project's one session, in main's directory, is linked into spare (`order` gets "link"). */
-  function oneSessionIo(order: string[], link?: () => Promise<void>): SessionsIo {
-    const sessions = `${HOME}/.claude/projects/-home-someone-site`;
-    return {
-      exists: async (path) => path === "/home/someone/site",
-      realpath: async (path) => {
-        if (path.startsWith(`${ACCOUNTS}/spare`))
-          throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
-        return path;
-      },
-      entries: async (dir) =>
-        dir === sessions ? [{ name: "s1.jsonl", directory: false }] : [],
-      mkdir: async () => {},
-      link: async () => {
-        order.push("link");
-        await link?.();
-      },
-      symlink: async () => {},
-    };
-  }
-  const SITE = { "proj-1": [{ path: "/home/someone/site" }] };
 
   it("shares the sessions before it points the project at the new account", async () => {
     const order: string[] = [];
@@ -6828,6 +6829,68 @@ describe("the model a thread's turn runs on", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("writes nothing once the checkpoint gave up while the sessions were being shared (a read of 1.5 s, sharing held 2 s)", async () => {
+    const order: string[] = [];
+    const never = () => new Promise<never>(() => {});
+    const h = await host(OPUS_ELSEWHERE, {
+      ...FABLE,
+      sessionsIo: oneSessionIo(order, never),
+      environments: SITE,
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    vi.useFakeTimers();
+    try {
+      let reads = 0;
+      h.harness.sdk.stub("projects.machineEnvironment", async () => {
+        const snapshot = environmentOf(h);
+        if (reads++ === 0)
+          await new Promise((resolve) => setTimeout(resolve, 1_500));
+        return snapshot;
+      });
+      const answer = dispatch(h, "claude-opus-5-5");
+      await vi.advanceTimersByTimeAsync(3_000);
+      // The message goes on the default account, which has its login...
+      expect(await answer).toEqual({ action: "proceed" });
+      expect(order).toEqual(["link"]);
+      // ...and the move found late is dropped: no write, no move recorded.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(h.envSet).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history).toEqual([]);
+    expect(
+      h.harness.logEntries.filter((e) => e.message.includes("Moved to account")),
+    ).toEqual([]);
+  });
+
+  it("drops a move before the turn when a pick by hand lands while its sessions are shared", async () => {
+    const order: string[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let links = 0;
+    const h = await host(OPUS_ELSEWHERE, {
+      ...FABLE,
+      // The placement's link waits; the pick's does not.
+      sessionsIo: oneSessionIo(order, () => (links++ === 0 ? held : Promise.resolve())),
+      environments: SITE,
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const answer = dispatch(h, "claude-opus-5-5");
+    await vi.waitFor(() => expect(order).toEqual(["link"]));
+    expect((await h.harness.behavior.runCli(["use", "Website", "spare"])).exitCode).toBe(0);
+    release();
+    expect(await answer).toEqual({ action: "proceed" });
+    // The pick stands; the automatic move to work is not written.
+    expect(h.envSet.map((e) => e.note)).toEqual([ownNote("spare")]);
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history.map((r) => r.reason)).toEqual(["Picked by hand"]);
+    expect(state.projects.find((p) => p.id === "proj-1")?.account).toBe("spare");
   });
 
   it("lets the message through when the project's account cannot be read, or the read never answers", async () => {
