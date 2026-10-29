@@ -24,6 +24,13 @@ project uses [Semantic Versioning](https://semver.org/).
   failure is logged and never stops the move, and after 2 s the move goes
   on without waiting for the rest. A move just before a turn (the
   message's checkpoint) starts the links and does not wait for them.
+  Known limit (Codex E46-R7-001, left open on purpose): on a machine whose
+  accounts do not share `projects/`, a thread whose project is moved by
+  that checkpoint can still be resumed before its links land. Waiting
+  there reopened a family of races between placements (rounds 2 to 6), so
+  the real fix is the shared `projects/` directory on every machine
+  (the Mac has it; the Linux hosts get it with the cerebro-linux E46
+  migration); this plugin's links are the second line of defence.
 
 ### Changed
 
@@ -79,8 +86,8 @@ project uses [Semantic Versioning](https://semver.org/).
 
 - **The advice to switch to Opus is in Spanish.** The retry reason, the
   composer's banner, the history and the log now say `Sin <model> en
-  ninguna cuenta: pasa este hilo a Opus con el selector de modelo; irá a
-  <name>`. Only the text changes: when it is said, and the account it
+ninguna cuenta: pasa este hilo a Opus con el selector de modelo; irá a
+<name>`. Only the text changes: when it is said, and the account it
   names, stay as they were. The rest of the plugin stays in English.
 
 ## [0.2.27] - 2026-10-17
@@ -195,7 +202,7 @@ project uses [Semantic Versioning](https://semver.org/).
   maximum wait or with no account usable), and a refresh that ends
   while it runs gets one more pass after it, not a second one at once.
   A refresh asked by hand (the section's refresh, `bb claude-switcher
-  refresh`) still answers once the banners are asked.
+refresh`) still answers once the banners are asked.
 - **A refresh that fails still asks the banners.** When the accounts
   directory could not be read, the refresh stopped before the banners
   were asked, and a thread with provider-retry's retry queued (not
@@ -410,7 +417,7 @@ project uses [Semantic Versioning](https://semver.org/).
   `maximumWaitHours` and when no account will free, as long as an account
   can run Opus without spending the preferred model's weekly. A wait's
   retry reason ends with `. No Fable on any account: switch this thread to
-  Opus with the model picker; it will go to <name>`, naming the account
+Opus with the model picker; it will go to <name>`, naming the account
   the project's next Opus turn would run on, and so does the retry of
   another thread of the project that follows the wait; the history gets
   the text once per turn sent (from the project's account to itself when
@@ -479,7 +486,7 @@ project uses [Semantic Versioning](https://semver.org/).
   one moves to a Team seat, or to an account out of Fable, before the turn
   (`current-reserved`), and when no account spares Fable the turn stays
   where the project is and the log says so (`Opus turn stays on …: no
-  account spares Fable`). A failed Opus turn waits only for an account
+account spares Fable`). A failed Opus turn waits only for an account
   that will spare Fable when the retry is sent (each account projected to
   the latest possible send, from now at the earliest), or is left alone
   with the new reason `reserved-for-preferred-model`; a leftover Opus turn
