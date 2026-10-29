@@ -129,10 +129,10 @@ public SDK surfaces, and never touches a `CLAUDE_CONFIG_DIR` it did not set.
 
 ### 🔮 A forecast per window
 
-Under each weekly window: when it runs out at the pace you have used it
+In each weekly window's tooltip: when it runs out at the pace you have used it
 since the plugin first measured the current window, or that it lasts
 until its reset. Also in the account menu
-of a thread's header and of the new-thread composer, and in `list`.
+of a thread's header and of the new-thread composer, and in `list --json`.
 
 </td>
 <td valign="top">
@@ -731,6 +731,13 @@ executable (`claude auth login`) as a child process of bb's server.
   letter or a digit and goes on with letters, digits, dots, dashes and
   underscores. A directory that already existed is not
   changed.
+- When a project moves to another account, the sessions of the project
+  that account lacks are linked into its `projects/<project>/`: a hard
+  link to each `<session>.jsonl` (a copy when the accounts are on
+  different filesystems) and a symbolic link to the session's folder,
+  for each path of the project on bb's server machine. Nothing is
+  removed or overwritten, and accounts whose `projects` already is one
+  directory are not touched.
 - Like every bb plugin, it is full-trust code running in bb's server
   process. See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
@@ -741,7 +748,7 @@ executable (`claude auth login`) as a child process of bb's server.
 `bb claude-switcher <command>`:
 
 ```sh
-bb claude-switcher list [--json]          # windows per account (with their forecast), account per project
+bb claude-switcher list [--json]          # a line per account (ses, sem, preferred model, agotada hasta), projects by account; forecasts in --json
 bb claude-switcher refresh [--json]       # query the usage endpoint now
 bb claude-switcher history [--json]       # every move of a project, latest first, and why
 bb claude-switcher use <project> <account | default>   # project id, or its name when unique
