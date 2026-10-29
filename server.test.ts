@@ -3348,6 +3348,87 @@ describe("claude accounts plugin", () => {
     );
   });
 
+  /** A filesystem where the project's one session, in main's directory, is linked into spare (`order` gets "link"). */
+  function oneSessionIo(order: string[], link?: () => Promise<void>): SessionsIo {
+    const sessions = `${HOME}/.claude/projects/-home-someone-site`;
+    return {
+      exists: async (path) => path === "/home/someone/site",
+      realpath: async (path) => {
+        if (path.startsWith(`${ACCOUNTS}/spare`))
+          throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        return path;
+      },
+      entries: async (dir) =>
+        dir === sessions ? [{ name: "s1.jsonl", directory: false }] : [],
+      mkdir: async () => {},
+      link: async () => {
+        order.push("link");
+        await link?.();
+      },
+      symlink: async () => {},
+    };
+  }
+  const SITE = { "proj-1": [{ path: "/home/someone/site" }] };
+
+  it("shares the sessions before it points the project at the new account", async () => {
+    const order: string[] = [];
+    const h = await host(ALL_FREE, {
+      sessionsIo: oneSessionIo(order),
+      environments: SITE,
+      beforeSet: async () => {
+        order.push("set");
+      },
+    });
+    dispose = () => h.harness.dispose();
+    expect((await h.harness.behavior.runCli(["use", "Website", "spare"])).exitCode).toBe(0);
+    // A turn of another thread that reads the new account finds its session.
+    expect(order).toEqual(["link", "set"]);
+  });
+
+  it.each([
+    ["bb's list of the project's environments", "environments"],
+    ["a link on the filesystem", "link"],
+  ])(
+    "gives up sharing after 2 s when %s never answers, and moves the project",
+    async (_, hung) => {
+      const order: string[] = [];
+      const never = () => new Promise<never>(() => {});
+      const h = await host(ALL_FREE, {
+        sessionsIo: oneSessionIo(order, hung === "link" ? never : undefined),
+        environments: SITE,
+      });
+      dispose = () => h.harness.dispose();
+      if (hung === "environments") h.harness.sdk.stub("environments.list", never);
+      vi.useFakeTimers();
+      try {
+        let done = false;
+        const answer = h.harness.behavior
+          .runCli(["use", "Website", "spare"])
+          .finally(() => {
+            done = true;
+          });
+        for (let ms = 0; ms < 1_900; ms += 100)
+          await vi.advanceTimersByTimeAsync(100);
+        // Still sharing just before the limit: the variable waits for it.
+        expect(done).toBe(false);
+        expect(h.envSet).toEqual([]);
+        for (let ms = 1_900; ms < 10_000 && !done; ms += 100)
+          await vi.advanceTimersByTimeAsync(100);
+        expect((await answer).exitCode).toBe(0);
+        expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+        expect(
+          h.harness.logEntries
+            .filter((e) => e.level === "warn")
+            .map((e) => e.message),
+        ).toContain(
+          "sessions of Website not shared into spare within 2 s; the move goes on",
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("treats a subdirectory named \"default\" as an account when the default account has another name", async () => {
     const h = await host(
       { ...ALL_FREE, default: () => Response.json(payload(1, 1)) },

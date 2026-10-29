@@ -117,6 +117,12 @@ export const FIRST_PLACEMENT_WAIT_MS = 5_000;
  * account; then it is refused (E44).
  */
 export const MAX_START_WAITS = 3;
+/**
+ * Sharing a moved project's sessions (see shareProjectSessions) is waited
+ * for this long at most: it runs in the project's queue and before a turn
+ * (Codex E46-001).
+ */
+export const SESSIONS_LIMIT_MS = 2_000;
 /** A login left waiting in the browser this long is given up. */
 export const LOGIN_TIMEOUT_MS = 10 * 60_000;
 /** An account directory name: one path segment, no leading dot. */
@@ -1299,6 +1305,24 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       move.epoch += 1;
     }
     try {
+      // The sessions first, while the move is counted in flight: a turn of
+      // another thread of the project that reads the new account finds its
+      // session there (Codex E46-002). Links in the new account are
+      // harmless if the write below fails. Past SESSIONS_LIMIT_MS the
+      // variable is written anyway: a move without the sessions beats a
+      // queue hung on a filesystem or on bb (Fable, 2026-10-29); what is
+      // still under way only adds links.
+      if (move !== null) {
+        const shared = await within(
+          shareProjectSessions(projectId, account, toName, from.account),
+          SESSIONS_LIMIT_MS,
+          `sessions of ${projectNames.get(projectId) ?? projectId} not shared into ${toName}`,
+        );
+        if (shared === "late")
+          bb.log.warn(
+            `sessions of ${projectNames.get(projectId) ?? projectId} not shared into ${toName} within ${SESSIONS_LIMIT_MS / 1000} s; the move goes on`,
+          );
+      }
       if (account === null || account.configDir === null) {
         // Default account = no variable. Only ours can be there (see above).
         if (from.owned) {
@@ -1329,12 +1353,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           askBannersAgain();
       }
     }
-    if (toName !== (from.account ?? current.defaultAccountName)) {
+    if (toName !== (from.account ?? current.defaultAccountName))
       accountChangedAt.set(projectId, deps.now());
-      // Before the turn that resumes the thread there (a retry, the next
-      // message): only once the variable is written.
-      await shareProjectSessions(projectId, account, toName, from.account);
-    }
     bb.realtime.publish(CHANGED, { at: deps.now() });
   }
 
