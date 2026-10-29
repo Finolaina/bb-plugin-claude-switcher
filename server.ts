@@ -47,6 +47,7 @@ import {
   nodeAccountsIo,
   nodeCredentialIo,
   nodeLoginIo,
+  nodeSessionsIo,
 } from "./src/node-io.js";
 import {
   ADVISED_DECLINES,
@@ -78,6 +79,7 @@ import {
   usageSourceRpcContract,
 } from "./src/usage-source-contract.js";
 import { toMeasurement, toResource } from "./src/usage-source.js";
+import { shareSessions, type SessionsIo } from "./src/sessions.js";
 import { forecastLine, projectName, sharedWith } from "./src/ui.js";
 
 export const ENV_VAR = "CLAUDE_CONFIG_DIR";
@@ -314,6 +316,11 @@ export interface PluginDeps {
   credentialIo: CredentialIo;
   accountsIo: AccountsIo;
   loginIo: LoginIo;
+  /**
+   * The filesystem a moved project's Claude Code sessions are shared on
+   * (see src/sessions.ts); none: they are not.
+   */
+  sessionsIo?: SessionsIo;
   /** Path of bin/open-login.sh, the BROWSER a login runs. */
   loginHelper: string;
   /** The plugin process's environment, inherited by a login. */
@@ -1128,6 +1135,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const value = (async () => {
       // The personal project too: a variable set there must be visible and releasable.
       const projects = await bb.sdk.projects.list({ includePersonal: true });
+      for (const p of projects) projectNames.set(p.id, p.name);
       return Promise.all(
         projects.map(async (p) => ({
           id: p.id,
@@ -1319,9 +1327,78 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           askBannersAgain();
       }
     }
-    if (toName !== (from.account ?? current.defaultAccountName))
+    if (toName !== (from.account ?? current.defaultAccountName)) {
       accountChangedAt.set(projectId, deps.now());
+      // Before the turn that resumes the thread there (a retry, the next
+      // message): only once the variable is written.
+      await shareProjectSessions(projectId, account, toName, from.account);
+    }
     bb.realtime.publish(CHANGED, { at: deps.now() });
+  }
+
+  /** The projects named in the last list (logs only). */
+  const projectNames = new Map<string, string>();
+  /** Projects already logged as having a path of another machine. */
+  const elsewhereLogged = new Set<string>();
+  /**
+   * Links into the account the project moved to the Claude Code sessions
+   * it lacks of the project's paths on this machine, so a thread resumed
+   * there finds its conversation (src/sessions.ts). Never fails the move:
+   * whatever goes wrong is logged.
+   */
+  async function shareProjectSessions(
+    projectId: string,
+    account: Account | null,
+    toName: string,
+    fromName: string | null,
+  ): Promise<void> {
+    const io = deps.sessionsIo;
+    if (io === undefined) return;
+    const name = projectNames.get(projectId) ?? projectId;
+    const dirOf = (a: Account | null | undefined) =>
+      a?.configDir ?? `${deps.accountsIo.home}/.claude`;
+    try {
+      const target = dirOf(account);
+      const left = accounts.find(
+        (a) => a.name === (fromName ?? current.defaultAccountName),
+      );
+      // The account left first: it has the thread's latest session.
+      const sources = [
+        ...(left === undefined ? [] : [dirOf(left)]),
+        ...accounts.map(dirOf),
+      ];
+      const environments = await bb.sdk.environments.list({ projectId });
+      const paths = [
+        ...new Set(
+          environments.flatMap((e) =>
+            e.path === null || e.status === "destroyed" ? [] : [e.path],
+          ),
+        ),
+      ];
+      const elsewhere: string[] = [];
+      for (const projectPath of paths) {
+        const result = await shareSessions({ projectPath, target, sources, io });
+        if (result.skipped === "no-project-dir") elsewhere.push(projectPath);
+        if (result.linked > 0)
+          bb.log.info(
+            `sessions of ${name} shared into ${toName}: ${result.linked} linked (${projectPath})`,
+          );
+        if (result.errors.length > 0)
+          bb.log.warn(
+            `sessions of ${name} not all shared into ${toName}: ${result.errors.slice(0, 3).join("; ")}${result.errors.length > 3 ? ` (+${result.errors.length - 3} more)` : ""} (${projectPath})`,
+          );
+      }
+      if (elsewhere.length > 0 && !elsewhereLogged.has(projectId)) {
+        elsewhereLogged.add(projectId);
+        bb.log.info(
+          `sessions not shared for ${name}: path not on this machine (${elsewhere.join(", ")})`,
+        );
+      }
+    } catch (error) {
+      bb.log.warn(
+        `sessions of ${name} not shared into ${toName}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   /** How old a measurement may be to decide on: two refresh periods. */
@@ -4235,6 +4312,7 @@ export default function plugin(bb: BbPluginApi) {
     credentialIo: nodeCredentialIo(),
     accountsIo: nodeAccountsIo(),
     loginIo: nodeLoginIo(),
+    sessionsIo: nodeSessionsIo(),
     loginHelper: loginHelperPath(import.meta.url),
     env: process.env,
     now: Date.now,

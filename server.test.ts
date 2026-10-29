@@ -22,6 +22,7 @@ import {
 import type { AccountsIo } from "./src/accounts.js";
 import type { CredentialIo } from "./src/credentials.js";
 import type { LoginIo, LoginProcess } from "./src/login.js";
+import type { SessionsIo } from "./src/sessions.js";
 import {
   usageFetchMethod,
   usageListMethod,
@@ -357,6 +358,10 @@ interface HostOptions {
   env?: Record<string, string>;
   /** What the accounts directory holds, links and files included; default: dirs() as directories. */
   accountEntries?: () => { name: string; directory: boolean }[];
+  /** The filesystem the sessions of a moved project are shared on; none: not shared. */
+  sessionsIo?: SessionsIo;
+  /** What environments.list answers per project (its paths on every host). */
+  environments?: Record<string, { path: string | null; status?: string }[]>;
 }
 
 /** A machineEnvironment read held by a test: `reached` once the read waits on it, `release` to let it answer. */
@@ -606,6 +611,14 @@ async function host(
           },
         },
       },
+      environments: {
+        list: async ({ projectId }: { projectId: string }) =>
+          (options.environments?.[projectId] ?? []).map((e) => ({
+            projectId,
+            status: "ready",
+            ...e,
+          })),
+      },
       projects: {
         // Like bb: the personal project ("Don't work in a project") only on request.
         list: async (args?: { includePersonal?: boolean }) => [
@@ -685,6 +698,9 @@ async function host(
     env: options.env ?? { PATH: "/usr/bin" },
     now: options.clock ?? (() => NOW),
     random: () => 0,
+    ...(options.sessionsIo === undefined
+      ? {}
+      : { sessionsIo: options.sessionsIo }),
   });
   fake.bb.storage.kv.get = kvGet;
   return {
@@ -3236,6 +3252,102 @@ describe("claude accounts plugin", () => {
     const twin = await h.harness.behavior.runCli(["use", "Twin", "spare"]);
     expect(twin.exitCode).not.toBe(0);
     expect(twin.stderr ?? twin.stdout).toMatch(/proj-1, proj-2/);
+  });
+
+  it("shares the project's sessions into the account it moves to, for each of its paths on this machine", async () => {
+    const made: string[] = [];
+    const project = "/home/someone/site";
+    const sessions = `${HOME}/.claude/projects/-home-someone-site`;
+    const io: SessionsIo = {
+      exists: async (path) => path === project,
+      realpath: async (path) => {
+        if (path === `${ACCOUNTS}/spare/projects`) throw new Error("ENOENT");
+        return path;
+      },
+      entries: async (dir) =>
+        dir === sessions ? [{ name: "s1.jsonl", directory: false }] : [],
+      mkdir: async (dir) => {
+        made.push(`mkdir ${dir}`);
+      },
+      link: async (existing, path) => {
+        made.push(`link ${existing} -> ${path}`);
+      },
+      copy: async () => {},
+      symlink: async () => {},
+    };
+    const h = await host(ALL_FREE, {
+      sessionsIo: io,
+      environments: {
+        "proj-1": [
+          { path: project },
+          // A path of another machine (the Mac), and one bb tore down.
+          { path: "/Users/someone/elsewhere" },
+          { path: "/gone", status: "destroyed" },
+        ],
+      },
+    });
+    dispose = () => h.harness.dispose();
+    const ok = await h.harness.behavior.runCli(["use", "Website", "spare"]);
+    expect(ok.exitCode).toBe(0);
+    expect(made).toEqual([
+      `mkdir ${ACCOUNTS}/spare/projects/-home-someone-site`,
+      `link ${sessions}/s1.jsonl -> ${ACCOUNTS}/spare/projects/-home-someone-site/s1.jsonl`,
+    ]);
+    const infos = h.harness.logEntries
+      .filter((e) => e.level === "info")
+      .map((e) => e.message);
+    expect(infos).toContain(
+      `sessions of Website shared into spare: 1 linked (${project})`,
+    );
+    expect(
+      infos.filter((m) => m.includes("path not on this machine")),
+    ).toEqual(["sessions not shared for Website: path not on this machine (/Users/someone/elsewhere)"]);
+    // Said once per project, not on every move.
+    await h.harness.behavior.runCli(["use", "Website", "work"]);
+    expect(
+      h.harness.logEntries.filter((e) =>
+        e.message.includes("path not on this machine"),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("moves the project even when its sessions cannot be shared", async () => {
+    const broken = async () => {
+      throw new Error("EIO: the disk is gone");
+    };
+    const h = await host(ALL_FREE, {
+      sessionsIo: {
+        exists: broken,
+        realpath: broken,
+        entries: broken,
+        mkdir: broken,
+        link: broken,
+        copy: broken,
+        symlink: broken,
+      },
+      environments: { "proj-1": [{ path: "/home/someone/site" }] },
+    });
+    dispose = () => h.harness.dispose();
+    const ok = await h.harness.behavior.runCli(["use", "Website", "spare"]);
+    expect(ok.exitCode).toBe(0);
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+    // And when bb cannot list the project's environments.
+    h.harness.sdk.stub("environments.list", broken);
+    const again = await h.harness.behavior.runCli(["use", "Website", "work"]);
+    expect(again.exitCode).toBe(0);
+    expect(h.envSet.map((e) => e.value)).toEqual([
+      `${ACCOUNTS}/spare`,
+      `${ACCOUNTS}/work`,
+    ]);
+    const warns = h.harness.logEntries
+      .filter((e) => e.level === "warn")
+      .map((e) => e.message);
+    expect(warns).toContain(
+      "sessions of Website not all shared into spare: EIO: the disk is gone (/home/someone/site)",
+    );
+    expect(warns).toContain(
+      "sessions of Website not shared into work: EIO: the disk is gone",
+    );
   });
 
   it("treats a subdirectory named \"default\" as an account when the default account has another name", async () => {

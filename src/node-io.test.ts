@@ -11,7 +11,12 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loginHelperPath, nodeAccountsIo, nodeLoginIo } from "./node-io.js";
+import {
+  loginHelperPath,
+  nodeAccountsIo,
+  nodeLoginIo,
+  nodeSessionsIo,
+} from "./node-io.js";
 
 let base = "";
 afterEach(async () => {
@@ -124,6 +129,45 @@ describe("loginHelperPath", () => {
     );
     expect(loginHelperPath("file:///plugins/my%20dist/dist/server.js")).toBe(
       "/plugins/my dist/bin/open-login.sh",
+    );
+  });
+});
+
+describe("nodeSessionsIo", () => {
+  it("hard-links, copies without overwriting, and lists a link to a directory as one", async () => {
+    const io = nodeSessionsIo();
+    base = await mkdtemp(join(tmpdir(), "claude-sessions-"));
+    const from = join(base, "a", "s.jsonl");
+    await io.mkdir(join(base, "a", "s", "subagents"));
+    await writeFile(from, "one\n");
+    await io.mkdir(join(base, "b"));
+    await io.link(from, join(base, "b", "s.jsonl"));
+    // One file: what the old account appends, the new one reads.
+    expect((await stat(join(base, "b", "s.jsonl"))).ino).toBe(
+      (await stat(from)).ino,
+    );
+    await expect(io.link(from, join(base, "b", "s.jsonl"))).rejects.toThrow(
+      /EEXIST/,
+    );
+    await io.copy(from, join(base, "b", "t.jsonl"));
+    await expect(io.copy(from, join(base, "b", "t.jsonl"))).rejects.toThrow(
+      /EEXIST/,
+    );
+    await io.symlink(join(base, "a", "s"), join(base, "b", "s"));
+    expect(await readlink(join(base, "b", "s"))).toBe(join(base, "a", "s"));
+    expect(await io.entries(join(base, "b"))).toEqual(
+      expect.arrayContaining([
+        { name: "s", directory: true },
+        { name: "s.jsonl", directory: false },
+        { name: "t.jsonl", directory: false },
+      ]),
+    );
+    expect(await io.entries(join(base, "missing"))).toEqual([]);
+    expect(await io.exists(join(base, "b", "s"))).toBe(true);
+    expect(await io.exists(join(base, "nowhere"))).toBe(false);
+    await symlink(join(base, "a"), join(base, "c"));
+    expect(await io.realpath(join(base, "c", "s"))).toBe(
+      await io.realpath(join(base, "a", "s")),
     );
   });
 });
