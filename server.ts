@@ -1452,6 +1452,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function loggedOut(name: string): boolean {
     return collector.get(name)?.problem?.kind === "unauthenticated";
   }
+  /** The default account's login: "unknown" until a look at it has answered (Astra E44-R2-01). */
+  function defaultLogin(): "yes" | "no" | "unknown" {
+    const measured = collector.get(current.defaultAccountName);
+    if (measured === undefined) return "unknown";
+    return measured.problem?.kind === "unauthenticated" ? "no" : "yes";
+  }
 
   async function pickAccount(
     projectId: string,
@@ -2364,21 +2370,24 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * placed is placed now, not only when bb announces the thread, which may
    * come after the turn started on the default account (E44: on a machine
    * whose `~/.claude` has no login, that turn fails with «Not logged in»,
-   * and so do its retries). Outside the project's queue, like placeTurn:
-   * placeProject reads the account again before it writes. A project seen
-   * before, or given an account already (here or outside this plugin), is
-   * left to placeTurn and thread.created as before.
+   * and so do its retries). A project seen before, or given an account
+   * already (here or outside this plugin), is left to placeTurn and
+   * thread.created as before.
    */
   async function placeNewProject(thread: ThreadResponse): Promise<void> {
     const projectId = thread.projectId;
     if (installedAt === null || handled.has(projectId)) return;
-    if (!placing.has(projectId)) {
-      const project = await bb.sdk.projects.get({ projectId });
-      if (project.createdAt <= installedAt) return;
-      const at = await projectAccount(projectId);
-      if (at.owned || at.external) return;
-    }
-    await placeOnce(thread);
+    const under = placing.get(projectId);
+    if (under !== undefined) return under;
+    const project = await bb.sdk.projects.get({ projectId });
+    if (project.createdAt <= installedAt) return;
+    const at = await projectAccount(projectId);
+    if (at.owned || at.external) return;
+    // In the project's queue, like thread.created's: a pick by hand saved
+    // meanwhile runs after it and wins (Astra E44-R2-02). The checkpoint
+    // never waits for it longer than DISPATCH_LIMIT_MS, so a retry a
+    // handler of the queue sends through bb cannot hold it.
+    await inProjectQueue(projectId, () => placeOnce(thread));
   }
 
   // ---- Move ahead of the limit, after a turn -----------------------------
@@ -2624,6 +2633,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** The thread archived or deleted: nothing of its turns runs again, and what is kept for it goes. */
   async function threadGone({ thread }: { thread: ThreadResponse }) {
     forgetStart(thread.id);
+    startWaits.delete(thread.id);
     threadModel.delete(thread.id);
     adviceOver(thread.id);
     // Forgotten in storage too, or the stored list only grows (Codex r8,
@@ -2816,9 +2826,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** A measure of every account started for a waiting turn, shared while it runs. */
   let measuring: Promise<void> | null = null;
   function measureForStart(): Promise<void> {
-    measuring ??= refreshAll().finally(() => {
-      measuring = null;
-    });
+    measuring ??= refreshAll()
+      .catch((error: unknown) =>
+        bb.log.warn(
+          `the accounts not measured for a waiting turn: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      )
+      .finally(() => {
+        measuring = null;
+      });
     return measuring;
   }
   /**
@@ -2926,33 +2942,42 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // it has none (Astra E44-R3); found missing, the placement above may not
     // have known it: the message waits below and is placed again. With no
     // login no network is asked: the look is local.
-    if (collector.get(current.defaultAccountName) === undefined)
+    // The default is `~/.claude` whatever the accounts directory holds: it
+    // is looked at without reading that directory, which may fail.
+    let look: Promise<unknown> | null = null;
+    if (defaultLogin() === "unknown") {
+      look = collector.collect(
+        accounts.find((a) => a.name === current.defaultAccountName) ?? {
+          name: current.defaultAccountName,
+          configDir: null,
+          email: null,
+          accountUuid: null,
+        },
+      );
       await within(
-        (async () => {
-          if (accounts.length === 0) await discover();
-          const own = accounts.find(
-            (a) => a.name === current.defaultAccountName,
-          );
-          if (own !== undefined && collector.get(own.name) === undefined)
-            await collector.collect(own);
-        })(),
+        look,
         DISPATCH_LIMIT_MS,
         `thread ${thread.id}: the default account's login not looked at`,
       );
+    }
     const done = turnPlaced === null ? null : await turnPlaced;
     const where: TurnPlace | null =
       typeof done === "object" && done !== null ? done.value : null;
-    if (!loggedOut(current.defaultAccountName)) return null;
+    const login = defaultLogin();
+    if (login === "yes") return null;
     if (where === "external" || (where !== null && !where.byDefault))
       return null;
     // On the default account without a login, or not known where (a write
     // or a read failed or took too long: Astra E44-R2). What is under way
     // and could give the project an account is waited for; failed, it is
     // tried again on the next attempt.
+    // Nothing is started for a message that can no longer wait (R2-04).
+    const canWait = (startWaits.get(thread.id) ?? 0) < MAX_START_WAITS;
     const pending =
       placing.get(thread.projectId) ??
-      (unreadAccounts().length > 0 ? measureForStart() : null);
-    if (pending !== null || where === null) {
+      (login === "unknown" ? look : null) ??
+      (canWait && unreadAccounts().length > 0 ? measureForStart() : null);
+    if (pending !== null || where === null || login === "unknown") {
       const wait = startWait(
         thread.id,
         pending,
@@ -2960,12 +2985,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
       if (wait !== null) return wait;
     }
+    const why =
+      login === "no"
+        ? "has no login"
+        : "has a login that could not be checked";
     bb.log.warn(
-      `thread ${thread.id}: refused: no account for project ${thread.projectId} and ${current.defaultAccountName} has no login`,
+      `thread ${thread.id}: refused: no account for project ${thread.projectId} and ${current.defaultAccountName} ${why}`,
     );
     return {
       action: "reject",
-      message: `Claude Switcher: no account assigned to this project and the default account (${current.defaultAccountName}) has no login. Assign one with: bb claude-switcher use ${thread.projectId} <account>`,
+      message: `Claude Switcher: no account assigned to this project and the default account (${current.defaultAccountName}) ${why}. Assign one with: bb claude-switcher use ${thread.projectId} <account>`,
     };
   }
 
@@ -2981,8 +3010,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const model = modelFamily(ctx.requestedExecution.model);
     if (model !== null) threadModel.set(thread.id, model);
     if (current.autoSwitch && ctx.attempt === "start-turn") {
+      // A message sent now, not a queued one asked again: its own waits
+      // (Astra E44-R2-03).
+      if (ctx.queuedMessages.length === 0) startWaits.delete(thread.id);
       const decision = await beforeStart(thread, model);
-      if (decision !== null) return decision;
+      if (decision !== null) {
+        if (decision.action === "reject") startWaits.delete(thread.id);
+        return decision;
+      }
       startWaits.delete(thread.id);
     }
     // Where the project stands as the turn is sent, for `thread.active`.

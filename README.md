@@ -350,9 +350,13 @@ flowchart TD
   not name as a Claude model is placed for the preferred one). While
   something that could give the project an account is under way or has
   failed (its placement, the write of its account, the first measure of
-  the accounts after the plugin loads), the message waits, up to three
-  times 5 s (`Looking for a Claude account with a login for this
-  project`), and goes as soon as that ends. When no account can, bb
+  the accounts after the plugin loads, the look at the default's own
+  login), the message waits, up to three times 5 s per message
+  (`Looking for a Claude account with a login for this project`), and
+  goes as soon as that ends. A login still not checked by then counts as
+  missing (the refusal says `has a login that could not be checked`).
+  A pick by hand saved while the first placement writes wins over it.
+  When no account can, bb
   refuses the message with
   `Claude Switcher: no account assigned to this project and the default
   account (<name>) has no login. Assign one with: bb claude-switcher use

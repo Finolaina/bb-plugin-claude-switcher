@@ -22,7 +22,9 @@ project uses [Semantic Versioning](https://semver.org/).
   preferred model (`… before the turn: <old> is not logged in`), whatever
   model the message names. While the placement, the write of the account
   or the first measure after a reload is under way or has failed, the
-  message waits, up to three times 5 s. When no account can take it, bb
+  message waits, up to three times 5 s per message; the default's login
+  is looked at even when the accounts directory cannot be read, and one
+  that cannot be checked counts as missing. When no account can take it, bb
   refuses the message with the command that fixes it
   (`bb claude-switcher use <project id> <account>`) instead of starting a
   turn that fails.
