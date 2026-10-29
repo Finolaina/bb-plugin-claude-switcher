@@ -24,7 +24,12 @@ project uses [Semantic Versioning](https://semver.org/).
   or the first measure after a reload is under way or has failed, the
   message waits, up to three times 5 s per message; the default's login
   is looked at even when the accounts directory cannot be read, and one
-  that cannot be checked counts as missing. When no account can take it, bb
+  that cannot be checked counts as missing, also when its check failed (the
+  store could not be read, the refresh failed); a usage query that fails
+  after the login was read still counts as a login. A project with an
+  account of its own, or one set outside the plugin, is never held: when
+  the accounts directory cannot be read, its turn runs on that variable and
+  the log says so. When no account can take it, bb
   refuses the message with the command that fixes it
   (`bb claude-switcher use <project id> <account>`) instead of starting a
   turn that fails.

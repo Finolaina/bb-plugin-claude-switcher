@@ -354,14 +354,20 @@ flowchart TD
   login), the message waits, up to three times 5 s per message
   (`Looking for a Claude account with a login for this project`), and
   goes as soon as that ends. A login still not checked by then counts as
-  missing (the refusal says `has a login that could not be checked`).
+  missing (the refusal says `has a login that could not be checked`), and
+  so does one whose check failed (its store could not be read, or its
+  refresh failed): the project moves as if the default had no login. A
+  usage query that fails after the login was read still counts as a login.
   A pick by hand saved while the first placement writes wins over it.
   When no account can, bb
   refuses the message with
   `Claude Switcher: no account assigned to this project and the default
   account (<name>) has no login. Assign one with: bb claude-switcher use
   <project id> <account>`, and nothing runs. A project with an account of
-  its own is never refused for this. The login is judged where the plugin
+  its own is never refused for this, also when the accounts directory
+  cannot be read: its turn runs on the variable it has, and the log says
+  `not placed before its turn; it runs on the project's own
+  CLAUDE_CONFIG_DIR`. The login is judged where the plugin
   runs: a thread on another machine, whose own `~/.claude` may have a
   login, is moved or refused the same way.
 - **Before every turn.** bb tells the plugin the model each message is

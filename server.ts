@@ -33,7 +33,7 @@ import {
   type Account,
   type AccountsIo,
 } from "./src/accounts.js";
-import { UsageCollector } from "./src/collector.js";
+import { UsageCollector, type LoginState } from "./src/collector.js";
 import {
   forecastWindow,
   recordSample,
@@ -1452,11 +1452,27 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function loggedOut(name: string): boolean {
     return collector.get(name)?.problem?.kind === "unauthenticated";
   }
-  /** The default account's login: "unknown" until a look at it has answered (Astra E44-R2-01). */
-  function defaultLogin(): "yes" | "no" | "unknown" {
-    const measured = collector.get(current.defaultAccountName);
-    if (measured === undefined) return "unknown";
-    return measured.problem?.kind === "unauthenticated" ? "no" : "yes";
+  /**
+   * The default account's login: "unknown" until a look at it has answered
+   * (Astra E44-R2-01), and while its last look could not check it (the
+   * store unreadable, the refresh failed: Astra E44-R3-01).
+   */
+  function defaultLogin(): LoginState {
+    return collector.get(current.defaultAccountName)?.login ?? "unknown";
+  }
+  /**
+   * A turn on `name` would start on a login nobody confirmed: none, or the
+   * default's whose last look could not check it (Astra E44-R3-01). Never
+   * looked at does not count: beforeStart looks at it first. Only the
+   * default's failed look counts: a project on an account of its own stays
+   * where it was put.
+   */
+  function unconfirmed(name: string): boolean {
+    return (
+      loggedOut(name) ||
+      (name === current.defaultAccountName &&
+        collector.get(name)?.login === "unknown")
+    );
   }
 
   async function pickAccount(
@@ -2302,7 +2318,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       preferredModel: current.preferredModel,
       excursionFrom: wayHome(projectId, current.preferredModel, measured, now),
       now,
-      currentLoggedOut: loggedOut(fromName),
+      currentLoggedOut: unconfirmed(fromName),
     });
     if (decision.kind === "keep") {
       bb.log.info(
@@ -2775,7 +2791,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const decision = decidePlacement({
       ...placementOf(projectId, model, now),
       currentAccount: fromName,
-      currentLoggedOut: loggedOut(fromName),
+      currentLoggedOut: unconfirmed(fromName),
     });
     if (decision.kind === "keep") {
       // The turn runs where the project is (refused at the checkpoint only
@@ -2924,7 +2940,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // somewhere else whatever its model (Astra E44-R1).
     const turnModel =
       model ??
-      (loggedOut(current.defaultAccountName) ? current.preferredModel : null);
+      (unconfirmed(current.defaultAccountName) ? current.preferredModel : null);
     const turn = { abandoned: false };
     const turnPlaced =
       turnModel === null
@@ -2967,6 +2983,25 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (login === "yes") return null;
     if (where === "external" || (where !== null && !where.byDefault))
       return null;
+    // Not known where because the placement failed or was not tried (a
+    // model bb does not name): a project with a variable of its own, or one
+    // set outside this plugin, runs on it whatever the accounts directory
+    // says; bb passes the value it holds (Astra E44-R3-02). Read apart from
+    // the placement, which needs that directory and a model. Not when the
+    // placement took too long: bb is slow, and the wait below covers it.
+    if (where === null && done !== "late") {
+      const own = await within(
+        projectAccount(thread.projectId),
+        DISPATCH_LIMIT_MS,
+        `thread ${thread.id}: the project's account not read before its turn`,
+      );
+      if (typeof own === "object" && (own.value.owned || own.value.external)) {
+        bb.log.warn(
+          `thread ${thread.id}: not placed before its turn; it runs on the project's own CLAUDE_CONFIG_DIR`,
+        );
+        return null;
+      }
+    }
     // On the default account without a login, or not known where (a write
     // or a read failed or took too long: Astra E44-R2). What is under way
     // and could give the project an account is waited for; failed, it is
