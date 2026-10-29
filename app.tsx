@@ -59,7 +59,6 @@ type AccountState = State["accounts"][number];
 /** Select value for a project whose CLAUDE_CONFIG_DIR was set by something else. */
 const EXTERNAL = "__external__";
 const STALE = "__stale__";
-type Window = NonNullable<AccountState["usage"]>["session"];
 
 // The last list any view received: a header mounting for another thread
 // shows it at once while its own read is under way (bb can take seconds).
