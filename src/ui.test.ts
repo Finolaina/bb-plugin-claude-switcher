@@ -546,6 +546,46 @@ describe("listText (bb claude-switcher list)", () => {
     expect(lines.join("\n")).not.toMatch(/runs out|lasts until/);
   });
 
+  it("says both when a locked account also has full windows: the latest reset and LOCKED, within 60 characters", () => {
+    const state = tenAccounts(NOW);
+    state.accounts = [
+      {
+        ...state.accounts[3]!,
+        name: "maxprivada",
+        usage: {
+          blocked: true,
+          session: { usedPercent: 100, resetsAt: NOW + 3_600_000 },
+          weekly: { usedPercent: 100, resetsAt: NOW + 4 * 24 * 3_600_000 },
+          models: { Fable: { usedPercent: 100, resetsAt: NOW + 2 * 3_600_000 } },
+        },
+      },
+    ];
+    state.projects = [];
+    const [locked] = listText(state, NOW, "UTC").split("\n");
+    // Too long with every column: the weekly goes first.
+    expect(locked).toBe(
+      "maxprivada  ses 100% Fable 100% agotada hasta 02/11 LOCKED",
+    );
+    expect(locked!.length).toBeLessThanOrEqual(60);
+    const base = tenAccounts(NOW).accounts[1]!;
+    state.accounts = [
+      {
+        ...base,
+        name: "m2",
+        usage: {
+          ...base.usage!,
+          blocked: true,
+          session: { usedPercent: 100, resetsAt: NOW + 3_600_000 },
+        },
+      },
+    ];
+    const [short] = listText(state, NOW, "UTC").split("\n");
+    // When it fits, every column stays.
+    expect(short).toBe(
+      "m2  ses 100% sem  71% Fable  64% agotada hasta 11:00 LOCKED",
+    );
+  });
+
   it("says LOCKED for an account the provider locked, and counts a window whose reset passed as empty", () => {
     const state = tenAccounts(NOW);
     state.accounts = [
