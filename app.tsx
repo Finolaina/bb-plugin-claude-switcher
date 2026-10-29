@@ -20,13 +20,17 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import type { rpcContract, State } from "./server";
 import {
+  accountSummary,
+  accountWindows,
   askForProject,
   composerProject,
   forecastLine,
   headerStatus,
   newestFirst,
   noLoginFound,
+  outText,
   picksOnSelect,
+  projectsByAccount,
   projectName,
   projectRead,
   retryDelayMs,
@@ -55,7 +59,6 @@ type AccountState = State["accounts"][number];
 /** Select value for a project whose CLAUDE_CONFIG_DIR was set by something else. */
 const EXTERNAL = "__external__";
 const STALE = "__stale__";
-type Window = NonNullable<AccountState["usage"]>["session"];
 
 // The last list any view received: a header mounting for another thread
 // shows it at once while its own read is under way (bb can take seconds).
@@ -178,25 +181,6 @@ function useAccounts() {
 
 type Forecast = State["forecasts"][string][string];
 
-/** The forecast under a window's bar, when there is one. */
-function ForecastLine({ forecast }: { forecast: Forecast | undefined }) {
-  const line =
-    forecast === undefined ? null : forecastLine(forecast, Date.now());
-  if (line === null) return null;
-  return (
-    <p
-      className={cn(
-        "mt-0.5 text-[11px]",
-        forecast?.kind === "runs-out"
-          ? "text-warning"
-          : "text-muted-foreground",
-      )}
-    >
-      {line}
-    </p>
-  );
-}
-
 function formatReset(resetsAt: number | null): string {
   if (resetsAt === null) return "";
   const diff = resetsAt - Date.now();
@@ -221,47 +205,96 @@ function barClass(usedPercent: number): string {
   return "bg-primary";
 }
 
-function WindowBar({
-  label,
-  window,
-  forecast,
+/**
+ * An account's windows in short lines: "ses 10% · sem 40% · Fable 20%"
+ * (no weekly on a Team seat), "agotada hasta …" when one is full, a thin
+ * bar per window side by side, and in small text when each resets and the
+ * pace of the window that matters (as in the thread's menu). Written out,
+ * not only in the titles, which neither a keyboard nor a touch opens
+ * (Codex E46-R6-003).
+ */
+export function UsageRow({
+  usage,
+  preferredModel,
+  forecasts,
 }: {
-  label: string;
-  window: Window;
-  forecast?: Forecast;
+  usage: NonNullable<AccountState["usage"]>;
+  preferredModel: string;
+  forecasts: Record<string, Forecast> | undefined;
 }) {
-  const used = windowPercent(window, Date.now());
-  const pct = Math.max(0, Math.min(100, used));
+  const now = Date.now();
+  const summary = accountSummary(usage, preferredModel, now);
+  const windows = accountWindows(usage).map((w) => {
+    const used = Math.round(windowPercent(w.window, now));
+    const forecast = forecasts?.[w.key];
+    const pace = forecast === undefined ? null : forecastLine(forecast, now);
+    const reset =
+      w.window.resetsAt === null ? "" : ` · ${formatReset(w.window.resetsAt)}`;
+    return {
+      ...w,
+      used,
+      title: `${w.label}: ${used}%${reset}${pace === null ? "" : ` · ${pace}`}`,
+    };
+  });
+  const resets = windows.flatMap((w) =>
+    w.window.resetsAt === null
+      ? []
+      : [`${w.short} ${formatReset(w.window.resetsAt)}`],
+  );
+  const paced = windowForecast(
+    forecasts === undefined ? undefined : { own: forecasts },
+    "own",
+    preferredModel,
+  );
+  const pace = paced === null ? null : forecastLine(paced[1], now);
+  const details = [
+    ...(resets.length === 0 ? [] : [`resets ${resets.join(", ")}`]),
+    ...(pace === null
+      ? []
+      : [`${windows.find((w) => w.key === paced?.[0])?.short ?? paced?.[0]} ${pace}`]),
+  ];
   return (
-    <div className="min-w-0">
-      <div className="flex items-baseline justify-between gap-2 text-xs">
-        <span className="truncate text-muted-foreground" title={label}>
-          {label}
-        </span>
-        <span className="shrink-0 tabular-nums">
-          {Math.round(used)}%
-          {window.resetsAt === null ? null : (
-            <span className="text-muted-foreground">
-              {" "}
-              · {formatReset(window.resetsAt)}
-            </span>
-          )}
-        </span>
+    <div className="mt-1">
+      <p className="flex flex-wrap items-baseline gap-x-1.5 text-[11px] tabular-nums text-muted-foreground">
+        {windows.map((w, i) => (
+          <span key={w.key} title={w.title}>
+            {i === 0 ? "" : "· "}
+            {w.short} {w.used}%
+          </span>
+        ))}
+        {summary.outUntil === undefined ? null : (
+          <span className="text-destructive">
+            {outText(summary.outUntil, now)}
+          </span>
+        )}
+      </p>
+      <div className="mt-1 flex gap-1">
+        {windows.map((w) => {
+          const pct = Math.max(0, Math.min(100, w.used));
+          return (
+            <div
+              key={w.key}
+              className="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-muted"
+              role="progressbar"
+              aria-label={w.label}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={w.used}
+              title={w.title}
+            >
+              <div
+                className={cn("h-full rounded-full", barClass(pct))}
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+          );
+        })}
       </div>
-      <div
-        className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-muted"
-        role="progressbar"
-        aria-label={label}
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={Math.round(used)}
-      >
-        <div
-          className={cn("h-full rounded-full", barClass(pct))}
-          style={{ width: `${pct}%` }}
-        />
-      </div>
-      <ForecastLine forecast={forecast} />
+      {details.length === 0 ? null : (
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          {details.join(" · ")}
+        </p>
+      )}
     </div>
   );
 }
@@ -269,6 +302,7 @@ function WindowBar({
 function AccountCard({
   account,
   isDefault,
+  preferredModel,
   forecasts,
   twin = null,
   onLogin,
@@ -276,6 +310,7 @@ function AccountCard({
 }: {
   account: AccountState;
   isDefault: boolean;
+  preferredModel: string;
   forecasts: Record<string, Forecast> | undefined;
   /** Another listed account that is the same Claude account. */
   twin?: string | null;
@@ -300,7 +335,7 @@ function AccountCard({
   // The default account's directory is the CLI's own: the other one is redone.
   const again = twin !== null && !isDefault;
   return (
-    <li className="rounded-md border border-border p-3">
+    <li className="rounded-md border border-border px-3 py-2">
       <div className="flex items-baseline justify-between gap-2">
         <div className="min-w-0">
           <span className="font-medium">{account.name}</span>
@@ -359,22 +394,11 @@ function AccountCard({
         </Button>
       ) : null}
       {usage === null ? null : (
-        <div className="mt-2 grid gap-2">
-          <WindowBar label="Session (5 h)" window={usage.session} />
-          <WindowBar
-            label="Weekly (all models)"
-            window={usage.weekly}
-            forecast={forecasts?.weekly}
-          />
-          {Object.entries(usage.models).map(([model, window]) => (
-            <WindowBar
-              key={model}
-              label={`Weekly · ${model}`}
-              window={window}
-              forecast={forecasts?.[model]}
-            />
-          ))}
-        </div>
+        <UsageRow
+          usage={usage}
+          preferredModel={preferredModel}
+          forecasts={forecasts}
+        />
       )}
     </li>
   );
@@ -584,6 +608,7 @@ function AccountsSection() {
             key={account.name}
             account={account}
             isDefault={account.name === state.defaultAccountName}
+            preferredModel={state.preferredModel}
             forecasts={state.forecasts?.[account.name]}
             twin={sharedWith(account, state.accounts)}
             onLogin={
@@ -612,66 +637,82 @@ function AccountsSection() {
         {state.projects.length === 0 ? (
           <p className="mt-2 text-muted-foreground">No projects yet.</p>
         ) : null}
-        <ul
-          aria-label="Projects"
-          className="mt-2 divide-y divide-border rounded-md border border-border"
-        >
-          {state.projects.map((project) => (
-            <li
-              key={project.id}
-              className="flex items-center justify-between gap-3 px-3 py-2"
-            >
-              <span className="min-w-0 truncate" title={project.name}>
-                {project.name}
-              </span>
-              <select
-                className="h-8 rounded-md border border-input bg-transparent px-2 text-xs"
-                aria-label={`Account for ${project.name}`}
-                title={
-                  project.external
-                    ? "CLAUDE_CONFIG_DIR is set outside this plugin; change it in the project's machine environment"
-                    : undefined
-                }
-                value={
-                  project.external
-                    ? EXTERNAL
-                    : project.owned && project.account === null
-                      ? STALE
-                      : (project.account ?? "")
-                }
-                disabled={busy || project.external}
-                onChange={(event) =>
-                  setProjectAccount(
-                    project.id,
-                    event.target.value === "" ? null : event.target.value,
-                  )
-                }
-              >
-                {project.external ? (
-                  <option value={EXTERNAL} disabled>
-                    CLAUDE_CONFIG_DIR set outside this plugin
-                  </option>
-                ) : null}
-                {project.owned && project.account === null ? (
-                  <option value={STALE} disabled>
-                    account no longer exists: pick one
-                  </option>
-                ) : null}
-                <option value="">{state.defaultAccountName} (~/.claude)</option>
-                {state.accounts
-                  .filter((a) => a.name !== state.defaultAccountName)
-                  .map((a) => (
-                    <option key={a.name} value={a.name}>
-                      {a.name}
-                      {a.problem?.kind === "unauthenticated"
-                        ? " (not logged in)"
-                        : ""}
-                    </option>
+        <div role="group" aria-label="Projects" className="mt-2 grid gap-2">
+          {projectsByAccount(state).map((group) => {
+            const account = state.accounts.find(
+              (a) => a.name === group.account,
+            );
+            return (
+              <section key={group.heading} aria-label={`Projects on ${group.heading}`}>
+                <div className="flex items-baseline justify-between gap-2 px-1 text-xs">
+                  <span className="shrink-0 font-medium">{group.heading}</span>
+                  {account === undefined ? null : (
+                    <span className="truncate text-muted-foreground">
+                      {usageLine(account, state.preferredModel, Date.now())}
+                    </span>
+                  )}
+                </div>
+                <ul className="mt-1 divide-y divide-border rounded-md border border-border">
+                  {group.projects.map((project) => (
+                    <li
+                      key={project.id}
+                      className="flex items-center justify-between gap-3 px-3 py-2"
+                    >
+                      <span className="min-w-0 truncate" title={project.name}>
+                        {project.name}
+                      </span>
+                      <select
+                        className="h-8 rounded-md border border-input bg-transparent px-2 text-xs"
+                        aria-label={`Account for ${project.name}`}
+                        title={
+                          project.external
+                            ? "CLAUDE_CONFIG_DIR is set outside this plugin; change it in the project's machine environment"
+                            : undefined
+                        }
+                        value={
+                          project.external
+                            ? EXTERNAL
+                            : project.owned && project.account === null
+                              ? STALE
+                              : (project.account ?? "")
+                        }
+                        disabled={busy || project.external}
+                        onChange={(event) =>
+                          setProjectAccount(
+                            project.id,
+                            event.target.value === "" ? null : event.target.value,
+                          )
+                        }
+                      >
+                        {project.external ? (
+                          <option value={EXTERNAL} disabled>
+                            CLAUDE_CONFIG_DIR set outside this plugin
+                          </option>
+                        ) : null}
+                        {project.owned && project.account === null ? (
+                          <option value={STALE} disabled>
+                            account no longer exists: pick one
+                          </option>
+                        ) : null}
+                        <option value="">{state.defaultAccountName} (~/.claude)</option>
+                        {state.accounts
+                          .filter((a) => a.name !== state.defaultAccountName)
+                          .map((a) => (
+                            <option key={a.name} value={a.name}>
+                              {a.name}
+                              {a.problem?.kind === "unauthenticated"
+                                ? " (not logged in)"
+                                : ""}
+                            </option>
+                          ))}
+                      </select>
+                    </li>
                   ))}
-              </select>
-            </li>
-          ))}
-        </ul>
+                </ul>
+              </section>
+            );
+          })}
+        </div>
       </div>
       <History state={state} />
     </div>
@@ -767,7 +808,10 @@ function usageLine(
   };
   const parts = [
     `session ${pct(account.usage.session)}`,
-    `weekly ${pct(account.usage.weekly)}`,
+    // A Team seat has no general weekly.
+    ...(account.usage.weekly.absent === true
+      ? []
+      : [`weekly ${pct(account.usage.weekly)}`]),
   ];
   const model = Object.entries(account.usage.models).find(
     ([name]) =>

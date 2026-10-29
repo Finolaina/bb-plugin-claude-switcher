@@ -4,6 +4,52 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.30] - 2026-10-29
+
+### Fixed
+
+- **A thread keeps its conversation when its project moves to another
+  account.** bb resumes a thread with `claude --resume <session>` under the
+  project's new `CLAUDE_CONFIG_DIR`, and Claude Code looks for the session
+  in that account's `projects/`. Where the accounts do not share that
+  directory (Linux, an account made without the link), the thread failed
+  with «No conversation found with session ID …». Before the project is
+  pointed at the new account, the plugin links into it every session of
+  the project it lacks, for each of the project's paths on this machine
+  (worktrees included, and the resolved path): a hard link to each
+  `<session>.jsonl` (a symbolic link across filesystems: both accounts
+  always read one transcript) and a symbolic link to its folder. Nothing
+  is removed or overwritten; accounts that already share `projects/` are
+  left alone; a project of another machine is skipped and logged once; a
+  failure is logged and never stops the move, and after 2 s the move goes
+  on without waiting for the rest. A move just before a turn (the
+  message's checkpoint) starts the links and does not wait for them.
+  Known limit (Codex E46-R7-001, left open on purpose): on a machine whose
+  accounts do not share `projects/`, a thread whose project is moved by
+  that checkpoint can still be resumed before its links land. Waiting
+  there reopened a family of races between placements (rounds 2 to 6), so
+  the real fix is the shared `projects/` directory on every machine
+  (the Mac has it; the Linux hosts get it with the cerebro-linux E46
+  migration); this plugin's links are the second line of defence.
+
+### Changed
+
+- **`bb claude-switcher list` is one short line per account.** At most 60
+  characters, in aligned columns: `ses` (session), `sem` (weekly, not on a
+  Team seat, which has none), the preferred model, `agotada hasta HH:MM`
+  (or the date, a day or more away) when a window is full, `LOCKED`. The
+  pace of each window is no longer in the text (it stays in `--json`).
+  The projects are listed by account: `team3: Ads · Bots · Infra`, then
+  those set outside the plugin and those of an account that is gone.
+- **The panel is compact.** Each account is one card with its windows in
+  one line of text (`ses 10% · sem 40% · Fable 20%`) and a thin bar per
+  window side by side; under them, in small text, when each window
+  resets and the pace of the window that matters.
+  A Team seat shows no «Weekly (all models)» bar, and the account menu of
+  a thread shows no weekly for it. The projects are grouped under their
+  account, each group headed by the account's usage, with the account
+  picker of each project as before.
+
 ## [0.2.29] - 2026-10-29
 
 ### Fixed
@@ -40,8 +86,8 @@ project uses [Semantic Versioning](https://semver.org/).
 
 - **The advice to switch to Opus is in Spanish.** The retry reason, the
   composer's banner, the history and the log now say `Sin <model> en
-  ninguna cuenta: pasa este hilo a Opus con el selector de modelo; irá a
-  <name>`. Only the text changes: when it is said, and the account it
+ninguna cuenta: pasa este hilo a Opus con el selector de modelo; irá a
+<name>`. Only the text changes: when it is said, and the account it
   names, stay as they were. The rest of the plugin stays in English.
 
 ## [0.2.27] - 2026-10-17
@@ -156,7 +202,7 @@ project uses [Semantic Versioning](https://semver.org/).
   maximum wait or with no account usable), and a refresh that ends
   while it runs gets one more pass after it, not a second one at once.
   A refresh asked by hand (the section's refresh, `bb claude-switcher
-  refresh`) still answers once the banners are asked.
+refresh`) still answers once the banners are asked.
 - **A refresh that fails still asks the banners.** When the accounts
   directory could not be read, the refresh stopped before the banners
   were asked, and a thread with provider-retry's retry queued (not
@@ -371,7 +417,7 @@ project uses [Semantic Versioning](https://semver.org/).
   `maximumWaitHours` and when no account will free, as long as an account
   can run Opus without spending the preferred model's weekly. A wait's
   retry reason ends with `. No Fable on any account: switch this thread to
-  Opus with the model picker; it will go to <name>`, naming the account
+Opus with the model picker; it will go to <name>`, naming the account
   the project's next Opus turn would run on, and so does the retry of
   another thread of the project that follows the wait; the history gets
   the text once per turn sent (from the project's account to itself when
@@ -440,7 +486,7 @@ project uses [Semantic Versioning](https://semver.org/).
   one moves to a Team seat, or to an account out of Fable, before the turn
   (`current-reserved`), and when no account spares Fable the turn stays
   where the project is and the log says so (`Opus turn stays on …: no
-  account spares Fable`). A failed Opus turn waits only for an account
+account spares Fable`). A failed Opus turn waits only for an account
   that will spare Fable when the retry is sent (each account projected to
   the latest possible send, from now at the earliest), or is left alone
   with the new reason `reserved-for-preferred-model`; a leftover Opus turn

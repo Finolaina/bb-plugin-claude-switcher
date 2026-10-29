@@ -1,0 +1,45 @@
+bb claude-switcher list: antes (0.2.29) y despues (0.2.30)
+Mismo fixture (src/list-fixture.ts): 10 cuentas, 5 Team sin semanal general (absent), 5 Max;
+team3 al 100 % de sesion y max4 al 100 % de semanal. Hora: 2026-10-29 11:00 en Madrid.
+Generado con la funcion real de cada version (0.2.29: textState de server.ts en 2c41fd9;
+0.2.30: listText de src/ui.ts). Los tabuladores de la 0.2.29 se ven expandidos a 8 columnas.
+
+=== ANTES (0.2.29), linea mas larga: 157 caracteres ===
+viaulab session 10%     weekly 40%      Fable 20%       weekly runs out in 2 d 5 h at this pace (30 %/day)
+max2    session 55%     weekly 71%      Fable 64%       weekly lasts until the reset at this pace (8 %/day)     Fable runs out in 9 h at this pace (40 %/day)
+max3    session 3%      weekly 12%
+max4    session 20%     weekly 100%     Fable 88%
+maxprivada      session 0%      weekly 5%       Fable 1%
+team1   session 30%     weekly 0%       Fable 50%
+team2   session 5%      weekly 0%       Fable 9%
+team3   session 100%    weekly 0%       Fable 70%
+team4   unauthenticated
+team5   session 45%     weekly 0%       Fable 100%
+
+projects:
+Infra   team3
+Website (viaulab)
+Bots    team3
+Agenda  max2
+Legacy  (external CLAUDE_CONFIG_DIR)
+Ghost   (viaulab)
+Ads     team3
+
+=== DESPUES (0.2.30), linea de cuenta mas larga: 60 caracteres ===
+viaulab     ses  10% sem  40% Fable  20%
+max2        ses  55% sem  71% Fable  64%
+max3        ses   3% sem  12%
+max4        ses  20% sem 100% Fable  88% agotada hasta 01/11
+maxprivada  ses   0% sem   5% Fable   1%
+team1       ses  30%          Fable  50%
+team2       ses   5%          Fable   9%
+team3       ses 100%          Fable  70% agotada hasta 13:00
+team4       not logged in
+team5       ses  45%          Fable  99%
+
+projects:
+viaulab: Website
+max2: Agenda
+team3: Ads · Bots · Infra
+(external CLAUDE_CONFIG_DIR): Legacy
+(account no longer exists): Ghost
