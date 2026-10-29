@@ -183,11 +183,15 @@ async function shareKey(
       // would leave the account moved back to with the old transcript,
       // and that one is never overwritten (Codex E46-003). Across
       // filesystems, a symlink to it.
+      // The transcript itself, not a symlink to it: on Linux a hard link
+      // to a symlink is the symlink, and a relative one points at nothing
+      // from the target (Codex E46-R3-002).
+      const file = await io.realpath(source);
       try {
-        await io.link(source, path);
+        await io.link(file, path);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
-        await io.symlink(source, path);
+        await io.symlink(file, path);
       }
       linked += 1;
     } catch (error) {
