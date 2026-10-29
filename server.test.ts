@@ -3272,7 +3272,6 @@ describe("claude accounts plugin", () => {
       link: async (existing, path) => {
         made.push(`link ${existing} -> ${path}`);
       },
-      copy: async () => {},
       symlink: async () => {},
     };
     const h = await host(ALL_FREE, {
@@ -3322,7 +3321,6 @@ describe("claude accounts plugin", () => {
         entries: broken,
         mkdir: broken,
         link: broken,
-        copy: broken,
         symlink: broken,
       },
       environments: { "proj-1": [{ path: "/home/someone/site" }] },

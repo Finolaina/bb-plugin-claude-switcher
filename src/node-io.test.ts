@@ -134,7 +134,7 @@ describe("loginHelperPath", () => {
 });
 
 describe("nodeSessionsIo", () => {
-  it("hard-links, copies without overwriting, and lists a link to a directory as one", async () => {
+  it("hard-links and symlinks without overwriting, and lists a link to a directory as one", async () => {
     const io = nodeSessionsIo();
     base = await mkdtemp(join(tmpdir(), "claude-sessions-"));
     const from = join(base, "a", "s.jsonl");
@@ -149,8 +149,8 @@ describe("nodeSessionsIo", () => {
     await expect(io.link(from, join(base, "b", "s.jsonl"))).rejects.toThrow(
       /EEXIST/,
     );
-    await io.copy(from, join(base, "b", "t.jsonl"));
-    await expect(io.copy(from, join(base, "b", "t.jsonl"))).rejects.toThrow(
+    await io.symlink(from, join(base, "b", "t.jsonl"));
+    await expect(io.symlink(from, join(base, "b", "t.jsonl"))).rejects.toThrow(
       /EEXIST/,
     );
     await io.symlink(join(base, "a", "s"), join(base, "b", "s"));

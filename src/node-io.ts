@@ -1,9 +1,7 @@
 // Real filesystem, keychain and network adapters for the interfaces the
 // pure modules take. Everything a test wants to fake lives behind these.
 import { execFile, spawn } from "node:child_process";
-import { constants } from "node:fs";
 import {
-  copyFile,
   link,
   lstat,
   mkdir,
@@ -199,9 +197,8 @@ export function nodeSessionsIo(): SessionsIo {
     mkdir: async (dir) => {
       await mkdir(dir, { recursive: true, mode: 0o700 });
     },
+    // Neither goes over a file that is there (EEXIST instead).
     link: (existing, path) => link(existing, path),
-    // Never over a file that is there (EEXIST instead).
-    copy: (from, to) => copyFile(from, to, constants.COPYFILE_EXCL),
     symlink: (target, path) => symlink(target, path),
   };
 }

@@ -18,15 +18,14 @@ export interface SessionsIo {
   entries(dir: string): Promise<{ name: string; directory: boolean }[]>;
   /** Creates the directory and its parents; nothing when it exists. */
   mkdir(dir: string): Promise<void>;
-  /** A hard link at `path` to `existing`; throws EXDEV across filesystems. */
+  /** A hard link at `path` to `existing`; throws EXDEV across filesystems, EEXIST over a file. */
   link(existing: string, path: string): Promise<void>;
-  /** Copies `from` to `to`, failing when `to` exists. */
-  copy(from: string, to: string): Promise<void>;
+  /** A symbolic link at `path` to `target`; throws EEXIST over a file. */
   symlink(target: string, path: string): Promise<void>;
 }
 
 export interface ShareResult {
-  /** Sessions (jsonl) linked or copied into the target. */
+  /** Sessions (jsonl) linked into the target. */
   linked: number;
   /**
    * "no-project-dir": the project's path is not on this machine (a project
@@ -53,10 +52,22 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function resolved(io: SessionsIo, path: string): Promise<string | null> {
+/**
+ * The resolved path, or null when there is nothing there (ENOENT, or a
+ * file where a directory is: ENOTDIR). Any other failure (EACCES, EIO) is
+ * collected in `errors` with the path, and also gives null (Codex E46-004).
+ */
+async function resolved(
+  io: SessionsIo,
+  path: string,
+  errors: string[],
+): Promise<string | null> {
   try {
     return await io.realpath(path);
-  } catch {
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "ENOTDIR")
+      errors.push(`${path}: ${message(error)}`);
     return null;
   }
 }
@@ -85,14 +96,18 @@ export async function shareSessions({
       return { linked, skipped: "no-project-dir", errors };
     // Claude Code names the project by its working directory, which may be
     // the resolved path (on the NUC /Users/aitor is a link to /home/aitor).
-    const real = (await resolved(io, projectPath)) ?? projectPath;
+    const real = (await resolved(io, projectPath, errors)) ?? projectPath;
     const keys = [...new Set([projectKey(projectPath), projectKey(real)])];
-    const targetProjects = await resolved(io, `${target}/projects`);
+    const targetProjects = await resolved(io, `${target}/projects`, errors);
     let looked = false;
     let shared = false;
     for (const source of new Set(sources)) {
       if (source === target) continue;
-      const sourceProjects = await resolved(io, `${source}/projects`);
+      const sourceProjects = await resolved(
+        io,
+        `${source}/projects`,
+        errors,
+      );
       if (sourceProjects === null) continue;
       if (sourceProjects === targetProjects) {
         shared = true;
@@ -164,11 +179,15 @@ async function shareKey(
         await io.symlink(source, path);
         continue;
       }
+      // One file for both accounts, whichever one appends to it: a copy
+      // would leave the account moved back to with the old transcript,
+      // and that one is never overwritten (Codex E46-003). Across
+      // filesystems, a symlink to it.
       try {
         await io.link(source, path);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
-        await io.copy(source, path);
+        await io.symlink(source, path);
       }
       linked += 1;
     } catch (error) {
