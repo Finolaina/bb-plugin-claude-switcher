@@ -4,6 +4,41 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.30] - 2026-10-29
+
+### Fixed
+
+- **A thread keeps its conversation when its project moves to another
+  account.** bb resumes a thread with `claude --resume <session>` under the
+  project's new `CLAUDE_CONFIG_DIR`, and Claude Code looks for the session
+  in that account's `projects/`. Where the accounts do not share that
+  directory (Linux, an account made without the link), the thread failed
+  with «No conversation found with session ID …». Once the variable is
+  written, the plugin links into the new account every session of the
+  project it lacks, for each of the project's paths on this machine
+  (worktrees included, and the resolved path): a hard link to each
+  `<session>.jsonl` (a copy across filesystems) and a symbolic link to its
+  folder. Nothing is removed or overwritten; accounts that already share
+  `projects/` are left alone; a project of another machine is skipped and
+  logged once; a failure is logged and never stops the move.
+
+### Changed
+
+- **`bb claude-switcher list` is one short line per account.** At most 60
+  characters, in aligned columns: `ses` (session), `sem` (weekly, not on a
+  Team seat, which has none), the preferred model, `agotada hasta HH:MM`
+  (or the date, a day or more away) when a window is full, `LOCKED`. The
+  pace of each window is no longer in the text (it stays in `--json`).
+  The projects are listed by account: `team3: Ads · Bots · Infra`, then
+  those set outside the plugin and those of an account that is gone.
+- **The panel is compact.** Each account is one card with its windows in
+  one line of text (`ses 10% · sem 40% · Fable 20%`) and a thin bar per
+  window side by side; the reset and the pace are in each bar's tooltip.
+  A Team seat shows no «Weekly (all models)» bar, and the account menu of
+  a thread shows no weekly for it. The projects are grouped under their
+  account, each group headed by the account's usage, with the account
+  picker of each project as before.
+
 ## [0.2.29] - 2026-10-29
 
 ### Fixed
