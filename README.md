@@ -129,9 +129,11 @@ public SDK surfaces, and never touches a `CLAUDE_CONFIG_DIR` it did not set.
 
 ### 🔮 A forecast per window
 
-In each weekly window's tooltip: when it runs out at the pace you have used it
-since the plugin first measured the current window, or that it lasts
-until its reset. Also in the account menu
+Under each account's bars, in small text, with when each window resets:
+when the window that matters (the preferred model's, else the weekly)
+runs out at the pace you have used it since the plugin first measured the
+current window, or that it lasts until its reset; each window's tooltip
+has its own. Also in the account menu
 of a thread's header and of the new-thread composer, and in `list --json`.
 
 </td>
