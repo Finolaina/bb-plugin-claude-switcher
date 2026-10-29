@@ -1189,8 +1189,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   type MoveMark = { writes: number; picks: number };
   const moves = new Map<
     string,
-    { epoch: number; inFlight: number; picks: number; writes: number }
+    {
+      epoch: number;
+      inFlight: number;
+      picks: number;
+      writes: number;
+      writing: Writing | null;
+    }
   >();
+  /** A write of a project's account under way: `done` once it is over, landed or not. */
+  type Writing = { done: Promise<void>; byHand: boolean };
   function movesOf(projectId: string): {
     epoch: number;
     inFlight: number;
@@ -1206,10 +1214,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
      * of the account that a move crossed it.
      */
     writes: number;
+    /** The write under way, if any (see placeTurn: a crossed placement waits for it). */
+    writing: Writing | null;
   } {
     let move = moves.get(projectId);
     if (move === undefined) {
-      move = { epoch: 0, inFlight: 0, picks: 0, writes: 0 };
+      move = { epoch: 0, inFlight: 0, picks: 0, writes: 0, writing: null };
       moves.set(projectId, move);
     }
     return move;
@@ -1296,19 +1306,21 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /**
    * Point the project at `account` (null = default). Refuses an external
    * variable. An automatic move is looked at again once the sessions are
-   * shared, just before the write: when a write of the project's account
-   * or a pick by hand happened during the sharing, or `wanted` (the
-   * placement before a turn: the checkpoint still waits) says no, nothing
-   * is written and the answer is false: the caller records no move and
-   * acts on none (Codex E46-R2-001, E46-R4-001). A choice by hand
-   * (`byHand`: a pick, a release) always writes.
+   * shared, just before the write: nothing is written, and the caller
+   * records no move and acts on none, when `wanted` (the placement before
+   * a turn: the checkpoint still waits) says no ("cancelled"), a pick by
+   * hand landed or is being written ("picked"), or another automatic
+   * write of the project's account started ("moved": the caller may wait
+   * for it, `movesOf().writing`, and decide again). Codex E46-R2-001,
+   * E46-R4-001, E46-R5-001. A choice by hand (`byHand`: a pick, a
+   * release) always writes. True once written.
    */
   async function applyAccount(
     projectId: string,
     account: Account | null,
     from: ProjectAccount,
     options: { byHand?: boolean; wanted?: () => boolean } = {},
-  ): Promise<boolean> {
+  ): Promise<true | "cancelled" | "picked" | "moved"> {
     if (from.external) {
       throw new Error(
         `${ENV_VAR} on project ${projectId} was set outside this plugin; change it in the project's machine environment`,
@@ -1326,6 +1338,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       move.epoch += 1;
     }
     let wrote = false;
+    let writing: Writing | null = null;
     try {
       // The sessions first, while the move is counted in flight: a turn of
       // another thread of the project that reads the new account finds its
@@ -1345,40 +1358,57 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           bb.log.warn(
             `sessions of ${projectNames.get(projectId) ?? projectId} not shared into ${toName} within ${SESSIONS_LIMIT_MS / 1000} s; the move goes on`,
           );
-        const crossed =
-          move.writes !== mark.writes || move.picks !== mark.picks;
         const unwanted = options.wanted !== undefined && !options.wanted();
-        if (options.byHand !== true && (crossed || unwanted)) {
+        const picked =
+          move.picks !== mark.picks || move.writing?.byHand === true;
+        const moved = move.writes !== mark.writes;
+        if (options.byHand !== true && (unwanted || picked || moved)) {
+          const why = unwanted ? "cancelled" : picked ? "picked" : "moved";
           bb.log.info(
-            `project ${projectId}: not moved to ${toName}: ${crossed ? "picked by hand or moved meanwhile" : "the turn no longer waits for it"}`,
+            `project ${projectId}: not moved to ${toName}: ${why === "cancelled" ? "the turn no longer waits for it" : why === "picked" ? "picked by hand meanwhile" : "moved meanwhile"}`,
           );
-          return false;
+          return why;
         }
       }
       if (move !== null) {
         move.writes += 1;
         wrote = true;
       }
-      if (account === null || account.configDir === null) {
-        // Default account = no variable. Only ours can be there (see above).
-        if (from.owned) {
-          await bb.sdk.projects.deleteMachineEnvironmentVariable({
+      const write = (async () => {
+        if (account === null || account.configDir === null) {
+          // Default account = no variable. Only ours can be there (see above).
+          if (from.owned) {
+            await bb.sdk.projects.deleteMachineEnvironmentVariable({
+              projectId,
+              name: ENV_VAR,
+            });
+          }
+        } else {
+          await bb.sdk.projects.setMachineEnvironmentVariable({
             projectId,
             name: ENV_VAR,
+            value: account.configDir,
+            note: noteFor(account.name),
           });
         }
-      } else {
-        await bb.sdk.projects.setMachineEnvironmentVariable({
-          projectId,
-          name: ENV_VAR,
-          value: account.configDir,
-          note: noteFor(account.name),
-        });
-      }
+      })();
+      writing =
+        move === null
+          ? null
+          : {
+              done: write.then(
+                () => undefined,
+                () => undefined,
+              ),
+              byHand: options.byHand === true,
+            };
+      if (move !== null) move.writing = writing;
+      await write;
     } finally {
       // Also after a failure: a delete may have landed before it.
       projectsRead = null;
       if (move !== null) {
+        if (move.writing === writing) move.writing = null;
         if (wrote) move.writes += 1;
         move.inFlight -= 1;
         move.epoch += 1;
@@ -2474,7 +2504,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return;
     }
     if (
-      !(await applyAccount(projectId, accountOrDefault(decision.account), latest))
+      (await applyAccount(projectId, accountOrDefault(decision.account), latest)) !==
+      true
     ) {
       bb.log.info(
         `thread ${thread.id}: not placed (the project's account changed meanwhile)`,
@@ -2663,7 +2694,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (decision.kind === "keep") return;
     // Moved by something else while the sessions were shared: this
     // decision, taken on the account before, no longer holds.
-    if (!(await applyAccount(projectId, accountOrDefault(decision.account), from)))
+    if (
+      (await applyAccount(projectId, accountOrDefault(decision.account), from)) !==
+      true
+    )
       return;
     await markHandled(projectId);
     noteMove(projectId, fromName, decision.account, model, before);
@@ -2925,11 +2959,29 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   async function placeTurn(
     thread: ThreadResponse,
     model: string,
-    turn: { abandoned: boolean },
+    turn: { abandoned: boolean; crossed?: boolean },
   ): Promise<TurnPlace | null> {
     const projectId = thread.projectId;
     // Emptied by a change of the accounts directory, until the next look.
     if (accounts.length === 0) await discover();
+    // Decided again after another automatic move of the project crossed
+    // this one: from where that move left it, for this turn's model
+    // (Codex E46-R5-001). Ends when the checkpoint stops waiting.
+    for (;;) {
+      const placed = await placeTurnOnce(thread, model, turn);
+      if (placed !== "moved") return placed;
+      turn.crossed = true;
+      await movesOf(projectId).writing?.done;
+      if (turn.abandoned) return null;
+    }
+  }
+  /** One look of placeTurn; "moved": another automatic move crossed it. */
+  async function placeTurnOnce(
+    thread: ThreadResponse,
+    model: string,
+    turn: { abandoned: boolean },
+  ): Promise<TurnPlace | null | "moved"> {
+    const projectId = thread.projectId;
     const before = moveMark(projectId);
     const from = await projectAccount(projectId);
     if (from.external) return "external";
@@ -2953,13 +3005,22 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (turn.abandoned) return null;
     const to = accountOrDefault(decision.account);
     // Looked at again after the sessions are shared: the checkpoint may
-    // have stopped waiting, or a pick landed, meanwhile.
-    if (
-      !(await applyAccount(projectId, to, from, {
-        wanted: () => !turn.abandoned,
-      }))
-    )
-      return null;
+    // have stopped waiting, a pick landed, or another move, meanwhile.
+    const applied = await applyAccount(projectId, to, from, {
+      wanted: () => !turn.abandoned,
+    });
+    if (applied === "cancelled") return null;
+    if (applied === "moved") return "moved";
+    if (applied === "picked") {
+      // The pick stands: the turn runs where it put the project.
+      await movesOf(projectId).writing?.done;
+      const now = await projectAccount(projectId);
+      if (now.external) return "external";
+      return {
+        account: now.account ?? current.defaultAccountName,
+        byDefault: !now.owned,
+      };
+    }
     await markHandled(projectId);
     noteMove(projectId, fromName, decision.account, model, before);
     const reason =
@@ -3096,7 +3157,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const turnModel =
       model ??
       (unconfirmed(current.defaultAccountName) ? current.preferredModel : null);
-    const turn = { abandoned: false };
+    const turn: { abandoned: boolean; crossed?: boolean } = {
+      abandoned: false,
+    };
     const turnPlaced =
       turnModel === null
         ? null
@@ -3134,6 +3197,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const done = turnPlaced === null ? null : await turnPlaced;
     const where: TurnPlace | null =
       typeof done === "object" && done !== null ? done.value : null;
+    // Crossed by another move and not placed again in time: never sent as
+    // is, it might start where that move left the project, on an account
+    // its model must not use. It waits and bb asks again (E46-R5-001).
+    if (done === "late" && turn.crossed === true) {
+      const wait = startWait(
+        thread.id,
+        turnPlaced,
+        "Choosing a Claude account for this turn",
+      );
+      if (wait !== null) return wait;
+    }
     const login = defaultLogin();
     if (login === "yes") return null;
     if (where === "external" || (where !== null && !where.byDefault))
@@ -3603,7 +3677,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (stuck && !current.autoSwitch) return;
     if (decision.account !== fromName) {
       if (
-        !(await applyAccount(projectId, accountOrDefault(decision.account), from))
+        (await applyAccount(projectId, accountOrDefault(decision.account), from)) !==
+        true
       ) {
         // Moved by a placement before a turn while the sessions were shared:
         // that move, decided later, stands. Nothing is recorded; the turn is
@@ -4094,7 +4169,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     // Moved by something else while the sessions were shared: the wait
     // stays as it is, and fires on its own.
-    if (!(await applyAccount(projectId, accountOrDefault(to), from))) return;
+    if ((await applyAccount(projectId, accountOrDefault(to), from)) !== true)
+      return;
     await markHandled(projectId);
     noteMove(projectId, fromName, to, model, before);
     const reason = `Moved to account ${to}, which can run the waiting turn now: ${fromName} ${noLogin ? "is not logged in" : whyOut(fromName, model)}`;
