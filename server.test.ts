@@ -5348,30 +5348,52 @@ describe("the history of moves", () => {
     ).toEqual(["spare", "work"]);
   });
 
-  it("shows in `list` the pace of a weekly window that has one", async () => {
+  it("keeps the pace of a weekly window in `list --json` and out of the text, which has no weekly for a Team seat", async () => {
     let clock = NOW;
     let weekly = 40;
+    // A Team seat: session and Fable, seven_day null (measured 2026-10-11).
+    const team = () => {
+      const p = payload(5, 0, 30);
+      return Response.json({
+        ...p,
+        limits: (p.limits as { kind: string }[]).filter(
+          (l) => l.kind !== "weekly_all",
+        ),
+        seven_day: null,
+      });
+    };
     const h = await host(
       {
         main: () => Response.json(payload(10, weekly, 20)),
         spare: () => Response.json(payload(10, 60)),
-        work: () => Response.json(payload(5, 20)),
+        work: team,
       },
-      { clock: () => clock },
+      { clock: () => clock, settings: { preferredModel: "Fable" } },
     );
     dispose = () => h.harness.dispose();
     await h.harness.behavior.callRpc("accounts_refresh", null);
     clock = NOW + 24 * HOUR;
     weekly = 70;
     await h.harness.behavior.callRpc("accounts_refresh", null);
-    const lines = (await h.harness.behavior.runCli(["list"])).stdout.split("\n");
-    expect(lines.find((l) => l.startsWith("main\t"))).toBe(
-      "main\tsession 10%\tweekly 70%\tFable 20%\tweekly runs out in 1 d 0 h at this pace (30 %/day)",
+    const text = (await h.harness.behavior.runCli(["list"])).stdout;
+    const lines = text.split("\n");
+    // A day later: the session and Fable windows have reset since.
+    expect(lines.find((l) => l.startsWith("main "))).toBe(
+      "main   ses   0% sem  70% Fable   0%",
     );
-    // A steady window says nothing.
-    expect(lines.find((l) => l.startsWith("work\t"))).toBe(
-      "work\tsession 5%\tweekly 20%\t",
+    expect(lines.find((l) => l.startsWith("work "))).toBe(
+      "work   ses   0%          Fable   0%",
     );
+    expect(text).not.toMatch(/runs out/);
+    const json = JSON.parse(
+      (await h.harness.behavior.runCli(["list", "--json"])).stdout,
+    ) as State;
+    expect(json.forecasts.main?.weekly).toMatchObject({ kind: "runs-out" });
+    expect(json.accounts.find((a) => a.name === "work")?.usage?.weekly).toEqual({
+      usedPercent: 0,
+      resetsAt: null,
+      absent: true,
+    });
   });
 });
 
