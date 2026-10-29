@@ -1,4 +1,15 @@
-import { describe, expect, it } from "vitest";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { nodeSessionsIo } from "./node-io.js";
 import { projectKey, shareSessions, type SessionsIo } from "./sessions.js";
 
 /**
@@ -251,6 +262,28 @@ describe("shareSessions", () => {
     ).toBe(true);
   });
 
+  it("links the file a session's symlink resolves to, also across filesystems", async () => {
+    const fs = memoryFs();
+    fs.addDir(PROJECT);
+    fs.addFile(`${TEAM1}/archive/aaa.jsonl`);
+    fs.addFile(`${TEAM1}/projects/${KEY}/aaa.jsonl`);
+    fs.addFile(`${TEAM1}/archive/bbb.jsonl`);
+    fs.addFile(`${TEAM1}/projects/${KEY}/bbb.jsonl`);
+    fs.real.set(`${TEAM1}/projects/${KEY}/aaa.jsonl`, `${TEAM1}/archive/aaa.jsonl`);
+    fs.real.set(`${TEAM1}/projects/${KEY}/bbb.jsonl`, `${TEAM1}/archive/bbb.jsonl`);
+    fs.fail("link", `${TEAM2}/projects/${KEY}/bbb.jsonl`, "EXDEV");
+    await shareSessions({
+      projectPath: PROJECT,
+      target: TEAM2,
+      sources: [TEAM1],
+      io: fs.io,
+    });
+    expect(fs.made.filter((m) => !m.startsWith("mkdir"))).toEqual([
+      `link ${TEAM1}/archive/aaa.jsonl -> ${TEAM2}/projects/${KEY}/aaa.jsonl`,
+      `symlink ${TEAM1}/archive/bbb.jsonl -> ${TEAM2}/projects/${KEY}/bbb.jsonl`,
+    ]);
+  });
+
   it.each([
     ["the same filesystem (a hard link)", null],
     ["two filesystems (a symlink)", "EXDEV"],
@@ -312,5 +345,37 @@ describe("shareSessions", () => {
         io: none.io,
       }),
     ).toEqual({ linked: 0, skipped: null, errors: [] });
+  });
+});
+
+describe("shareSessions on the real filesystem", () => {
+  let base = "";
+  afterEach(async () => {
+    if (base !== "") await rm(base, { recursive: true, force: true });
+    base = "";
+  });
+
+  it("links the transcript a relative symlink points at, not the symlink", async () => {
+    base = await mkdtemp(join(tmpdir(), "claude-sessions-"));
+    const project = join(base, "project");
+    await mkdir(project);
+    const key = projectKey(project);
+    const from = join(base, "a");
+    const to = join(base, "b");
+    await mkdir(join(from, "archive"), { recursive: true });
+    await mkdir(join(from, "projects", key), { recursive: true });
+    await writeFile(join(from, "archive", "s.jsonl"), "turn 1\n");
+    // Relative to its own directory: copied as is elsewhere, it points at nothing.
+    await symlink("../../archive/s.jsonl", join(from, "projects", key, "s.jsonl"));
+    const result = await shareSessions({
+      projectPath: project,
+      target: to,
+      sources: [from],
+      io: nodeSessionsIo(),
+    });
+    expect(result).toEqual({ linked: 1, skipped: null, errors: [] });
+    expect(await readFile(join(to, "projects", key, "s.jsonl"), "utf8")).toBe(
+      "turn 1\n",
+    );
   });
 });
