@@ -47,6 +47,7 @@ import {
   nodeAccountsIo,
   nodeCredentialIo,
   nodeLoginIo,
+  nodeSessionsIo,
 } from "./src/node-io.js";
 import {
   ADVISED_DECLINES,
@@ -78,7 +79,8 @@ import {
   usageSourceRpcContract,
 } from "./src/usage-source-contract.js";
 import { toMeasurement, toResource } from "./src/usage-source.js";
-import { forecastLine, projectName, sharedWith } from "./src/ui.js";
+import { shareSessions, type SessionsIo } from "./src/sessions.js";
+import { listText, projectName, sharedWith } from "./src/ui.js";
 
 export const ENV_VAR = "CLAUDE_CONFIG_DIR";
 /** Realtime channel app.tsx listens on after any state change. */
@@ -115,6 +117,12 @@ export const FIRST_PLACEMENT_WAIT_MS = 5_000;
  * account; then it is refused (E44).
  */
 export const MAX_START_WAITS = 3;
+/**
+ * Sharing a moved project's sessions (see shareProjectSessions) is waited
+ * for this long at most: it runs in the project's queue and before a turn
+ * (Codex E46-001).
+ */
+export const SESSIONS_LIMIT_MS = 2_000;
 /** A login left waiting in the browser this long is given up. */
 export const LOGIN_TIMEOUT_MS = 10 * 60_000;
 /** An account directory name: one path segment, no leading dot. */
@@ -193,6 +201,8 @@ function notTheUsersThread(
 const windowSchema = z.object({
   usedPercent: z.number(),
   resetsAt: z.number().nullable(),
+  /** The provider reported no such window: a Team seat's general weekly. */
+  absent: z.literal(true).optional(),
 });
 const accountStateSchema = z.object({
   name: z.string(),
@@ -314,6 +324,11 @@ export interface PluginDeps {
   credentialIo: CredentialIo;
   accountsIo: AccountsIo;
   loginIo: LoginIo;
+  /**
+   * The filesystem a moved project's Claude Code sessions are shared on
+   * (see src/sessions.ts); none: they are not.
+   */
+  sessionsIo?: SessionsIo;
   /** Path of bin/open-login.sh, the BROWSER a login runs. */
   loginHelper: string;
   /** The plugin process's environment, inherited by a login. */
@@ -1128,6 +1143,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const value = (async () => {
       // The personal project too: a variable set there must be visible and releasable.
       const projects = await bb.sdk.projects.list({ includePersonal: true });
+      for (const p of projects) projectNames.set(p.id, p.name);
       return Promise.all(
         projects.map(async (p) => ({
           id: p.id,
@@ -1170,28 +1186,38 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * done: a read of the project's account that overlaps or crosses one says
    * nothing about where a turn started (Codex IR15-001).
    */
-  type MoveMark = { epoch: number; picks: number };
+  type MoveMark = { writes: number; picks: number };
   const moves = new Map<
     string,
-    { epoch: number; inFlight: number; picks: number }
+    { epoch: number; inFlight: number; picks: number; writes: number }
   >();
   function movesOf(projectId: string): {
     epoch: number;
     inFlight: number;
     /** Choices by hand (a pick, also one that confirms the account; a release): each outranks an automatic move still under way. */
     picks: number;
+    /**
+     * Writes of the project's account, counted as each starts and once it
+     * is over (landed or not): what decides whether a decision still holds
+     * (applyAccount) and whether a move's origin is known (noteMove). An
+     * attempt dropped before its write moves nothing here, so it never
+     * drops nor hides the one that replaced it (Codex E46-R3-001,
+     * E46-R4-002); `epoch`, which every attempt moves, only tells a read
+     * of the account that a move crossed it.
+     */
+    writes: number;
   } {
     let move = moves.get(projectId);
     if (move === undefined) {
-      move = { epoch: 0, inFlight: 0, picks: 0 };
+      move = { epoch: 0, inFlight: 0, picks: 0, writes: 0 };
       moves.set(projectId, move);
     }
     return move;
   }
   /** The project's moves and picks as they stand, for noteMove: taken BEFORE reading the project's account. */
   function moveMark(projectId: string): MoveMark {
-    const { epoch, picks } = movesOf(projectId);
-    return { epoch, picks };
+    const { writes, picks } = movesOf(projectId);
+    return { writes, picks };
   }
 
   /**
@@ -1216,7 +1242,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * and keeps it through later moves; a move for the preferred model is a
    * new home and forgets it. `before`: the project's moves and picks when
    * the caller captured them, BEFORE reading the project's account: the
-   * origin is noted only when exactly this move happened since (epoch + 2)
+   * origin is noted only when exactly this move's write happened since
+   * (writes + 2)
    * and nobody picked by hand meanwhile, so neither a stale read, a move
    * that crossed the write nor a pick that confirmed the account names a
    * wrong origin (Codex BM-R2-003, BM-R3-001, BM-INSPECT-004).
@@ -1235,7 +1262,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     if (excursions.has(projectId)) return;
     const move = movesOf(projectId);
-    if (move.epoch !== before.epoch + 2 || move.picks !== before.picks) {
+    if (move.writes !== before.writes + 2 || move.picks !== before.picks) {
       // Logged, not debug: the project's next turn in the preferred model
       // then stays where it is, and this line is why (code-reviewer r1).
       bb.log.info(
@@ -1266,12 +1293,29 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     });
   }
 
-  /** Point the project at `account` (null = default). Refuses an external variable. */
+  /**
+   * Point the project at `account` (null = default). Refuses an external
+   * variable. False when an automatic move is dropped: a write of the
+   * project's account or a pick by hand happened while its sessions were
+   * shared; nothing is written, and the caller records no move and acts on
+   * none (Codex E46-R2-001, E46-R4-001). A choice by hand (`byHand`: a
+   * pick, a release) always writes.
+   *
+   * `share: false` (placeTurn, the dispatcher's path): the sharing is
+   * started and not waited for, its failures logged, and the move is not
+   * looked at again (Fable, 2026-10-29). Every race of rounds r2 to r6
+   * came from waiting for the sessions there. With the projects/ directory
+   * shared by the accounts (the Mac already; Linux with E46) the sharing
+   * does nothing; and the moves that matter most to live threads (an
+   * account out: turn.failed, then judge; a pick; moveAhead; moveUpWait)
+   * run in the project's queue, one at a time, and wait for it.
+   */
   async function applyAccount(
     projectId: string,
     account: Account | null,
     from: ProjectAccount,
-  ): Promise<void> {
+    options: { byHand?: boolean; share?: boolean } = {},
+  ): Promise<boolean> {
     if (from.external) {
       throw new Error(
         `${ENV_VAR} on project ${projectId} was set outside this plugin; change it in the project's machine environment`,
@@ -1288,7 +1332,42 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       move.inFlight += 1;
       move.epoch += 1;
     }
+    let wrote = false;
     try {
+      // The sessions first, while the move is counted in flight: a turn of
+      // another thread of the project that reads the new account finds its
+      // session there (Codex E46-002). Links in the new account are
+      // harmless if the write below fails. Past SESSIONS_LIMIT_MS the
+      // variable is written anyway: a move without the sessions beats a
+      // queue hung on a filesystem or on bb (Fable, 2026-10-29); what is
+      // still under way only adds links.
+      if (move !== null && options.share === false)
+        void shareProjectSessions(projectId, account, toName, from.account);
+      else if (move !== null) {
+        const mark = { writes: move.writes, picks: move.picks };
+        const shared = await within(
+          shareProjectSessions(projectId, account, toName, from.account),
+          SESSIONS_LIMIT_MS,
+          `sessions of ${projectNames.get(projectId) ?? projectId} not shared into ${toName}`,
+        );
+        if (shared === "late")
+          bb.log.warn(
+            `sessions of ${projectNames.get(projectId) ?? projectId} not shared into ${toName} within ${SESSIONS_LIMIT_MS / 1000} s; the move goes on`,
+          );
+        if (
+          options.byHand !== true &&
+          (move.writes !== mark.writes || move.picks !== mark.picks)
+        ) {
+          bb.log.info(
+            `project ${projectId}: not moved to ${toName}: picked by hand or moved meanwhile`,
+          );
+          return false;
+        }
+      }
+      if (move !== null) {
+        move.writes += 1;
+        wrote = true;
+      }
       if (account === null || account.configDir === null) {
         // Default account = no variable. Only ours can be there (see above).
         if (from.owned) {
@@ -1309,6 +1388,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // Also after a failure: a delete may have landed before it.
       projectsRead = null;
       if (move !== null) {
+        if (wrote) move.writes += 1;
         move.inFlight -= 1;
         move.epoch += 1;
         // A banners' pass left the project unread for this move: it runs
@@ -1322,6 +1402,72 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (toName !== (from.account ?? current.defaultAccountName))
       accountChangedAt.set(projectId, deps.now());
     bb.realtime.publish(CHANGED, { at: deps.now() });
+    return true;
+  }
+
+  /** The projects named in the last list (logs only). */
+  const projectNames = new Map<string, string>();
+  /** Projects already logged as having a path of another machine. */
+  const elsewhereLogged = new Set<string>();
+  /**
+   * Links into the account the project moved to the Claude Code sessions
+   * it lacks of the project's paths on this machine, so a thread resumed
+   * there finds its conversation (src/sessions.ts). Never fails the move:
+   * whatever goes wrong is logged.
+   */
+  async function shareProjectSessions(
+    projectId: string,
+    account: Account | null,
+    toName: string,
+    fromName: string | null,
+  ): Promise<void> {
+    const io = deps.sessionsIo;
+    if (io === undefined) return;
+    const name = projectNames.get(projectId) ?? projectId;
+    const dirOf = (a: Account | null | undefined) =>
+      a?.configDir ?? `${deps.accountsIo.home}/.claude`;
+    try {
+      const target = dirOf(account);
+      const left = accounts.find(
+        (a) => a.name === (fromName ?? current.defaultAccountName),
+      );
+      // The account left first: it has the thread's latest session.
+      const sources = [
+        ...(left === undefined ? [] : [dirOf(left)]),
+        ...accounts.map(dirOf),
+      ];
+      const environments = await bb.sdk.environments.list({ projectId });
+      const paths = [
+        ...new Set(
+          environments.flatMap((e) =>
+            e.path === null || e.status === "destroyed" ? [] : [e.path],
+          ),
+        ),
+      ];
+      const elsewhere: string[] = [];
+      for (const projectPath of paths) {
+        const result = await shareSessions({ projectPath, target, sources, io });
+        if (result.skipped === "no-project-dir") elsewhere.push(projectPath);
+        if (result.linked > 0)
+          bb.log.info(
+            `sessions of ${name} shared into ${toName}: ${result.linked} linked (${projectPath})`,
+          );
+        if (result.errors.length > 0)
+          bb.log.warn(
+            `sessions of ${name} not all shared into ${toName}: ${result.errors.slice(0, 3).join("; ")}${result.errors.length > 3 ? ` (+${result.errors.length - 3} more)` : ""} (${projectPath})`,
+          );
+      }
+      if (elsewhere.length > 0 && !elsewhereLogged.has(projectId)) {
+        elsewhereLogged.add(projectId);
+        bb.log.info(
+          `sessions not shared for ${name}: path not on this machine (${elsewhere.join(", ")})`,
+        );
+      }
+    } catch (error) {
+      bb.log.warn(
+        `sessions of ${name} not shared into ${toName}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   /** How old a measurement may be to decide on: two refresh periods. */
@@ -1490,7 +1636,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         await discover();
         const from = await projectAccount(projectId);
         const to = choose(findAccount);
-        await applyAccount(projectId, to, from);
+        await applyAccount(projectId, to, from, { byHand: true });
         applied = true;
         // The pick is the user's: nothing to come back from, also when it
         // confirms the account the project is on; and it outranks an
@@ -2336,7 +2482,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       await markHandled(projectId);
       return;
     }
-    await applyAccount(projectId, accountOrDefault(decision.account), latest);
+    if (
+      !(await applyAccount(projectId, accountOrDefault(decision.account), latest))
+    ) {
+      bb.log.info(
+        `thread ${thread.id}: not placed (the project's account changed meanwhile)`,
+      );
+      await markHandled(projectId);
+      return;
+    }
     await markHandled(projectId);
     noteMove(
       projectId,
@@ -2516,7 +2670,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       now,
     });
     if (decision.kind === "keep") return;
-    await applyAccount(projectId, accountOrDefault(decision.account), from);
+    // Moved by something else while the sessions were shared: this
+    // decision, taken on the account before, no longer holds.
+    if (!(await applyAccount(projectId, accountOrDefault(decision.account), from)))
+      return;
     await markHandled(projectId);
     noteMove(projectId, fromName, decision.account, model, before);
     const reason = `Switched ahead of the limit to ${decision.account}: ${fromName} at ${Math.round(decision.used)}% of ${decision.window}`;
@@ -2804,7 +2961,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     if (turn.abandoned) return null;
     const to = accountOrDefault(decision.account);
-    await applyAccount(projectId, to, from);
+    // The sessions are not waited for: see applyAccount (Fable, 2026-10-29).
+    await applyAccount(projectId, to, from, { share: false });
     await markHandled(projectId);
     noteMove(projectId, fromName, decision.account, model, before);
     const reason =
@@ -3447,7 +3605,24 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // moving and before retrying (Codex r6, IR6-006).
     if (stuck && !current.autoSwitch) return;
     if (decision.account !== fromName) {
-      await applyAccount(projectId, accountOrDefault(decision.account), from);
+      if (
+        !(await applyAccount(projectId, accountOrDefault(decision.account), from))
+      ) {
+        // Moved by a placement before a turn while the sessions were shared:
+        // that move, decided later, stands. Nothing is recorded; the turn is
+        // retried at once where the project is now (it is judged again if
+        // it fails there).
+        bb.log.info(
+          `thread ${event.threadId}: ${how}not moved to ${decision.account} (the project's account changed meanwhile); retried where the project is now`,
+        );
+        await retryTurn(
+          event,
+          "Retrying: the project's account changed meanwhile",
+          undefined,
+          stuck,
+        );
+        return;
+      }
       noteMove(projectId, fromName, decision.account, model, before);
       await recordMove(
         {
@@ -3920,7 +4095,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
       return;
     }
-    await applyAccount(projectId, accountOrDefault(to), from);
+    // Moved by something else while the sessions were shared: the wait
+    // stays as it is, and fires on its own.
+    if (!(await applyAccount(projectId, accountOrDefault(to), from))) return;
     await markHandled(projectId);
     noteMove(projectId, fromName, to, model, before);
     const reason = `Moved to account ${to}, which can run the waiting turn now: ${fromName} ${noLogin ? "is not logged in" : whyOut(fromName, model)}`;
@@ -4059,27 +4236,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     description: "Emit machine-readable JSON",
   } as const;
   function textState(s: State): string {
-    const pct = (n: number) => `${Math.round(n)}%`;
-    const lines = s.accounts.map((a) => {
-      if (a.usage === null)
-        return `${a.name}\t${a.problem?.kind ?? "not observed"}`;
-      const models = Object.entries(a.usage.models)
-        .map(([m, w]) => `${m} ${pct(w.usedPercent)}`)
-        .join(" ");
-      // The pace of each window that has one: "weekly runs out in 2 d 5 h …".
-      const paces = Object.entries(s.forecasts[a.name] ?? {}).flatMap(
-        ([window, forecast]) => {
-          const line = forecastLine(forecast, deps.now());
-          return line === null ? [] : [`\t${window} ${line}`];
-        },
-      );
-      return `${a.name}\tsession ${pct(a.usage.session.usedPercent)}\tweekly ${pct(a.usage.weekly.usedPercent)}\t${models}${a.usage.blocked ? "\tLOCKED" : ""}${paces.join("")}`;
-    });
-    const projects = s.projects.map(
-      (p) =>
-        `${p.name}\t${p.external ? "(external CLAUDE_CONFIG_DIR)" : (p.account ?? `(${s.defaultAccountName})`)}`,
-    );
-    return [...lines, "", "projects:", ...projects].join("\n") + "\n";
+    return listText(s, deps.now());
   }
   bb.cli.register(
     defineCli({
@@ -4192,7 +4349,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
               } else if (p.owned) {
                 try {
                   await inProjectQueue(p.id, async () => {
-                    await applyAccount(p.id, null, await projectAccount(p.id));
+                    await applyAccount(p.id, null, await projectAccount(p.id), {
+                      byHand: true,
+                    });
                     recentSwitches.delete(p.id);
                     excursions.delete(p.id);
                     movesOf(p.id).picks += 1;
@@ -4235,6 +4394,7 @@ export default function plugin(bb: BbPluginApi) {
     credentialIo: nodeCredentialIo(),
     accountsIo: nodeAccountsIo(),
     loginIo: nodeLoginIo(),
+    sessionsIo: nodeSessionsIo(),
     loginHelper: loginHelperPath(import.meta.url),
     env: process.env,
     now: Date.now,

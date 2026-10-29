@@ -22,6 +22,7 @@ import {
 import type { AccountsIo } from "./src/accounts.js";
 import type { CredentialIo } from "./src/credentials.js";
 import type { LoginIo, LoginProcess } from "./src/login.js";
+import type { SessionsIo } from "./src/sessions.js";
 import {
   usageFetchMethod,
   usageListMethod,
@@ -357,6 +358,10 @@ interface HostOptions {
   env?: Record<string, string>;
   /** What the accounts directory holds, links and files included; default: dirs() as directories. */
   accountEntries?: () => { name: string; directory: boolean }[];
+  /** The filesystem the sessions of a moved project are shared on; none: not shared. */
+  sessionsIo?: SessionsIo;
+  /** What environments.list answers per project (its paths on every host). */
+  environments?: Record<string, { path: string | null; status?: string }[]>;
 }
 
 /** A machineEnvironment read held by a test: `reached` once the read waits on it, `release` to let it answer. */
@@ -606,6 +611,14 @@ async function host(
           },
         },
       },
+      environments: {
+        list: async ({ projectId }: { projectId: string }) =>
+          (options.environments?.[projectId] ?? []).map((e) => ({
+            projectId,
+            status: "ready",
+            ...e,
+          })),
+      },
       projects: {
         // Like bb: the personal project ("Don't work in a project") only on request.
         list: async (args?: { includePersonal?: boolean }) => [
@@ -685,6 +698,9 @@ async function host(
     env: options.env ?? { PATH: "/usr/bin" },
     now: options.clock ?? (() => NOW),
     random: () => 0,
+    ...(options.sessionsIo === undefined
+      ? {}
+      : { sessionsIo: options.sessionsIo }),
   });
   fake.bb.storage.kv.get = kvGet;
   return {
@@ -739,6 +755,28 @@ function sent(
 function ownNote(name: string) {
   return `Claude Code account "${name}" (set by the Claude Switcher plugin)`;
 }
+
+/** A filesystem where the project's one session, in main's directory, is linked into the target (`order` gets "link"; `link` may hold it). */
+function oneSessionIo(order: string[], link?: () => Promise<void>): SessionsIo {
+  const sessions = `${HOME}/.claude/projects/-home-someone-site`;
+  return {
+    exists: async (path) => path === "/home/someone/site",
+    realpath: async (path) => {
+      if (path.startsWith(`${ACCOUNTS}/spare`))
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      return path;
+    },
+    entries: async (dir) =>
+      dir === sessions ? [{ name: "s1.jsonl", directory: false }] : [],
+    mkdir: async () => {},
+    link: async () => {
+      order.push("link");
+      await link?.();
+    },
+    symlink: async () => {},
+  };
+}
+const SITE = { "proj-1": [{ path: "/home/someone/site" }] };
 
 let dispose: (() => void) | null = null;
 afterEach(() => {
@@ -3238,6 +3276,302 @@ describe("claude accounts plugin", () => {
     expect(twin.stderr ?? twin.stdout).toMatch(/proj-1, proj-2/);
   });
 
+  it("shares the project's sessions into the account it moves to, for each of its paths on this machine", async () => {
+    const made: string[] = [];
+    const project = "/home/someone/site";
+    const sessions = `${HOME}/.claude/projects/-home-someone-site`;
+    const io: SessionsIo = {
+      exists: async (path) => path === project,
+      realpath: async (path) => {
+        if (path === `${ACCOUNTS}/spare/projects`) throw new Error("ENOENT");
+        return path;
+      },
+      entries: async (dir) =>
+        dir === sessions ? [{ name: "s1.jsonl", directory: false }] : [],
+      mkdir: async (dir) => {
+        made.push(`mkdir ${dir}`);
+      },
+      link: async (existing, path) => {
+        made.push(`link ${existing} -> ${path}`);
+      },
+      symlink: async () => {},
+    };
+    const h = await host(ALL_FREE, {
+      sessionsIo: io,
+      environments: {
+        "proj-1": [
+          { path: project },
+          // A path of another machine (the Mac), and one bb tore down.
+          { path: "/Users/someone/elsewhere" },
+          { path: "/gone", status: "destroyed" },
+        ],
+      },
+    });
+    dispose = () => h.harness.dispose();
+    const ok = await h.harness.behavior.runCli(["use", "Website", "spare"]);
+    expect(ok.exitCode).toBe(0);
+    expect(made).toEqual([
+      `mkdir ${ACCOUNTS}/spare/projects/-home-someone-site`,
+      `link ${sessions}/s1.jsonl -> ${ACCOUNTS}/spare/projects/-home-someone-site/s1.jsonl`,
+    ]);
+    const infos = h.harness.logEntries
+      .filter((e) => e.level === "info")
+      .map((e) => e.message);
+    expect(infos).toContain(
+      `sessions of Website shared into spare: 1 linked (${project})`,
+    );
+    expect(
+      infos.filter((m) => m.includes("path not on this machine")),
+    ).toEqual(["sessions not shared for Website: path not on this machine (/Users/someone/elsewhere)"]);
+    // Said once per project, not on every move.
+    await h.harness.behavior.runCli(["use", "Website", "work"]);
+    expect(
+      h.harness.logEntries.filter((e) =>
+        e.message.includes("path not on this machine"),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("moves the project even when its sessions cannot be shared", async () => {
+    const broken = async () => {
+      throw new Error("EIO: the disk is gone");
+    };
+    const h = await host(ALL_FREE, {
+      sessionsIo: {
+        exists: broken,
+        realpath: broken,
+        entries: broken,
+        mkdir: broken,
+        link: broken,
+        symlink: broken,
+      },
+      environments: { "proj-1": [{ path: "/home/someone/site" }] },
+    });
+    dispose = () => h.harness.dispose();
+    const ok = await h.harness.behavior.runCli(["use", "Website", "spare"]);
+    expect(ok.exitCode).toBe(0);
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+    // And when bb cannot list the project's environments.
+    h.harness.sdk.stub("environments.list", broken);
+    const again = await h.harness.behavior.runCli(["use", "Website", "work"]);
+    expect(again.exitCode).toBe(0);
+    expect(h.envSet.map((e) => e.value)).toEqual([
+      `${ACCOUNTS}/spare`,
+      `${ACCOUNTS}/work`,
+    ]);
+    const warns = h.harness.logEntries
+      .filter((e) => e.level === "warn")
+      .map((e) => e.message);
+    expect(warns).toContain(
+      "sessions of Website not all shared into spare: EIO: the disk is gone (/home/someone/site)",
+    );
+    expect(warns).toContain(
+      "sessions of Website not shared into work: EIO: the disk is gone",
+    );
+  });
+
+
+  it("shares the sessions before it points the project at the new account", async () => {
+    const order: string[] = [];
+    const h = await host(ALL_FREE, {
+      sessionsIo: oneSessionIo(order),
+      environments: SITE,
+      beforeSet: async () => {
+        order.push("set");
+      },
+    });
+    dispose = () => h.harness.dispose();
+    expect((await h.harness.behavior.runCli(["use", "Website", "spare"])).exitCode).toBe(0);
+    // A turn of another thread that reads the new account finds its session.
+    expect(order).toEqual(["link", "set"]);
+  });
+
+  it.each([
+    ["bb's list of the project's environments", "environments"],
+    ["a link on the filesystem", "link"],
+  ])(
+    "gives up sharing after 2 s when %s never answers, and moves the project",
+    async (_, hung) => {
+      const order: string[] = [];
+      const never = () => new Promise<never>(() => {});
+      const h = await host(ALL_FREE, {
+        sessionsIo: oneSessionIo(order, hung === "link" ? never : undefined),
+        environments: SITE,
+      });
+      dispose = () => h.harness.dispose();
+      if (hung === "environments") h.harness.sdk.stub("environments.list", never);
+      vi.useFakeTimers();
+      try {
+        let done = false;
+        const answer = h.harness.behavior
+          .runCli(["use", "Website", "spare"])
+          .finally(() => {
+            done = true;
+          });
+        for (let ms = 0; ms < 1_900; ms += 100)
+          await vi.advanceTimersByTimeAsync(100);
+        // Still sharing just before the limit: the variable waits for it.
+        expect(done).toBe(false);
+        expect(h.envSet).toEqual([]);
+        for (let ms = 1_900; ms < 10_000 && !done; ms += 100)
+          await vi.advanceTimersByTimeAsync(100);
+        expect((await answer).exitCode).toBe(0);
+        expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+        expect(
+          h.harness.logEntries
+            .filter((e) => e.level === "warn")
+            .map((e) => e.message),
+        ).toContain(
+          "sessions of Website not shared into spare within 2 s; the move goes on",
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("records no switch for a failed turn when a placement before a turn moved the project while the sessions were shared, and retries it where the project is", async () => {
+    const order: string[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let links = 0;
+    const h = await host(ALL_FREE, {
+      // The switch's link waits; the placement's does not.
+      sessionsIo: oneSessionIo(order, () => (links++ === 0 ? held : Promise.resolve())),
+      environments: SITE,
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const failed = h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    await vi.waitFor(() => expect(order).toEqual(["link"]));
+    // Another thread's turn is placed meanwhile: main is out, it goes to work.
+    expect(
+      await h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id: "thread-2", projectId: "proj-1" }),
+          requestedExecution: { providerId: "claude-code", model: "claude-opus-5-5" },
+          attempt: "start-turn",
+        }),
+      ),
+    ).toEqual({ action: "proceed" });
+    release();
+    await failed;
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history.map((r) => [r.threadId, r.to])).toEqual([["thread-2", "work"]]);
+    expect(h.retries.map((r) => [r.threadId, r.reason])).toEqual([
+      ["thread-1", "Retrying: the project's account changed meanwhile"],
+    ]);
+  });
+
+  it("records no switch for a failed turn when the project is released by hand while the sessions are shared, and retries it where the project is", async () => {
+    const order: string[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const h = await host(ALL_FREE, {
+      sessionsIo: oneSessionIo(order, () => held),
+      environments: SITE,
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const failed = h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    await vi.waitFor(() => expect(order).toEqual(["link"]));
+    // On the default account with no variable: released at once, no write.
+    expect((await h.harness.behavior.runCli(["release"])).exitCode).toBe(0);
+    release();
+    await failed;
+    expect(h.envSet).toEqual([]);
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history).toEqual([]);
+    expect(h.retries.map((r) => [r.threadId, r.reason])).toEqual([
+      ["thread-1", "Retrying: the project's account changed meanwhile"],
+    ]);
+  });
+
+  it("writes a pick by hand even when a placement before a turn moved the project while its sessions were shared", async () => {
+    const order: string[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let links = 0;
+    const h = await host(ALL_FREE, {
+      // The pick's link waits; the placement's does not.
+      sessionsIo: oneSessionIo(order, () => (links++ === 0 ? held : Promise.resolve())),
+      environments: SITE,
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const picked = h.harness.behavior.runCli(["use", "Website", "spare"]);
+    await vi.waitFor(() => expect(order).toEqual(["link"]));
+    expect(
+      await h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id: "thread-2", projectId: "proj-1" }),
+          requestedExecution: { providerId: "claude-code", model: "claude-opus-5-5" },
+          attempt: "start-turn",
+        }),
+      ),
+    ).toEqual({ action: "proceed" });
+    release();
+    expect((await picked).exitCode).toBe(0);
+    // The user's choice is the last word.
+    expect(h.envSet.map((e) => e.value)).toEqual([
+      `${ACCOUNTS}/work`,
+      `${ACCOUNTS}/spare`,
+    ]);
+  });
+
+  it("does not place a new thread's project when a placement before a turn moved it while the sessions were shared", async () => {
+    const order: string[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let links = 0;
+    const h = await host(ALL_FREE, {
+      // The thread's placement's link waits; the turn's does not.
+      sessionsIo: oneSessionIo(order, () => (links++ === 0 ? held : Promise.resolve())),
+      environments: SITE,
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // The turn of thread-2 reads the project's account slowly.
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    let reads = 0;
+    h.harness.sdk.stub(
+      "projects.machineEnvironment",
+      async ({ projectId }: { projectId: string }) => {
+        const snapshot = {
+          builtInGit: { status: "disabled" as const, statusMessage: "" },
+          inheritedVariables: [],
+          variables: h.env.get(projectId) ?? [],
+        };
+        if (reads++ === 0) await gate;
+        return snapshot;
+      },
+    );
+    const turn = h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: "thread-2", projectId: "proj-1" }),
+        requestedExecution: { providerId: "claude-code", model: "claude-opus-5-5" },
+        attempt: "start-turn",
+      }),
+    );
+    await vi.waitFor(() => expect(reads).toBe(1));
+    // main is out: the project moves off it as thread-1 is announced...
+    const created = h.harness.behavior.emitThreadEvent("thread.created", {
+      thread: thread({ id: "thread-1", projectId: "proj-1" }),
+    });
+    await vi.waitFor(() => expect(order).toEqual(["link"]));
+    // ...while thread-2's turn, read before, is placed and written.
+    open();
+    expect(await turn).toEqual({ action: "proceed" });
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    release();
+    await created;
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history.map((r) => r.threadId)).toEqual(["thread-2"]);
+  });
+
   it("treats a subdirectory named \"default\" as an account when the default account has another name", async () => {
     const h = await host(
       { ...ALL_FREE, default: () => Response.json(payload(1, 1)) },
@@ -5236,30 +5570,52 @@ describe("the history of moves", () => {
     ).toEqual(["spare", "work"]);
   });
 
-  it("shows in `list` the pace of a weekly window that has one", async () => {
+  it("keeps the pace of a weekly window in `list --json` and out of the text, which has no weekly for a Team seat", async () => {
     let clock = NOW;
     let weekly = 40;
+    // A Team seat: session and Fable, seven_day null (measured 2026-10-11).
+    const team = () => {
+      const p = payload(5, 0, 30);
+      return Response.json({
+        ...p,
+        limits: (p.limits as { kind: string }[]).filter(
+          (l) => l.kind !== "weekly_all",
+        ),
+        seven_day: null,
+      });
+    };
     const h = await host(
       {
         main: () => Response.json(payload(10, weekly, 20)),
         spare: () => Response.json(payload(10, 60)),
-        work: () => Response.json(payload(5, 20)),
+        work: team,
       },
-      { clock: () => clock },
+      { clock: () => clock, settings: { preferredModel: "Fable" } },
     );
     dispose = () => h.harness.dispose();
     await h.harness.behavior.callRpc("accounts_refresh", null);
     clock = NOW + 24 * HOUR;
     weekly = 70;
     await h.harness.behavior.callRpc("accounts_refresh", null);
-    const lines = (await h.harness.behavior.runCli(["list"])).stdout.split("\n");
-    expect(lines.find((l) => l.startsWith("main\t"))).toBe(
-      "main\tsession 10%\tweekly 70%\tFable 20%\tweekly runs out in 1 d 0 h at this pace (30 %/day)",
+    const text = (await h.harness.behavior.runCli(["list"])).stdout;
+    const lines = text.split("\n");
+    // A day later: the session and Fable windows have reset since.
+    expect(lines.find((l) => l.startsWith("main "))).toBe(
+      "main   ses   0% sem  70% Fable   0%",
     );
-    // A steady window says nothing.
-    expect(lines.find((l) => l.startsWith("work\t"))).toBe(
-      "work\tsession 5%\tweekly 20%\t",
+    expect(lines.find((l) => l.startsWith("work "))).toBe(
+      "work   ses   0%          Fable   0%",
     );
+    expect(text).not.toMatch(/runs out/);
+    const json = JSON.parse(
+      (await h.harness.behavior.runCli(["list", "--json"])).stdout,
+    ) as State;
+    expect(json.forecasts.main?.weekly).toMatchObject({ kind: "runs-out" });
+    expect(json.accounts.find((a) => a.name === "work")?.usage?.weekly).toEqual({
+      usedPercent: 0,
+      resetsAt: null,
+      absent: true,
+    });
   });
 });
 
@@ -5450,6 +5806,55 @@ describe("moving a project ahead of the limit for a thread in another model", ()
       to: "work",
       reason: "Switched ahead of the limit to work: main at 95% of session",
     });
+  });
+
+  it("writes nothing ahead of the limit when a placement before a turn moved the project while the sessions were shared", async () => {
+    let clock = NOW;
+    const order: string[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let links = 0;
+    const h = await host(
+      {
+        // main: nearly out of session, and out of Fable; work: room, but no
+        // Fable either; spare: a Max account with Fable.
+        main: () => Response.json(teamPayload(95, 100)),
+        work: () => Response.json(teamPayload(17, 100)),
+        spare: () => Response.json(payload(10, 10, 2)),
+      },
+      {
+        settings: { preferredModel: "Fable", switchAheadPercent: 0, switchAheadOtherPercent: 95 },
+        clock: () => clock,
+        // The move ahead's link waits; the placement's does not.
+        sessionsIo: oneSessionIo(order, () => (links++ === 0 ? held : Promise.resolve())),
+        environments: SITE,
+      },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + 5 * 60_000;
+    expect(await sent(h, "claude-opus-5-5")).toEqual({ action: "proceed" });
+    // The Opus turn ends: main at 95% moves ahead to work, held in its sharing.
+    const ahead = idle(h);
+    await vi.waitFor(() => expect(order).toEqual(["link"]));
+    // Meanwhile a Fable turn of the project is placed on spare.
+    expect(
+      await h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id: "thread-2", projectId: "proj-1" }),
+          requestedExecution: { providerId: "claude-code", model: "claude-fable-5-1" },
+          attempt: "start-turn",
+        }),
+      ),
+    ).toEqual({ action: "proceed" });
+    expect(h.envSet.map((e) => e.note)).toEqual([ownNote("spare")]);
+    release();
+    await ahead;
+    // The move ahead, decided on main, is dropped: the project stays on spare.
+    expect(h.envSet.map((e) => e.note)).toEqual([ownNote("spare")]);
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history.map((r) => r.to)).toEqual(["spare"]);
+    expect(state.projects.find((p) => p.id === "proj-1")?.account).toBe("spare");
   });
 
   it("leaves a Fable thread alone when switchAheadPercent is 0, whatever switchAheadOtherPercent says", async () => {
@@ -6612,6 +7017,30 @@ describe("the model a thread's turn runs on", () => {
       await vi.advanceTimersByTimeAsync(3_000);
       expect(reads).toBe(1);
       expect(h.envSet).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("places a turn without waiting for its sessions: the project is moved and the message goes while they are still being linked (Fable, 2026-10-29)", async () => {
+    const order: string[] = [];
+    const h = await host(OPUS_ELSEWHERE, {
+      ...FABLE,
+      sessionsIo: oneSessionIo(order, () => new Promise<never>(() => {})),
+      environments: SITE,
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    vi.useFakeTimers();
+    try {
+      let answered: unknown = null;
+      void dispatch(h, "claude-opus-5-5").then((a) => (answered = a));
+      await vi.advanceTimersByTimeAsync(100);
+      // Well before SESSIONS_LIMIT_MS: nothing waited for the link.
+      expect(answered).toEqual({ action: "proceed" });
+      expect(h.envSet.map((e) => e.note)).toEqual([ownNote("work")]);
+      // The sharing was started all the same.
+      expect(order).toEqual(["link"]);
     } finally {
       vi.useRealTimers();
     }
@@ -10123,6 +10552,41 @@ describe("an Opus turn never retried, released or placed on a Max account that k
       await h.harness.behavior.callRpc("accounts_refresh", null);
       expect(await dispatch(h, "thread-2", FABLE_ID)).toEqual({ action: "proceed" });
       expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-1"]);
+    });
+
+    it("leaves the waiting turn queued when a placement before a turn moved the project while the refresh shared its sessions", async () => {
+      const order: string[] = [];
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      let links = 0;
+      const h = await host(
+        {
+          main: () => Response.json(payload(100, 40, 20)),
+          work: () => Response.json(teamPayload(5, 42)),
+          spare: () => Response.json(payload(10, 10, 5)),
+        },
+        {
+          ...FABLE,
+          queued: [waitingOpus("main")],
+          ...WAITING_OPUS,
+          // The refresh's link waits; the placement's does not.
+          sessionsIo: oneSessionIo(order, () => (links++ === 0 ? held : Promise.resolve())),
+          environments: SITE,
+        },
+      );
+      dispose = () => h.harness.dispose();
+      const pass = onePass(h);
+      await vi.waitFor(() => expect(order).toEqual(["link"]));
+      expect(await dispatch(h, "thread-2", OPUS_ID)).toEqual({ action: "proceed" });
+      expect(notes(h)).toEqual([ownNote("work")]);
+      release();
+      await pass;
+      // One write, the placement's; the wait is not released by a move that did not happen.
+      expect(notes(h)).toEqual([ownNote("work")]);
+      expect(h.retries).toEqual([]);
+      expect(h.deleted).toEqual([]);
+      const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+      expect(state.history.map((r) => r.threadId)).toEqual(["thread-2"]);
     });
 
     it("never released on the Max account a Fable turn brought the project back to: moved to the seat and retried there", async () => {

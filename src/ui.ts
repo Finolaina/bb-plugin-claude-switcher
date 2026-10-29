@@ -297,3 +297,238 @@ export function picksOnSelect(
 ): boolean {
   return newThread || clicked !== shown;
 }
+
+type ListWindow = Window & { absent?: true };
+interface UsageLike {
+  blocked: boolean;
+  session: ListWindow;
+  weekly: ListWindow;
+  models: Record<string, ListWindow>;
+}
+
+/** What an account's compact line shows (the CLI's list, the panel's cards). */
+export interface AccountSummary {
+  session: number;
+  /** null on a Team seat: it has no general weekly (absent). */
+  weekly: number | null;
+  /** The preferred model's window, when the account has one. */
+  model: { name: string; percent: number } | null;
+  /**
+   * The account has a window at 100 %: until when (the latest reset of
+   * those, when it can run again), or null when the provider gave none.
+   * Undefined: no window is full.
+   */
+  outUntil?: number | null;
+}
+
+/** A share as a whole number; never "100" for a window that still has a little room. */
+function shownPercent(window: Window, now: number): number {
+  const used = windowPercent(window, now);
+  return used < 100 ? Math.min(99, Math.round(used)) : Math.round(used);
+}
+
+export function accountSummary(
+  usage: UsageLike,
+  preferredModel: string,
+  now: number,
+): AccountSummary {
+  const model = Object.entries(usage.models).find(
+    ([name]) =>
+      preferredModel !== "" &&
+      name.toLowerCase() === preferredModel.toLowerCase(),
+  );
+  const team = usage.weekly.absent === true;
+  const windows = [
+    usage.session,
+    ...(team ? [] : [usage.weekly]),
+    ...(model === undefined ? [] : [model[1]]),
+  ];
+  const full = windows.filter((w) => windowPercent(w, now) >= 100);
+  const summary: AccountSummary = {
+    session: shownPercent(usage.session, now),
+    weekly: team ? null : shownPercent(usage.weekly, now),
+    model:
+      model === undefined
+        ? null
+        : { name: model[0], percent: shownPercent(model[1], now) },
+  };
+  if (full.length > 0)
+    summary.outUntil = full.some((w) => w.resetsAt === null)
+      ? null
+      : Math.max(...full.map((w) => w.resetsAt!));
+  return summary;
+}
+
+/** "agotada hasta 14:00" within a day, "agotada hasta 03/11" beyond (local time, or `timeZone`). */
+export function outText(
+  until: number | null,
+  now: number,
+  timeZone?: string,
+): string {
+  if (until === null) return "agotada";
+  const options: Intl.DateTimeFormatOptions =
+    until - now < 24 * 3_600_000
+      ? { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }
+      : { day: "2-digit", month: "2-digit" };
+  return `agotada hasta ${new Intl.DateTimeFormat("en-GB", { ...options, timeZone }).format(until)}`;
+}
+
+interface ListInput {
+  defaultAccountName: string;
+  preferredModel: string;
+  accounts: ReadonlyArray<{
+    name: string;
+    problem: { kind: "unauthenticated" } | { kind: "error"; message: string } | null;
+    usage: UsageLike | null;
+  }>;
+  projects: ReadonlyArray<{
+    name: string;
+    account: string | null;
+    owned: boolean;
+    external: boolean;
+  }>;
+}
+
+/** The heading of the projects set outside this plugin, in the list and the panel. */
+export const EXTERNAL_GROUP = "(external CLAUDE_CONFIG_DIR)";
+/** The heading of the projects whose variable names an account that is gone. */
+export const GONE_GROUP = "(account no longer exists)";
+
+/**
+ * The projects by the account they run on, in the accounts' order, each
+ * group sorted by name; then the external ones and those of a vanished
+ * account. Accounts without a project are left out.
+ */
+export function projectsByAccount<
+  P extends { name: string; account: string | null; owned: boolean; external: boolean },
+>(
+  state: {
+    defaultAccountName: string;
+    accounts: ReadonlyArray<{ name: string }>;
+    projects: ReadonlyArray<P>;
+  },
+): { heading: string; account: string | null; projects: P[] }[] {
+  const groupOf = (p: P) =>
+    p.external
+      ? EXTERNAL_GROUP
+      : p.owned && p.account === null
+        ? GONE_GROUP
+        : (p.account ?? state.defaultAccountName);
+  const headings = [
+    ...state.accounts.map((a) => a.name),
+    ...new Set(state.projects.map(groupOf)),
+  ];
+  const order = [
+    ...new Set([
+      ...headings.filter((h) => h !== EXTERNAL_GROUP && h !== GONE_GROUP),
+      EXTERNAL_GROUP,
+      GONE_GROUP,
+    ]),
+  ];
+  return order.flatMap((heading) => {
+    const projects = state.projects
+      .filter((p) => groupOf(p) === heading)
+      .sort((a, b) => a.name.localeCompare(b.name));
+    if (projects.length === 0) return [];
+    const account =
+      heading === EXTERNAL_GROUP || heading === GONE_GROUP ? null : heading;
+    return [{ heading, account, projects }];
+  });
+}
+
+/** Longest an account's name is shown in the list. */
+const LIST_NAME = 10;
+/** Longest an account's line in the list is. */
+const LIST_LINE = 60;
+
+/**
+ * `bb claude-switcher list` as text: one aligned line per account of at
+ * most 60 characters (`ses`, `sem` but on a Team seat, the preferred
+ * model, `agotada hasta …` when a window is full, LOCKED), then the
+ * projects by account. The pace of each window is in `--json` only.
+ */
+export function listText(state: ListInput, now: number, timeZone?: string): string {
+  const width = Math.min(
+    LIST_NAME,
+    Math.max(0, ...state.accounts.map((a) => a.name.length)),
+  );
+  const pct = (n: number) => `${n}%`.padStart(4);
+  const model = state.preferredModel.slice(0, 5);
+  const lines = state.accounts.map((a) => {
+    const name = a.name.slice(0, LIST_NAME).padEnd(width);
+    let rest: string;
+    if (a.usage === null) {
+      rest =
+        a.problem?.kind === "unauthenticated"
+          ? "not logged in"
+          : a.problem?.kind === "error"
+            ? `query failed: ${a.problem.message}`
+            : "not observed";
+    } else {
+      const s = accountSummary(a.usage, state.preferredModel, now);
+      const blank = (text: string) => " ".repeat(text.length);
+      const sem = `sem ${pct(s.weekly ?? 0)}`;
+      const fable = `${model} ${pct(s.model?.percent ?? 0)}`;
+      // Each column on its own: a locked account can have full windows too
+      // (Codex E46-R5-002). Dropped while the line is too long, least
+      // needed first: sem, LOCKED, agotada hasta, the model.
+      const columns = [
+        { keep: 5, text: `ses ${pct(s.session)}` },
+        { keep: 0, text: s.weekly === null ? blank(sem) : sem },
+        ...(model === ""
+          ? []
+          : [{ keep: 4, text: s.model === null ? blank(fable) : fable }]),
+        {
+          keep: 3,
+          text:
+            s.outUntil === undefined ? "" : outText(s.outUntil, now, timeZone),
+        },
+        { keep: 2, text: a.usage.blocked ? "LOCKED" : "" },
+      ].filter((c) => c.text !== "");
+      const join = () => columns.map((c) => c.text).join(" ").trimEnd();
+      while (`${name}  ${join()}`.trimEnd().length > LIST_LINE) {
+        const least = columns.reduce((a, b) => (b.keep < a.keep ? b : a));
+        if (least.keep === 5) break;
+        columns.splice(columns.indexOf(least), 1);
+      }
+      rest = join();
+    }
+    const line = `${name}  ${rest}`.trimEnd();
+    return line.length <= LIST_LINE ? line : `${line.slice(0, LIST_LINE - 1)}…`;
+  });
+  const projects = projectsByAccount(state).map(
+    (g) => `${g.heading}: ${g.projects.map((p) => p.name).join(" · ")}`,
+  );
+  return [...lines, "", "projects:", ...projects].join("\n") + "\n";
+}
+
+/**
+ * The windows an account's card draws, in order: session, the general
+ * weekly (none on a Team seat: it has no such limit) and each model's.
+ * `short` is the card's text ("ses 10% · sem 40% · Fable 20%").
+ */
+export function accountWindows<W extends ListWindow>(usage: {
+  session: W;
+  weekly: W;
+  models: Record<string, W>;
+}): { key: string; label: string; short: string; window: W }[] {
+  return [
+    { key: "session", label: "Session (5 h)", short: "ses", window: usage.session },
+    ...(usage.weekly.absent === true
+      ? []
+      : [
+          {
+            key: "weekly",
+            label: "Weekly (all models)",
+            short: "sem",
+            window: usage.weekly,
+          },
+        ]),
+    ...Object.entries(usage.models).map(([model, window]) => ({
+      key: model,
+      label: `Weekly · ${model}`,
+      short: model,
+      window,
+    })),
+  ];
+}

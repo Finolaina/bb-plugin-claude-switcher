@@ -2,11 +2,14 @@
 // pure modules take. Everything a test wants to fake lives behind these.
 import { execFile, spawn } from "node:child_process";
 import {
+  link,
   lstat,
   mkdir,
   readFile,
   readdir,
+  realpath,
   rename,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -15,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import type { AccountsIo } from "./accounts.js";
 import type { CredentialIo } from "./credentials.js";
 import type { LoginIo } from "./login.js";
+import type { SessionsIo } from "./sessions.js";
 
 const SECURITY = "/usr/bin/security";
 /** A keychain prompt or a hung agent must not block the plugin forever. */
@@ -154,6 +158,48 @@ export function nodeLoginIo(): LoginIo {
         throw error;
       }
     },
+  };
+}
+
+export function nodeSessionsIo(): SessionsIo {
+  return {
+    exists: async (path) => {
+      try {
+        await lstat(path);
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+        throw error;
+      }
+    },
+    realpath: (path) => realpath(path),
+    entries: async (dir) => {
+      let found;
+      try {
+        found = await readdir(dir, { withFileTypes: true });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+        throw error;
+      }
+      return Promise.all(
+        found.map(async (e) => ({
+          name: e.name,
+          // A session folder linked in by an earlier move is a directory too.
+          directory: e.isSymbolicLink()
+            ? await stat(`${dir}/${e.name}`).then(
+                (s) => s.isDirectory(),
+                () => false,
+              )
+            : e.isDirectory(),
+        })),
+      );
+    },
+    mkdir: async (dir) => {
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+    },
+    // Neither goes over a file that is there (EEXIST instead).
+    link: (existing, path) => link(existing, path),
+    symlink: (target, path) => symlink(target, path),
   };
 }
 
