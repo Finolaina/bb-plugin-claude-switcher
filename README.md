@@ -346,7 +346,14 @@ flowchart TD
   «Not logged in». Before such a turn, a project left on it moves to the
   best account that can run the turn, even one that keeps its weekly for
   the preferred model (`Moved to account <name> before the turn: <old> is
-  not logged in`). When no account can, bb refuses the message with
+  not logged in`), whatever model the message is sent with (one bb does
+  not name as a Claude model is placed for the preferred one). While
+  something that could give the project an account is under way or has
+  failed (its placement, the write of its account, the first measure of
+  the accounts after the plugin loads), the message waits, up to three
+  times 5 s (`Looking for a Claude account with a login for this
+  project`), and goes as soon as that ends. When no account can, bb
+  refuses the message with
   `Claude Switcher: no account assigned to this project and the default
   account (<name>) has no login. Assign one with: bb claude-switcher use
   <project id> <account>`, and nothing runs. A project with an account of

@@ -22,6 +22,7 @@ import {
   defineCli,
   defineRpcContract,
   type BbPluginApi,
+  type MessageDispatchHookDecision,
   type PluginThreadEventPayloads,
   type PluginTurnFailedEvent,
 } from "@get-bb/plugin-sdk";
@@ -108,6 +109,12 @@ export const DISPATCH_LIMIT_MS = 3_000;
  * first): bb asks again sooner, as soon as the placement ends (E44).
  */
 export const FIRST_PLACEMENT_WAIT_MS = 5_000;
+/**
+ * A message that would start on a default account without a login waits
+ * at most this many times for something that could give its project an
+ * account; then it is refused (E44).
+ */
+export const MAX_START_WAITS = 3;
 /** A login left waiting in the browser this long is given up. */
 export const LOGIN_TIMEOUT_MS = 10 * 60_000;
 /** An account directory name: one path segment, no leading dot. */
@@ -139,6 +146,8 @@ const KV_SERIES = "usage-series";
 const HISTORY_LIMIT = 100;
 /** A thread as bb reports it (the SDK does not export the type by name). */
 type ThreadResponse = PluginThreadEventPayloads["thread.created"]["thread"];
+/** Where a turn runs, as placeTurn leaves it (see there). */
+type TurnPlace = { account: string; byDefault: boolean } | "external";
 /** A queued row bb removed, as `message.cancelled` reports it. */
 type CancelledEntry = PluginThreadEventPayloads["message.cancelled"]["entry"];
 /** When this plugin first ran: a project created later is new. */
@@ -2736,20 +2745,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * every account is out of the preferred one. `turn.abandoned` is set when
    * the checkpoint stopped waiting: nothing is moved after that.
    * Resolves to the account the turn runs on (`byDefault`: no variable, the
-   * machine's own `~/.claude`), or null when that is not this plugin's to
-   * say (an external variable) or the checkpoint stopped waiting.
+   * machine's own `~/.claude`), "external" for a variable not set by this
+   * plugin, or null when the checkpoint stopped waiting.
    */
   async function placeTurn(
     thread: ThreadResponse,
     model: string,
     turn: { abandoned: boolean },
-  ): Promise<{ account: string; byDefault: boolean } | null> {
+  ): Promise<TurnPlace | null> {
     const projectId = thread.projectId;
     // Emptied by a change of the accounts directory, until the next look.
     if (accounts.length === 0) await discover();
     const before = moveMark(projectId);
     const from = await projectAccount(projectId);
-    if (from.external) return null;
+    if (from.external) return "external";
     const fromName = from.account ?? current.defaultAccountName;
     const now = deps.now();
     const excursion = excursions.get(projectId);
@@ -2796,13 +2805,170 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   // attempt when a handler throws or takes 10 s: it decides on the
   // measurements already there and stays out of the project's queue (a
   // retry sent from that queue passes through here). A placement that has
-  // not finished after DISPATCH_LIMIT_MS is given up, but a new project's
-  // first one: its first message waits for it, once. The message goes on,
-  // unless the turn would run on a default account without a login and no
-  // other account can take it: then it is refused with the command that
-  // fixes it (E44).
-  /** Threads whose first message already waited once for its project's placement. */
-  const waitedForPlacement = new Set<string>();
+  // not finished after DISPATCH_LIMIT_MS is given up. Two exceptions
+  // (E44): a new project's first placement, which its message waits for;
+  // and a turn that would start on a default account without a login,
+  // which waits while anything that could give the project an account is
+  // under way or failed (a placement, a write, a measure of the accounts),
+  // and is refused, with the command that fixes it, when nothing can.
+  /** Waits asked per thread before its turn could start (see MAX_START_WAITS). */
+  const startWaits = new Map<string, number>();
+  /** A measure of every account started for a waiting turn, shared while it runs. */
+  let measuring: Promise<void> | null = null;
+  function measureForStart(): Promise<void> {
+    measuring ??= refreshAll().finally(() => {
+      measuring = null;
+    });
+    return measuring;
+  }
+  /**
+   * The thread's message waits until FIRST_PLACEMENT_WAIT_MS from now, and
+   * bb is asked again as soon as `pending` ends, when there is one. Null
+   * once the thread has waited MAX_START_WAITS times.
+   */
+  function startWait(
+    threadId: string,
+    pending: Promise<unknown> | null,
+    reason: string,
+  ): MessageDispatchHookDecision | null {
+    const waited = startWaits.get(threadId) ?? 0;
+    if (waited >= MAX_START_WAITS) return null;
+    startWaits.set(threadId, waited + 1);
+    if (pending !== null)
+      void pending
+        .then(
+          () => undefined,
+          () => undefined,
+        )
+        .then(() => bb.experimental_hooks.recheck("message.dispatch"))
+        .catch((error: unknown) =>
+          bb.log.warn(
+            `thread ${threadId}: bb not asked again after what its message waits for: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        );
+    bb.log.info(`thread ${threadId}: its message waits (${reason})`);
+    return {
+      action: "wait",
+      reason,
+      sendAt: deps.now() + FIRST_PLACEMENT_WAIT_MS,
+    };
+  }
+  /** `work` within `ms`: its value, "late" (after `onLate`), or "failed" (logged as `what`). */
+  async function within<T>(
+    work: Promise<T>,
+    ms: number,
+    what: string,
+    onLate?: () => void,
+  ): Promise<{ value: T } | "late" | "failed"> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        work.then((value) => ({ value })),
+        new Promise<"late">((resolve) => {
+          timer = setTimeout(() => {
+            onLate?.();
+            resolve("late");
+          }, ms);
+        }),
+      ]);
+    } catch (error) {
+      bb.log.warn(
+        `${what}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return "failed";
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Before a turn starts, with the automatic choice on: what bb should do
+   * with the message; null = send it.
+   */
+  async function beforeStart(
+    thread: ThreadResponse,
+    model: string | null,
+  ): Promise<MessageDispatchHookDecision | null> {
+    const first = placeNewProject(thread);
+    const placed = await within(
+      first,
+      DISPATCH_LIMIT_MS,
+      `thread ${thread.id}: its new project not placed before its first turn`,
+    );
+    if (placed === "late") {
+      const wait = startWait(
+        thread.id,
+        first,
+        "Choosing a Claude account for this new project",
+      );
+      if (wait !== null) return wait;
+    }
+    // A message whose model bb does not name as a Claude model is placed
+    // for the preferred one when the default has no login: it must run
+    // somewhere else whatever its model (Astra E44-R1).
+    const turnModel =
+      model ??
+      (loggedOut(current.defaultAccountName) ? current.preferredModel : null);
+    const turn = { abandoned: false };
+    const turnPlaced =
+      turnModel === null
+        ? null
+        : within(
+            placeTurn(thread, turnModel, turn),
+            DISPATCH_LIMIT_MS,
+            `thread ${thread.id}: not placed before its turn`,
+            () => {
+              turn.abandoned = true;
+            },
+          );
+    // Never measured (the plugin has just loaded): the default's login is
+    // looked at meanwhile, within the same time, so no turn is sent where
+    // it has none (Astra E44-R3); found missing, the placement above may not
+    // have known it: the message waits below and is placed again. With no
+    // login no network is asked: the look is local.
+    if (collector.get(current.defaultAccountName) === undefined)
+      await within(
+        (async () => {
+          if (accounts.length === 0) await discover();
+          const own = accounts.find(
+            (a) => a.name === current.defaultAccountName,
+          );
+          if (own !== undefined && collector.get(own.name) === undefined)
+            await collector.collect(own);
+        })(),
+        DISPATCH_LIMIT_MS,
+        `thread ${thread.id}: the default account's login not looked at`,
+      );
+    const done = turnPlaced === null ? null : await turnPlaced;
+    const where: TurnPlace | null =
+      typeof done === "object" && done !== null ? done.value : null;
+    if (!loggedOut(current.defaultAccountName)) return null;
+    if (where === "external" || (where !== null && !where.byDefault))
+      return null;
+    // On the default account without a login, or not known where (a write
+    // or a read failed or took too long: Astra E44-R2). What is under way
+    // and could give the project an account is waited for; failed, it is
+    // tried again on the next attempt.
+    const pending =
+      placing.get(thread.projectId) ??
+      (unreadAccounts().length > 0 ? measureForStart() : null);
+    if (pending !== null || where === null) {
+      const wait = startWait(
+        thread.id,
+        pending,
+        "Looking for a Claude account with a login for this project",
+      );
+      if (wait !== null) return wait;
+    }
+    bb.log.warn(
+      `thread ${thread.id}: refused: no account for project ${thread.projectId} and ${current.defaultAccountName} has no login`,
+    );
+    return {
+      action: "reject",
+      message: `Claude Switcher: no account assigned to this project and the default account (${current.defaultAccountName}) has no login. Assign one with: bb claude-switcher use ${thread.projectId} <account>`,
+    };
+  }
+
   bb.experimental_hooks.on("message.dispatch", async (ctx) => {
     const { thread } = ctx;
     if (
@@ -2815,91 +2981,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const model = modelFamily(ctx.requestedExecution.model);
     if (model !== null) threadModel.set(thread.id, model);
     if (current.autoSwitch && ctx.attempt === "start-turn") {
-      const first = placeNewProject(thread);
-      let late = false;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        await Promise.race([
-          first,
-          new Promise<void>((resolve) => {
-            timer = setTimeout(() => {
-              late = true;
-              resolve();
-            }, DISPATCH_LIMIT_MS);
-          }),
-        ]);
-      } catch (error) {
-        bb.log.warn(
-          `thread ${thread.id}: its new project not placed before its first turn: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      } finally {
-        clearTimeout(timer);
-      }
-      if (late && !waitedForPlacement.has(thread.id)) {
-        waitedForPlacement.add(thread.id);
-        // bb asks again as soon as the placement ends, at sendAt at the latest.
-        void first
-          .then(
-            () => undefined,
-            () => undefined,
-          )
-          .then(() => bb.experimental_hooks.recheck("message.dispatch"))
-          .catch((error: unknown) =>
-            bb.log.warn(
-              `thread ${thread.id}: bb not asked again after its project's placement: ${error instanceof Error ? error.message : String(error)}`,
-            ),
-          );
-        bb.log.info(
-          `thread ${thread.id}: its first message waits for the new project's placement`,
-        );
-        return {
-          action: "wait",
-          reason: "Choosing a Claude account for this new project",
-          sendAt: deps.now() + FIRST_PLACEMENT_WAIT_MS,
-        };
-      }
-      waitedForPlacement.delete(thread.id);
-    }
-    let runsOn: { account: string; byDefault: boolean } | null = null;
-    if (model !== null && current.autoSwitch && ctx.attempt === "start-turn") {
-      const turn = { abandoned: false };
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        runsOn = await Promise.race([
-          placeTurn(thread, model, turn),
-          new Promise<null>((resolve) => {
-            timer = setTimeout(() => {
-              turn.abandoned = true;
-              resolve(null);
-            }, DISPATCH_LIMIT_MS);
-          }),
-        ]);
-      } catch (error) {
-        bb.log.warn(
-          `thread ${thread.id}: not placed before its turn: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      } finally {
-        clearTimeout(timer);
-      }
+      const decision = await beforeStart(thread, model);
+      if (decision !== null) return decision;
+      startWaits.delete(thread.id);
     }
     // Where the project stands as the turn is sent, for `thread.active`.
     dispatchEpoch.set(thread.id, movesOf(thread.projectId).epoch);
-    // No account to move to and the default has no login: a clear refusal
-    // instead of a turn that fails with «Not logged in» (E44). The login is
-    // the one where this plugin runs (bb's server machine).
-    if (
-      runsOn !== null &&
-      runsOn.byDefault &&
-      loggedOut(current.defaultAccountName)
-    ) {
-      bb.log.warn(
-        `thread ${thread.id}: refused: no account for project ${thread.projectId} and ${current.defaultAccountName} has no login`,
-      );
-      return {
-        action: "reject",
-        message: `Claude Switcher: no account assigned to this project and the default account (${current.defaultAccountName}) has no login. Assign one with: bb claude-switcher use ${thread.projectId} <account>`,
-      };
-    }
     return { action: "proceed" };
   });
 
