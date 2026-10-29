@@ -12,7 +12,12 @@ import type {
 } from "@get-bb/plugin-sdk";
 
 type ThreadResponse = PluginThreadEventPayloads["thread.created"]["thread"];
-import { createPlugin, ENV_VAR, type State } from "./server.js";
+import {
+  createPlugin,
+  ENV_VAR,
+  FIRST_PLACEMENT_WAIT_MS,
+  type State,
+} from "./server.js";
 import type { AccountsIo } from "./src/accounts.js";
 import type { CredentialIo } from "./src/credentials.js";
 import type { LoginIo, LoginProcess } from "./src/login.js";
@@ -3599,6 +3604,194 @@ describe("placing a project before a new thread's first turn", () => {
       expect(h.envSet).toEqual([]);
       h.harness.dispose();
     }
+  });
+
+  describe("on a machine whose default login is missing, the account is chosen before the first turn starts (E44)", () => {
+    /** The default account (`main`) has no login where the threads run; the others are free. */
+    const NO_DEFAULT_LOGIN = {
+      main: () => new Response(null, { status: 401 }),
+      spare: () => Response.json(payload(10, 60, 20)),
+      work: () => Response.json(payload(5, 20, 30)),
+    };
+    const NO_LOGIN_AT_ALL = {
+      main: () => new Response(null, { status: 401 }),
+      spare: () => new Response(null, { status: 401 }),
+      work: () => new Response(null, { status: 401 }),
+    };
+
+    /** bb's checkpoint before the first message of a thread it has just created (still `pending`). */
+    function dispatched(
+      h: Awaited<ReturnType<typeof host>>,
+      threadId: string,
+      projectId: string,
+      model: string | null,
+    ) {
+      return h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id: threadId, projectId, status: "pending" }),
+          requestedExecution: { providerId: "claude-code", model },
+          attempt: "start-turn",
+        }),
+      );
+    }
+
+    it("places a new project at its first message's checkpoint, before bb announces the thread, and not again when it does", async () => {
+      const h = await host(NO_DEFAULT_LOGIN, FABLE);
+      dispose = () => h.harness.dispose();
+      expect(
+        await dispatched(h, "thr-new", "proj-3", "claude-haiku-5-5"),
+      ).toEqual({ action: "proceed" });
+      expect(h.envSet).toEqual([
+        {
+          projectId: "proj-3",
+          name: ENV_VAR,
+          value: `${ACCOUNTS}/work`,
+          note: ownNote("work"),
+        },
+      ]);
+      await h.harness.behavior.emitThreadEvent(
+        "thread.created",
+        created({ id: "thr-new", projectId: "proj-3" }),
+      );
+      expect(h.envSet).toHaveLength(1);
+    });
+
+    it("places it also when bb has not resolved the model of the first message", async () => {
+      const h = await host(NO_DEFAULT_LOGIN, FABLE);
+      dispose = () => h.harness.dispose();
+      expect(await dispatched(h, "thr-new", "proj-3", null)).toEqual({
+        action: "proceed",
+      });
+      expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+        ["proj-3", `${ACCOUNTS}/work`],
+      ]);
+    });
+
+    it("has the first message wait while the new project's placement takes long, and asks bb again once it is placed", async () => {
+      const h = await host(NO_DEFAULT_LOGIN, FABLE);
+      dispose = () => h.harness.dispose();
+      vi.useFakeTimers();
+      try {
+        let reads = 0;
+        h.harness.sdk.stub(
+          "projects.machineEnvironment",
+          async ({ projectId }: { projectId: string }) => {
+            const snapshot = {
+              builtInGit: { status: "disabled" as const, statusMessage: "" },
+              inheritedVariables: [],
+              variables: h.env.get(projectId) ?? [],
+            };
+            if (reads++ === 0)
+              await new Promise((resolve) => setTimeout(resolve, 5_000));
+            return snapshot;
+          },
+        );
+        const answer = dispatched(h, "thr-new", "proj-3", "claude-haiku-5-5");
+        await vi.advanceTimersByTimeAsync(3_000);
+        expect(await answer).toEqual({
+          action: "wait",
+          reason: "Choosing a Claude account for this new project",
+          sendAt: NOW + FIRST_PLACEMENT_WAIT_MS,
+        });
+        expect(h.envSet).toEqual([]);
+        expect(h.harness.recheckCount).toBe(0);
+        // The read answers at 5 s; the accounts are measured after it.
+        for (let s = 3; s < 30 && h.envSet.length === 0; s++)
+          await vi.advanceTimersByTimeAsync(1_000);
+        expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+          ["proj-3", `${ACCOUNTS}/work`],
+        ]);
+        expect(h.harness.recheckCount).toBe(1);
+        // bb asks again: the turn goes, on the account just chosen.
+        expect(
+          await dispatched(h, "thr-new", "proj-3", "claude-haiku-5-5"),
+        ).toEqual({ action: "proceed" });
+        expect(h.envSet).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("moves a project already seen and left on the default account off it before its turn, when the default has no login", async () => {
+      const h = await host(NO_DEFAULT_LOGIN, FABLE);
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(
+        await dispatched(h, "thread-1", "proj-1", "claude-haiku-5-5"),
+      ).toEqual({ action: "proceed" });
+      expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+        ["proj-1", `${ACCOUNTS}/work`],
+      ]);
+      const state = (await h.harness.behavior.callRpc(
+        "accounts_list",
+        null,
+      )) as State;
+      expect(state.lastSwitch).toMatchObject({
+        threadId: "thread-1",
+        from: "main",
+        to: "work",
+        reason: "Moved to account work before the turn: main is not logged in",
+      });
+    });
+
+    it("refuses the first message with a clear message when no account has a login, instead of starting a turn that fails with «Not logged in»", async () => {
+      const h = await host(NO_LOGIN_AT_ALL, FABLE);
+      dispose = () => h.harness.dispose();
+      expect(
+        await dispatched(h, "thr-new", "proj-3", "claude-haiku-5-5"),
+      ).toEqual({
+        action: "reject",
+        message:
+          "Claude Switcher: no account assigned to this project and the default account (main) has no login. Assign one with: bb claude-switcher use proj-3 <account>",
+      });
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("refuses nothing on an account the project was given, though it has no login", async () => {
+      const h = await host(NO_LOGIN_AT_ALL, {
+        ...FABLE,
+        presetEnv: {
+          "proj-3": [
+            { name: ENV_VAR, note: ownNote("work"), secret: true, value: null },
+          ],
+        },
+      });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(
+        await dispatched(h, "thr-new", "proj-3", "claude-haiku-5-5"),
+      ).toEqual({ action: "proceed" });
+      expect(h.envSet).toEqual([]);
+      expect(h.envDeleted).toEqual([]);
+    });
+
+    it("leaves the first message alone where the default account has a login and is the best one", async () => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(1, 10, 0)),
+          spare: () => Response.json(payload(10, 60, 20)),
+          work: () => Response.json(payload(5, 20, 30)),
+        },
+        FABLE,
+      );
+      dispose = () => h.harness.dispose();
+      expect(
+        await dispatched(h, "thr-new", "proj-3", "claude-haiku-5-5"),
+      ).toEqual({ action: "proceed" });
+      expect(h.envSet).toEqual([]);
+      expect(h.envDeleted).toEqual([]);
+    });
+
+    it("refuses nothing and places nothing with the automatic choice off", async () => {
+      const h = await host(NO_LOGIN_AT_ALL, {
+        settings: { preferredModel: "Fable", autoSwitch: false },
+      });
+      dispose = () => h.harness.dispose();
+      expect(
+        await dispatched(h, "thr-new", "proj-3", "claude-haiku-5-5"),
+      ).toEqual({ action: "proceed" });
+      expect(h.envSet).toEqual([]);
+    });
   });
 });
 

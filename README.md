@@ -45,7 +45,7 @@ first.
 | ------------------------------------------------ | :---------------------: | :------------------------------------------: |
 | See every account's session and weekly windows   |           ❌            |             ✅ in Provider usage             |
 | Keep working when one account hits its limit     |           ❌            |             ✅ switch and retry              |
-| Start a new project on an account that works     |           ❌            |           ✅ when its thread opens           |
+| Start a new project on an account that works     |           ❌            |          ✅ before its first turn           |
 | Wait for the account that frees first            |           ❌            |         ✅ within your maximum wait          |
 | Stick to a model, like Fable                     |           n/a           |              ✅ preferred model              |
 | Choose the account of each project by hand       |           ❌            | ✅ new thread, thread header, picker and CLI |
@@ -326,15 +326,33 @@ flowchart TD
 ```
 
 - **When a thread is created.** A project created after the plugin first
-  ran (for an update from 0.2.1, after the first start of 0.2.2) goes to
-  the best account, and a project whose account is already measured out
-  moves to another one. This races the thread's first turn: if the turn
+  ran (for an update from 0.2.1, after the first start of 0.2.2), with no
+  account of its own yet, goes to the best account before its first turn:
+  bb asks the plugin before it sends a thread's first message, and the
+  plugin places the project then. While the accounts are measured for it,
+  that message waits once, up to 5 s (`Choosing a Claude account for this
+  new project`), and goes as soon as the project is placed. A project
+  whose account is already measured out moves to another one when its
+  thread is created. This races the thread's first turn: if the turn
   starts first on the old account and fails, it is retried once on the
   new account; if it succeeds there, the thread's next turns run on the
   new account, which needs the shared transcripts described in
   [Setting up extra accounts](#setting-up-extra-accounts). A project you
   pinned by hand (the default account included) stays put while its
   account works.
+- **Where the default account has no login.** The default account is
+  the `~/.claude` of the machine bb's server runs on; where nobody logged
+  in there (a server moved to a new machine), a turn on it fails with
+  «Not logged in». Before such a turn, a project left on it moves to the
+  best account that can run the turn, even one that keeps its weekly for
+  the preferred model (`Moved to account <name> before the turn: <old> is
+  not logged in`). When no account can, bb refuses the message with
+  `Claude Switcher: no account assigned to this project and the default
+  account (<name>) has no login. Assign one with: bb claude-switcher use
+  <project id> <account>`, and nothing runs. A project with an account of
+  its own is never refused for this. The login is judged where the plugin
+  runs: a thread on another machine, whose own `~/.claude` may have a
+  login, is moved or refused the same way.
 - **Before every turn.** bb tells the plugin the model each message is
   sent with. When the project's account is measured unable to run that
   model and another account can, the project moves there before the turn
@@ -464,7 +482,7 @@ after 5 attempts. The reasons this plugin writes are
 and `Retrying on account <name>`, plus two for moves made when a thread is
 created or before a turn: `New project placed on account <name>[ (<model>)]` and
 `Moved to account <name> before the turn: <old> cannot run <model>` (or
-`is out of usage` without a preferred model), one for a move after a
+`is out of usage` without a preferred model, `is not logged in`), one for a move after a
 turn: `Switched ahead of the limit to <name>: <old> at <n>% of <window>`,
 and `Picked by hand` for your own picks. Every one goes to
 `bb plugin logs claude-switcher`; every move of a project is also in
@@ -864,6 +882,11 @@ Coming from `claude-accounts` 0.1.x? See the upgrade note in
   aside for 6 hours, and the log
   names it. Fix the account (log in again, or ask the organization's
   admin) and run `bb plugin reload claude-switcher` to use it at once.
+- **A message is refused with "no account assigned to this project".**
+  No account could take the turn and the default account has no login
+  on the machine bb's server runs on. Log in on one account (**Log in**
+  on its card) or pin one with the command the message gives, then send
+  the message again.
 - **A new project did not move to the best account.** Read
   `bb plugin logs claude-switcher`: each thread creation logs where the
   project was left and why. Projects created before the plugin first ran,

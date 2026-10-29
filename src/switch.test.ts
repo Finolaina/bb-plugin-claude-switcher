@@ -730,6 +730,33 @@ describe("decidePlacement", () => {
     ).toEqual({ kind: "keep" });
   });
 
+  it("moves a project off an account without a login, measured or not, and keeps it there only when no other account can run (E44)", () => {
+    const input = {
+      currentAccount: "main",
+      accounts: [account("spare", { models: fable(100) }), account("work")],
+      preferredModel: "Fable",
+      now: NOW,
+      currentLoggedOut: true,
+    };
+    expect(decidePlacement({ ...input, isNew: false })).toEqual({
+      kind: "move",
+      account: "work",
+      why: "current-blocked",
+    });
+    expect(decidePlacement({ ...input, isNew: true })).toEqual({
+      kind: "move",
+      account: "work",
+      why: "new-project",
+    });
+    expect(
+      decidePlacement({ ...input, isNew: false, accounts: [] }),
+    ).toEqual({ kind: "keep" });
+    // Not known to be logged out: nothing measured of it, it is left alone.
+    expect(
+      decidePlacement({ ...input, isNew: false, currentLoggedOut: false }),
+    ).toEqual({ kind: "keep" });
+  });
+
   it("moves a known project off an account measured unable to run the preferred model, before the turn", () => {
     expect(
       decidePlacement({
