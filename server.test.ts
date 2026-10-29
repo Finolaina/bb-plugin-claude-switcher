@@ -6868,6 +6868,40 @@ describe("the model a thread's turn runs on", () => {
     ).toEqual([]);
   });
 
+  it("writes the new account once when two turns of the project are placed at the same time", async () => {
+    const order: string[] = [];
+    const held: (() => void)[] = [];
+    const h = await host(OPUS_ELSEWHERE, {
+      ...FABLE,
+      // Each placement's link waits until the test lets it go.
+      sessionsIo: oneSessionIo(
+        order,
+        () => new Promise<void>((resolve) => held.push(resolve)),
+      ),
+      environments: SITE,
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const first = dispatch(h, "claude-opus-5-5");
+    await vi.waitFor(() => expect(held).toHaveLength(1));
+    const second = dispatch(h, "claude-opus-5-5", {
+      thread: thread({ id: "thread-2", projectId: "proj-1" }),
+    });
+    await vi.waitFor(() => expect(held).toHaveLength(2));
+    // Let go in the order they started.
+    held[0]!();
+    expect(await first).toEqual({ action: "proceed" });
+    held[1]!();
+    expect(await second).toEqual({ action: "proceed" });
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-1", `${ACCOUNTS}/work`],
+    ]);
+    // Both turns run on it: the project is on work.
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.projects.find((p) => p.id === "proj-1")?.account).toBe("work");
+    expect(state.history.map((r) => r.to)).toEqual(["work"]);
+  });
+
   it("drops a move before the turn when a pick by hand lands while its sessions are shared", async () => {
     const order: string[] = [];
     let release!: () => void;
