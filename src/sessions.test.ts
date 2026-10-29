@@ -4,7 +4,8 @@ import { projectKey, shareSessions, type SessionsIo } from "./sessions.js";
 /**
  * An in-memory filesystem: files, directories and symlinks by absolute
  * path, plus the resolved path of any path that is a link (or sits under
- * one). Records every link, copy and symlink made.
+ * one). Records every link and symlink made. A file's content is an
+ * object a hard link shares, and a symlink reads through to its target.
  */
 function memoryFs() {
   const files = new Set<string>();
@@ -13,15 +14,24 @@ function memoryFs() {
   /** realpath overrides: a path that resolves elsewhere (a symlinked dir). */
   const real = new Map<string, string>();
   const made: string[] = [];
+  const contents = new Map<string, { text: string }>();
+  /** Where a path's content lives: through every symlink. */
+  const resolve = (p: string): string =>
+    symlinks.has(p) ? resolve(symlinks.get(p)!) : p;
+  const append = (p: string, text: string) => {
+    contents.get(resolve(p))!.text += text;
+  };
+  const read = (p: string) => contents.get(resolve(p))?.text;
   const failures = new Map<string, NodeJS.ErrnoException>();
   const parent = (p: string) => p.slice(0, p.lastIndexOf("/")) || "/";
   const exists = (p: string) => files.has(p) || dirs.has(p) || symlinks.has(p);
   function addDir(p: string) {
     for (let d = p; d !== "/" && !dirs.has(d); d = parent(d)) dirs.add(d);
   }
-  function addFile(p: string) {
+  function addFile(p: string, text = "") {
     addDir(parent(p));
     files.add(p);
+    contents.set(p, { text });
   }
   function fail(op: string, path: string, code: string) {
     failures.set(
@@ -36,6 +46,7 @@ function memoryFs() {
   const io: SessionsIo = {
     exists: async (p) => exists(p),
     async realpath(p) {
+      check("realpath", p);
       for (const [from, to] of real)
         if (p === from || p.startsWith(`${from}/`))
           return to + p.slice(from.length);
@@ -65,20 +76,30 @@ function memoryFs() {
       if (exists(path))
         throw Object.assign(new Error(`EEXIST: ${path}`), { code: "EEXIST" });
       files.add(path);
+      contents.set(path, contents.get(resolve(existing))!);
       made.push(`link ${existing} -> ${path}`);
-    },
-    async copy(from, to) {
-      check("copy", to);
-      files.add(to);
-      made.push(`copy ${from} -> ${to}`);
     },
     async symlink(target, path) {
       check("symlink", path);
+      if (exists(path))
+        throw Object.assign(new Error(`EEXIST: ${path}`), { code: "EEXIST" });
       symlinks.set(path, target);
       made.push(`symlink ${target} -> ${path}`);
     },
   };
-  return { io, files, dirs, symlinks, real, made, addDir, addFile, fail };
+  return {
+    io,
+    files,
+    dirs,
+    symlinks,
+    real,
+    made,
+    addDir,
+    addFile,
+    fail,
+    append,
+    read,
+  };
 }
 
 const PROJECT = "/home/aitor/Desarrollo/Maquinas";
@@ -157,7 +178,7 @@ describe("shareSessions", () => {
     expect(fs.made).toEqual([]);
   });
 
-  it("creates the target's project directory, and copies a session across filesystems", async () => {
+  it("creates the target's project directory, and links a session across filesystems with a symlink", async () => {
     const fs = memoryFs();
     fs.addDir(PROJECT);
     fs.addFile(`${TEAM1}/projects/${KEY}/aaa.jsonl`);
@@ -171,7 +192,7 @@ describe("shareSessions", () => {
     expect(result).toEqual({ linked: 1, skipped: null, errors: [] });
     expect(fs.made).toEqual([
       `mkdir ${TEAM2}/projects/${KEY}`,
-      `copy ${TEAM1}/projects/${KEY}/aaa.jsonl -> ${TEAM2}/projects/${KEY}/aaa.jsonl`,
+      `symlink ${TEAM1}/projects/${KEY}/aaa.jsonl -> ${TEAM2}/projects/${KEY}/aaa.jsonl`,
     ]);
   });
 
@@ -228,5 +249,68 @@ describe("shareSessions", () => {
     expect(
       fs.files.has(`${TEAM2}/projects/-Users-aitor-Desarrollo-Maquinas/old.jsonl`),
     ).toBe(true);
+  });
+
+  it.each([
+    ["the same filesystem (a hard link)", null],
+    ["two filesystems (a symlink)", "EXDEV"],
+  ])(
+    "keeps one transcript across a move there and back, on %s",
+    async (_, linkError) => {
+      const fs = memoryFs();
+      fs.addDir(PROJECT);
+      const a = `${TEAM1}/projects/${KEY}/aaa.jsonl`;
+      const b = `${TEAM2}/projects/${KEY}/aaa.jsonl`;
+      fs.addFile(a, "turn 1\n");
+      if (linkError !== null) fs.fail("link", b, linkError);
+      // team1 -> team2: the thread goes on there.
+      await shareSessions({
+        projectPath: PROJECT,
+        target: TEAM2,
+        sources: [TEAM1],
+        io: fs.io,
+      });
+      fs.append(b, "turn 2\n");
+      // team2 -> team1: team1 already has the session, and it is the same.
+      const back = await shareSessions({
+        projectPath: PROJECT,
+        target: TEAM1,
+        sources: [TEAM2],
+        io: fs.io,
+      });
+      expect(back).toEqual({ linked: 0, skipped: null, errors: [] });
+      expect(fs.read(a)).toBe("turn 1\nturn 2\n");
+      expect(fs.read(b)).toBe("turn 1\nturn 2\n");
+    },
+  );
+
+  it("reports a source whose projects directory cannot be resolved, and goes on with the others", async () => {
+    const fs = memoryFs();
+    fs.addDir(PROJECT);
+    fs.addFile(`${TEAM1}/projects/${KEY}/aaa.jsonl`);
+    fs.addFile(`${DEFAULT}/projects/${KEY}/bbb.jsonl`);
+    fs.fail("realpath", `${TEAM1}/projects`, "EACCES");
+    const result = await shareSessions({
+      projectPath: PROJECT,
+      target: TEAM2,
+      sources: [TEAM1, DEFAULT],
+      io: fs.io,
+    });
+    expect(result).toEqual({
+      linked: 1,
+      skipped: null,
+      errors: [`${TEAM1}/projects: EACCES: realpath ${TEAM1}/projects`],
+    });
+    // A missing one is no error: that account has no sessions.
+    const none = memoryFs();
+    none.addDir(PROJECT);
+    expect(
+      await shareSessions({
+        projectPath: PROJECT,
+        target: TEAM2,
+        sources: [TEAM1],
+        io: none.io,
+      }),
+    ).toEqual({ linked: 0, skipped: null, errors: [] });
   });
 });
