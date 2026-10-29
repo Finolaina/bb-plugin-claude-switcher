@@ -7035,6 +7035,132 @@ describe("the model a thread's turn runs on", () => {
     ).toEqual([]);
   });
 
+  describe("an Opus placement crossed by a Fable one (Codex E46-R5-001)", () => {
+    /** main is out of its session; work is a Team seat without Fable; spare is a Max account that keeps Fable. */
+    const SPLIT = {
+      main: usage(100, 30, 0),
+      work: seat(5, 100, 10),
+      spare: usage(10, 5, 20),
+    };
+    const turnOf = (
+      h: Awaited<ReturnType<typeof host>>,
+      threadId: string,
+      model: string,
+    ) =>
+      h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id: threadId, projectId: "proj-1" }),
+          requestedExecution: { providerId: "claude-code", model },
+          attempt: "start-turn",
+        }),
+      );
+    /** The Opus placement's link waits on `held`; the others go at once. `setHeld`: the first write waits too. */
+    async function split(holdWrite?: Promise<void>) {
+      const order: string[] = [];
+      const held: (() => void)[] = [];
+      let links = 0;
+      let writes = 0;
+      const h = await host(SPLIT, {
+        ...FABLE,
+        sessionsIo: oneSessionIo(order, () =>
+          links++ === 0
+            ? new Promise<void>((resolve) => held.push(resolve))
+            : Promise.resolve(),
+        ),
+        environments: SITE,
+        beforeSet: async () => {
+          if (writes++ === 0 && holdWrite !== undefined) await holdWrite;
+        },
+      });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      return { h, held, writesStarted: () => writes };
+    }
+
+    it("places the Opus turn again from where the Fable turn moved the project: on the seat, never on the Max account", async () => {
+      const { h, held } = await split();
+      const opus = turnOf(h, "thread-1", "claude-opus-5-5");
+      await vi.waitFor(() => expect(held).toHaveLength(1));
+      expect(await turnOf(h, "thread-2", "claude-fable-5-1")).toEqual({
+        action: "proceed",
+      });
+      expect(h.envSet.map((e) => e.note)).toEqual([ownNote("spare")]);
+      held[0]!();
+      expect(await opus).toEqual({ action: "proceed" });
+      // Opus would spend spare's weekly, kept for Fable: it runs on work.
+      expect(h.envSet.map((e) => e.note)).toEqual([
+        ownNote("spare"),
+        ownNote("work"),
+      ]);
+    });
+
+    it("waits for the Fable write still under way, then places the Opus turn again", async () => {
+      let letWrite!: () => void;
+      const write = new Promise<void>((resolve) => (letWrite = resolve));
+      const { h, held, writesStarted } = await split(write);
+      const opus = turnOf(h, "thread-1", "claude-opus-5-5");
+      await vi.waitFor(() => expect(held).toHaveLength(1));
+      const fable = turnOf(h, "thread-2", "claude-fable-5-1");
+      await vi.waitFor(() => expect(writesStarted()).toBe(1));
+      let opusDone = false;
+      void opus.then(() => {
+        opusDone = true;
+      });
+      held[0]!();
+      // The Opus placement waits for the write to land.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(opusDone).toBe(false);
+      expect(h.envSet).toEqual([]);
+      letWrite();
+      expect(await fable).toEqual({ action: "proceed" });
+      expect(await opus).toEqual({ action: "proceed" });
+      expect(h.envSet.map((e) => e.note)).toEqual([
+        ownNote("spare"),
+        ownNote("work"),
+      ]);
+    });
+
+    it("keeps a pick by hand still being written: the Opus turn is not placed again away from it", async () => {
+      let letWrite!: () => void;
+      const write = new Promise<void>((resolve) => (letWrite = resolve));
+      const { h, held, writesStarted } = await split(write);
+      const opus = turnOf(h, "thread-1", "claude-opus-5-5");
+      await vi.waitFor(() => expect(held).toHaveLength(1));
+      const picked = h.harness.behavior.runCli(["use", "Website", "spare"]);
+      await vi.waitFor(() => expect(writesStarted()).toBe(1));
+      held[0]!();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      letWrite();
+      expect((await picked).exitCode).toBe(0);
+      expect(await opus).toEqual({ action: "proceed" });
+      // spare is the user's choice, though Opus would rather not run there.
+      expect(h.envSet.map((e) => e.note)).toEqual([ownNote("spare")]);
+    });
+
+    it("has the Opus message wait, not go, when the Fable write does not land within the checkpoint's time", async () => {
+      const { h, held, writesStarted } = await split(new Promise<void>(() => {}));
+      vi.useFakeTimers();
+      try {
+        const opus = turnOf(h, "thread-1", "claude-opus-5-5");
+        for (let i = 0; i < 20 && held.length === 0; i++)
+          await vi.advanceTimersByTimeAsync(5);
+        expect(held).toHaveLength(1);
+        const fable = turnOf(h, "thread-2", "claude-fable-5-1");
+        for (let i = 0; i < 20 && writesStarted() === 0; i++)
+          await vi.advanceTimersByTimeAsync(5);
+        expect(writesStarted()).toBe(1);
+        held[0]!();
+        await vi.advanceTimersByTimeAsync(3_000);
+        expect(await opus).toMatchObject({ action: "wait" });
+        expect(h.envSet).toEqual([]);
+        await vi.advanceTimersByTimeAsync(3_000);
+        await fable;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   it("writes the new account once when two turns of the project are placed at the same time", async () => {
     const order: string[] = [];
     const held: (() => void)[] = [];
