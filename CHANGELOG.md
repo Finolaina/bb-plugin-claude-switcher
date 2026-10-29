@@ -13,14 +13,16 @@ project uses [Semantic Versioning](https://semver.org/).
   project's new `CLAUDE_CONFIG_DIR`, and Claude Code looks for the session
   in that account's `projects/`. Where the accounts do not share that
   directory (Linux, an account made without the link), the thread failed
-  with «No conversation found with session ID …». Once the variable is
-  written, the plugin links into the new account every session of the
-  project it lacks, for each of the project's paths on this machine
+  with «No conversation found with session ID …». Before the project is
+  pointed at the new account, the plugin links into it every session of
+  the project it lacks, for each of the project's paths on this machine
   (worktrees included, and the resolved path): a hard link to each
-  `<session>.jsonl` (a copy across filesystems) and a symbolic link to its
-  folder. Nothing is removed or overwritten; accounts that already share
-  `projects/` are left alone; a project of another machine is skipped and
-  logged once; a failure is logged and never stops the move.
+  `<session>.jsonl` (a symbolic link across filesystems: both accounts
+  always read one transcript) and a symbolic link to its folder. Nothing
+  is removed or overwritten; accounts that already share `projects/` are
+  left alone; a project of another machine is skipped and logged once; a
+  failure is logged and never stops the move, and after 2 s the move goes
+  on without waiting for the rest.
 
 ### Changed
 

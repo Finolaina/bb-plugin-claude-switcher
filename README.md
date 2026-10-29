@@ -733,8 +733,8 @@ executable (`claude auth login`) as a child process of bb's server.
   changed.
 - When a project moves to another account, the sessions of the project
   that account lacks are linked into its `projects/<project>/`: a hard
-  link to each `<session>.jsonl` (a copy when the accounts are on
-  different filesystems) and a symbolic link to the session's folder,
+  link to each `<session>.jsonl` (a symbolic link when the accounts are
+  on different filesystems) and a symbolic link to the session's folder,
   for each path of the project on bb's server machine. Nothing is
   removed or overwritten, and accounts whose `projects` already is one
   directory are not touched.
