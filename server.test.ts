@@ -16,6 +16,7 @@ import {
   createPlugin,
   ENV_VAR,
   FIRST_PLACEMENT_WAIT_MS,
+  MAX_START_WAITS,
   type State,
 } from "./server.js";
 import type { AccountsIo } from "./src/accounts.js";
@@ -3780,6 +3781,76 @@ describe("placing a project before a new thread's first turn", () => {
       ).toEqual({ action: "proceed" });
       expect(h.envSet).toEqual([]);
       expect(h.envDeleted).toEqual([]);
+    });
+
+    it("refuses also when bb names no Claude model for the message, none or an alias, and no account has a login (Astra E44-R1)", async () => {
+      for (const model of [null, "opusplan"]) {
+        const h = await host(NO_LOGIN_AT_ALL, FABLE);
+        expect(await dispatched(h, "thr-new", "proj-3", model)).toMatchObject({
+          action: "reject",
+        });
+        h.harness.dispose();
+      }
+    });
+
+    it("never sends a turn to the default without a login when writing the chosen account fails: it waits, then refuses (Astra E44-R2)", async () => {
+      const h = await host(NO_DEFAULT_LOGIN, { ...FABLE, failSet: ["proj-3"] });
+      dispose = () => h.harness.dispose();
+      const answers = [];
+      for (let i = 0; i <= MAX_START_WAITS; i++)
+        answers.push(
+          await dispatched(h, "thr-new", "proj-3", "claude-haiku-5-5"),
+        );
+      expect(answers.map((a) => (a as { action: string }).action)).toEqual([
+        ...Array.from({ length: MAX_START_WAITS }, () => "wait"),
+        "reject",
+      ]);
+      expect(answers[0]).toEqual({
+        action: "wait",
+        reason: "Looking for a Claude account with a login for this project",
+        sendAt: NOW + FIRST_PLACEMENT_WAIT_MS,
+      });
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("never sends a turn to the default without a login when its placement takes too long: it waits (Astra E44-R2)", async () => {
+      const h = await host(NO_DEFAULT_LOGIN, FABLE);
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      vi.useFakeTimers();
+      try {
+        // The project's account is never read back.
+        h.harness.sdk.stub(
+          "projects.machineEnvironment",
+          () => new Promise(() => {}),
+        );
+        const answer = dispatched(h, "thread-1", "proj-1", "claude-haiku-5-5");
+        await vi.advanceTimersByTimeAsync(3_000);
+        expect(await answer).toMatchObject({ action: "wait" });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("right after a reload, looks at the default's login before the turn, waits while the accounts are measured, then moves the project (Astra E44-R3)", async () => {
+      const h = await host(NO_DEFAULT_LOGIN, FABLE);
+      dispose = () => h.harness.dispose();
+      // Nothing measured yet: a project seen before, on the default account.
+      expect(
+        await dispatched(h, "thread-1", "proj-1", "claude-haiku-5-5"),
+      ).toEqual({
+        action: "wait",
+        reason: "Looking for a Claude account with a login for this project",
+        sendAt: NOW + FIRST_PLACEMENT_WAIT_MS,
+      });
+      expect(h.envSet).toEqual([]);
+      await vi.waitFor(() => expect(h.harness.recheckCount).toBe(1));
+      expect(
+        await dispatched(h, "thread-1", "proj-1", "claude-haiku-5-5"),
+      ).toEqual({ action: "proceed" });
+      expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+        ["proj-1", `${ACCOUNTS}/work`],
+      ]);
     });
 
     it("refuses nothing and places nothing with the automatic choice off", async () => {

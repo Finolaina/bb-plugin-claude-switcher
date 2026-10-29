@@ -19,8 +19,11 @@ project uses [Semantic Versioning](https://semver.org/).
 - **A turn no longer starts on a default account without a login.** A
   project left on the default account moves, before the turn, to the
   best account that can run it, even one that keeps its weekly for the
-  preferred model (`… before the turn: <old> is not logged in`). When no
-  account can, bb refuses the message with the command that fixes it
+  preferred model (`… before the turn: <old> is not logged in`), whatever
+  model the message names. While the placement, the write of the account
+  or the first measure after a reload is under way or has failed, the
+  message waits, up to three times 5 s. When no account can take it, bb
+  refuses the message with the command that fixes it
   (`bb claude-switcher use <project id> <account>`) instead of starting a
   turn that fails.
 
