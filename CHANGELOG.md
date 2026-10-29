@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.29] - 2026-10-29
+
+### Fixed
+
+- **A new project's first thread starts on the account chosen for it.**
+  The project was placed when bb announced the thread, which comes after
+  its first turn has started: that turn ran on the default account. On a
+  machine whose `~/.claude` has no login (bb's server moved to a new
+  machine), it failed with «Not logged in», and so did its retries. bb
+  asks the plugin before a thread's first message is sent; a new project
+  with no account of its own is placed then, and the message waits once,
+  up to 5 s, while the accounts are measured.
+- **A turn no longer starts on a default account without a login.** A
+  project left on the default account moves, before the turn, to the
+  best account that can run it, even one that keeps its weekly for the
+  preferred model (`… before the turn: <old> is not logged in`). When no
+  account can, bb refuses the message with the command that fixes it
+  (`bb claude-switcher use <project id> <account>`) instead of starting a
+  turn that fails.
+
 ## [0.2.28] - 2026-10-17
 
 ### Changed

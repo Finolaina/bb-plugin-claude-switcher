@@ -428,6 +428,12 @@ export interface PlacementInput {
    */
   excursionFrom?: string | null;
   now: number;
+  /**
+   * The current account has no login (its usage answered unauthenticated):
+   * a turn there fails with «Not logged in», measured or not (E44: the
+   * default `~/.claude` of a machine nobody logged in on).
+   */
+  currentLoggedOut?: boolean;
 }
 
 /** The account a project would best run on now, for the thread header. */
@@ -489,15 +495,23 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     )
       return { kind: "move", account: home.name, why: "back-from-excursion" };
   }
+  const loggedOut = input.currentLoggedOut === true;
   const current = accounts.find((a) => a.name === input.currentAccount);
-  if (current === undefined || current.unknown === true)
+  if (!loggedOut && (current === undefined || current.unknown === true))
     return { kind: "keep" };
-  const runs = isUsable(current) && canRunModel(current, input.preferredModel);
+  const runs =
+    !loggedOut &&
+    current !== undefined &&
+    isUsable(current) &&
+    canRunModel(current, input.preferredModel);
   if (runs && !spendsReservedWeekly(current, options)) return { kind: "keep" };
-  const choice = chooseAccount(
-    accounts.filter((a) => a.name !== input.currentAccount),
-    options,
-  );
+  const others = accounts.filter((a) => a.name !== input.currentAccount);
+  const choice =
+    chooseAccount(others, options) ??
+    // Without a login a turn kept here fails for sure: the reserve gives way.
+    (loggedOut
+      ? chooseAccount(others, { preferredModel: input.preferredModel })
+      : null);
   if (choice === null)
     return runs ? { kind: "keep", why: "current-reserved" } : { kind: "keep" };
   return {

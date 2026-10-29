@@ -102,6 +102,12 @@ export const REFUSAL_MS = 6 * 60 * 60_000;
 export const AHEAD_FRESH_MS = 60_000;
 /** bb fails a dispatch whose checkpoint takes 10 s: the placement before a turn is left behind well before. */
 export const DISPATCH_LIMIT_MS = 3_000;
+/**
+ * A new project's first message waits this long, once, when its placement
+ * has not finished within DISPATCH_LIMIT_MS (the accounts are measured
+ * first): bb asks again sooner, as soon as the placement ends (E44).
+ */
+export const FIRST_PLACEMENT_WAIT_MS = 5_000;
 /** A login left waiting in the browser this long is given up. */
 export const LOGIN_TIMEOUT_MS = 10 * 60_000;
 /** An account directory name: one path segment, no leading dot. */
@@ -568,6 +574,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
   /** Why a project moves off `name` before a turn, for the history. */
   function whyOut(name: string, model: string): string {
+    if (loggedOut(name)) return "is not logged in";
     if (refusing(name)) return "refused a turn";
     if (reservedFor(name, model) && canRunHere(name, model))
       return `would spend ${current.preferredModel}'s weekly`;
@@ -1423,13 +1430,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * do not count: those accounts may still run it.
    */
   function cannotRun(name: string): boolean {
-    if (collector.get(name)?.problem?.kind === "unauthenticated") return true;
+    if (loggedOut(name)) return true;
     const known = measuredAccounts().find((a) => a.name === name);
     return (
       known !== undefined &&
       known.unknown !== true &&
       bestAccount([known], "", deps.now()) !== name
     );
+  }
+
+  /** `name` answered its usage query unauthenticated: no login, a turn there fails. */
+  function loggedOut(name: string): boolean {
+    return collector.get(name)?.problem?.kind === "unauthenticated";
   }
 
   async function pickAccount(
@@ -2275,6 +2287,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       preferredModel: current.preferredModel,
       excursionFrom: wayHome(projectId, current.preferredModel, measured, now),
       now,
+      currentLoggedOut: loggedOut(fromName),
     });
     if (decision.kind === "keep") {
       bb.log.info(
@@ -2319,6 +2332,44 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       },
       null,
     );
+  }
+
+  /**
+   * The placement of each project under way, from thread.created or from
+   * its first message's checkpoint (see placeNewProject): one per project,
+   * shared by both (E44).
+   */
+  const placing = new Map<string, Promise<void>>();
+  function placeOnce(thread: ThreadResponse): Promise<void> {
+    const under = placing.get(thread.projectId);
+    if (under !== undefined) return under;
+    const run = placeProject(thread).finally(() => {
+      if (placing.get(thread.projectId) === run)
+        placing.delete(thread.projectId);
+    });
+    placing.set(thread.projectId, run);
+    return run;
+  }
+  /**
+   * Before a thread's first turn: a project created after install and never
+   * placed is placed now, not only when bb announces the thread, which may
+   * come after the turn started on the default account (E44: on a machine
+   * whose `~/.claude` has no login, that turn fails with «Not logged in»,
+   * and so do its retries). Outside the project's queue, like placeTurn:
+   * placeProject reads the account again before it writes. A project seen
+   * before, or given an account already (here or outside this plugin), is
+   * left to placeTurn and thread.created as before.
+   */
+  async function placeNewProject(thread: ThreadResponse): Promise<void> {
+    const projectId = thread.projectId;
+    if (installedAt === null || handled.has(projectId)) return;
+    if (!placing.has(projectId)) {
+      const project = await bb.sdk.projects.get({ projectId });
+      if (project.createdAt <= installedAt) return;
+      const at = await projectAccount(projectId);
+      if (at.owned || at.external) return;
+    }
+    await placeOnce(thread);
   }
 
   // ---- Move ahead of the limit, after a turn -----------------------------
@@ -2589,7 +2640,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       await markHandled(thread.projectId);
       return;
     }
-    await inProjectQueue(thread.projectId, () => placeProject(thread));
+    await inProjectQueue(thread.projectId, () => placeOnce(thread));
   });
 
   // ---- The model of each turn, at bb's dispatch checkpoint ----------------
@@ -2684,35 +2735,41 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * the user switched to Opus runs on an account with Opus left even when
    * every account is out of the preferred one. `turn.abandoned` is set when
    * the checkpoint stopped waiting: nothing is moved after that.
+   * Resolves to the account the turn runs on (`byDefault`: no variable, the
+   * machine's own `~/.claude`), or null when that is not this plugin's to
+   * say (an external variable) or the checkpoint stopped waiting.
    */
   async function placeTurn(
     thread: ThreadResponse,
     model: string,
     turn: { abandoned: boolean },
-  ) {
+  ): Promise<{ account: string; byDefault: boolean } | null> {
     const projectId = thread.projectId;
     // Emptied by a change of the accounts directory, until the next look.
     if (accounts.length === 0) await discover();
     const before = moveMark(projectId);
     const from = await projectAccount(projectId);
-    if (from.external) return;
+    if (from.external) return null;
     const fromName = from.account ?? current.defaultAccountName;
     const now = deps.now();
     const excursion = excursions.get(projectId);
     const decision = decidePlacement({
       ...placementOf(projectId, model, now),
       currentAccount: fromName,
+      currentLoggedOut: loggedOut(fromName),
     });
     if (decision.kind === "keep") {
-      // bb never refuses a message: the turn runs where the project is.
+      // The turn runs where the project is (refused at the checkpoint only
+      // when that is the default account and it has no login).
       if (decision.why === "current-reserved")
         bb.log.info(
           `thread ${thread.id}: ${model} turn stays on ${fromName}: no account spares ${current.preferredModel}`,
         );
-      return;
+      return { account: fromName, byDefault: !from.owned };
     }
-    if (turn.abandoned) return;
-    await applyAccount(projectId, accountOrDefault(decision.account), from);
+    if (turn.abandoned) return null;
+    const to = accountOrDefault(decision.account);
+    await applyAccount(projectId, to, from);
     await markHandled(projectId);
     noteMove(projectId, fromName, decision.account, model, before);
     const reason =
@@ -2732,13 +2789,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // Its turn has not started: it runs on the new account.
       thread.id,
     );
+    return { account: decision.account, byDefault: to === null };
   }
 
   // bb holds every message it asks about on this answer and fails the
-  // attempt when a handler throws or takes 10 s: it always proceeds, decides
-  // on the measurements already there, and stays out of the project's queue
-  // (a retry sent from that queue passes through here). A placement that
-  // has not finished after DISPATCH_LIMIT_MS is given up.
+  // attempt when a handler throws or takes 10 s: it decides on the
+  // measurements already there and stays out of the project's queue (a
+  // retry sent from that queue passes through here). A placement that has
+  // not finished after DISPATCH_LIMIT_MS is given up, but a new project's
+  // first one: its first message waits for it, once. The message goes on,
+  // unless the turn would run on a default account without a login and no
+  // other account can take it: then it is refused with the command that
+  // fixes it (E44).
+  /** Threads whose first message already waited once for its project's placement. */
+  const waitedForPlacement = new Set<string>();
   bb.experimental_hooks.on("message.dispatch", async (ctx) => {
     const { thread } = ctx;
     if (
@@ -2750,16 +2814,63 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return { action: "proceed" };
     const model = modelFamily(ctx.requestedExecution.model);
     if (model !== null) threadModel.set(thread.id, model);
+    if (current.autoSwitch && ctx.attempt === "start-turn") {
+      const first = placeNewProject(thread);
+      let late = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          first,
+          new Promise<void>((resolve) => {
+            timer = setTimeout(() => {
+              late = true;
+              resolve();
+            }, DISPATCH_LIMIT_MS);
+          }),
+        ]);
+      } catch (error) {
+        bb.log.warn(
+          `thread ${thread.id}: its new project not placed before its first turn: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      } finally {
+        clearTimeout(timer);
+      }
+      if (late && !waitedForPlacement.has(thread.id)) {
+        waitedForPlacement.add(thread.id);
+        // bb asks again as soon as the placement ends, at sendAt at the latest.
+        void first
+          .then(
+            () => undefined,
+            () => undefined,
+          )
+          .then(() => bb.experimental_hooks.recheck("message.dispatch"))
+          .catch((error: unknown) =>
+            bb.log.warn(
+              `thread ${thread.id}: bb not asked again after its project's placement: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          );
+        bb.log.info(
+          `thread ${thread.id}: its first message waits for the new project's placement`,
+        );
+        return {
+          action: "wait",
+          reason: "Choosing a Claude account for this new project",
+          sendAt: deps.now() + FIRST_PLACEMENT_WAIT_MS,
+        };
+      }
+      waitedForPlacement.delete(thread.id);
+    }
+    let runsOn: { account: string; byDefault: boolean } | null = null;
     if (model !== null && current.autoSwitch && ctx.attempt === "start-turn") {
       const turn = { abandoned: false };
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        await Promise.race([
+        runsOn = await Promise.race([
           placeTurn(thread, model, turn),
-          new Promise<void>((resolve) => {
+          new Promise<null>((resolve) => {
             timer = setTimeout(() => {
               turn.abandoned = true;
-              resolve();
+              resolve(null);
             }, DISPATCH_LIMIT_MS);
           }),
         ]);
@@ -2773,6 +2884,22 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     // Where the project stands as the turn is sent, for `thread.active`.
     dispatchEpoch.set(thread.id, movesOf(thread.projectId).epoch);
+    // No account to move to and the default has no login: a clear refusal
+    // instead of a turn that fails with «Not logged in» (E44). The login is
+    // the one where this plugin runs (bb's server machine).
+    if (
+      runsOn !== null &&
+      runsOn.byDefault &&
+      loggedOut(current.defaultAccountName)
+    ) {
+      bb.log.warn(
+        `thread ${thread.id}: refused: no account for project ${thread.projectId} and ${current.defaultAccountName} has no login`,
+      );
+      return {
+        action: "reject",
+        message: `Claude Switcher: no account assigned to this project and the default account (${current.defaultAccountName}) has no login. Assign one with: bb claude-switcher use ${thread.projectId} <account>`,
+      };
+    }
     return { action: "proceed" };
   });
 
