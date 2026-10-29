@@ -3620,18 +3620,24 @@ describe("placing a project before a new thread's first turn", () => {
       work: () => new Response(null, { status: 401 }),
     };
 
-    /** bb's checkpoint before the first message of a thread it has just created (still `pending`). */
+    /**
+     * bb's checkpoint before the first message of a thread it has just
+     * created (still `pending`); `again`: the same message, queued by a wait
+     * and asked about again.
+     */
     function dispatched(
       h: Awaited<ReturnType<typeof host>>,
       threadId: string,
       projectId: string,
       model: string | null,
+      again = false,
     ) {
       return h.harness.registrations.hooks["message.dispatch"]!(
         makeMessageDispatchHookContext({
           thread: thread({ id: threadId, projectId, status: "pending" }),
           requestedExecution: { providerId: "claude-code", model },
           attempt: "start-turn",
+          queuedMessages: again ? [{ id: "queued_1" }] : [],
         }),
       );
     }
@@ -3799,7 +3805,7 @@ describe("placing a project before a new thread's first turn", () => {
       const answers = [];
       for (let i = 0; i <= MAX_START_WAITS; i++)
         answers.push(
-          await dispatched(h, "thr-new", "proj-3", "claude-haiku-5-5"),
+          await dispatched(h, "thr-new", "proj-3", "claude-haiku-5-5", i > 0),
         );
       expect(answers.map((a) => (a as { action: string }).action)).toEqual([
         ...Array.from({ length: MAX_START_WAITS }, () => "wait"),
@@ -3851,6 +3857,113 @@ describe("placing a project before a new thread's first turn", () => {
       expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
         ["proj-1", `${ACCOUNTS}/work`],
       ]);
+    });
+
+    it("right after a reload with the accounts directory unreadable, looks at the default's login anyway and does not start the turn there (Astra E44-R2-01)", async () => {
+      let broken = false;
+      const h = await host(NO_DEFAULT_LOGIN, {
+        ...FABLE,
+        dirs: () => {
+          if (broken) throw new Error("EACCES: permission denied");
+          return ["spare", "work"];
+        },
+      });
+      dispose = () => h.harness.dispose();
+      broken = true;
+      expect(
+        await dispatched(h, "thread-1", "proj-1", "claude-haiku-5-5"),
+      ).toMatchObject({ action: "wait" });
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("does not start a turn on the default while its login is still unknown: it waits, then refuses saying so (Astra E44-R2-01)", async () => {
+      const h = await host(
+        {
+          ...NO_DEFAULT_LOGIN,
+          // The default's usage never answers: its login stays unknown.
+          main: () => new Promise<Response>(() => {}) as unknown as Response,
+        },
+        FABLE,
+      );
+      dispose = () => h.harness.dispose();
+      vi.useFakeTimers();
+      try {
+        const answers = [];
+        for (let i = 0; i <= MAX_START_WAITS; i++) {
+          const answer = dispatched(h, "thread-1", "proj-1", null, i > 0);
+          await vi.advanceTimersByTimeAsync(3_000);
+          answers.push(await answer);
+        }
+        expect(answers.map((a) => (a as { action: string }).action)).toEqual([
+          ...Array.from({ length: MAX_START_WAITS }, () => "wait"),
+          "reject",
+        ]);
+        expect(answers.at(-1)).toEqual({
+          action: "reject",
+          message:
+            "Claude Switcher: no account assigned to this project and the default account (main) has a login that could not be checked. Assign one with: bb claude-switcher use proj-1 <account>",
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("lets a pick by hand saved while the first placement writes win over it (Astra E44-R2-02)", async () => {
+      let picked: Promise<unknown> | null = null;
+      const h: Awaited<ReturnType<typeof host>> = await host(NO_DEFAULT_LOGIN, {
+        ...FABLE,
+        beforeSet: async () => {
+          if (picked !== null) return;
+          picked = h.harness.behavior.callRpc("project_set_account", {
+            projectId: "proj-3",
+            account: "spare",
+          });
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        },
+      });
+      dispose = () => h.harness.dispose();
+      expect(
+        await dispatched(h, "thr-new", "proj-3", "claude-haiku-5-5"),
+      ).toEqual({ action: "proceed" });
+      await picked;
+      expect(h.envSet.map((e) => e.value)).toEqual([
+        `${ACCOUNTS}/work`,
+        `${ACCOUNTS}/spare`,
+      ]);
+    });
+
+    it("gives a new message of the thread its own waits after the previous one was refused (Astra E44-R2-03)", async () => {
+      const h = await host(NO_DEFAULT_LOGIN, { ...FABLE, failSet: ["proj-3"] });
+      dispose = () => h.harness.dispose();
+      for (let i = 0; i <= MAX_START_WAITS; i++)
+        await dispatched(h, "thr-new", "proj-3", "claude-haiku-5-5", i > 0);
+      // The user sends again: a new message, which may wait like the first.
+      expect(
+        await dispatched(h, "thr-new", "proj-3", "claude-haiku-5-5"),
+      ).toMatchObject({ action: "wait" });
+    });
+
+    it("starts no measure for a message that can no longer wait, and a measure that fails is never left unhandled (Astra E44-R2-04)", async () => {
+      let broken = false;
+      const h = await host(NO_DEFAULT_LOGIN, {
+        ...FABLE,
+        failSet: ["proj-1"],
+        dirs: () => {
+          if (broken) throw new Error("EIO: i/o error");
+          return ["spare", "work"];
+        },
+      });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_list", null);
+      broken = true;
+      const answers = [];
+      for (let i = 0; i <= MAX_START_WAITS; i++)
+        answers.push(
+          await dispatched(h, "thread-1", "proj-1", "claude-haiku-5-5", i > 0),
+        );
+      expect(answers.at(-1)).toMatchObject({ action: "reject" });
+      // Every measure started settles, and none is left rejected.
+      await new Promise((resolve) => setTimeout(resolve, 50));
     });
 
     it("refuses nothing and places nothing with the automatic choice off", async () => {
