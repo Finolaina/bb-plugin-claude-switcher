@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 // app.tsx has no DOM tests (see README, Development); this guards the r3
 // regression where two empty-state blocks were pasted twice.
@@ -94,7 +94,7 @@ async function register(slotNames: string[], withComposer = false) {
           slot: name,
           id: r.id,
           title: r.title,
-          // The component by name: app.tsx exports only the plugin definition.
+          // The component by name, as the plugin definition registers it.
           component: (r.component as { name?: string }).name,
         }),
     ]),
@@ -195,5 +195,55 @@ describe("the compact accounts panel", () => {
     expect(source).toContain("projectsByAccount(state).map(");
     // The menu's line has no weekly for a Team seat either.
     expect(source).toContain("account.usage.weekly.absent === true");
+  });
+});
+
+describe("an account's row in the panel (Codex E46-R6-003)", () => {
+  it("writes when each window resets and the pace that matters as text, not only in titles a keyboard or a touch never opens", async () => {
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { UsageRow } = await import("./app");
+    const NOW = Date.UTC(2026, 9, 29, 12, 0);
+    const H = 3_600_000;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+    try {
+      const text = (props: Parameters<typeof UsageRow>[0]) =>
+        // Tags (and the titles inside them) out: only what is on screen.
+        renderToStaticMarkup(createElement(UsageRow, props)).replace(/<[^>]*>/g, "");
+      const shown = text({
+        usage: {
+          blocked: false,
+          session: { usedPercent: 40, resetsAt: NOW + 2 * H + 10 * 60_000 },
+          weekly: { usedPercent: 30, resetsAt: NOW + 76 * H },
+          models: { Fable: { usedPercent: 70, resetsAt: NOW + 26 * H } },
+        },
+        preferredModel: "Fable",
+        forecasts: {
+          weekly: { kind: "lasts", until: NOW + 76 * H, percentPerDay: 5 },
+          Fable: { kind: "runs-out", at: NOW + 20 * H, percentPerDay: 30 },
+        },
+      });
+      expect(shown).toContain("ses 40%");
+      expect(shown).toContain(
+        "resets ses 2 h 10 min, sem 3 d 4 h, Fable 1 d 2 h · Fable runs out in 20 h at this pace (30 %/day)",
+      );
+      // A Team seat: no weekly, and nothing to pace.
+      const seat = text({
+        usage: {
+          blocked: false,
+          session: { usedPercent: 5, resetsAt: NOW + 4 * H },
+          weekly: { usedPercent: 0, resetsAt: null, absent: true },
+          models: {},
+        },
+        preferredModel: "Fable",
+        forecasts: undefined,
+      });
+      expect(seat).toContain("resets ses 4 h 0 min");
+      expect(seat).not.toContain("sem");
+      expect(seat).not.toContain("runs out");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

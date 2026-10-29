@@ -206,11 +206,14 @@ function barClass(usedPercent: number): string {
 }
 
 /**
- * An account's windows in two short lines: "ses 10% · sem 40% · Fable 20%"
- * (no weekly on a Team seat), "agotada hasta …" when one is full, and a
- * thin bar per window side by side; the reset and the pace in each title.
+ * An account's windows in short lines: "ses 10% · sem 40% · Fable 20%"
+ * (no weekly on a Team seat), "agotada hasta …" when one is full, a thin
+ * bar per window side by side, and in small text when each resets and the
+ * pace of the window that matters (as in the thread's menu). Written out,
+ * not only in the titles, which neither a keyboard nor a touch opens
+ * (Codex E46-R6-003).
  */
-function UsageRow({
+export function UsageRow({
   usage,
   preferredModel,
   forecasts,
@@ -233,6 +236,23 @@ function UsageRow({
       title: `${w.label}: ${used}%${reset}${pace === null ? "" : ` · ${pace}`}`,
     };
   });
+  const resets = windows.flatMap((w) =>
+    w.window.resetsAt === null
+      ? []
+      : [`${w.short} ${formatReset(w.window.resetsAt)}`],
+  );
+  const paced = windowForecast(
+    forecasts === undefined ? undefined : { own: forecasts },
+    "own",
+    preferredModel,
+  );
+  const pace = paced === null ? null : forecastLine(paced[1], now);
+  const details = [
+    ...(resets.length === 0 ? [] : [`resets ${resets.join(", ")}`]),
+    ...(pace === null
+      ? []
+      : [`${windows.find((w) => w.key === paced?.[0])?.short ?? paced?.[0]} ${pace}`]),
+  ];
   return (
     <div className="mt-1">
       <p className="flex flex-wrap items-baseline gap-x-1.5 text-[11px] tabular-nums text-muted-foreground">
@@ -270,6 +290,11 @@ function UsageRow({
           );
         })}
       </div>
+      {details.length === 0 ? null : (
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          {details.join(" · ")}
+        </p>
+      )}
     </div>
   );
 }

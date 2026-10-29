@@ -22,7 +22,8 @@ project uses [Semantic Versioning](https://semver.org/).
   is removed or overwritten; accounts that already share `projects/` are
   left alone; a project of another machine is skipped and logged once; a
   failure is logged and never stops the move, and after 2 s the move goes
-  on without waiting for the rest.
+  on without waiting for the rest. A move just before a turn (the
+  message's checkpoint) starts the links and does not wait for them.
 
 ### Changed
 
@@ -35,7 +36,8 @@ project uses [Semantic Versioning](https://semver.org/).
   those set outside the plugin and those of an account that is gone.
 - **The panel is compact.** Each account is one card with its windows in
   one line of text (`ses 10% · sem 40% · Fable 20%`) and a thin bar per
-  window side by side; the reset and the pace are in each bar's tooltip.
+  window side by side; under them, in small text, when each window
+  resets and the pace of the window that matters.
   A Team seat shows no «Weekly (all models)» bar, and the account menu of
   a thread shows no weekly for it. The projects are grouped under their
   account, each group headed by the account's usage, with the account
