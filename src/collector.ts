@@ -21,12 +21,23 @@ import { parseUsage, type ParsedUsage } from "./usage.js";
 export type Problem =
   null | { kind: "unauthenticated" } | { kind: "error"; message: string };
 
+/**
+ * What the LAST attempt showed of the login: "yes" once a token was read
+ * (or refreshed) and the usage endpoint did not refuse it, also when the
+ * query then failed (429, 5xx, an unreadable answer); "no" with no login in
+ * the store, or the token refused; "unknown" when the check itself failed
+ * (the store could not be read, the refresh failed): nothing is inferred
+ * from the mere existence of a measurement (Astra E44-R3-01).
+ */
+export type LoginState = "yes" | "no" | "unknown";
+
 export interface Measurement {
   /** When `usage` was measured, or null if never. */
   observedAt: number | null;
   usage: ParsedUsage | null;
   /** Outcome of the LAST attempt; null when it succeeded. */
   problem: Problem;
+  login: LoginState;
 }
 
 export interface CollectorDeps {
@@ -62,6 +73,7 @@ export class UsageCollector {
       usage: previous?.usage ?? null,
     };
     let measurement: Measurement;
+    let login: LoginState = "unknown";
     try {
       const token = await accessToken(
         this.deps.io,
@@ -74,8 +86,10 @@ export class UsageCollector {
           observedAt: null,
           usage: null,
           problem: { kind: "unauthenticated" },
+          login: "no",
         };
       } else {
+        login = "yes";
         const result = await fetchUsage(this.deps.io, token.token);
         switch (result.status) {
           case "ok":
@@ -89,6 +103,7 @@ export class UsageCollector {
                       kind: "error",
                       message: `refreshed login not written back yet: ${token.unsaved}`,
                     },
+              login,
             };
             break;
           case "unauthenticated":
@@ -96,6 +111,7 @@ export class UsageCollector {
               observedAt: null,
               usage: null,
               problem: { kind: "unauthenticated" },
+              login: "no",
             };
             break;
           case "rate-limited":
@@ -105,12 +121,14 @@ export class UsageCollector {
                 kind: "error",
                 message: "usage endpoint rate-limited this query",
               },
+              login,
             };
             break;
           case "error":
             measurement = {
               ...stale,
               problem: { kind: "error", message: result.message },
+              login,
             };
             break;
         }
@@ -122,6 +140,7 @@ export class UsageCollector {
           kind: "error",
           message: error instanceof Error ? error.message : String(error),
         },
+        login,
       };
     }
     this.cache.set(account.name, measurement);

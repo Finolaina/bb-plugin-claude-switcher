@@ -89,6 +89,8 @@ function hash(dir: string): string {
 function fakes(
   usageByAccount: Record<string, () => Response>,
   dirs: () => string[],
+  /** Accounts whose login store refuses the read (security exits 51). */
+  unreadable: () => string[] = () => [],
 ) {
   const files: Record<string, string> = {
     [`${HOME}/.claude.json`]: claudeJson("main@example.com", "uuid-main"),
@@ -122,6 +124,7 @@ function fakes(
       const name = services[args[args.indexOf("-s") + 1]!];
       if (args[0] !== "find-generic-password" || name === undefined)
         return { code: 44, stdout: "" };
+      if (unreadable().includes(name)) return { code: 51, stdout: "" };
       return {
         code: 0,
         stdout: JSON.stringify({
@@ -310,6 +313,8 @@ interface HostOptions {
   /** queuedMessages.delete throws this (the row left the queue between list and delete); `landed`: bb removed the row first, and only its answer was lost. */
   deleteRowError?: { message: string; code?: string; status?: number; landed?: boolean };
   dirs?: () => string[];
+  /** Accounts whose login store cannot be read (see fakes). */
+  unreadable?: () => string[];
   clock?: () => number;
   /** What threads.get answers per thread, over a visible Claude Code thread of the user. */
   threads?: Record<string, Partial<ThreadResponse>>;
@@ -405,6 +410,7 @@ async function host(
   const { credentialIo, accountsIo, usageCalls, files } = fakes(
     usage,
     options.dirs ?? (() => ["spare", "work"]),
+    options.unreadable,
   );
   const { loginIo, logins, made, links } = fakeLoginIo(
     options.accountEntries ??
@@ -3964,6 +3970,124 @@ describe("placing a project before a new thread's first turn", () => {
       expect(answers.at(-1)).toMatchObject({ action: "reject" });
       // Every measure started settles, and none is left rejected.
       await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    it("does not start a turn on the default when its login could not be checked (its store unreadable): the project moves to an account with a login (Astra E44-R3-01)", async () => {
+      const h = await host(NO_DEFAULT_LOGIN, {
+        ...FABLE,
+        unreadable: () => ["main"],
+      });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(
+        await dispatched(h, "thread-1", "proj-1", "claude-haiku-5-5"),
+      ).toEqual({ action: "proceed" });
+      expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-1"]);
+    });
+
+    it("refuses, after its waits, a turn when no login could be checked anywhere, with the command that fixes it (Astra E44-R3-01)", async () => {
+      const h = await host(NO_DEFAULT_LOGIN, {
+        ...FABLE,
+        unreadable: () => ["main", "spare", "work"],
+      });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      const answers = [];
+      for (let i = 0; i <= MAX_START_WAITS; i++)
+        answers.push(
+          await dispatched(h, "thread-1", "proj-1", "claude-haiku-5-5", i > 0),
+        );
+      expect(answers.map((a) => (a as { action: string }).action)).toEqual([
+        ...Array.from({ length: MAX_START_WAITS }, () => "wait"),
+        "reject",
+      ]);
+      expect(answers.at(-1)).toEqual({
+        action: "reject",
+        message:
+          "Claude Switcher: no account assigned to this project and the default account (main) has a login that could not be checked. Assign one with: bb claude-switcher use proj-1 <account>",
+      });
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("counts a login whose token was read as a login when only the usage query fails (rate-limited): the turn starts there (Astra E44-R3-01)", async () => {
+      const h = await host(
+        {
+          ...NO_DEFAULT_LOGIN,
+          main: () => new Response(null, { status: 429 }),
+        },
+        FABLE,
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(
+        await dispatched(h, "thread-1", "proj-1", "claude-haiku-5-5"),
+      ).toEqual({ action: "proceed" });
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("lets a project with an account of its own, or one set outside the plugin, start its turn when the accounts directory cannot be read after a reload, and says so in the log (Astra E44-R3-02)", async () => {
+      const h = await host(NO_DEFAULT_LOGIN, {
+        ...FABLE,
+        dirs: () => {
+          throw new Error("EACCES: permission denied");
+        },
+        presetEnv: {
+          "proj-1": [
+            { name: ENV_VAR, note: ownNote("work"), secret: true, value: null },
+          ],
+          "proj-2": [
+            { name: ENV_VAR, note: "set by hand", secret: true, value: null },
+          ],
+        },
+      });
+      dispose = () => h.harness.dispose();
+      expect(
+        await dispatched(h, "thread-1", "proj-1", "claude-haiku-5-5"),
+      ).toEqual({ action: "proceed" });
+      expect(
+        await dispatched(h, "thr-2", "proj-2", "claude-haiku-5-5"),
+      ).toEqual({ action: "proceed" });
+      expect(h.envSet).toEqual([]);
+      const warns = h.harness.logEntries
+        .filter((e) => e.level === "warn")
+        .map((e) => e.message);
+      expect(warns).toContainEqual(
+        expect.stringContaining(
+          "thread thread-1: not placed before its turn; it runs on the project's own CLAUDE_CONFIG_DIR",
+        ),
+      );
+      // A project on the default account is still not started there.
+      expect(
+        await dispatched(h, "thread-3", "proj-3", "claude-haiku-5-5"),
+      ).toMatchObject({ action: "wait" });
+    });
+
+    it("lets a project with an account of its own start a message whose model bb does not name while the default's login is still unknown (Astra E44-R3-02)", async () => {
+      const h = await host(
+        {
+          ...NO_DEFAULT_LOGIN,
+          // The default's usage never answers: its login stays unknown.
+          main: () => new Promise<Response>(() => {}) as unknown as Response,
+        },
+        {
+          ...FABLE,
+          presetEnv: {
+            "proj-1": [
+              { name: ENV_VAR, note: ownNote("work"), secret: true, value: null },
+            ],
+          },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      vi.useFakeTimers();
+      try {
+        const answer = dispatched(h, "thread-1", "proj-1", null);
+        await vi.advanceTimersByTimeAsync(3_000);
+        expect(await answer).toEqual({ action: "proceed" });
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(h.envSet).toEqual([]);
     });
 
     it("refuses nothing and places nothing with the automatic choice off", async () => {

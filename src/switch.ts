@@ -429,9 +429,10 @@ export interface PlacementInput {
   excursionFrom?: string | null;
   now: number;
   /**
-   * The current account has no login (its usage answered unauthenticated):
-   * a turn there fails with «Not logged in», measured or not (E44: the
-   * default `~/.claude` of a machine nobody logged in on).
+   * The current account has no login (its usage answered unauthenticated),
+   * or it is the default and its login could not be checked (Astra
+   * E44-R3-01): a turn there fails with «Not logged in», measured or not
+   * (E44: the default `~/.claude` of a machine nobody logged in on).
    */
   currentLoggedOut?: boolean;
 }

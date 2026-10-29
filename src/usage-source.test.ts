@@ -31,6 +31,7 @@ describe("provider-usage source mapping", () => {
     const measurement = toMeasurement(ACCOUNT, {
       observedAt: NOW,
       problem: null,
+      login: "yes",
       usage: {
         blocked: false,
         session: { usedPercent: 20, resetsAt: NOW + 3_600_000 },
@@ -90,6 +91,7 @@ describe("provider-usage source mapping", () => {
         observedAt: null,
         usage: null,
         problem: { kind: "unauthenticated" },
+        login: "no",
       }).usage,
     ).toEqual({ status: "unauthenticated", ...base });
     expect(
@@ -97,6 +99,7 @@ describe("provider-usage source mapping", () => {
         observedAt: null,
         usage: null,
         problem: { kind: "error", message: "boom" },
+        login: "unknown",
       }).usage,
     ).toEqual({ status: "error", ...base, message: "boom" });
     expect(toMeasurement(ACCOUNT, undefined).usage).toEqual({
@@ -110,6 +113,7 @@ describe("provider-usage source mapping", () => {
     const measurement = toMeasurement(ACCOUNT, {
       observedAt: NOW - 60_000,
       problem: { kind: "error", message: "rate-limited" },
+      login: "yes",
       usage: {
         blocked: false,
         session: { usedPercent: 1, resetsAt: null },

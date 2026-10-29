@@ -26,6 +26,8 @@ interface IoOptions {
   expiresAt?: number;
   /** Exit code of add-generic-password. */
   addCode?: number;
+  /** Exit code of find-generic-password (51: the store refused the read). */
+  findCode?: number;
 }
 
 function io(responses: Array<() => Response>, options: IoOptions = {}) {
@@ -49,6 +51,8 @@ function io(responses: Array<() => Response>, options: IoOptions = {}) {
       if (args[0] !== "find-generic-password" || options.loggedIn === false) {
         return { code: 44, stdout: "" };
       }
+      if (options.findCode !== undefined)
+        return { code: options.findCode, stdout: "" };
       // Reads are async in reality: lets concurrent collects interleave.
       await new Promise((r) => setTimeout(r, 1));
       return {
@@ -96,6 +100,7 @@ describe("UsageCollector", () => {
     expect(measurement).toEqual({
       observedAt: NOW + 5,
       problem: null,
+      login: "yes",
       usage: {
         blocked: false,
         session: {
@@ -270,6 +275,7 @@ describe("UsageCollector", () => {
     expect(await collector.collect(ACCOUNT)).toEqual({
       observedAt: null,
       problem: { kind: "unauthenticated" },
+      login: "no",
       usage: null,
     });
     expect(collector.usable()).toEqual([]);
@@ -283,6 +289,7 @@ describe("UsageCollector", () => {
     expect(await collector.collect(ACCOUNT)).toEqual({
       observedAt: null,
       problem: { kind: "unauthenticated" },
+      login: "no",
       usage: null,
     });
   });
@@ -369,6 +376,35 @@ describe("UsageCollector", () => {
       kind: "error",
       message: expect.stringMatching(/503/),
     });
+    // The login was not confirmed by this attempt, whatever the last one said (Astra E44-R3-01).
+    expect(good.login).toBe("yes");
+    expect(measurement.login).toBe("unknown");
+  });
+
+  it("says the login is unknown when its store cannot be read, and yes only once a token was read, also when the usage query then fails (Astra E44-R3-01)", async () => {
+    const unreadable = new UsageCollector({
+      io: io([], { findCode: 51 }).credentialIo,
+      now: () => NOW,
+    });
+    expect(await unreadable.collect(ACCOUNT)).toEqual({
+      observedAt: null,
+      usage: null,
+      problem: { kind: "error", message: expect.stringMatching(/exited 51/) },
+      login: "unknown",
+    });
+    const read = new UsageCollector({
+      io: io([
+        () => new Response("", { status: 429 }),
+        () => new Response("", { status: 500 }),
+        () => Response.json({ limits: [{ kind: "session", percent: "20" }] }),
+      ]).credentialIo,
+      now: () => NOW,
+    });
+    for (let i = 0; i < 3; i++) {
+      const measurement = await read.collect(ACCOUNT);
+      expect(measurement.problem?.kind).toBe("error");
+      expect(measurement.login).toBe("yes");
+    }
   });
 
   it("collects every account in turn, one pass at a time, and exposes them for the policy", async () => {
