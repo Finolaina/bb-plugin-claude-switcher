@@ -1189,17 +1189,23 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   type MoveMark = { epoch: number; picks: number };
   const moves = new Map<
     string,
-    { epoch: number; inFlight: number; picks: number }
+    { epoch: number; inFlight: number; picks: number; writes: number }
   >();
   function movesOf(projectId: string): {
     epoch: number;
     inFlight: number;
     /** Choices by hand (a pick, also one that confirms the account; a release): each outranks an automatic move still under way. */
     picks: number;
+    /**
+     * Writes of the project's account that landed. A move dropped before
+     * its write does not count, so it never drops the one after it (Codex
+     * E46-R3-001), as `epoch`, which every attempt moves, would.
+     */
+    writes: number;
   } {
     let move = moves.get(projectId);
     if (move === undefined) {
-      move = { epoch: 0, inFlight: 0, picks: 0 };
+      move = { epoch: 0, inFlight: 0, picks: 0, writes: 0 };
       moves.set(projectId, move);
     }
     return move;
@@ -1286,9 +1292,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * Point the project at `account` (null = default). Refuses an external
    * variable. `wanted`, for a move decided outside the project's queue (the
    * placement before a turn): looked at once the sessions are shared, just
-   * before the write; when it says no, or a pick by hand or another move of
-   * the project happened during the sharing, nothing is written and the
-   * answer is false: the caller records no move (Codex E46-R2-001).
+   * before the write; when it says no, or a pick by hand or another write
+   * of the project's account landed during the sharing, nothing is written
+   * and the answer is false: the caller records no move (Codex E46-R2-001).
    */
   async function applyAccount(
     projectId: string,
@@ -1321,7 +1327,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // queue hung on a filesystem or on bb (Fable, 2026-10-29); what is
       // still under way only adds links.
       if (move !== null) {
-        const mark = { epoch: move.epoch, picks: move.picks };
+        const mark = { writes: move.writes, picks: move.picks };
         const shared = await within(
           shareProjectSessions(projectId, account, toName, from.account),
           SESSIONS_LIMIT_MS,
@@ -1334,7 +1340,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         if (
           wanted !== undefined &&
           (!wanted() ||
-            move.epoch !== mark.epoch ||
+            move.writes !== mark.writes ||
             move.picks !== mark.picks)
         ) {
           bb.log.info(
@@ -1359,6 +1365,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           note: noteFor(account.name),
         });
       }
+      if (move !== null) move.writes += 1;
     } finally {
       // Also after a failure: a delete may have landed before it.
       projectsRead = null;
