@@ -80,7 +80,7 @@ import {
 } from "./src/usage-source-contract.js";
 import { toMeasurement, toResource } from "./src/usage-source.js";
 import { shareSessions, type SessionsIo } from "./src/sessions.js";
-import { forecastLine, projectName, sharedWith } from "./src/ui.js";
+import { listText, projectName, sharedWith } from "./src/ui.js";
 
 export const ENV_VAR = "CLAUDE_CONFIG_DIR";
 /** Realtime channel app.tsx listens on after any state change. */
@@ -195,6 +195,8 @@ function notTheUsersThread(
 const windowSchema = z.object({
   usedPercent: z.number(),
   resetsAt: z.number().nullable(),
+  /** The provider reported no such window: a Team seat's general weekly. */
+  absent: z.literal(true).optional(),
 });
 const accountStateSchema = z.object({
   name: z.string(),
@@ -4136,27 +4138,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     description: "Emit machine-readable JSON",
   } as const;
   function textState(s: State): string {
-    const pct = (n: number) => `${Math.round(n)}%`;
-    const lines = s.accounts.map((a) => {
-      if (a.usage === null)
-        return `${a.name}\t${a.problem?.kind ?? "not observed"}`;
-      const models = Object.entries(a.usage.models)
-        .map(([m, w]) => `${m} ${pct(w.usedPercent)}`)
-        .join(" ");
-      // The pace of each window that has one: "weekly runs out in 2 d 5 h …".
-      const paces = Object.entries(s.forecasts[a.name] ?? {}).flatMap(
-        ([window, forecast]) => {
-          const line = forecastLine(forecast, deps.now());
-          return line === null ? [] : [`\t${window} ${line}`];
-        },
-      );
-      return `${a.name}\tsession ${pct(a.usage.session.usedPercent)}\tweekly ${pct(a.usage.weekly.usedPercent)}\t${models}${a.usage.blocked ? "\tLOCKED" : ""}${paces.join("")}`;
-    });
-    const projects = s.projects.map(
-      (p) =>
-        `${p.name}\t${p.external ? "(external CLAUDE_CONFIG_DIR)" : (p.account ?? `(${s.defaultAccountName})`)}`,
-    );
-    return [...lines, "", "projects:", ...projects].join("\n") + "\n";
+    return listText(s, deps.now());
   }
   bb.cli.register(
     defineCli({

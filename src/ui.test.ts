@@ -7,13 +7,18 @@ import {
   picksOnSelect,
   forecastLine,
   headerStatus,
+  accountWindows,
+  listText,
   noLoginFound,
+  projectsByAccount,
+  outText,
   projectName,
   retryDelayMs,
   sharedWith,
   signalsBack,
   windowForecast,
 } from "./ui.js";
+import { tenAccounts } from "./list-fixture.js";
 
 const ok = { problem: null };
 const unauth = { problem: { kind: "unauthenticated" as const } };
@@ -477,5 +482,149 @@ describe("signalsBack", () => {
   it("is false on the view's first look, connected or not: it reads as it mounts", () => {
     expect(signalsBack(undefined, "connected")).toBe(false);
     expect(signalsBack(undefined, "connecting")).toBe(false);
+  });
+});
+
+describe("listText (bb claude-switcher list)", () => {
+  const NOW = Date.parse("2026-10-29T10:00:00.000Z");
+
+  it("gives each account one aligned line, without a weekly on a Team seat, and the projects by account", () => {
+    expect(listText(tenAccounts(NOW), NOW, "UTC")).toBe(
+      [
+        "viaulab     ses  10% sem  40% Fable  20%",
+        "max2        ses  55% sem  71% Fable  64%",
+        "max3        ses   3% sem  12%",
+        "max4        ses  20% sem 100% Fable  88% agotada hasta 01/11",
+        "maxprivada  ses   0% sem   5% Fable   1%",
+        "team1       ses  30%          Fable  50%",
+        "team2       ses   5%          Fable   9%",
+        "team3       ses 100%          Fable  70% agotada hasta 12:00",
+        "team4       not logged in",
+        "team5       ses  45%          Fable  99%",
+        "",
+        "projects:",
+        "viaulab: Website",
+        "max2: Agenda",
+        "team3: Ads · Bots · Infra",
+        "(external CLAUDE_CONFIG_DIR): Legacy",
+        "(account no longer exists): Ghost",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("keeps every account line within 60 characters, and says no weekly for a Team seat", () => {
+    const state = tenAccounts(NOW);
+    // The longest a line gets: a ten-character name, every window full.
+    state.accounts.push({
+      ...state.accounts[3]!,
+      name: "a-very-long-account-name",
+      usage: {
+        blocked: false,
+        session: { usedPercent: 100, resetsAt: NOW + 60_000 },
+        weekly: { usedPercent: 100, resetsAt: NOW + 5 * 24 * 3_600_000 },
+        models: { Fable: { usedPercent: 100, resetsAt: NOW + 3_600_000 } },
+      },
+    });
+    state.accounts.push({
+      ...state.accounts[0]!,
+      name: "failing",
+      usage: null,
+      problem: { kind: "error", message: "HTTP 429: rate limited ".repeat(5) },
+    });
+    const lines = listText(state, NOW, "UTC").split("\n");
+    const accountLines = lines.slice(0, lines.indexOf(""));
+    expect(accountLines).toHaveLength(12);
+    for (const line of accountLines) expect(line.length).toBeLessThanOrEqual(60);
+    expect(accountLines).toContain(
+      "a-very-lon  ses 100% sem 100% Fable 100% agotada hasta 03/11",
+    );
+    expect(accountLines.at(-1)).toMatch(/^failing {5}query failed: HTTP 429/);
+    for (const line of accountLines.filter((l) => l.startsWith("team")))
+      expect(line).not.toMatch(/sem|weekly/);
+    // The pace of a window stays in --json: not a line of the text.
+    expect(lines.join("\n")).not.toMatch(/runs out|lasts until/);
+  });
+
+  it("says LOCKED for an account the provider locked, and counts a window whose reset passed as empty", () => {
+    const state = tenAccounts(NOW);
+    state.accounts = [
+      {
+        ...state.accounts[1]!,
+        usage: { ...state.accounts[1]!.usage!, blocked: true },
+      },
+      {
+        ...state.accounts[2]!,
+        usage: {
+          ...state.accounts[2]!.usage!,
+          session: { usedPercent: 100, resetsAt: NOW - 1 },
+        },
+      },
+    ];
+    state.projects = [];
+    expect(listText(state, NOW, "UTC")).toBe(
+      [
+        "max2  ses  55% sem  71% Fable  64% LOCKED",
+        "max3  ses   0% sem  12%",
+        "",
+        "projects:",
+        "",
+      ].join("\n"),
+    );
+  });
+});
+
+describe("outText", () => {
+  const NOW = Date.parse("2026-10-29T10:00:00.000Z");
+  it("gives the hour within a day of the reset and the date from a day on", () => {
+    expect(outText(NOW + 24 * 3_600_000 - 60_000, NOW, "UTC")).toBe(
+      "agotada hasta 09:59",
+    );
+    expect(outText(NOW + 24 * 3_600_000, NOW, "UTC")).toBe(
+      "agotada hasta 30/10",
+    );
+    expect(outText(NOW + 2 * 3_600_000, NOW, "Europe/Madrid")).toBe(
+      "agotada hasta 13:00",
+    );
+    expect(outText(null, NOW, "UTC")).toBe("agotada");
+  });
+});
+
+describe("accountWindows (the panel's bars)", () => {
+  const NOW = Date.parse("2026-10-29T10:00:00.000Z");
+  const [max, , , , , team] = tenAccounts(NOW).accounts;
+
+  it("has no weekly bar for a Team seat, and one for a Max account", () => {
+    expect(accountWindows(team!.usage!).map((w) => w.label)).toEqual([
+      "Session (5 h)",
+      "Weekly · Fable",
+    ]);
+    expect(accountWindows(max!.usage!).map((w) => w.label)).toEqual([
+      "Session (5 h)",
+      "Weekly (all models)",
+      "Weekly · Fable",
+    ]);
+    expect(accountWindows(max!.usage!).map((w) => w.short)).toEqual([
+      "ses",
+      "sem",
+      "Fable",
+    ]);
+  });
+});
+
+describe("projectsByAccount (the panel's project list)", () => {
+  it("groups the projects under their account, in the accounts' order, external and vanished ones last", () => {
+    const groups = projectsByAccount(
+      tenAccounts(Date.parse("2026-10-29T10:00:00.000Z")),
+    );
+    expect(
+      groups.map((g) => [g.heading, g.account, g.projects.map((p) => p.id)]),
+    ).toEqual([
+      ["viaulab", "viaulab", ["p2"]],
+      ["max2", "max2", ["p4"]],
+      ["team3", "team3", ["p7", "p3", "p1"]],
+      ["(external CLAUDE_CONFIG_DIR)", null, ["p5"]],
+      ["(account no longer exists)", null, ["p6"]],
+    ]);
   });
 });

@@ -181,3 +181,19 @@ describe("the plugin's frontend registration", () => {
     expect(registered.map((r) => `${r.slot}:${r.id}`)).toEqual(["settingsSection:claude-switcher"]);
   });
 });
+
+// The compact panel (0.2.30): the decisions live in src/ui.ts (tested
+// there); these guard that app.tsx draws from them.
+describe("the compact accounts panel", () => {
+  it("draws each card's bars from accountWindows in one thin row, says when an account is out, and groups the projects by account", async () => {
+    const source = await readFile(new URL("./app.tsx", import.meta.url), "utf8");
+    // No weekly bar of its own: a Team seat has none (accountWindows).
+    expect(source).not.toContain('label="Weekly (all models)"');
+    expect(source).toContain("accountWindows(usage).map(");
+    expect(source).toContain('className="mt-1 flex gap-1"');
+    expect(source).toContain("outText(summary.outUntil, now)");
+    expect(source).toContain("projectsByAccount(state).map(");
+    // The menu's line has no weekly for a Team seat either.
+    expect(source).toContain("account.usage.weekly.absent === true");
+  });
+});
