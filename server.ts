@@ -1282,12 +1282,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     });
   }
 
-  /** Point the project at `account` (null = default). Refuses an external variable. */
+  /**
+   * Point the project at `account` (null = default). Refuses an external
+   * variable. `wanted`, for a move decided outside the project's queue (the
+   * placement before a turn): looked at once the sessions are shared, just
+   * before the write; when it says no, or a pick by hand or another move of
+   * the project happened during the sharing, nothing is written and the
+   * answer is false: the caller records no move (Codex E46-R2-001).
+   */
   async function applyAccount(
     projectId: string,
     account: Account | null,
     from: ProjectAccount,
-  ): Promise<void> {
+    wanted?: () => boolean,
+  ): Promise<boolean> {
     if (from.external) {
       throw new Error(
         `${ENV_VAR} on project ${projectId} was set outside this plugin; change it in the project's machine environment`,
@@ -1313,6 +1321,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // queue hung on a filesystem or on bb (Fable, 2026-10-29); what is
       // still under way only adds links.
       if (move !== null) {
+        const mark = { epoch: move.epoch, picks: move.picks };
         const shared = await within(
           shareProjectSessions(projectId, account, toName, from.account),
           SESSIONS_LIMIT_MS,
@@ -1322,6 +1331,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           bb.log.warn(
             `sessions of ${projectNames.get(projectId) ?? projectId} not shared into ${toName} within ${SESSIONS_LIMIT_MS / 1000} s; the move goes on`,
           );
+        if (
+          wanted !== undefined &&
+          (!wanted() ||
+            move.epoch !== mark.epoch ||
+            move.picks !== mark.picks)
+        ) {
+          bb.log.info(
+            `project ${projectId}: not moved to ${toName}: ${wanted() ? "picked by hand or moved meanwhile" : "the turn no longer waits for it"}`,
+          );
+          return false;
+        }
       }
       if (account === null || account.configDir === null) {
         // Default account = no variable. Only ours can be there (see above).
@@ -1356,6 +1376,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (toName !== (from.account ?? current.defaultAccountName))
       accountChangedAt.set(projectId, deps.now());
     bb.realtime.publish(CHANGED, { at: deps.now() });
+    return true;
   }
 
   /** The projects named in the last list (logs only). */
@@ -2903,7 +2924,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     if (turn.abandoned) return null;
     const to = accountOrDefault(decision.account);
-    await applyAccount(projectId, to, from);
+    // Looked at again after the sessions are shared: the checkpoint may
+    // have stopped waiting, or a pick landed, meanwhile.
+    if (!(await applyAccount(projectId, to, from, () => !turn.abandoned)))
+      return null;
     await markHandled(projectId);
     noteMove(projectId, fromName, decision.account, model, before);
     const reason =
