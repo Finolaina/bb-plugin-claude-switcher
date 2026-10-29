@@ -469,16 +469,29 @@ export function listText(state: ListInput, now: number, timeZone?: string): stri
       const blank = (text: string) => " ".repeat(text.length);
       const sem = `sem ${pct(s.weekly ?? 0)}`;
       const fable = `${model} ${pct(s.model?.percent ?? 0)}`;
-      rest = [
-        `ses ${pct(s.session)}`,
-        s.weekly === null ? blank(sem) : sem,
-        ...(model === "" ? [] : [s.model === null ? blank(fable) : fable]),
-        a.usage.blocked
-          ? "LOCKED"
-          : s.outUntil === undefined
-            ? ""
-            : outText(s.outUntil, now, timeZone),
-      ].join(" ");
+      // Each column on its own: a locked account can have full windows too
+      // (Codex E46-R5-002). Dropped while the line is too long, least
+      // needed first: sem, LOCKED, agotada hasta, the model.
+      const columns = [
+        { keep: 5, text: `ses ${pct(s.session)}` },
+        { keep: 0, text: s.weekly === null ? blank(sem) : sem },
+        ...(model === ""
+          ? []
+          : [{ keep: 4, text: s.model === null ? blank(fable) : fable }]),
+        {
+          keep: 3,
+          text:
+            s.outUntil === undefined ? "" : outText(s.outUntil, now, timeZone),
+        },
+        { keep: 2, text: a.usage.blocked ? "LOCKED" : "" },
+      ].filter((c) => c.text !== "");
+      const join = () => columns.map((c) => c.text).join(" ").trimEnd();
+      while (`${name}  ${join()}`.trimEnd().length > LIST_LINE) {
+        const least = columns.reduce((a, b) => (b.keep < a.keep ? b : a));
+        if (least.keep === 5) break;
+        columns.splice(columns.indexOf(least), 1);
+      }
+      rest = join();
     }
     const line = `${name}  ${rest}`.trimEnd();
     return line.length <= LIST_LINE ? line : `${line.slice(0, LIST_LINE - 1)}…`;
