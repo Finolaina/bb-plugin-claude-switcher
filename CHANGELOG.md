@@ -21,29 +21,32 @@ project uses [Semantic Versioning](https://semver.org/).
   the queue», asked again every 30 s, not counted against the 3 waits of a
   new project's placement); a turn that ends, fails or whose thread goes
   frees its seat for the first in line and bb is asked again at once. A
-  reservation whose turn does not start within 90 s is freed. The seats
-  are kept in memory; a reload counts the threads bb reports active.
+  reservation whose turn does not start within 90 s is freed. Every turn
+  is checked, placed by the plugin or not: when its project's account
+  cannot be read, the message waits up to three times, then goes with a
+  warning. A started turn keeps the seat its dispatch reserved, even when
+  the project moved before bb announced it. The seats are the login's
+  (`accountUuid`): two directories of one account share them, and a
+  renamed default keeps them. The seats are kept in memory; after a
+  reload the threads bb reports active are counted before any turn starts
+  (a message waits meanwhile, asked again in 5 s); a failed read is tried
+  three times, 2 s apart, and a thread that ends while counted is not
+  counted.
 - **A project is never moved to find a seat.** Seats only steer moves made
-  for other reasons (a new project, a switch on a limit, a move before a
-  turn, a move off a long wait: an account with a free seat first, by
-  quota alone when none has one; ahead of the limit: only an account with
-  a free seat). A pick by hand waits for a seat like any.
+  for other reasons, and those go only to an account with a free seat (a
+  new project, a move before a turn, a move off a long wait, a move ahead
+  of the limit); with none free anywhere the project stays and its
+  threads wait. The one exception is the switch after a turn failed on a
+  limit, which picks by quota among the others when none has a seat. A
+  pick by hand waits for a seat like any.
 - `bb claude-switcher list` shows `seats 3/4` under each limited account
   and a «Waiting for a seat:» section; each account card in Settings shows
-  `seats 3/4 · 2 waiting`.
-- Every usage sample stores the seats taken as it was measured
-  (`seat-samples`, a week), and `bb claude-switcher seats [--json]` prints
-  them with the usage, to set the defaults from data (they are a guess).
-
-### Known limits
-
-- A turn whose placement failed or took too long, or whose model bb does
-  not name, is not checked for a seat at the checkpoint (bb waits on that
-  answer and the project's account is not read twice); it takes a seat as
-  it starts. With the automatic choice off, the project's account is read
-  at the checkpoint for the seat.
-- A thread that ends between the reload's list of threads and its count
-  keeps a seat until its next turn ends.
+  `seats 3/4 · 2 waiting`, updated as seats change.
+- Each measurement of an account stores a sample whole in itself
+  (`seat-samples`, a week, one per account and measurement): seats
+  running and reserved then, session and weekly %, and their resets.
+  `bb claude-switcher seats [--json]` prints them with the session % spent
+  per hour and seat, to set the defaults from data (they are a guess).
 
 ## [0.2.30] - 2026-10-29
 
