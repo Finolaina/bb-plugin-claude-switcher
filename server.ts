@@ -5338,6 +5338,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (accounts.length === 0) await discover();
     const now = deps.now();
     const taken = seatsState();
+    // What the policy may choose, whatever the model (Codex ULTRA-R06): a
+    // read it no longer trusts is no usable account here either.
+    const trusted = new Set(collector.usable(maxReadAgeMs()).map((a) => a.name));
     const observed = accounts
       .map((a) => collector.get(a.name)?.observedAt ?? null)
       .filter((at): at is number => at !== null);
@@ -5350,6 +5353,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           m?.usage === null || m?.usage === undefined
             ? null
             : settle({ ...m.usage, name: account.name }, now);
+        const unconfirmed =
+          usage !== null && !trusted.has(account.name) && m?.observedAt != null;
         return {
           name: account.name,
           plan: planOf(account, m?.usage ?? null),
@@ -5363,8 +5368,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                   ...taken[account.name]!,
                   external: taken[account.name]!.external ?? [],
                 },
+          ...(unconfirmed ? { unconfirmedSince: m!.observedAt! } : {}),
           usable:
             usage !== null &&
+            !unconfirmed &&
             usage.unknown !== true &&
             !loggedOut(account.name) &&
             !refusing(account.name) &&
