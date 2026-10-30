@@ -6,6 +6,7 @@
 // has a test; app.tsx only draws it. The words match the Mac menu-bar app
 // (cuentas-claude, Sources/CuentasCore/Lista.swift) so both say the same.
 
+import { DAY_ZONE } from "./pace.js";
 import { windowForecast } from "./ui.js";
 
 export type Lang = "es" | "en";
@@ -85,10 +86,14 @@ const TODAY: Record<Lang, [string, string, string]> = {
   en: ["today", "tomorrow", "yesterday"],
 };
 
-/** The wall clock of `at` in `timeZone` (the browser's own when undefined). */
+/**
+ * The wall clock of `at` in `timeZone`; Madrid's when undefined, never the
+ * browser's: the day and the resets are Madrid's (DISENO.md; Codex
+ * ULTRA-R2-005).
+ */
 function clock(at: number, timeZone: string | undefined) {
   const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
+    timeZone: timeZone ?? DAY_ZONE,
     hourCycle: "h23",
     year: "numeric",
     month: "numeric",
@@ -137,6 +142,11 @@ export function whenShort(
   return `${day} ${target.time}`;
 }
 
+/** A move's date and time in the history, in Madrid; in `locale` (the browser's when undefined). */
+export function moveTime(at: number, locale?: string): string {
+  return new Date(at).toLocaleString(locale, { timeZone: DAY_ZONE });
+}
+
 /** «el lunes 2, 09:00» / «on Monday 2, 09:00»; today and tomorrow as in the short form. */
 export function whenLong(
   at: number,
@@ -181,7 +191,7 @@ export interface PanelSeats {
 export interface PanelContext {
   now: number;
   lang: Lang;
-  /** The zone the days are counted in; the browser's own when undefined. */
+  /** The zone the days are counted in; Madrid's when undefined. */
   timeZone?: string;
   preferredModel: string;
 }

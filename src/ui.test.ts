@@ -436,6 +436,23 @@ describe("signalsBack", () => {
   });
 });
 
+describe("outText on a machine in another zone (Codex ULTRA-R2-005)", () => {
+  it("writes when an account is back in Madrid's time, with no zone given", () => {
+    const zone = process.env.TZ;
+    process.env.TZ = "America/New_York";
+    try {
+      const now = Date.parse("2026-10-29T10:00:00Z");
+      // 13:00 in Madrid (CET), 08:00 in New York.
+      expect(outText(Date.parse("2026-10-29T12:00:00Z"), now)).toBe("agotada hasta 13:00");
+      // 00:30 on 31 Oct in Madrid is still the 30th in New York.
+      expect(outText(Date.parse("2026-10-30T23:30:00Z"), now)).toBe("agotada hasta 31/10");
+    } finally {
+      if (zone === undefined) delete process.env.TZ;
+      else process.env.TZ = zone;
+    }
+  });
+});
+
 describe("listText (bb claude-switcher list)", () => {
   const NOW = Date.parse("2026-10-29T10:00:00.000Z");
 

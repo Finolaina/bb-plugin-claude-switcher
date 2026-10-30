@@ -15,6 +15,17 @@ describe("app.tsx", () => {
   });
 });
 
+// No DOM tests: guards that the panel writes its dates through src/panel.ts,
+// in Madrid (Codex ULTRA-R2-005), never in the browser's zone.
+describe("the panel's dates", () => {
+  it("writes the history's times with moveTime and passes no browser zone", async () => {
+    const source = await readFile(new URL("./app.tsx", import.meta.url), "utf8");
+    expect(source).toContain("{moveTime(move.at)}");
+    expect(source).not.toMatch(/toLocale(String|DateString|TimeString)\(/);
+    expect(source).not.toContain("resolvedOptions().timeZone");
+  });
+});
+
 // The thread header vanished whenever its reads were slow or failed (bb
 // busy, 2026-10-02): no DOM tests here, so these guard the two fixes.
 describe("the thread header's reads", () => {

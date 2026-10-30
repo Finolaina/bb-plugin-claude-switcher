@@ -94,6 +94,9 @@ project uses [Semantic Versioning](https://semver.org/).
   plan («aitor · Ultra · sin tope de 5 h», Codex ULTRA-R05). `plan` stays
   null: bb 0.46 puts its own word («Max», «Team») in place of the label
   for a plan id it knows, and the account's name would be lost.
+- **Every date in the panel, its rows and the menus is Madrid's**, not
+  the browser's zone (a reset at 09:00 in Madrid read «03:00» in New
+  York); so are the history's times and the «agotada hasta» of `list`.
 
 ### Known limits
 

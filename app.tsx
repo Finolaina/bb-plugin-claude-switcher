@@ -46,6 +46,7 @@ import {
   forecastText,
   type Lang,
   menuLine,
+  moveTime,
   type PanelBar,
   type PanelRow,
   type PanelState,
@@ -786,7 +787,7 @@ function History({ state }: { state: State }) {
             className="flex flex-wrap gap-x-3 gap-y-0.5 px-3 py-1.5"
           >
             <span className="shrink-0 tabular-nums text-muted-foreground">
-              {new Date(move.at).toLocaleString()}
+              {moveTime(move.at)}
             </span>
             <span className="min-w-0 break-words">
               <span className="font-medium">
