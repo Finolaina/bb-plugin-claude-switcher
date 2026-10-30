@@ -21,7 +21,18 @@ import { settle } from "./switch.js";
 import { parseUsage, type ParsedUsage } from "./usage.js";
 
 export type Problem =
-  null | { kind: "unauthenticated" } | { kind: "error"; message: string };
+  | null
+  | { kind: "unauthenticated" }
+  | {
+      kind: "error";
+      message: string;
+      /**
+       * The usage itself was measured on this attempt: only the refreshed
+       * login could not be written back. Unset: the query failed and the
+       * usage is the last good one, old.
+       */
+      fresh?: true;
+    };
 
 /**
  * What the LAST attempt showed of the login: "yes" once a token was read
@@ -40,6 +51,18 @@ export interface Measurement {
   /** Outcome of the LAST attempt; null when it succeeded. */
   problem: Problem;
   login: LoginState;
+}
+
+/**
+ * The measurement's usage was read on its own attempt (Codex ULTRA-R2-002):
+ * succeeded, or measured with only a warning (the refreshed login not
+ * written back). A failed query that reuses the last good usage is not one.
+ */
+export function freshReading(
+  m: Measurement,
+): m is Measurement & { observedAt: number; usage: ParsedUsage } {
+  if (m.observedAt === null || m.usage === null) return false;
+  return m.problem?.kind !== "error" || m.problem.fresh === true;
 }
 
 export interface CollectorDeps {
@@ -122,6 +145,7 @@ export class UsageCollector {
                   : {
                       kind: "error",
                       message: `refreshed login not written back yet: ${token.unsaved}`,
+                      fresh: true,
                     },
               login,
             };
