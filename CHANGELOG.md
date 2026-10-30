@@ -11,7 +11,7 @@ project uses [Semantic Versioning](https://semver.org/).
 - **An Ultra account freed of the 5-hour window was «blocked + unknown».**
   Anthropic renamed Max 20x to Ultra and drops its 5-hour window account
   by account (2026-10-30). The usage endpoint then answers `five_hour:
-  null`, no `session` limit and a `weekly_all`: the plugin read the
+null`, no `session` limit and a `weekly_all`: the plugin read the
   missing session as an incomplete answer, so the account was never
   chosen and `list` said `ses 100% LOCKED`. Such an answer now reads a
   session absent at 0 % that never binds (the pattern of a Team seat's
@@ -112,6 +112,15 @@ project uses [Semantic Versioning](https://semver.org/).
 - `planOf` without a profile tier cannot tell an Ultra still on the
   5-hour window from a Max: it says «sin datos de plan» until the login's
   profile carries `organizationRateLimitTier` or `planDisplayName`.
+- Left open by the final inspection (Codex Astra r3, no high; for 0.2.33):
+  the refresh's rescue of a project off an account that cannot run does
+  not know whether its threads are background work, so it may move a
+  background-only project to an account kept for the user (ULTRA-R3-001);
+  moving an external hold to another account frees its old seat before the
+  hold is stored, so a thread admitted in that moment and a failed write
+  can leave two on one seat (ULTRA-R3-002); and a failed read of the
+  stored external holds at load starts with none, so their seats can be
+  granted again until they are reserved anew (ULTRA-R3-003).
 
 ## [0.2.31] - 2026-10-30
 
