@@ -17,6 +17,7 @@ import {
   ENV_VAR,
   FIRST_PLACEMENT_WAIT_MS,
   MAX_START_WAITS,
+  SEAT_RECHECK_MS,
   type State,
 } from "./server.js";
 import type { AccountsIo } from "./src/accounts.js";
@@ -799,6 +800,8 @@ describe("claude accounts plugin", () => {
       "maximumWaitHours",
       "preferredModel",
       "refreshMinutes",
+      "seatsMax",
+      "seatsTeam",
       "switchAheadOtherPercent",
       "switchAheadPercent",
     ]);
@@ -13427,5 +13430,204 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     await h.harness.behavior.emitThreadEvent("turn.failed", failure());
     expect(h.retries.map((r) => r.reason)).toEqual(["Waiting for Fable on main"]);
     expect(await history(h)).toEqual([]);
+  });
+});
+
+describe("seats per account: threads wait for a free one", () => {
+  /** bb asks before a thread's turn starts: what the plugin answers. */
+  const ask = (h: Awaited<ReturnType<typeof host>>, id: string, projectId = "proj-1") =>
+    sent(h, id, projectId) as Promise<{ action: string; reason?: string; sendAt?: number }>;
+  const seatsOf = async (h: Awaited<ReturnType<typeof host>>) =>
+    ((await h.harness.behavior.callRpc("accounts_list", null)) as State).seats;
+  const OFF = { autoSwitch: false };
+
+  it("with 3 seats and 5 threads, 2 wait, each saying its place in the queue", async () => {
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 3 } });
+    dispose = () => h.harness.dispose();
+    for (const id of ["t1", "t2", "t3"])
+      expect(await ask(h, id)).toEqual({ action: "proceed" });
+    expect(await ask(h, "t4")).toEqual({
+      action: "wait",
+      reason: "Waiting for a seat on main: 3/3 threads running, 0 ahead in the queue",
+      sendAt: NOW + SEAT_RECHECK_MS,
+    });
+    expect(await ask(h, "t5")).toMatchObject({
+      action: "wait",
+      reason: "Waiting for a seat on main: 3/3 threads running, 1 ahead in the queue",
+    });
+    expect((await seatsOf(h))?.main).toMatchObject({
+      capacity: 3,
+      reserved: 3,
+      queued: [{ threadId: "t4" }, { threadId: "t5" }],
+    });
+  });
+
+  it("a turn that ends frees its seat for the first in line, and bb is asked again at once", async () => {
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    await ask(h, "t1");
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "t1", projectId: "proj-1" }),
+    });
+    expect((await ask(h, "t2")).action).toBe("wait");
+    expect((await ask(h, "t3")).action).toBe("wait");
+    const before = h.harness.recheckCount;
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "t1", projectId: "proj-1" }),
+    });
+    await vi.waitFor(() => expect(h.harness.recheckCount).toBe(before + 1));
+    // t3 asks first, but t2 was first in line.
+    expect((await ask(h, "t3")).action).toBe("wait");
+    expect(await ask(h, "t2")).toEqual({ action: "proceed" });
+  });
+
+  it("a waiting thread archived leaves the queue", async () => {
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    await ask(h, "t1");
+    await ask(h, "t2");
+    await ask(h, "t3");
+    await h.harness.behavior.emitThreadEvent("thread.archived", {
+      thread: thread({ id: "t2", projectId: "proj-1" }),
+    });
+    expect((await seatsOf(h))?.main?.queued).toEqual([
+      { threadId: "t3", title: null },
+    ]);
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "t1", projectId: "proj-1" }),
+    });
+    expect(await ask(h, "t3")).toEqual({ action: "proceed" });
+  });
+
+  it("a reload counts the threads bb says are running, on their project's account", async () => {
+    const h = await host(ALL_FREE, {
+      settings: { ...OFF, seatsMax: 2 },
+      threads: {
+        r1: { status: "active" },
+        r2: { status: "starting" },
+        r3: { status: "idle" },
+        r4: { status: "active", providerId: "codex" },
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await vi.waitFor(async () =>
+      expect((await seatsOf(h))?.main).toMatchObject({ running: 2 }),
+    );
+    expect((await ask(h, "t9")).action).toBe("wait");
+  });
+
+  it("an account's kind comes from its organizationType; unknown, from its windows", async () => {
+    const h = await host(
+      { ...ALL_FREE, main: () => Response.json(payload(10, 40)) },
+      { settings: { ...OFF, seatsMax: 5, seatsTeam: 1 } },
+    );
+    dispose = () => h.harness.dispose();
+    // No organizationType, a weekly window: Max, 5 seats.
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect((await seatsOf(h))?.main?.capacity).toBe(5);
+    h.files[`${HOME}/.claude.json`] = JSON.stringify({
+      oauthAccount: {
+        accountUuid: "uuid-main",
+        emailAddress: "main@example.com",
+        organizationType: "claude_team",
+      },
+    });
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect((await seatsOf(h))?.main?.capacity).toBe(1);
+    expect((await ask(h, "t1")).action).toBe("proceed");
+    expect((await ask(h, "t2")).action).toBe("wait");
+  });
+
+  it("an unknown kind without a weekly window is a Team seat", async () => {
+    const h = await host(
+      { ...ALL_FREE, main: () => Response.json(teamPayload(10, 10)) },
+      { settings: { ...OFF, seatsMax: 5, seatsTeam: 1 } },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect((await seatsOf(h))?.main?.capacity).toBe(1);
+  });
+
+  it("a project picked by hand onto a full account waits there; it is not moved for a seat", async () => {
+    const h = await host(ALL_FREE, { settings: { seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-1",
+      account: "spare",
+    });
+    const opus = (id: string) =>
+      h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id, projectId: "proj-1" }),
+          requestedExecution: { providerId: "claude-code", model: "claude-opus-5-5" },
+          attempt: "start-turn",
+        }),
+      );
+    expect(await opus("t1")).toEqual({ action: "proceed" });
+    expect(await opus("t2")).toMatchObject({
+      action: "wait",
+      reason: "Waiting for a seat on spare: 1/1 threads running, 0 ahead in the queue",
+    });
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+  });
+
+  it("a new project is placed on the best account with a free seat", async () => {
+    const h = await host(ALL_FREE, { settings: { seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // work, the best by quota, already runs a thread.
+    await h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-2",
+      account: "work",
+    });
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thr-2", projectId: "proj-2" }),
+    });
+    await vi.waitFor(async () =>
+      expect((await seatsOf(h))?.work?.running).toBe(1),
+    );
+    await h.harness.behavior.emitThreadEvent("thread.created", {
+      thread: thread({ id: "thr-new", projectId: "proj-3" }),
+    });
+    expect(h.envSet.at(-1)).toMatchObject({
+      projectId: "proj-3",
+      value: `${ACCOUNTS}/spare`,
+    });
+  });
+
+  it("a turn started without a reservation still takes a seat", async () => {
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "sneaky", projectId: "proj-1" }),
+    });
+    await vi.waitFor(async () =>
+      expect((await seatsOf(h))?.main?.running).toBe(1),
+    );
+    expect((await ask(h, "t1")).action).toBe("wait");
+  });
+
+  it("the list shows each account's seats and who waits", async () => {
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    await ask(h, "t1");
+    await ask(h, "t2");
+    const { stdout } = await h.harness.behavior.runCli(["list"]);
+    expect(stdout).toContain("seats 1/1");
+    expect(stdout).toMatch(/Waiting for a seat:\nmain  #1  t2/);
+  });
+});
+
+describe("bb claude-switcher seats", () => {
+  it("prints each account's seats and every usage sample with the seats taken then", async () => {
+    const h = await host(ALL_FREE, { settings: { autoSwitch: false, seatsMax: 2 } });
+    dispose = () => h.harness.dispose();
+    await sent(h, "t1", "proj-1");
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const { stdout } = await h.harness.behavior.runCli(["seats"]);
+    expect(stdout).toContain("main\tseats 1/2 (0 running, 1 reserved)\t0 waiting");
+    expect(stdout).toContain(`${new Date(NOW).toISOString()}\tmain\t0\t1\t100\t40`);
+    expect(await h.harness.behavior.callRpc("accounts_list", null)).toBeDefined();
   });
 });
