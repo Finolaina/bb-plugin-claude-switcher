@@ -4,6 +4,47 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.31] - 2026-10-30
+
+### Added
+
+- **Seats per account: threads wait their turn instead of emptying one
+  account.** With many threads open, they all ran on the account with the
+  most room and emptied its 5-hour window in minutes (2026-10-29: 7 of 8
+  accounts at 100 % at once). Each account now has seats, threads running
+  turns on it at once: `seatsMax` (default 4) on a Max account, `seatsTeam`
+  (default 2) on a Team account, 0 = no limit. The kind comes from
+  `oauthAccount.organizationType` (`claude_max`, `claude_team`); unknown,
+  an account without a general weekly window is Team. At the dispatch
+  checkpoint, after the turn is placed, a thread whose account is full
+  waits («Waiting for a seat on <account>: 2/2 threads running, 1 ahead in
+  the queue», asked again every 30 s, not counted against the 3 waits of a
+  new project's placement); a turn that ends, fails or whose thread goes
+  frees its seat for the first in line and bb is asked again at once. A
+  reservation whose turn does not start within 90 s is freed. The seats
+  are kept in memory; a reload counts the threads bb reports active.
+- **A project is never moved to find a seat.** Seats only steer moves made
+  for other reasons (a new project, a switch on a limit, a move before a
+  turn, a move off a long wait: an account with a free seat first, by
+  quota alone when none has one; ahead of the limit: only an account with
+  a free seat). A pick by hand waits for a seat like any.
+- `bb claude-switcher list` shows `seats 3/4` under each limited account
+  and a «Waiting for a seat:» section; each account card in Settings shows
+  `seats 3/4 · 2 waiting`.
+- Every usage sample stores the seats taken as it was measured
+  (`seat-samples`, a week), and `bb claude-switcher seats [--json]` prints
+  them with the usage, to set the defaults from data (they are a guess).
+
+### Known limits
+
+- A turn whose placement failed or took too long, or whose model bb does
+  not name, is not checked for a seat at the checkpoint (bb waits on that
+  answer and the project's account is not read twice); it takes a seat as
+  it starts. With the automatic choice off, the project's account is read
+  at the checkpoint for the seat.
+- A thread that ends between the reload's list of threads and its count
+  keeps a seat until its next turn ends.
+
 ## [0.2.30] - 2026-10-29
 
 ### Fixed
