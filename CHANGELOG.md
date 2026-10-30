@@ -55,6 +55,32 @@ project uses [Semantic Versioning](https://semver.org/).
   asked for, and is kept in storage (`external-seats`) across reloads.
   Counted in `list`, `seats` and `health`.
 
+### Changed
+
+- **Settings → Claude Switcher reads at a glance (design B).** On top, one
+  sentence: which accounts work now, which are kept for you (their day's
+  share is spent) and which free one has most of its week left. Below,
+  the Ultra and Max accounts by what is left of their week, most first,
+  then the Team seats by name; one row each with the plan («Ultra · con
+  5 h», «Ultra · sin tope de 5 h», «Team»), one bar of what is LEFT (of
+  the week, or of the 5 hours on a Team seat) with today's share striped
+  at its end, the state as an icon and a word (Out, Kept for you,
+  Working, Free; «No data» for a failed read), today's line or the
+  seat's threads, and when it is back («lun 09:00», «mañana 11:00»).
+  Working = it holds a seat, also one held from outside bb. Spanish for a
+  browser set to Spanish, English otherwise. The cards with one bar per
+  window and their «ses/sem» text are gone; the pace of the window that
+  matters is now in each row's tooltip and in the thread's menu, in the
+  same two languages.
+- **The thread's account in its header** shows its state as an icon, and
+  its menu opens on a small card with what is left in large type, the
+  bar and its line; every account of the menu, and every account
+  heading of Projects, says its state and what is left in one line.
+- **bb's usage panel** labels each card with the account's name and its
+  plan («aitor · Ultra · sin tope de 5 h», Codex ULTRA-R05). `plan` stays
+  null: bb 0.46 puts its own word («Max», «Team») in place of the label
+  for a plan id it knows, and the account's name would be lost.
+
 ### Known limits
 
 - The pace places only new projects: a project already placed is not
