@@ -285,8 +285,10 @@ describe("the thread's account in its menu", () => {
     const aitor = text("aitor", null);
     expect(aitor).toContain("2 %");
     expect(aitor).toContain("Ultra · sin tope de 5 h · le queda el 2 % de la semana · vuelve dom 18:00");
-    expect(text("studio", "Semana: llega al reinicio a este ritmo (24.3 %/día)")).toContain(
-      "Semana: llega al reinicio a este ritmo (24.3 %/día)",
-    );
+    // The pace the card shows comes from the fixture's forecast, in Spanish.
+    const { forecastText } = await import("./src/panel");
+    const pace = forecastText(state.forecasts, "studio", "Fable", READING_AT, "es");
+    expect(pace).toBe("Semana: llega al reinicio a este ritmo (24,3 %/día)");
+    expect(text("studio", pace)).toContain("(24,3 %/día)");
   });
 });
