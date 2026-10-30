@@ -14971,6 +14971,29 @@ describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
     });
   });
 
+  it("keeps as the day's first reading one bb's usage panel made (Codex ULTRA-R03)", async () => {
+    let clock = NOW;
+    let workWeekly = 30;
+    const h = await host(
+      { ...usage, work: () => Response.json(payload(5, workWeekly)) },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    // 12:00 in Madrid: the panel reads work at 30 %, the refresh a minute later at 55 %.
+    await h.harness.behavior.callRpc(usageFetchMethod, { resourceId: "work", refresh: true });
+    await vi.waitFor(async () => {
+      const stored = (await h.bb.storage.kv.get("pace-day")) as Record<string, { usedPercent: number }> | undefined;
+      expect(stored?.work?.usedPercent).toBe(30);
+    });
+    clock = NOW + 60_000;
+    workWeekly = 55;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const s = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(s.accounts.find((a) => a.name === "work")?.pace).toMatchObject({ spent: 25 });
+    const stored = (await h.bb.storage.kv.get("pace-day")) as Record<string, { usedPercent: number }>;
+    expect(stored.work?.usedPercent).toBe(30);
+  });
+
   it("keeps the day's first reading in storage, across a reload", async () => {
     const h = await host(usage);
     dispose = () => h.harness.dispose();
