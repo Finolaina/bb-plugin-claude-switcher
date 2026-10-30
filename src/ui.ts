@@ -308,7 +308,8 @@ interface UsageLike {
 
 /** What an account's compact line shows (the CLI's list, the panel's cards). */
 export interface AccountSummary {
-  session: number;
+  /** null on an Ultra account freed of the 5-hour window: it has no session (absent). */
+  session: number | null;
   /** null on a Team seat: it has no general weekly (absent). */
   weekly: number | null;
   /** The preferred model's window, when the account has one. */
@@ -338,14 +339,15 @@ export function accountSummary(
       name.toLowerCase() === preferredModel.toLowerCase(),
   );
   const team = usage.weekly.absent === true;
+  const noSession = usage.session.absent === true;
   const windows = [
-    usage.session,
+    ...(noSession ? [] : [usage.session]),
     ...(team ? [] : [usage.weekly]),
     ...(model === undefined ? [] : [model[1]]),
   ];
   const full = windows.filter((w) => windowPercent(w, now) >= 100);
   const summary: AccountSummary = {
-    session: shownPercent(usage.session, now),
+    session: noSession ? null : shownPercent(usage.session, now),
     weekly: team ? null : shownPercent(usage.weekly, now),
     model:
       model === undefined
@@ -397,6 +399,8 @@ interface ListInput {
     name: string;
     problem: { kind: "unauthenticated" } | { kind: "error"; message: string } | null;
     usage: UsageLike | null;
+    /** The plan's short label («Ultra · sin tope de 5 h», «Team»), shown under the line. */
+    planShort?: string;
   }>;
   projects: ReadonlyArray<{
     name: string;
@@ -484,13 +488,16 @@ export function listText(state: ListInput, now: number, timeZone?: string): stri
     } else {
       const s = accountSummary(a.usage, state.preferredModel, now);
       const blank = (text: string) => " ".repeat(text.length);
+      const ses = `ses ${pct(s.session ?? 0)}`;
       const sem = `sem ${pct(s.weekly ?? 0)}`;
       const fable = `${model} ${pct(s.model?.percent ?? 0)}`;
       // Each column on its own: a locked account can have full windows too
       // (Codex E46-R5-002). Dropped while the line is too long, least
       // needed first: sem, LOCKED, agotada hasta, the model.
       const columns = [
-        { keep: 5, text: `ses ${pct(s.session)}` },
+        // No session on an Ultra account freed of the 5-hour window: its
+        // plan says so under the line.
+        { keep: 5, text: s.session === null ? blank(ses) : ses },
         { keep: 0, text: s.weekly === null ? blank(sem) : sem },
         ...(model === ""
           ? []
@@ -511,10 +518,15 @@ export function listText(state: ListInput, now: number, timeZone?: string): stri
       rest = join();
     }
     const line = `${name}  ${rest}`.trimEnd();
-    const seats = seatsText(state.seats?.[a.name]);
+    const details = [
+      a.planShort ?? null,
+      seatsText(state.seats?.[a.name]),
+    ].filter((d): d is string => d !== null && d !== "");
     return [
       line.length <= LIST_LINE ? line : `${line.slice(0, LIST_LINE - 1)}…`,
-      ...(seats === null ? [] : [`${" ".repeat(width)}  ${seats}`]),
+      ...(details.length === 0
+        ? []
+        : [`${" ".repeat(width)}  ${details.join(" · ")}`]),
     ];
   });
   const projects = projectsByAccount(state).map(
@@ -537,8 +549,9 @@ export function listText(state: ListInput, now: number, timeZone?: string): stri
 }
 
 /**
- * The windows an account's card draws, in order: session, the general
- * weekly (none on a Team seat: it has no such limit) and each model's.
+ * The windows an account's card draws, in order: session (none on an
+ * Ultra account freed of the 5-hour window), the general weekly (none on a
+ * Team seat: it has no such limit) and each model's.
  * `short` is the card's text ("ses 10% · sem 40% · Fable 20%").
  */
 export function accountWindows<W extends ListWindow>(usage: {
@@ -547,7 +560,9 @@ export function accountWindows<W extends ListWindow>(usage: {
   models: Record<string, W>;
 }): { key: string; label: string; short: string; window: W }[] {
   return [
-    { key: "session", label: "Session (5 h)", short: "ses", window: usage.session },
+    ...(usage.session.absent === true
+      ? []
+      : [{ key: "session", label: "Session (5 h)", short: "ses", window: usage.session }]),
     ...(usage.weekly.absent === true
       ? []
       : [

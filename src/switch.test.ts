@@ -1897,3 +1897,33 @@ describe("seats steer where a project goes, and never move one by themselves", (
     });
   });
 });
+
+describe("decidePlacement of background work (SPEC 2026-10-30 §2)", () => {
+  const accounts = [
+    account("main", { session: { usedPercent: 30, resetsAt: NOW + HOUR } }),
+    account("work", { session: { usedPercent: 5, resetsAt: NOW + HOUR } }),
+  ];
+  const saved = (name: string) => name === "work";
+
+  it("puts a new project of background work behind the accounts saved for the user", () => {
+    expect(
+      decidePlacement({ currentAccount: "main", isNew: true, accounts, preferredModel: "", now: NOW, savedForUser: saved }),
+    ).toEqual({ kind: "keep" });
+    expect(
+      decidePlacement({ currentAccount: "main", isNew: true, accounts, preferredModel: "", now: NOW }),
+    ).toEqual({ kind: "move", account: "work", why: "new-project" });
+  });
+
+  it("never moves a project already placed because of the pace", () => {
+    expect(
+      decidePlacement({
+        currentAccount: "work",
+        isNew: false,
+        accounts,
+        preferredModel: "",
+        now: NOW,
+        savedForUser: saved,
+      }),
+    ).toEqual({ kind: "keep" });
+  });
+});

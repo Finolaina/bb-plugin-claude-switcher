@@ -30,9 +30,11 @@ import { z } from "zod";
 import {
   discoverAccounts,
   expandHome,
+  planOf,
   type Account,
   type AccountsIo,
 } from "./src/accounts.js";
+import { nextDayStart, paceOf, type DayStart, type Pace } from "./src/pace.js";
 import {
   UsageCollector,
   type LoginState,
@@ -205,6 +207,8 @@ const KV_HISTORY = "switch-history";
 const KV_CANCELLED = "cancelled-retries";
 /** Usage samples per account and window, for the forecast. */
 const KV_SERIES = "usage-series";
+/** The day's first reading of each account's weekly window, for the day's pace (see src/pace.ts). */
+const KV_PACE = "pace-day";
 const HISTORY_LIMIT = 100;
 /** A thread as bb reports it (the SDK does not export the type by name). */
 type ThreadResponse = PluginThreadEventPayloads["thread.created"]["thread"];
@@ -265,6 +269,12 @@ function notTheUsersThread(
     : "hidden thread";
 }
 
+const paceSchema = z.object({
+  budget: z.number(),
+  spent: z.number(),
+  dayPercent: z.number(),
+  background: z.boolean(),
+});
 const windowSchema = z.object({
   usedPercent: z.number(),
   resetsAt: z.number().nullable(),
@@ -293,6 +303,17 @@ const accountStateSchema = z.object({
       models: z.record(z.string(), windowSchema),
     })
     .nullable(),
+  // Optional: a server older than the app (during an update) sends none.
+  /** The plan behind the login (see planOf): ultra, max, team or unknown. */
+  plan: z.enum(["ultra", "max", "team", "unknown"]).optional(),
+  /** «Ultra · sin tope de 5 h», «Team»...: the same text on every screen. */
+  planLabel: z.string().optional(),
+  /** The label where room is short (the CLI's list): «Ultra · con 5 h». */
+  planShort: z.string().optional(),
+  /** Whether the account has the 5-hour window; null while its usage says nothing. */
+  fiveHour: z.boolean().nullable().optional(),
+  /** The day's pace of its weekly window; null on a Team seat or without a reset. */
+  pace: paceSchema.nullable().optional(),
 });
 const projectStateSchema = z.object({
   id: z.string(),
@@ -318,6 +339,11 @@ const forecastSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("steady") }),
   z.object({ kind: z.literal("unknown") }),
 ]);
+const dayStartSchema = z.object({
+  at: z.number(),
+  usedPercent: z.number(),
+  resetsAt: z.number(),
+});
 const seriesSchema = z.object({
   resetsAt: z.number().nullable(),
   points: z.array(z.tuple([z.number(), z.number()])),
@@ -519,6 +545,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       description:
         "A thread whose turn is about to start waits when the project's account already runs this many; it starts as soon as one of them ends, first come first served. A project is never moved to find a seat. 0 = no limit.",
       default: 2,
+    },
+    dayStartHour: {
+      type: "number",
+      label: "Hour the day starts (Europe/Madrid)",
+      description:
+        "Each day from this hour gets an even share of what is left of an account's weekly window. At 90 % of it the account takes no more background work (threads another thread, an automation or a plugin opens) unless no other account can run it; your own threads are never held back by it.",
+      default: 9,
     },
     loginPrivateWindow: {
       type: "boolean",
@@ -1133,6 +1166,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       `could not read the usage samples; starting them again: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  /** The day's first reading of each account's weekly window (see src/pace.ts). */
+  let paceDay: Record<string, DayStart> = {};
+  try {
+    const parsed = z
+      .record(z.string(), dayStartSchema)
+      .safeParse(await bb.storage.kv.get<unknown>(KV_PACE));
+    if (parsed.success) paceDay = parsed.data;
+  } catch (error) {
+    bb.log.warn(
+      `could not read the day's first readings; the day's pace starts again: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   // The seat samples kept; one of another shape (before 0.2.31's second
   // round: no usage in it) is left out.
   try {
@@ -1189,6 +1234,29 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       `could not read what the banners are asked on; they come back with the next judgments: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  /** The hour the day starts in Madrid (the setting, a whole hour 0-23; 9 when unreadable). */
+  function dayHour(): number {
+    const h = Math.floor(current.dayStartHour);
+    return Number.isFinite(h) && h >= 0 && h <= 23 ? h : 9;
+  }
+  /** The day's pace of the account's weekly window now; null on a Team seat, without a reset or unmeasured. */
+  function paceFor(name: string): Pace | null {
+    const usage = collector.get(name)?.usage;
+    if (usage === null || usage === undefined) return null;
+    const now = deps.now();
+    return paceOf(settle({ ...usage, name }, now).weekly, paceDay[name], now, dayHour());
+  }
+  /**
+   * The account is saved for the user (SPEC 2026-10-30 §2): its day's pace
+   * at 90 %, or not known for a weekly window it has (no reset: nothing is
+   * spent blind). A Team seat has no general weekly: no pace holds it back.
+   */
+  function savedForUser(name: string): boolean {
+    const usage = collector.get(name)?.usage;
+    if (usage === null || usage === undefined) return false;
+    if (usage.weekly.absent === true) return false;
+    return paceFor(name)?.background !== true;
+  }
   let seriesWrites: Promise<void> = Promise.resolve();
   /**
    * Note the measured windows of every known account (the weekly one and
@@ -1219,6 +1287,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         string,
         { usedPercent: number; resetsAt: number | null },
       ][] = [["weekly", m.usage.weekly], ...Object.entries(m.usage.models)];
+      const day = nextDayStart(
+        paceDay[account.name],
+        {
+          at: m.observedAt,
+          usedPercent: m.usage.weekly.usedPercent,
+          resetsAt: m.usage.weekly.absent === true ? null : m.usage.weekly.resetsAt,
+        },
+        dayHour(),
+      );
+      if (day === undefined) delete paceDay[account.name];
+      else paceDay[account.name] = day;
       const updated: Record<string, Series> = {};
       for (const [name, w] of windows)
         updated[name] = recordSample(own[name], {
@@ -1231,6 +1310,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     series = next;
     for (const name of Object.keys(seatSamples))
       if (next[name] === undefined) delete seatSamples[name];
+    for (const name of Object.keys(paceDay))
+      if (!accounts.some((a) => a.name === name)) delete paceDay[name];
+    const paceSnapshot = { ...paceDay };
     const snapshot = series;
     pruneSeatSamples();
     const seatSnapshot = structuredClone(seatSamples);
@@ -1240,6 +1322,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       } catch (error) {
         bb.log.warn(
           `could not store the seat samples: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      try {
+        await bb.storage.kv.set(KV_PACE, paceSnapshot);
+      } catch (error) {
+        bb.log.warn(
+          `could not store the day's first readings: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
       try {
@@ -2006,6 +2095,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           observedAt: m?.observedAt ?? null,
           problem: m?.problem ?? null,
           usage: m?.usage ?? null,
+          ...planState(account, m?.usage ?? null),
+          pace: paceFor(account.name),
         };
       }),
       projects,
@@ -2023,6 +2114,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       forecasts: forecasts(),
       login: loginStatus(),
       seats: seatsState(),
+    };
+  }
+
+  /** What the views and `health` say of an account's plan (see planOf). */
+  function planState(account: Account, usage: Measurement["usage"]) {
+    const info = planOf(account, usage);
+    return {
+      plan: info.plan,
+      planLabel: info.label,
+      planShort: info.short,
+      fiveHour: info.fiveHour,
     };
   }
 
@@ -2931,6 +3033,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const fromName = from.account ?? current.defaultAccountName;
     // Read before noteMove, which forgets it on the way home.
     const excursion = excursions.get(projectId);
+    // Background work: a thread another thread, an automation or a plugin
+    // opened (the user opens the rest). A new project of it goes behind the
+    // accounts saved for the user (SPEC 2026-10-30 §2).
+    const background =
+      typeof thread.parentThreadId === "string" ||
+      typeof thread.originPluginId === "string";
     const decision = decidePlacement({
       currentAccount: fromName,
       isNew,
@@ -2938,6 +3046,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       preferredModel: current.preferredModel,
       excursionFrom: wayHome(projectId, current.preferredModel, measured, now),
       freeSeats,
+      ...(background ? { savedForUser } : {}),
       now,
       currentLoggedOut: unconfirmed(fromName),
     });

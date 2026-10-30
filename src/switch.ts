@@ -463,6 +463,12 @@ export interface PlacementInput {
    * themselves.
    */
   freeSeats?: (account: string) => number;
+  /**
+   * The thread is background work (see ChoiceOptions.savedForUser): a NEW
+   * project goes behind the accounts saved for the user. A project already
+   * placed is never moved for the pace.
+   */
+  savedForUser?: (account: string) => boolean;
   now: number;
   /**
    * The current account has no login (its usage answered unauthenticated),
@@ -513,7 +519,11 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     reserveModel: input.reserveModel,
   };
   if (input.isNew) {
-    const choice = chooseSeated(accounts, options, input.freeSeats);
+    const choice = chooseSeated(
+      accounts,
+      { ...options, savedForUser: input.savedForUser },
+      input.freeSeats,
+    );
     return choice === null || choice.account === input.currentAccount
       ? { kind: "keep" }
       : { kind: "move", account: choice.account, why: "new-project" };

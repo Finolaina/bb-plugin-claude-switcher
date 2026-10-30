@@ -658,3 +658,37 @@ describe("chooseAccount with seats", () => {
     ).toBeNull();
   });
 });
+
+describe("chooseAccount for background work (SPEC 2026-10-30 §2)", () => {
+  const soon = account("soon", { weekly: { usedPercent: 60, resetsAt: NOW + 6 * HOUR } });
+  const late = account("late", { weekly: { usedPercent: 10, resetsAt: NOW + 90 * HOUR } });
+  const saved = (name: string) => name === "soon";
+
+  it("puts the accounts saved for the user behind every other usable one", () => {
+    expect(chooseAccount([soon, late], { preferredModel: "" })?.account).toBe("soon");
+    expect(
+      chooseAccount([soon, late], { preferredModel: "", savedForUser: saved })?.account,
+    ).toBe("late");
+  });
+
+  it("still chooses a saved account when it is the only one: never work left without one", () => {
+    expect(
+      chooseAccount([soon, account("out", { weekly: { usedPercent: 100, resetsAt: NOW + HOUR } })], {
+        preferredModel: "",
+        savedForUser: saved,
+      })?.account,
+    ).toBe("soon");
+  });
+
+  it("takes an account without a session (Ultra) as one at 0 % of it", () => {
+    const ultra = account("ultra", {
+      session: { usedPercent: 0, resetsAt: null, absent: true },
+      weekly: { usedPercent: 60, resetsAt: NOW + 6 * HOUR },
+    });
+    const busy = account("busy", {
+      session: { usedPercent: 30, resetsAt: NOW + HOUR },
+      weekly: { usedPercent: 60, resetsAt: NOW + 5 * HOUR },
+    });
+    expect(chooseAccount([busy, ultra], { preferredModel: "" })?.account).toBe("ultra");
+  });
+});

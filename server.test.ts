@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import {
   createFakePluginHost,
   makeMessageDispatchHookContext,
@@ -830,6 +831,7 @@ describe("claude accounts plugin", () => {
       "accountsDir",
       "autoSwitch",
       "claudeCommand",
+      "dayStartHour",
       "defaultAccountName",
       "loginPrivateWindow",
       "maximumWaitHours",
@@ -14781,5 +14783,89 @@ describe("no project is left on an account out of the preferred model or without
     expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
       ["proj-1", `${ACCOUNTS}/spare`],
     ]);
+  });
+});
+
+// ---- Ultra without the 5-hour window, the day's pace (SPEC 2026-10-30) ----
+function ultraFixture(name: string): Payload {
+  return JSON.parse(
+    readFileSync(new URL(`./src/fixtures/ultra/${name}.json`, import.meta.url), "utf8"),
+  ) as Payload;
+}
+
+describe("an Ultra account without the 5-hour window (2026-10-30)", () => {
+  it("is listed with its plan, usable, with the Max seats, never «ses 100% LOCKED» (canary 1)", async () => {
+    const h = await host({
+      main: () => Response.json(ultraFixture("ultra-sin-5h")),
+      spare: () => Response.json(ultraFixture("team")),
+      work: () => Response.json(ultraFixture("ultra-con-5h-b")),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const s = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    const main = s.accounts.find((a) => a.name === "main")!;
+    expect(main).toMatchObject({
+      plan: "ultra",
+      planLabel: "Ultra · sin tope de 5 h",
+      fiveHour: false,
+    });
+    expect(main.usage).toMatchObject({ blocked: false, session: { absent: true } });
+    expect(main.usage?.unknown).toBeUndefined();
+    expect(s.accounts.find((a) => a.name === "spare")).toMatchObject({ plan: "team", planLabel: "Team" });
+    expect(s.seats?.main?.capacity).toBe(4);
+    expect(s.seats?.spare?.capacity).toBe(2);
+    const list = await h.harness.behavior.runCli(["list"]);
+    const mainLines = list.stdout.split("\n").filter((l) => l.startsWith("main "));
+    expect(mainLines.join("\n")).not.toMatch(/ses|LOCKED/);
+    expect(list.stdout).toContain("Ultra · sin tope de 5 h");
+    expect(list.stdout).toContain("Team");
+  });
+});
+
+describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
+  // NOW is 12:00 in Madrid: the day began at 09:00 (07:00Z), the weekly
+  // resets in 3 days: 3.125 days left, 32 points for today from 0 %.
+  const dayStart = { at: NOW - 2 * HOUR, usedPercent: 0, resetsAt: NOW + 3 * 24 * HOUR };
+  const usage = {
+    main: () => Response.json(payload(30, 40)),
+    spare: () => Response.json(payload(10, 20)),
+    // 30 of 32 points of the day spent: saved for the user.
+    work: () => Response.json(payload(5, 30)),
+  };
+
+  it("puts a new project of a thread another thread opened behind the account saved for the user", async () => {
+    const h = await host(usage, { kvPreset: { "pace-day": { work: dayStart } } });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const s = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(s.accounts.find((a) => a.name === "work")?.pace).toMatchObject({ background: false });
+    await h.harness.behavior.emitThreadEvent("thread.created", {
+      thread: thread({ id: "thr-bg", projectId: "proj-3", parentThreadId: "thr-parent" }),
+    });
+    expect(h.envSet.at(-1)).toEqual(
+      expect.objectContaining({ projectId: "proj-3", value: `${ACCOUNTS}/spare` }),
+    );
+  });
+
+  it("leaves the user's own new project on the best account whatever its pace", async () => {
+    const h = await host(usage, { kvPreset: { "pace-day": { work: dayStart } } });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent("thread.created", {
+      thread: thread({ id: "thr-me", projectId: "proj-3" }),
+    });
+    expect(h.envSet.at(-1)).toEqual(
+      expect.objectContaining({ projectId: "proj-3", value: `${ACCOUNTS}/work` }),
+    );
+  });
+
+  it("keeps the day's first reading in storage, across a reload", async () => {
+    const h = await host(usage);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await vi.waitFor(async () => {
+      const stored = (await h.bb.storage.kv.get("pace-day")) as Record<string, { usedPercent: number }>;
+      expect(stored?.work?.usedPercent).toBe(30);
+    });
   });
 });
