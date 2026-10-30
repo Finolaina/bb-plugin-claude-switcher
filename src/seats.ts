@@ -49,7 +49,27 @@ export interface AccountSeats {
   reserved: number;
   /** Waiting threads, first in line first. */
   queued: string[];
+  /** Seats held from outside bb (see holdExternal), by id; only when there is one. */
+  external?: { id: string; until: number }[];
 }
+
+/** Longest an external hold lasts from its request, whatever its `until` says. */
+export const EXTERNAL_MAX_MS = 12 * 60 * 60_000;
+
+/** A seat held from outside bb: a `claude -p` run with the account's CLAUDE_CONFIG_DIR, which bb does not see. */
+export interface ExternalHold {
+  id: string;
+  account: string;
+  /** It counts while the clock is before this. */
+  until: number;
+  /** When it was asked for (or last renewed). */
+  at: number;
+}
+
+export type HoldResult =
+  | { ok: true; until: number; renewed: boolean }
+  /** full: no free seat (or one owed to a thread already waiting); past: `until` is not ahead. */
+  | { ok: false; reason: "full" | "past" };
 
 interface Seat {
   account: string;
@@ -70,23 +90,93 @@ interface Waiting {
 export class Seats {
   private readonly seats = new Map<string, Seat>();
   private readonly waiting = new Map<string, Waiting>();
+  private readonly external = new Map<string, ExternalHold>();
   private arrivals = 0;
 
   /**
    * `account` is the seat budget's identity (the login's accountUuid, else
    * the name: Astra SEATS-R08); `changed` hears every change of the seats
-   * or the queues (Astra SEATS-R09).
+   * or the queues (Astra SEATS-R09); `clock` tells when an external hold
+   * has ended (read, never awaited).
    */
   constructor(
     private readonly capacity: (account: string) => number,
     private readonly changed: () => void = () => {},
+    private readonly clock: () => number = Date.now,
   ) {}
 
   private taken(account: string): number {
     let n = 0;
     for (const seat of this.seats.values())
       if (seat.account === account) n += 1;
+    const now = this.clock();
+    for (const hold of this.external.values())
+      if (hold.account === account && hold.until > now) n += 1;
     return n;
+  }
+
+  /**
+   * A seat of `account` held from outside bb until `until` (at most
+   * EXTERNAL_MAX_MS from `now`), under `id`. Checked and taken in this one
+   * call: nothing can take the seat in between. Taken only with a seat
+   * free beyond those owed to the threads already waiting. The same id
+   * again renews it: on the same account it keeps its seat, on another it
+   * moves there only if one is free there (else it stays as it was).
+   */
+  holdExternal(
+    id: string,
+    account: string,
+    until: number,
+    now: number,
+  ): HoldResult {
+    if (until <= now) return { ok: false, reason: "past" };
+    const end = Math.min(until, now + EXTERNAL_MAX_MS);
+    const held = this.external.get(id);
+    if (held !== undefined && held.until > now && held.account === account) {
+      this.external.set(id, { id, account, until: end, at: now });
+      this.changed();
+      return { ok: true, until: end, renewed: true };
+    }
+    if (held !== undefined) this.external.delete(id);
+    if (this.free(account) <= this.queue(account).length) {
+      if (held !== undefined) this.external.set(id, held);
+      return { ok: false, reason: "full" };
+    }
+    this.external.set(id, { id, account, until: end, at: now });
+    this.changed();
+    return { ok: true, until: end, renewed: held !== undefined };
+  }
+
+  /** The external hold `id` ends now: its account, or null when there was none (or it had ended). */
+  releaseExternal(id: string): string | null {
+    const held = this.external.get(id);
+    if (held === undefined) return null;
+    this.external.delete(id);
+    this.changed();
+    // One already ended was not there any more.
+    return held.until > this.clock() ? held.account : null;
+  }
+
+  /** The external holds still counting, by id. */
+  holds(): ExternalHold[] {
+    const now = this.clock();
+    return [...this.external.values()]
+      .filter((h) => h.until > now)
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .map((h) => ({ ...h }));
+  }
+
+  /**
+   * The holds kept in storage, back after a reload: granted then, so not
+   * checked against the seats again; the ended ones are left out and none
+   * lasts beyond EXTERNAL_MAX_MS from its request.
+   */
+  restoreHolds(stored: readonly ExternalHold[], now: number): void {
+    for (const h of stored) {
+      const until = Math.min(h.until, h.at + EXTERNAL_MAX_MS);
+      if (until > now) this.external.set(h.id, { ...h, until });
+    }
+    this.changed();
   }
 
   /** Seats free on the account; Infinity when it has no limit. */
@@ -162,6 +252,11 @@ export class Seats {
         this.seats.delete(threadId);
         freed.add(seat.account);
       }
+    for (const [id, hold] of this.external)
+      if (hold.until <= now) {
+        this.external.delete(id);
+        freed.add(hold.account);
+      }
     let left = false;
     for (const [threadId, waiting] of this.waiting)
       if (now - waiting.asked >= ttl) {
@@ -189,7 +284,11 @@ export class Seats {
    */
   rekey(from: string, to: string): void {
     let moved = false;
-    for (const entry of [...this.seats.values(), ...this.waiting.values()])
+    for (const entry of [
+      ...this.seats.values(),
+      ...this.waiting.values(),
+      ...this.external.values(),
+    ])
       if (entry.account === from) {
         entry.account = to;
         moved = true;
@@ -242,6 +341,8 @@ export class Seats {
     const names = new Set(accounts);
     for (const seat of this.seats.values()) names.add(seat.account);
     for (const waiting of this.waiting.values()) names.add(waiting.account);
+    const holds = this.holds();
+    for (const hold of holds) names.add(hold.account);
     const out: Record<string, AccountSeats> = {};
     for (const name of [...names].sort()) {
       let running = 0;
@@ -257,6 +358,10 @@ export class Seats {
         reserved,
         queued: this.queue(name).map((q) => q.threadId),
       };
+      const external = holds
+        .filter((h) => h.account === name)
+        .map((h) => ({ id: h.id, until: h.until }));
+      if (external.length > 0) out[name]!.external = external;
     }
     return out;
   }
