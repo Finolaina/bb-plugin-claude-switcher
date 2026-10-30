@@ -10722,7 +10722,12 @@ describe("an Opus turn never retried, released or placed on a Max account that k
       armed = true;
       const opus = dispatch(h, "thread-2", OPUS_ID);
       await gate.reached;
-      expect(await dispatch(h, "thread-3", FABLE_ID)).toEqual({ action: "proceed" });
+      // Taken home, but the Opus write still under way: where its turn
+      // starts is not known, so its seat waits (Astra SEATS-R3-002).
+      expect(await dispatch(h, "thread-3", FABLE_ID)).toMatchObject({
+        action: "wait",
+        reason: "Claude Switcher: the project's account could not be read for its seat; trying again",
+      });
       expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-1"]);
       gate.release();
       expect(await opus).toEqual({ action: "proceed" });
@@ -14008,6 +14013,222 @@ describe("seats hold through every way a turn starts (Astra SEATS-R01..R09)", ()
   });
 });
 
+describe("seats: the cases the third inspection found (Astra SEATS-R3)", () => {
+  type Answer = { action: string; reason?: string; sendAt?: number };
+  const ask = (h: Awaited<ReturnType<typeof host>>, id: string, projectId = "proj-1") =>
+    sent(h, id, projectId) as Promise<Answer>;
+  const opus = (h: Awaited<ReturnType<typeof host>>, id: string, projectId = "proj-1") =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id, projectId }),
+        requestedExecution: { providerId: "claude-code", model: "claude-opus-5-5" },
+        attempt: "start-turn",
+      }),
+    ) as Promise<Answer>;
+  const again = (h: Awaited<ReturnType<typeof host>>, id: string, projectId = "proj-1") =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id, projectId }),
+        requestedExecution: { providerId: "claude-code", model: null },
+        attempt: "start-turn",
+        queuedMessages: [{ id: `queued_${id}` }] as never,
+      }),
+    ) as Promise<Answer>;
+  const seatsOf = async (h: Awaited<ReturnType<typeof host>>) =>
+    ((await h.harness.behavior.callRpc("accounts_list", null)) as State).seats;
+  const counted = (h: Awaited<ReturnType<typeof host>>) =>
+    vi.waitFor(() =>
+      expect(
+        h.harness.logEntries.some((e) => e.message.startsWith("seats counted after loading")),
+      ).toBe(true),
+    );
+  const UNREAD = "Claude Switcher: the project's account could not be read for its seat; trying again";
+  /** proj-1 on spare, an account the accounts directory no longer holds. */
+  const ON_GONE_SPARE = {
+    "proj-1": [{ name: ENV_VAR, note: ownNote("spare"), secret: true, value: null }],
+  };
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("R3-001: automatic choice on, a model named, the project on an account no longer found: no seat of the default is reserved", async () => {
+    const h = await host(ALL_FREE, {
+      settings: { seatsMax: 1 },
+      dirs: () => ["work"],
+      presetEnv: ON_GONE_SPARE,
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect(await opus(h, "t1")).toEqual({
+      action: "wait",
+      reason: UNREAD,
+      sendAt: NOW + SEAT_RECHECK_MS,
+    });
+    expect((await seatsOf(h))?.main).toMatchObject({ running: 0, reserved: 0 });
+    // The default's seat is still free for a thread of a project on it.
+    expect(await opus(h, "t2", "proj-2")).toEqual({ action: "proceed" });
+  });
+
+  it("R3-001: a reload does not count a running thread of a project on an account no longer found as the default's", async () => {
+    const h = await host(ALL_FREE, {
+      settings: { autoSwitch: false, seatsMax: 1 },
+      dirs: () => ["work"],
+      presetEnv: ON_GONE_SPARE,
+      threads: { r1: { status: "active" } },
+    });
+    dispose = () => h.harness.dispose();
+    await counted(h);
+    expect((await seatsOf(h))?.main?.running ?? 0).toBe(0);
+    expect(await ask(h, "t9", "proj-2")).toEqual({ action: "proceed" });
+  });
+
+  it("R3-001: a turn announced without a reservation, its project on an account no longer found, takes no seat of the default", async () => {
+    const h = await host(ALL_FREE, {
+      settings: { autoSwitch: false, seatsMax: 1 },
+      dirs: () => ["work"],
+      presetEnv: ON_GONE_SPARE,
+    });
+    dispose = () => h.harness.dispose();
+    await counted(h);
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "sneaky", projectId: "proj-1" }),
+    });
+    expect((await seatsOf(h))?.main?.running ?? 0).toBe(0);
+    expect(await ask(h, "t9", "proj-2")).toEqual({ action: "proceed" });
+  });
+
+  it("R3-002: the project picked onto a full account while its placement is still being recorded: the seat is not reserved on the account it left", async () => {
+    let hold = false;
+    const gate = envGate();
+    const h = await host(
+      { ...ALL_FREE, main: () => Response.json(payload(100, 100)) },
+      {
+        settings: { seatsMax: 1 },
+        presetEnv: {
+          "proj-2": [{ name: ENV_VAR, note: ownNote("spare"), secret: true, value: null }],
+        },
+      },
+    );
+    dispose = () => h.harness.dispose();
+    await counted(h);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // thr-2 takes spare's only seat.
+    expect(await opus(h, "thr-2", "proj-2")).toEqual({ action: "proceed" });
+    const set = h.bb.storage.kv.set.bind(h.bb.storage.kv);
+    h.bb.storage.kv.set = async (key: string, value: unknown) => {
+      if (hold) {
+        hold = false;
+        gate.captured();
+        await gate.held;
+      }
+      return set(key, value);
+    };
+    hold = true;
+    // main cannot run: t1's placement moves proj-1 to work, and records it.
+    const answer = opus(h, "t1");
+    await gate.reached;
+    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", value: `${ACCOUNTS}/work` });
+    // Meanwhile the user picks spare, which is full.
+    const pick = h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-1",
+      account: "spare",
+    });
+    await vi.waitFor(() =>
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", value: `${ACCOUNTS}/spare` }),
+    );
+    gate.release();
+    const got = await answer;
+    await pick;
+    expect(got.action).toBe("wait");
+    expect((await seatsOf(h))?.work).toMatchObject({ running: 0, reserved: 0 });
+  });
+
+  it("R3-003: a turn announced without a reservation whose account read hangs is counted on the next refresh", async () => {
+    const gate = envGate();
+    let hold = false;
+    const h = await host(ALL_FREE, {
+      settings: { autoSwitch: false, seatsMax: 1 },
+      beforeEnvRead: async (projectId) => {
+        if (!hold || projectId !== "proj-1") return;
+        gate.captured();
+        await gate.held;
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await counted(h);
+    hold = true;
+    vi.useFakeTimers();
+    const active = h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "sneaky", projectId: "proj-1" }),
+    });
+    await gate.reached;
+    await vi.advanceTimersByTimeAsync(DISPATCH_LIMIT_MS);
+    await active;
+    vi.useRealTimers();
+    hold = false;
+    gate.release();
+    // Not counted yet (the late answer is not waited for): its seat is not
+    // shown taken by a guess.
+    expect((await seatsOf(h))?.main?.running ?? 0).toBe(0);
+    const before = h.usageCalls.length;
+    const run = h.harness.behavior.runService("usage-refresh");
+    await vi.waitFor(() => expect(h.usageCalls).toHaveLength(before + 3));
+    run.controller.abort();
+    await run.done;
+    expect((await seatsOf(h))?.main).toMatchObject({ running: 1 });
+    expect((await ask(h, "t9", "proj-2")).action).toBe("wait");
+  });
+
+  it("R3-004: the only message of a waiting thread cancelled: the next in line gets the seat as the running turn ends", async () => {
+    const h = await host(ALL_FREE, { settings: { autoSwitch: false, seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    await counted(h);
+    expect(await ask(h, "t1")).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "t1", projectId: "proj-1" }),
+    });
+    expect((await ask(h, "q1")).action).toBe("wait");
+    expect((await ask(h, "q2")).action).toBe("wait");
+    await h.harness.behavior.emitThreadEvent("message.cancelled", {
+      entry: { id: "queued_q1", threadId: "q1", sendAt: NOW + SEAT_RECHECK_MS, payload: { kind: "inline" } } as never,
+    });
+    expect((await seatsOf(h))?.main?.queued).toEqual([{ threadId: "q2", title: null }]);
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "t1", projectId: "proj-1" }),
+    });
+    expect(await again(h, "q2")).toEqual({ action: "proceed" });
+  });
+
+  it("R3-004: a cancelled message of a thread with another still queued keeps its place; a running seat is never freed", async () => {
+    const h = await host(ALL_FREE, { settings: { autoSwitch: false, seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    await counted(h);
+    expect(await ask(h, "t1")).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "t1", projectId: "proj-1" }),
+    });
+    expect((await ask(h, "q1")).action).toBe("wait");
+    h.queued.push({
+      id: "queued_q1b",
+      threadId: "q1",
+      payload: { kind: "inline" },
+      sendAt: null,
+      waitingOn: { kind: "time" },
+      createdAt: NOW,
+    } as never);
+    await h.harness.behavior.emitThreadEvent("message.cancelled", {
+      entry: { id: "queued_q1", threadId: "q1", sendAt: NOW + SEAT_RECHECK_MS, payload: { kind: "inline" } } as never,
+    });
+    await h.harness.behavior.emitThreadEvent("message.cancelled", {
+      entry: { id: "queued_t1", threadId: "t1", sendAt: NOW, payload: { kind: "inline" } } as never,
+    });
+    expect((await seatsOf(h))?.main).toMatchObject({
+      running: 1,
+      queued: [{ threadId: "q1" }],
+    });
+  });
+});
+
 describe("bb claude-switcher seats", () => {
   it("prints each account's seats and every usage sample with the seats taken then", async () => {
     const h = await host(ALL_FREE, { settings: { autoSwitch: false, seatsMax: 2 } });
@@ -14252,6 +14473,22 @@ describe("no project is left on an account out of the preferred model or without
     ]);
     expect(logged(h, "warn")).toContainEqual(
       expect.stringMatching(/^project Website: not moved off its account: /),
+    );
+  });
+
+  it("one project whose account cannot be read does not keep the others where they are (Astra SEATS-R3-005)", async () => {
+    const h = await host(MAIN_OUT_OF_FABLE, {
+      ...OPTIONS,
+      listed: ["proj-1", "proj-2"],
+      failEnvRead: ["proj-1"],
+    });
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-2", `${ACCOUNTS}/work`],
+    ]);
+    expect(logged(h, "warn")).toContainEqual(
+      expect.stringMatching(/^project Website: its account not read to rescue it: /),
     );
   });
 

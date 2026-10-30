@@ -215,6 +215,7 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
   // ponytail: the alternative is waiting for a seat on the spent account,
   // which does not come back until its reset; a full target means a wait
   // of a turn or two, and a quota choice may still pick the busiest one.
+  // Kept on purpose (Astra SEATS-R3-006, Fable 2026-10-30).
   const choice =
     chooseSeated(others, options, input.freeSeats) ??
     chooseAccount(others, options);
