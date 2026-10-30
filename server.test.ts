@@ -24,7 +24,7 @@ import {
   type State,
 } from "./server.js";
 import type { AccountsIo } from "./src/accounts.js";
-import type { CredentialIo } from "./src/credentials.js";
+import { TOKEN_URL, type CredentialIo } from "./src/credentials.js";
 import type { LoginIo, LoginProcess } from "./src/login.js";
 import type { SessionsIo } from "./src/sessions.js";
 import {
@@ -96,6 +96,11 @@ function fakes(
   dirs: () => string[],
   /** Accounts whose login store refuses the read (security exits 51). */
   unreadable: () => string[] = () => [],
+  /**
+   * Accounts whose token has expired: refreshed at the token endpoint, and
+   * the rotated login not written back (the store refuses the write).
+   */
+  unwritable: () => string[] = () => [],
 ) {
   const files: Record<string, string> = {
     [`${HOME}/.claude.json`]: claudeJson("main@example.com", "uuid-main"),
@@ -130,14 +135,15 @@ function fakes(
       if (args[0] !== "find-generic-password" || name === undefined)
         return { code: 44, stdout: "" };
       if (unreadable().includes(name)) return { code: 51, stdout: "" };
+      const expired = unwritable().includes(name);
       return {
         code: 0,
         stdout: JSON.stringify({
           claudeAiOauth: {
             accessToken: `tok-${name}`,
-            refreshToken: "r",
-            // Far ahead: no test here exercises the token refresh (credentials.test.ts does).
-            expiresAt: NOW + 30 * 24 * HOUR,
+            refreshToken: expired ? `r-${name}` : "r",
+            // Far ahead: no test here exercises the token refresh (credentials.test.ts does), but `unwritable`.
+            expiresAt: expired ? NOW - 1 : NOW + 30 * 24 * HOUR,
           },
         }),
       };
@@ -146,7 +152,13 @@ function fakes(
       throw new Error("ENOENT");
     },
     async writeFile() {},
-    fetch: async (_url, init) => {
+    fetch: async (url, init) => {
+      if (String(url) === TOKEN_URL) {
+        const name = String(
+          JSON.parse(String(init?.body)).refresh_token,
+        ).replace("r-", "");
+        return Response.json({ access_token: `tok-${name}`, expires_in: 3600 });
+      }
       const name = new Headers(init?.headers)
         .get("authorization")!
         .replace("Bearer tok-", "");
@@ -327,6 +339,8 @@ interface HostOptions {
   dirs?: () => string[];
   /** Accounts whose login store cannot be read (see fakes). */
   unreadable?: () => string[];
+  /** Accounts whose refreshed login cannot be written back (see fakes). */
+  unwritable?: () => string[];
   clock?: () => number;
   /** What threads.get answers per thread, over a visible Claude Code thread of the user. */
   threads?: Record<string, Partial<ThreadResponse>>;
@@ -431,6 +445,7 @@ async function host(
     usage,
     options.dirs ?? (() => ["spare", "work"]),
     options.unreadable,
+    options.unwritable,
   );
   const { loginIo, logins, made, links } = fakeLoginIo(
     options.accountEntries ??
@@ -15047,6 +15062,31 @@ describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
       const stored = (await h.bb.storage.kv.get("pace-day")) as Record<string, unknown>;
       expect(stored.work).toBeDefined();
       expect(stored.spare).toBeUndefined();
+    });
+  });
+
+  it("keeps the day's first reading of a fresh read whose refreshed login could not be written back (Codex ULTRA-R2-002)", async () => {
+    let clock = NOW;
+    let workWeekly = 30;
+    const h = await host(
+      { ...usage, work: () => Response.json(payload(5, workWeekly)) },
+      { clock: () => clock, unwritable: () => ["work"] },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    let s = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(s.accounts.find((a) => a.name === "work")?.problem).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/not written back/),
+    });
+    clock = NOW + 60_000;
+    workWeekly = 50;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    s = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(s.accounts.find((a) => a.name === "work")?.pace).toMatchObject({ spent: 20 });
+    await vi.waitFor(async () => {
+      const stored = (await h.bb.storage.kv.get("pace-day")) as Record<string, { usedPercent: number }>;
+      expect(stored.work?.usedPercent).toBe(30);
     });
   });
 

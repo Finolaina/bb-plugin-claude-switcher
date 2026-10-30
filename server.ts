@@ -42,6 +42,7 @@ import {
   type HealthReport,
 } from "./src/health.js";
 import {
+  freshReading,
   UsageCollector,
   type LoginState,
   type Measurement,
@@ -1355,7 +1356,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         continue;
       }
       // Only a fresh measurement is a sample: a failed query keeps the old usage.
-      if (m.problem !== null && m.problem.kind === "error") {
+      if (!freshReading(m)) {
         next[account.name] = own;
         continue;
       }
@@ -1417,8 +1418,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * fresh measurement counts: a failed query keeps the old usage.
    */
   function notePaceDay(name: string, m: Measurement): void {
-    if (m.observedAt === null || m.usage === null) return;
-    if (m.problem !== null && m.problem.kind === "error") return;
+    if (!freshReading(m)) return;
     // An answer without the general weekly (incomplete: no reset) touches
     // nothing (see nextDayStart, Codex ULTRA-R04); one that has it is a
     // reading of the week, whatever else it lacks. A Team seat has no
@@ -1449,8 +1449,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * query keeps the old one) adds nothing and changes nothing.
    */
   function noteSeatSample(name: string, m: Measurement): void {
-    if (m.observedAt === null || m.usage === null) return;
-    if (m.problem !== null && m.problem.kind === "error") return;
+    if (!freshReading(m)) return;
     const at = m.observedAt;
     const own = (seatSamples[name] ?? []).filter(
       ([t]) => at - t <= SEAT_SAMPLES_MS,
