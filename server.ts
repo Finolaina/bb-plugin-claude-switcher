@@ -846,6 +846,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   let seatsReady = false;
   /** The count after the load (see rebuildSeats), for `reserve` to wait for. */
   let seatsCounted: Promise<void> = Promise.resolve();
+  /**
+   * The last count read every thread it found running (Codex ULTRA-R2-003):
+   * a count that ended with a read failed (seatsReady all the same) leaves
+   * seats it could not tell, and `reserve` grants none on it.
+   */
+  let seatsComplete = false;
+  /** A count is under way (see countSeats). */
+  let seatsCounting = false;
   /** A message waited for the count: bb is asked again once it is done. */
   let seatsAwaited = false;
   /**
@@ -5464,6 +5472,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                   { code: "seats_counting", exitCode: EXIT_TEMPFAIL },
                 );
             }
+            // A count that left running threads unread is no count to grant
+            // on: they are counted again (Codex ULTRA-R2-003).
+            if (!seatsComplete) {
+              countSeats();
+              throw new PluginCliError(
+                "Some running threads could not be counted after a reload; counting them again, nothing held. Try again in a few seconds.",
+                { code: "seats_counting", exitCode: EXIT_TEMPFAIL },
+              );
+            }
             const key = seatKey(name);
             // Expired reservations and holds go first; then the check and
             // the hold in one synchronous step (see Seats.holdExternal).
@@ -5757,9 +5774,24 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * read that fails is tried again, and one that still fails leaves its
    * threads uncounted (they count as they start again): fail open, said.
    */
+  /** Counts the seats (see rebuildSeats), unless a count is under way. */
+  function countSeats(): void {
+    if (seatsCounting) return;
+    seatsCounted = rebuildSeats().catch((error: unknown) =>
+      bb.log.warn(
+        `the running threads were not counted after loading (they count as they start): ${error instanceof Error ? error.message : String(error)}`,
+      ),
+    );
+  }
   async function rebuildSeats(): Promise<void> {
     const ended = new Set<string>();
     endedWhileCounting = ended;
+    seatsCounting = true;
+    seatsComplete = false;
+    // Every running thread read: set at the end of the count, unless a
+    // read failed on the way.
+    let complete = false;
+    let unread = false;
     try {
       if (accounts.length === 0) await countTries("the accounts", discover);
       const running: { id: string; projectId: string }[] = [];
@@ -5788,6 +5820,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             countTries(`the account of project ${t.projectId}`, () =>
               projectAccount(t.projectId),
             ).catch((error: unknown) => {
+              unread = true;
               bb.log.warn(
                 `the threads of project ${t.projectId} not counted after loading (they count as they start): ${error instanceof Error ? error.message : String(error)}`,
               );
@@ -5818,6 +5851,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             const live = await countTries(`thread ${t.id}`, () =>
               bb.sdk.threads.get({ threadId: t.id }),
             ).catch((error: unknown) => {
+              unread = true;
               bb.log.warn(
                 `thread ${t.id} not counted after loading (it counts as it starts): ${error instanceof Error ? error.message : String(error)}`,
               );
@@ -5831,9 +5865,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           seats.confirm(t.id, seatKey(seat), deps.now());
         }),
       );
+      complete = !unread;
     } finally {
       endedWhileCounting = null;
       seatsReady = true;
+      seatsComplete = complete;
+      seatsCounting = false;
       const taken = Object.entries(seats.snapshot())
         .map(([key, s]) => `${seatName(key)} ${s.running} running`)
         .join(", ");
@@ -5848,11 +5885,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           );
     }
   }
-  seatsCounted = rebuildSeats().catch((error: unknown) =>
-    bb.log.warn(
-      `the running threads were not counted after loading (they count as they start): ${error instanceof Error ? error.message : String(error)}`,
-    ),
-  );
+  countSeats();
 
   bb.log.info("loaded");
 }

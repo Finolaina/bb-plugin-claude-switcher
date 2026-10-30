@@ -60,7 +60,9 @@ project uses [Semantic Versioning](https://semver.org/).
   owed to threads already waiting, or for an unknown account. Right after
   a reload it first waits, up to 5 s, for the threads already running to
   be counted; not counted by then, it holds nothing and fails with exit
-  75 (`seats_counting`: ask again in a moment). The same
+  75 (`seats_counting`: ask again in a moment). It fails the same way
+  when that count left a running thread unread, and counts them again.
+  The same
   id renews it. It ends at `until`, never more than 12 h after it was
   asked for, and is kept in storage (`external-seats`) across reloads.
   Counted in `list`, `seats` and `health`.
