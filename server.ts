@@ -35,6 +35,7 @@ import {
   type AccountsIo,
 } from "./src/accounts.js";
 import { nextDayStart, paceOf, type DayStart, type Pace } from "./src/pace.js";
+import { healthReport, healthText, type HealthReport } from "./src/health.js";
 import {
   UsageCollector,
   type LoginState,
@@ -5216,6 +5217,40 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function textState(s: State): string {
     return listText(s, deps.now());
   }
+  /** `health`: every account as SPEC 2026-10-30 §4 has it (version 1). */
+  async function health(): Promise<HealthReport> {
+    if (accounts.length === 0) await discover();
+    const now = deps.now();
+    const taken = seatsState();
+    const observed = accounts
+      .map((a) => collector.get(a.name)?.observedAt ?? null)
+      .filter((at): at is number => at !== null);
+    return healthReport({
+      measured: observed.length === 0 ? now : Math.max(...observed),
+      dayStartHour: dayHour(),
+      accounts: accounts.map((account) => {
+        const m = collector.get(account.name);
+        const usage =
+          m?.usage === null || m?.usage === undefined
+            ? null
+            : settle({ ...m.usage, name: account.name }, now);
+        return {
+          name: account.name,
+          plan: planOf(account, m?.usage ?? null),
+          usage,
+          problem: m?.problem ?? null,
+          pace: paceFor(account.name),
+          seats: taken[account.name],
+          usable:
+            usage !== null &&
+            usage.unknown !== true &&
+            !loggedOut(account.name) &&
+            !refusing(account.name) &&
+            isUsable(usage),
+        };
+      }),
+    });
+  }
   bb.cli.register(
     defineCli({
       name: "claude-switcher",
@@ -5232,6 +5267,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
               stdout: options.json
                 ? `${JSON.stringify(s, null, 2)}\n`
                 : textState(s),
+            };
+          },
+        }),
+        health: cliCommand({
+          summary:
+            "A stable read of every account for other threads and scripts: plan, 5-hour window, weekly, models, the day's pace, seats, usable and why not (version 1)",
+          options: { json: JSON_OPTION },
+          async run({ options }) {
+            const report = await health();
+            return {
+              exitCode: 0,
+              stdout: options.json
+                ? `${JSON.stringify(report, null, 2)}\n`
+                : healthText(report),
             };
           },
         }),
