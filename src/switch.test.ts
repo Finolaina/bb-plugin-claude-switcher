@@ -966,6 +966,26 @@ describe("decidePlacement with a reserved model (2026-10-13: the Max accounts ar
       ).toEqual({ kind: "move", account: "spare", why: "back-from-excursion" });
     });
 
+    it("keeps the project where it is while home has no free seat (Astra SEATS-R2-004)", () => {
+      const accounts = [seat, maxWithFable];
+      // Home full, the seat runs Fable: it stays, its thread waits there.
+      expect(
+        decidePlacement({
+          ...onSeat,
+          accounts,
+          freeSeats: (name) => (name === "spare" ? 0 : 1),
+        }),
+      ).toEqual({ kind: "keep" });
+      // Every account full.
+      expect(
+        decidePlacement({ ...onSeat, accounts, freeSeats: () => 0 }),
+      ).toEqual({ kind: "keep" });
+      // A seat free at home again: back.
+      expect(
+        decidePlacement({ ...onSeat, accounts, freeSeats: () => 1 }),
+      ).toEqual({ kind: "move", account: "spare", why: "back-from-excursion" });
+    });
+
     it("keeps the project on the seat while home is out of Fable, blocked, unmeasured or vetoed (excursionFrom null)", () => {
       const out = { ...maxWithFable, models: { Fable: { usedPercent: 100, resetsAt: NOW + 24 * HOUR } } };
       expect(decidePlacement({ ...onSeat, accounts: [seat, out] })).toEqual({ kind: "keep" });
