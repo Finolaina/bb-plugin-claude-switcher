@@ -139,32 +139,6 @@ type ForecastLike =
   | { kind: "steady" }
   | { kind: "unknown" };
 
-/** "2 d 5 h", "3 h", "40 min", or "now". */
-function inTime(ms: number): string {
-  const minutes = Math.round(ms / 60_000);
-  if (minutes <= 0) return "now";
-  if (minutes < 60) return `in ${minutes} min`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `in ${hours} h`;
-  const days = Math.floor(hours / 24);
-  return `in ${days} d ${hours % 24} h`;
-}
-
-/** One line under a window's bar; null when there is nothing worth saying. */
-export function forecastLine(
-  forecast: ForecastLike,
-  now: number,
-): string | null {
-  switch (forecast.kind) {
-    case "runs-out":
-      return `runs out ${inTime(forecast.at - now)} at this pace (${forecast.percentPerDay} %/day)`;
-    case "lasts":
-      return `lasts until the reset at this pace (${forecast.percentPerDay} %/day)`;
-    default:
-      return null;
-  }
-}
-
 /**
  * The forecast that matters for an account: its preferred model's window
  * when it has one, else its weekly window. Null when the account has none.
@@ -549,38 +523,4 @@ export function listText(state: ListInput, now: number, timeZone?: string): stri
       ...(waiting.length === 0 ? [] : ["", "Waiting for a seat:", ...waiting]),
     ].join("\n") + "\n"
   );
-}
-
-/**
- * The windows an account's card draws, in order: session (none on an
- * Ultra account freed of the 5-hour window), the general weekly (none on a
- * Team seat: it has no such limit) and each model's.
- * `short` is the card's text ("ses 10% · sem 40% · Fable 20%").
- */
-export function accountWindows<W extends ListWindow>(usage: {
-  session: W;
-  weekly: W;
-  models: Record<string, W>;
-}): { key: string; label: string; short: string; window: W }[] {
-  return [
-    ...(usage.session.absent === true
-      ? []
-      : [{ key: "session", label: "Session (5 h)", short: "ses", window: usage.session }]),
-    ...(usage.weekly.absent === true
-      ? []
-      : [
-          {
-            key: "weekly",
-            label: "Weekly (all models)",
-            short: "sem",
-            window: usage.weekly,
-          },
-        ]),
-    ...Object.entries(usage.models).map(([model, window]) => ({
-      key: model,
-      label: `Weekly · ${model}`,
-      short: model,
-      window,
-    })),
-  ];
 }

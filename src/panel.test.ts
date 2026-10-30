@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   accountRow,
+  forecastText,
   menuLine,
   panelList,
+  panelWords,
   threadLine,
   uiLang,
   whenLong,
@@ -405,5 +407,53 @@ describe("threadLine / menuLine", () => {
     );
     expect(threadLine(mariscal)).toBe("Ultra · sin sesión iniciada");
     expect(menuLine(mariscal)).toBe("sin sesión iniciada");
+  });
+});
+
+describe("panelWords", () => {
+  it("has every word of the view in both languages", () => {
+    expect(panelWords("es").logIn).toBe("Iniciar sesión");
+    expect(panelWords("en").logIn).toBe("Log in");
+    expect(panelWords("es").sameAs("ganaresenas")).toBe(
+      "Misma cuenta de Claude que ganaresenas: comparten el uso",
+    );
+    expect(Object.keys(panelWords("es")).sort()).toEqual(
+      Object.keys(panelWords("en")).sort(),
+    );
+  });
+});
+
+describe("forecastText", () => {
+  it("says when the window that matters runs out at this pace, in the user's language", () => {
+    const forecasts = {
+      joytorm: {
+        weekly: { kind: "lasts" as const, until: NOW + 76 * H, percentPerDay: 5 },
+        Fable: { kind: "runs-out" as const, at: NOW + 20 * H, percentPerDay: 30 },
+      },
+      siloeads: { weekly: { kind: "runs-out" as const, at: NOW + 53 * H, percentPerDay: 12 } },
+      team1: { Fable: { kind: "steady" as const } },
+    };
+    expect(forecastText(forecasts, "joytorm", "Fable", NOW, "es")).toBe(
+      "Fable: se acaba en 20 h a este ritmo (30 %/día)",
+    );
+    expect(forecastText(forecasts, "joytorm", "Fable", NOW, "en")).toBe(
+      "Fable: runs out in 20 h at this pace (30 %/day)",
+    );
+    expect(forecastText(forecasts, "joytorm", "", NOW, "es")).toBe(
+      "Semana: llega al reinicio a este ritmo (5 %/día)",
+    );
+    expect(forecastText(forecasts, "siloeads", "Fable", NOW, "es")).toBe(
+      "Semana: se acaba en 2 d 5 h a este ritmo (12 %/día)",
+    );
+    expect(forecastText(forecasts, "team1", "Fable", NOW, "es")).toBeNull();
+    expect(forecastText(undefined, "x", "Fable", NOW, "en")).toBeNull();
+  });
+
+  it("rounds to the minute: under half a minute is now, not «in 0 min»", () => {
+    const f = (at: number) => ({ a: { weekly: { kind: "runs-out" as const, at, percentPerDay: 12.5 } } });
+    expect(forecastText(f(NOW - 1), "a", "", NOW, "en")).toBe("Week: runs out now at this pace (12.5 %/day)");
+    expect(forecastText(f(NOW + 29_000), "a", "", NOW, "es")).toBe("Semana: se acaba ya a este ritmo (12.5 %/día)");
+    expect(forecastText(f(NOW + 31_000), "a", "", NOW, "en")).toBe("Week: runs out in 1 min at this pace (12.5 %/day)");
+    expect(forecastText(f(NOW + 3 * H), "a", "", NOW, "en")).toBe("Week: runs out in 3 h at this pace (12.5 %/day)");
   });
 });
