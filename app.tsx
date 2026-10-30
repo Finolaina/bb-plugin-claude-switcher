@@ -1,7 +1,8 @@
 // Claude Switcher — bb plugin frontend.
 //
-// A Settings section: every Claude Code account with its usage windows and
-// their forecast, a form to add an account and log it in, which account each
+// A Settings section: every Claude Code account as design B draws it (a
+// sentence on top, one row per account with what is left of its week; see
+// src/panel.ts), a form to add an account and log it in, which account each
 // project runs on (with a picker to change it), and the history of moves. The windows themselves are ALSO published to bb's
 // Provider usage panel through server.ts; this section is where you act.
 // And, in a Claude Code thread's header, the project's account with a menu
@@ -9,7 +10,14 @@
 // the same control in the new-thread composer, for the project picked there;
 // and over a thread's composer, the advice to switch it to Opus when nothing
 // queued says it.
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+} from "react";
 import {
   definePluginApp,
   useComposer,
@@ -20,27 +28,34 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import type { rpcContract, State } from "./server";
 import {
-  accountSummary,
-  accountWindows,
   askForProject,
   composerProject,
-  forecastLine,
   headerStatus,
   newestFirst,
   noLoginFound,
-  outText,
   picksOnSelect,
   projectsByAccount,
   projectName,
   projectRead,
   retryDelayMs,
-  seatsText,
   sharedWith,
-  type SeatsLike,
   signalsBack,
-  windowForecast,
-  windowPercent,
 } from "./src/ui";
+import {
+  accountRow,
+  forecastText,
+  type Lang,
+  menuLine,
+  moveTime,
+  type PanelBar,
+  type PanelRow,
+  type PanelState,
+  panelList,
+  panelWords,
+  threadLine,
+  uiLang,
+} from "./src/panel";
+import "./app.css";
 import { CLAUDE_CODE_PROVIDER } from "./src/switch";
 import { Button } from "@/components/ui/button";
 import {
@@ -181,240 +196,275 @@ function useAccounts() {
   };
 }
 
-type Forecast = State["forecasts"][string][string];
-
-function formatReset(resetsAt: number | null): string {
-  if (resetsAt === null) return "";
-  const diff = resetsAt - Date.now();
-  if (diff <= 0) return "resetting";
-  const minutes = Math.round(diff / 60_000);
-  if (minutes < 60) return `${minutes} min`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} h ${minutes % 60} min`;
-  const days = Math.floor(hours / 24);
-  return `${days} d ${hours % 24} h`;
+/** The browser's language: Spanish when it is any Spanish (the plugin is public, in English). */
+function useLang(): Lang {
+  return uiLang(typeof navigator === "undefined" ? undefined : navigator.language);
 }
 
-function formatObserved(observedAt: number | null): string {
-  if (observedAt === null) return "never measured";
-  const minutes = Math.round((Date.now() - observedAt) / 60_000);
-  return minutes < 1 ? "just now" : `${minutes} min ago`;
-}
-
-function barClass(usedPercent: number): string {
-  if (usedPercent >= 95) return "bg-destructive";
-  if (usedPercent >= 80) return "bg-warning";
-  return "bg-primary";
-}
-
-/**
- * An account's windows in short lines: "ses 10% · sem 40% · Fable 20%"
- * (no weekly on a Team seat), "agotada hasta …" when one is full, a thin
- * bar per window side by side, and in small text when each resets and the
- * pace of the window that matters (as in the thread's menu). Written out,
- * not only in the titles, which neither a keyboard nor a touch opens
- * (Codex E46-R6-003).
- */
-export function UsageRow({
-  usage,
-  preferredModel,
-  forecasts,
-}: {
-  usage: NonNullable<AccountState["usage"]>;
-  preferredModel: string;
-  forecasts: Record<string, Forecast> | undefined;
-}) {
-  const now = Date.now();
-  const summary = accountSummary(usage, preferredModel, now);
-  const windows = accountWindows(usage).map((w) => {
-    const used = Math.round(windowPercent(w.window, now));
-    const forecast = forecasts?.[w.key];
-    const pace = forecast === undefined ? null : forecastLine(forecast, now);
-    const reset =
-      w.window.resetsAt === null ? "" : ` · ${formatReset(w.window.resetsAt)}`;
-    return {
-      ...w,
-      used,
-      title: `${w.label}: ${used}%${reset}${pace === null ? "" : ` · ${pace}`}`,
-    };
+/** Whether `value` differs from the last render's (false on the first). */
+function useChanged<T>(value: T): boolean {
+  const last = useRef(value);
+  const changed = last.current !== value;
+  useEffect(() => {
+    last.current = value;
   });
-  const resets = windows.flatMap((w) =>
-    w.window.resetsAt === null
-      ? []
-      : [`${w.short} ${formatReset(w.window.resetsAt)}`],
-  );
-  const paced = windowForecast(
-    forecasts === undefined ? undefined : { own: forecasts },
-    "own",
-    preferredModel,
-  );
-  const pace = paced === null ? null : forecastLine(paced[1], now);
-  const details = [
-    ...(resets.length === 0 ? [] : [`resets ${resets.join(", ")}`]),
-    ...(pace === null
-      ? []
-      : [`${windows.find((w) => w.key === paced?.[0])?.short ?? paced?.[0]} ${pace}`]),
-  ];
+  return changed;
+}
+
+const STATE_ICON: Record<PanelState, ReactNode> = {
+  working: <path d="M5 3.5v9l7.5-4.5z" fill="currentColor" stroke="none" />,
+  free: <path d="M3 8.5l3 3 7-7" />,
+  kept: (
+    <>
+      <rect x="3.25" y="7" width="9.5" height="6.5" rx="1.5" />
+      <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" />
+    </>
+  ),
+  out: (
+    <>
+      <circle cx="8" cy="8" r="5.5" />
+      <path d="M8 5v3.2l2 1.3" />
+    </>
+  ),
+  nodata: (
+    <>
+      <circle cx="8" cy="8" r="5.5" />
+      <path d="M5.5 8h5" />
+    </>
+  ),
+};
+
+export function StateIcon({ state, className }: { state: PanelState; className?: string }) {
   return (
-    <div className="mt-1">
-      <p className="flex flex-wrap items-baseline gap-x-1.5 text-[11px] tabular-nums text-muted-foreground">
-        {windows.map((w, i) => (
-          <span key={w.key} title={w.title}>
-            {i === 0 ? "" : "· "}
-            {w.short} {w.used}%
-          </span>
-        ))}
-        {summary.outUntil === undefined ? null : (
-          <span className="text-destructive">
-            {outText(summary.outUntil, now)}
-          </span>
-        )}
-      </p>
-      <div className="mt-1 flex gap-1">
-        {windows.map((w) => {
-          const pct = Math.max(0, Math.min(100, w.used));
-          return (
-            <div
-              key={w.key}
-              className="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-muted"
-              role="progressbar"
-              aria-label={w.label}
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={w.used}
-              title={w.title}
-            >
-              <div
-                className={cn("h-full rounded-full", barClass(pct))}
-                style={{ width: `${pct}%` }}
-              />
-            </div>
-          );
-        })}
-      </div>
-      {details.length === 0 ? null : (
-        <p className="mt-0.5 text-xs text-muted-foreground">
-          {details.join(" · ")}
-        </p>
+    <svg
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      className={cn("size-3.5 shrink-0", className)}
+    >
+      {STATE_ICON[state]}
+    </svg>
+  );
+}
+
+/** The state as an icon and a word, never colour alone; it fades in when it changes. */
+function StateWord({ row }: { row: PanelRow }) {
+  const changed = useChanged(row.state);
+  return (
+    <span
+      key={row.state}
+      className={cn(
+        "whitespace-nowrap font-medium",
+        `cs-s-${row.state}`,
+        changed && "cs-fade",
       )}
+    >
+      <StateIcon state={row.state} className="mr-1 inline-block align-[-0.15em]" />
+      {row.word}
+    </span>
+  );
+}
+
+/** What is left, with today's share striped at its end; read out as «Le queda el 90 % de la semana». */
+export function LeftBar({ bar }: { bar: PanelBar | null }) {
+  if (bar === null) return <div className="cs-bar" aria-hidden />;
+  const start = bar.left - bar.today;
+  return (
+    <div className="cs-bar" role="img" aria-label={bar.label}>
+      <div
+        className={cn(
+          "cs-fill",
+          bar.tone === "amber" && "cs-low",
+          bar.tone === "blue" && "cs-five",
+        )}
+        style={{ transform: `scaleX(${bar.left / 100})` }}
+      />
+      {bar.today > 0 ? (
+        <div
+          className="cs-today"
+          style={{ clipPath: `inset(0 ${100 - bar.left}% 0 ${start}%)` }}
+        />
+      ) : null}
     </div>
   );
 }
 
-export function AccountCard({
-  account,
-  isDefault,
-  preferredModel,
-  forecasts,
+/**
+ * One account of design B: name and plan, the bar with the state and
+ * today's line under it, and what is left and when it is back. Two lines
+ * where the panel is narrow (a container query: the Settings column, a phone).
+ */
+export function AccountRowView({
+  row,
+  email = null,
+  isDefault = false,
   twin = null,
+  noLogin = false,
+  forecast = null,
   onLogin,
   busy = false,
-  seats,
+  lang,
 }: {
-  account: AccountState;
-  isDefault: boolean;
-  preferredModel: string;
-  forecasts: Record<string, Forecast> | undefined;
-  /** Another listed account that is the same Claude account. */
+  row: PanelRow;
+  /** The pace of its window that matters, for the tooltip (forecastText). */
+  forecast?: string | null;
+  email?: string | null;
+  isDefault?: boolean;
   twin?: string | null;
-  /**
-   * Offered for an account without a login, or logged in to the Claude
-   * account of another one; undefined while a login runs.
-   */
+  noLogin?: boolean;
+  /** Offered for an account without a login, or logged in to another one's Claude account. */
   onLogin?: () => void;
-  /** Another request of this page is on its way. */
   busy?: boolean;
-  /** Its seats (threads at once) and who waits for one. */
-  seats?: SeatsLike;
+  lang: Lang;
 }) {
-  const usage = account.usage;
-  const seated = seatsText(seats);
-  const status =
-    account.problem?.kind === "unauthenticated"
-      ? isDefault
-        ? "Not logged in (run `claude` once if you want to use this account)"
-        : "Not logged in"
-      : account.problem?.kind === "error"
-        ? account.problem.message
-        : null;
-  const noLogin = account.problem?.kind === "unauthenticated";
-  // The default account's directory is the CLI's own: the other one is redone.
+  const words = panelWords(lang);
   const again = twin !== null && !isDefault;
   return (
-    <li className="rounded-md border border-border px-3 py-2">
-      <div className="flex items-baseline justify-between gap-2">
-        <div className="min-w-0">
-          <span className="font-medium">{account.name}</span>
-          {isDefault ? (
-            <span
-              className="ml-1.5 rounded border border-border px-1 text-[10px] uppercase tracking-wide text-muted-foreground"
-              title="The CLI's own directory, ~/.claude"
-            >
-              default
-            </span>
-          ) : null}
-          {account.email === null ? null : (
-            <span
-              className="ml-1.5 truncate text-xs text-muted-foreground"
-              title={account.email}
-            >
-              {account.email}
-            </span>
-          )}
-        </div>
-        <span className="shrink-0 text-xs text-muted-foreground">
-          {seated === null ? null : (
-            <span
-              className="mr-1.5"
-              title="Threads running or about to start on this account, of the most allowed at once, and threads waiting for a seat"
-            >
-              {seated} ·
-            </span>
-          )}
-          {formatObserved(account.observedAt)}
+    <li
+      className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-1.5 py-2.5 @lg:grid-cols-[9.5rem_minmax(0,1fr)_9rem]"
+      title={forecast === null ? row.help : `${row.help}\n${forecast}`}
+    >
+      <div className="col-start-1 row-start-1 flex min-w-0 flex-col items-start gap-1">
+        <span
+          className="max-w-full truncate font-semibold leading-tight"
+          title={[email, isDefault ? "~/.claude" : null].filter(Boolean).join(" · ") || undefined}
+        >
+          {row.name}
         </span>
+        {row.planShort === "" ? null : (
+          <span
+            className="max-w-full truncate rounded-full border border-border px-1.5 text-[11px] leading-[1.125rem] text-muted-foreground"
+            title={row.planLong}
+          >
+            {row.planShort}
+          </span>
+        )}
       </div>
-      {usage?.blocked ? (
-        <p className="mt-1 text-xs text-destructive">
-          Locked by the provider, or incomplete usage data
-        </p>
-      ) : null}
-      {status === null ? null : (
-        <p
-          className={cn(
-            "mt-1 text-xs",
-            usage === null ? "text-destructive" : "text-muted-foreground",
+      <div className="col-span-2 row-start-2 min-w-0 @lg:col-span-1 @lg:col-start-2 @lg:row-start-1">
+        <LeftBar bar={row.bar} />
+        <p className="mt-1.5 text-xs leading-snug text-pretty">
+          <StateWord row={row} />
+          {row.line === "" ? null : (
+            <span className="text-muted-foreground"> · {row.line}</span>
           )}
-        >
-          {status}
         </p>
-      )}
-      {twin === null ? null : (
-        <p className="mt-1 text-xs text-muted-foreground">
-          Same Claude account as {twin}: the two share one usage
-        </p>
-      )}
-      {(noLogin || again) && onLogin !== undefined ? (
-        <Button
-          variant="outline"
-          size="sm"
-          className="mt-2"
-          onClick={onLogin}
-          disabled={busy}
-          aria-label={`Log in ${account.name}${noLogin ? "" : " again"}`}
-        >
-          <Icon name="LogIn" className="size-3.5" />
-          {noLogin ? "Log in" : "Log in again"}
-        </Button>
-      ) : null}
-      {usage === null ? null : (
-        <UsageRow
-          usage={usage}
-          preferredModel={preferredModel}
-          forecasts={forecasts}
-        />
-      )}
+        {twin === null ? null : (
+          <p className="mt-0.5 text-xs text-muted-foreground">{words.sameAs(twin)}</p>
+        )}
+      </div>
+      <div className="col-start-2 row-start-1 flex flex-col items-end gap-0.5 text-right text-xs @lg:col-start-3">
+        {row.figure === null ? (
+          <span className="text-muted-foreground">{words.noFigure}</span>
+        ) : (
+          <span className="whitespace-nowrap">
+            <span className="text-[13px] font-semibold tabular-nums">{row.figure}</span>{" "}
+            <span className="text-muted-foreground">{row.figureOf}</span>
+          </span>
+        )}
+        {row.when === "" ? null : (
+          <span className="whitespace-nowrap tabular-nums text-muted-foreground">{row.when}</span>
+        )}
+        {(noLogin || again) && onLogin !== undefined ? (
+          <Button
+            variant="outline"
+            size="sm"
+            className="mt-1 h-7 px-2 text-xs"
+            onClick={onLogin}
+            disabled={busy}
+            aria-label={`${noLogin ? words.logIn : words.logInAgain}: ${row.name}`}
+          >
+            <Icon name="LogIn" className="size-3.5" />
+            {noLogin ? words.logIn : words.logInAgain}
+          </Button>
+        ) : null}
+      </div>
     </li>
+  );
+}
+
+/**
+ * Design B: the sentence that says who works, who is kept for you and which
+ * has most week left, then the Ultra/Max accounts by what is left of their
+ * week and the Team seats by name.
+ */
+export function AccountsOverview({
+  state,
+  now,
+  lang,
+  timeZone,
+  busy = false,
+  onLogin,
+  onRefresh,
+}: {
+  state: State;
+  now: number;
+  lang: Lang;
+  timeZone?: string;
+  busy?: boolean;
+  /** Undefined while a login runs. */
+  onLogin?: (name: string) => void;
+  onRefresh?: () => void;
+}) {
+  const list = panelList(state, { now, lang, timeZone, preferredModel: state.preferredModel });
+  const words = panelWords(lang);
+  const byName = new Map(state.accounts.map((a) => [a.name, a]));
+  return (
+    <div className="cs-tone @container space-y-4">
+      <div className="flex items-start justify-between gap-3">
+        <p className="text-[15px] leading-normal text-pretty" aria-live="polite">
+          {list.sentence.map((piece, i) =>
+            piece.bold ? (
+              <b key={i} className="font-semibold">
+                {piece.text}
+              </b>
+            ) : (
+              <span key={i}>{piece.text}</span>
+            ),
+          )}
+        </p>
+        {onRefresh === undefined ? null : (
+          <Button
+            variant="outline"
+            size="sm"
+            className="shrink-0"
+            onClick={onRefresh}
+            disabled={busy}
+            aria-busy={busy}
+          >
+            <Icon name="RotateCcw" className={cn("size-3.5", busy && "animate-spin")} />
+            {busy ? words.refreshing : words.refresh}
+          </Button>
+        )}
+      </div>
+      {list.groups.map((group) => (
+        <section key={group.title} aria-label={group.title}>
+          <h4 className="text-xs font-medium text-muted-foreground">{group.title}</h4>
+          <ul className="divide-y divide-border">
+            {group.rows.map((row) => {
+              const account = byName.get(row.name);
+              return (
+                <AccountRowView
+                  key={row.name}
+                  row={row}
+                  lang={lang}
+                  email={account?.email ?? null}
+                  isDefault={row.name === state.defaultAccountName}
+                  twin={account === undefined ? null : sharedWith(account, state.accounts)}
+                  noLogin={account?.problem?.kind === "unauthenticated"}
+                  forecast={forecastText(state.forecasts, row.name, state.preferredModel, now, lang)}
+                  onLogin={onLogin === undefined ? undefined : () => onLogin(row.name)}
+                  busy={busy}
+                />
+              );
+            })}
+          </ul>
+        </section>
+      ))}
+    </div>
   );
 }
 
@@ -557,6 +607,7 @@ function AccountsSection() {
     sendCode,
     cancelLogin,
   } = useAccounts();
+  const lang = useLang();
   if (state === null) {
     return (
       <div className="space-y-2 text-sm">
@@ -578,31 +629,6 @@ function AccountsSection() {
   }
   return (
     <div className="space-y-4 text-sm">
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-muted-foreground">
-          {state.accounts.length} account
-          {state.accounts.length === 1 ? "" : "s"}
-          {state.autoSwitch
-            ? " · automatic account choice is on"
-            : " · automatic switch is off"}
-          {state.preferredModel === ""
-            ? ""
-            : ` · prefers ${state.preferredModel}`}
-        </p>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={refresh}
-          disabled={busy}
-          aria-busy={busy}
-        >
-          <Icon
-            name="RotateCcw"
-            className={cn("size-3.5", busy && "animate-spin")}
-          />
-          Refresh usage
-        </Button>
-      </div>
       {error === null ? null : (
         <p role="alert" className="text-destructive">
           {error}
@@ -616,25 +642,24 @@ function AccountsSection() {
           then refresh.
         </p>
       ) : null}
-      <ul aria-label="Claude accounts" className="grid gap-2 lg:grid-cols-2">
-        {state.accounts.map((account) => (
-          <AccountCard
-            key={account.name}
-            account={account}
-            isDefault={account.name === state.defaultAccountName}
-            preferredModel={state.preferredModel}
-            forecasts={state.forecasts?.[account.name]}
-            twin={sharedWith(account, state.accounts)}
-            seats={state.seats?.[account.name]}
-            onLogin={
-              state.login?.phase === "running"
-                ? undefined
-                : () => startLogin(account.name)
-            }
-            busy={busy}
-          />
-        ))}
-      </ul>
+      <AccountsOverview
+        state={state}
+        now={Date.now()}
+        lang={lang}
+        busy={busy}
+        onRefresh={refresh}
+        onLogin={state.login?.phase === "running" ? undefined : startLogin}
+      />
+      <p className="text-xs text-muted-foreground">
+        {state.accounts.length} account
+        {state.accounts.length === 1 ? "" : "s"}
+        {state.autoSwitch
+          ? " · automatic account choice is on"
+          : " · automatic switch is off"}
+        {state.preferredModel === ""
+          ? ""
+          : ` · prefers ${state.preferredModel}`}
+      </p>
       <AddAccount
         login={state.login ?? null}
         busy={busy}
@@ -662,9 +687,10 @@ function AccountsSection() {
                 <div className="flex items-baseline justify-between gap-2 px-1 text-xs">
                   <span className="shrink-0 font-medium">{group.heading}</span>
                   {account === undefined ? null : (
-                    <span className="truncate text-muted-foreground">
-                      {usageLine(account, state.preferredModel, Date.now())}
-                    </span>
+                    <AccountLine
+                      row={rowOf(state, account, lang)}
+                      className="min-w-0"
+                    />
                   )}
                 </div>
                 <ul className="mt-1 divide-y divide-border rounded-md border border-border">
@@ -761,7 +787,7 @@ function History({ state }: { state: State }) {
             className="flex flex-wrap gap-x-3 gap-y-0.5 px-3 py-1.5"
           >
             <span className="shrink-0 tabular-nums text-muted-foreground">
-              {new Date(move.at).toLocaleString()}
+              {moveTime(move.at)}
             </span>
             <span className="min-w-0 break-words">
               <span className="font-medium">
@@ -788,53 +814,27 @@ function History({ state }: { state: State }) {
   );
 }
 
-type Tone = NonNullable<ReturnType<typeof headerStatus>>["tone"];
-const TONE_DOT: Record<Tone, string> = {
-  ok: "bg-success",
-  tight: "bg-warning",
-  out: "bg-destructive",
-  unknown: "bg-muted-foreground",
-  nologin: "bg-destructive",
-};
-const TONE_TEXT: Record<Tone, string> = {
-  ok: "has room",
-  tight: "running low",
-  out: "out of usage",
-  unknown: "not measured",
-  nologin: "not logged in",
-};
+/** An account's row of design B, for the menu and the projects' headings. */
+function rowOf(state: State, account: AccountState, lang: Lang, now = Date.now()): PanelRow {
+  return accountRow(account, state.seats?.[account.name], {
+    now,
+    lang,
+    preferredModel: state.preferredModel,
+  });
+}
 
-/** "session 10% · weekly 40% · Fable 100%" for the account menu. */
-function usageLine(
-  account: AccountState,
-  preferredModel: string,
-  now: number,
-): string {
-  if (account.problem?.kind === "unauthenticated") return "not logged in";
-  const failed = account.problem?.kind === "error";
-  if (account.usage === null)
-    return failed ? "last measurement failed" : "not measured yet";
-  if (account.usage.unknown === true) return "not measured (incomplete answer)";
-  if (account.usage.blocked) return "locked by the provider";
-  // Never "100%" for an account that still has a little room.
-  const pct = (w: { usedPercent: number; resetsAt: number | null }) => {
-    const used = windowPercent(w, now);
-    return `${used < 100 ? Math.min(99, Math.round(used)) : Math.round(used)}%`;
-  };
-  const parts = [
-    `session ${pct(account.usage.session)}`,
-    // A Team seat has no general weekly.
-    ...(account.usage.weekly.absent === true
-      ? []
-      : [`weekly ${pct(account.usage.weekly)}`]),
-  ];
-  const model = Object.entries(account.usage.models).find(
-    ([name]) =>
-      preferredModel !== "" &&
-      name.toLowerCase() === preferredModel.toLowerCase(),
+/** «▶ Trabajando · 40 % de la semana · vuelve lun 09:00»: an account in one short line. */
+function AccountLine({ row, className }: { row: PanelRow; className?: string }) {
+  const rest = menuLine(row);
+  return (
+    <span className={cn("flex items-center gap-1 truncate text-xs", className)}>
+      <span className={cn("inline-flex shrink-0 items-center gap-1", `cs-s-${row.state}`)}>
+        <StateIcon state={row.state} className="size-3" />
+        {row.word}
+      </span>
+      {rest === "" ? null : <span className="truncate text-muted-foreground">· {rest}</span>}
+    </span>
   );
-  if (model !== undefined) parts.push(`${model[0]} ${pct(model[1])}`);
-  return parts.join(" · ") + (failed ? " (last query failed)" : "");
 }
 
 /**
@@ -889,6 +889,36 @@ function ThreadAccount({
   );
 }
 
+/**
+ * The thread's own account at the top of its menu, as a small card with its
+ * figure in large type (design B takes this from design A): what is left,
+ * the bar, its state and today's line, and the one-line summary.
+ */
+export function ThreadAccountCard({ row, forecast }: { row: PanelRow; forecast: string | null }) {
+  return (
+    <div className="mx-1 mt-1 mb-1.5 rounded-md bg-muted/60 px-2.5 py-2">
+      <div className="flex items-baseline justify-between gap-2 text-xs">
+        <span className="truncate font-medium">{row.name}</span>
+        <StateWord row={row} />
+      </div>
+      {row.figure === null ? null : (
+        <p className="mt-1 leading-none">
+          <span className="text-xl font-semibold tabular-nums">{row.figure}</span>{" "}
+          <span className="text-xs text-muted-foreground">{row.figureOf}</span>
+        </p>
+      )}
+      <div className="mt-2">
+        <LeftBar bar={row.bar} />
+      </div>
+      <p className="mt-1.5 text-xs text-muted-foreground">{threadLine(row)}</p>
+      {row.line === "" || row.state === "out" || row.state === "nodata" ? null : (
+        <p className="text-xs text-muted-foreground">{row.line}</p>
+      )}
+      {forecast === null ? null : <p className="text-xs text-pretty text-muted-foreground">{forecast}</p>}
+    </div>
+  );
+}
+
 function ThreadAccountMenu({
   projectId,
   isCompactViewport,
@@ -912,6 +942,7 @@ function ThreadAccountMenu({
     readProject,
     setProjectAccount,
   } = useAccounts();
+  const lang = useLang();
   const helpId = useId();
   // A project made a moment ago can be missing from the list the views
   // share: asked for by name, and again after a failed read (bb busy).
@@ -931,12 +962,9 @@ function ThreadAccountMenu({
   const status = headerStatus(state, projectId, now);
   if (status === null) return null;
   const name = status.account ?? "unknown account";
-  // The pace of the window that decides for this account, when it is known.
-  const picked =
-    status.account === null
-      ? null
-      : windowForecast(state.forecasts, status.account, state.preferredModel);
-  const pace = picked === null ? null : forecastLine(picked[1], now);
+  // The thread's account as design B says it: its state, what is left, when it is back.
+  const own = state.accounts.find((a) => a.name === status.account);
+  const row = own === undefined ? null : rowOf(state, own, lang, now);
   const toValue = (account: string) =>
     account === state.defaultAccountName ? null : account;
   const keepsHelp = newThread && state.autoSwitch && !status.external;
@@ -949,17 +977,17 @@ function ThreadAccountMenu({
           size="sm"
           className="h-7 gap-1.5 px-2 text-xs"
           aria-busy={busy}
-          aria-label={`Claude account: ${name}, ${TONE_TEXT[status.tone]}${
-            newThread && status.canSwitch ? `, best: ${status.best}` : ""
-          }${error === null ? "" : ", the last change failed"}`}
+          aria-label={`Claude account: ${name}${
+            row === null ? "" : `, ${row.word}, ${threadLine(row)}`
+          }${newThread && status.canSwitch ? `, best: ${status.best}` : ""}${
+            error === null ? "" : ", the last change failed"
+          }`}
         >
-          <span
-            aria-hidden
-            className={cn(
-              "size-2 shrink-0 rounded-full",
-              TONE_DOT[status.tone],
-            )}
-          />
+          {row === null ? (
+            <span aria-hidden className="size-2 shrink-0 rounded-full bg-muted-foreground" />
+          ) : (
+            <StateIcon state={row.state} className={cn("size-3", `cs-s-${row.state}`)} />
+          )}
           {isCompactViewport ? null : (
             <span className="max-w-32 truncate">{name}</span>
           )}
@@ -982,7 +1010,7 @@ function ThreadAccountMenu({
       )}
       <DropdownMenuContent
         align="start"
-        className="w-72"
+        className="cs-tone w-72"
         mobileTitle="Claude account"
         // Read out with the menu: the arrow keys never reach a label.
         aria-describedby={keepsHelp ? helpId : undefined}
@@ -1002,6 +1030,12 @@ function ThreadAccountMenu({
               }
         }
       >
+        {row === null ? null : (
+          <ThreadAccountCard
+            row={row}
+            forecast={forecastText(state.forecasts, row.name, state.preferredModel, now, lang)}
+          />
+        )}
         <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
           Claude account for this project, used by all its threads from their
           next turn
@@ -1012,11 +1046,6 @@ function ThreadAccountMenu({
               first turn.
             </span>
           ) : null}
-          {picked === null || pace === null ? null : (
-            <span className="block text-foreground">
-              {picked[0] === "weekly" ? "Weekly" : picked[0]}: {pace}
-            </span>
-          )}
         </DropdownMenuLabel>
         {status.canSwitch && status.best !== null ? (
           <>
@@ -1064,9 +1093,7 @@ function ThreadAccountMenu({
                     {account.name}
                     {account.name === status.best ? " · best now" : ""}
                   </span>
-                  <span className="truncate text-xs text-muted-foreground">
-                    {usageLine(account, state.preferredModel, now)}
-                  </span>
+                  <AccountLine row={rowOf(state, account, lang, now)} />
                 </span>
               </DropdownMenuItem>
             ))}

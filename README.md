@@ -20,7 +20,7 @@ When a turn hits a subscription limit, the project moves to a free account and t
 
 <br>
 
-<img src="docs/screenshots/settings.png" alt="The Claude Switcher section in Settings: usage per account and the account each project runs on" width="900">
+<img src="docs/screenshots/settings-ultra-claro.png" alt="The Claude Switcher section in Settings: a sentence on who works and who is kept for you, then a row per account with what is left of its week, and the thread header menu with the account as a card" width="900">
 
 </div>
 
@@ -49,7 +49,7 @@ first.
 | Wait for the account that frees first            |           ❌            |         ✅ within your maximum wait          |
 | Stick to a model, like Fable                     |           n/a           |              ✅ preferred model              |
 | Choose the account of each project by hand       |           ❌            | ✅ new thread, thread header, picker and CLI |
-| Know when a weekly window runs out at your pace  |           ❌            |            ✅ forecast per window            |
+| Know when a weekly window runs out at your pace  |           ❌            |      ✅ today's share and the forecast       |
 | Move before the limit instead of after a failure |           ❌            |         ✅ opt-in, after a turn ends         |
 | Add and log in an account without a terminal     |           ❌            |               ✅ from Settings               |
 | See why a project moved                          |           ❌            |             ✅ history of moves              |
@@ -127,14 +127,15 @@ public SDK surfaces, and never touches a `CLAUDE_CONFIG_DIR` it did not set.
 <tr>
 <td valign="top">
 
-### 🔮 A forecast per window
+### 🔮 Today's share and a forecast
 
-Under each account's bars, in small text, with when each window resets:
-when the window that matters (the preferred model's, else the weekly)
-runs out at the pace you have used it since the plugin first measured the
-current window, or that it lasts until its reset; each window's tooltip
-has its own. Also in the account menu
-of a thread's header and of the new-thread composer, and in `list --json`.
+Each Ultra or Max account's bar stripes today's share of what is left of
+its week, and says how much of it is spent («Hoy ha gastado el 30 % de su
+parte»). The forecast of the window that matters (the preferred model's,
+else the weekly) says when it runs out at the pace you have used it since
+the plugin first measured the current window, or that it lasts until its
+reset: in the account menu of a thread's header and of the new-thread
+composer, in each account's tooltip in Settings, and in `list --json`.
 
 </td>
 <td valign="top">
@@ -180,7 +181,7 @@ Settings and with `bb claude-switcher history`.
 <table>
 <tr>
 <td align="center"><img src="docs/screenshots/provider-usage.png" alt="Every Claude Code account in bb's Provider usage panel" width="440"><br><sub><b>Every account in Provider usage</b></sub></td>
-<td align="center"><img src="docs/screenshots/settings.png" alt="The Claude Switcher section in Settings" width="440"><br><sub><b>The account each project runs on</b></sub></td>
+<td align="center"><img src="docs/screenshots/settings-ultra-oscuro.png" alt="The Claude Switcher section in Settings, dark theme" width="440"><br><sub><b>What is left of each account, in the dark theme</b></sub></td>
 </tr>
 <tr>
 <td align="center" colspan="2"><img src="docs/screenshots/thread-header.png" alt="The project's account in a Claude Code thread's header, with its menu open: switch now to the best account, or pick any" width="290"><br><sub><b>The account in every thread's header, and the menu to change it</b></sub></td>
@@ -302,9 +303,9 @@ starts on a fresh account runs without your settings, hooks and
 
 | Where                                                | What                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **A Claude Code thread's header**                    | The project's account with a dot (green: room, amber: running low, red: out or not logged in, grey: not measured), and a menu with the forecast of its window, to switch now to the best account or pick any other.                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| **A Claude Code thread's header**                    | The project's account with its state as an icon (working, free, kept for you, out), and a menu that opens on the account's card (what is left, its bar, when it is back, the forecast of its window), to switch now to the best account or pick any other.                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | **The new-thread composer**                          | The same control for the project picked there, before the first message, with the best account beside it when it is another one. A pick there before you send, even of the account shown, keeps a new project from moving to the best account after its first turn. With automatic switching on, the rules that move any project still apply: your preferred model when the thread is created, the model a message is sent with, limits and refusals. Send after the pick is saved: a message sent in that moment can start on the old account. On a phone it shows once the composer is open. It hides while another provider is picked. |
-| **Settings → Claude Switcher**                       | The ten settings, a card per account with its windows and their forecast, **Add account** and **Log in**, the account each project runs on (with a picker), **Refresh usage**, and the history of moves.                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| **Settings → Claude Switcher**                       | The ten settings, a sentence on who works and who is kept for you, a row per account with what is left of its week (of its 5 hours on a Team seat), its state and when it is back, **Add account** and **Log in**, the account each project runs on (with a picker), **Refresh usage**, and the history of moves.                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | **Settings → Provider usage** (and its sidebar card) | Pick **Claude accounts** in the source menu to see every account's session, weekly and per-model windows.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | **A thread's retry reason**                          | `Switched to account <name>`, `Waiting for <name>` or `Retrying on account <name>`, wherever bb shows why a turn was retried; a wait for the preferred model with no account left that has it may end with `Sin <model> en ninguna cuenta: pasa este hilo a Opus con el selector de modelo; irá a <name>`.                                                                                                                                                                                                                                                                                                                              |
 | **A thread's composer**                              | When a failed turn in the preferred model is left with nothing queued (beyond the maximum wait, or no account will free) and an account can run Opus: a banner saying `Sin <model> en ninguna cuenta: pasa este hilo a Opus con el selector de modelo; irá a <name>`. It only shows: the switch is yours.                                                                                                                                                                                                                                                                                                                               |
@@ -758,6 +759,9 @@ bb claude-switcher list [--json]          # a line per account (ses, sem, prefer
 bb claude-switcher refresh [--json]       # query the usage endpoint now
 bb claude-switcher history [--json]       # every move of a project, latest first, and why
 bb claude-switcher seats [--json]         # seats of every account, who waits, and each usage sample with the seats taken then
+bb claude-switcher health [--json]        # a stable read for other threads and scripts (version 1): plan, 5-hour window, weekly, models, the day's pace, seats, usable
+bb claude-switcher reserve <account> --id <x> --until <ISO with zone> [--json]   # hold a seat for a run outside bb (at most 12 h); fails with no free seat (exit 1), or with exit 75 while the seats are still being counted after a reload
+bb claude-switcher unreserve --id <x> [--json]   # end it; an id not held is no error
 bb claude-switcher use <project> <account | default>   # project id, or its name when unique
 bb claude-switcher release                # remove every CLAUDE_CONFIG_DIR this plugin set
 ```
@@ -785,6 +789,7 @@ named `default`; the default account's own name always works.
 | `claudeCommand`      | `claude`             | The Claude Code executable used to log an account in from bb: a name looked up in the `PATH` of bb's server, or a full path.                                                                                        |
 | `seatsMax`           | `4`                  | Threads at once on a Max account: a thread whose turn is about to start waits when the project's account already runs this many. 0 = no limit. See [Seats per account](#seats-per-account). |
 | `seatsTeam`          | `2`                  | The same for a Team account. |
+| `dayStartHour`       | `9`                  | Hour the day starts in Europe/Madrid. Each day gets an even share of what is left of an account's weekly window; at 90 % of it the account takes no more background work (a thread another thread, an automation or a plugin opens) unless no other account can run it. Your own threads are never held back by it. |
 | `loginPrivateWindow` | `true`               | macOS: open logins in a private Chrome window, so they do not reuse the browser's Claude session. Off, without Chrome, or on Linux: the default browser.                                                            |
 
 The accounts are read again whenever you pick one (`use`, the picker) and
@@ -888,6 +893,15 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
   over the week; `--json` gives the samples.
 
 ## Known limitations
+
+- **The day's pace needs a thread to tell background work.** Background
+  work (a thread with a parent thread or opened by a plugin) puts the
+  accounts saved for the user (their day at 90 %) last in every choice of
+  another account it makes; a project whose account can run is not moved
+  for the pace. Two choices have no thread behind them and treat the work
+  as the user's: the refresh's move of a project off an account that
+  cannot run, and the account the Opus advice in a declined thread's
+  banner names. A hidden thread is never placed at all, as before.
 
 - **A wait can follow another account's limit report.** bb sends a
   thread's latest limit report with each failure, whichever turn it came

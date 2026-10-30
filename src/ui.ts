@@ -3,6 +3,7 @@ import type {
   PluginComposerScope,
   PluginRealtimeConnectionState,
 } from "@get-bb/plugin-sdk/app";
+import { DAY_ZONE } from "./pace.js";
 import { CLAUDE_CODE_PROVIDER } from "./switch.js";
 
 /** The notice "No Claude Code login found" applies when no listed account has a login. */
@@ -138,32 +139,6 @@ type ForecastLike =
   | { kind: "lasts"; until: number; percentPerDay: number }
   | { kind: "steady" }
   | { kind: "unknown" };
-
-/** "2 d 5 h", "3 h", "40 min", or "now". */
-function inTime(ms: number): string {
-  const minutes = Math.round(ms / 60_000);
-  if (minutes <= 0) return "now";
-  if (minutes < 60) return `in ${minutes} min`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `in ${hours} h`;
-  const days = Math.floor(hours / 24);
-  return `in ${days} d ${hours % 24} h`;
-}
-
-/** One line under a window's bar; null when there is nothing worth saying. */
-export function forecastLine(
-  forecast: ForecastLike,
-  now: number,
-): string | null {
-  switch (forecast.kind) {
-    case "runs-out":
-      return `runs out ${inTime(forecast.at - now)} at this pace (${forecast.percentPerDay} %/day)`;
-    case "lasts":
-      return `lasts until the reset at this pace (${forecast.percentPerDay} %/day)`;
-    default:
-      return null;
-  }
-}
 
 /**
  * The forecast that matters for an account: its preferred model's window
@@ -308,7 +283,8 @@ interface UsageLike {
 
 /** What an account's compact line shows (the CLI's list, the panel's cards). */
 export interface AccountSummary {
-  session: number;
+  /** null on an Ultra account freed of the 5-hour window: it has no session (absent). */
+  session: number | null;
   /** null on a Team seat: it has no general weekly (absent). */
   weekly: number | null;
   /** The preferred model's window, when the account has one. */
@@ -338,14 +314,15 @@ export function accountSummary(
       name.toLowerCase() === preferredModel.toLowerCase(),
   );
   const team = usage.weekly.absent === true;
+  const noSession = usage.session.absent === true;
   const windows = [
-    usage.session,
+    ...(noSession ? [] : [usage.session]),
     ...(team ? [] : [usage.weekly]),
     ...(model === undefined ? [] : [model[1]]),
   ];
   const full = windows.filter((w) => windowPercent(w, now) >= 100);
   const summary: AccountSummary = {
-    session: shownPercent(usage.session, now),
+    session: noSession ? null : shownPercent(usage.session, now),
     weekly: team ? null : shownPercent(usage.weekly, now),
     model:
       model === undefined
@@ -359,7 +336,7 @@ export function accountSummary(
   return summary;
 }
 
-/** "agotada hasta 14:00" within a day, "agotada hasta 03/11" beyond (local time, or `timeZone`). */
+/** "agotada hasta 14:00" within a day, "agotada hasta 03/11" beyond (Madrid's time, or `timeZone`; Codex ULTRA-R2-005). */
 export function outText(
   until: number | null,
   now: number,
@@ -370,7 +347,7 @@ export function outText(
     until - now < 24 * 3_600_000
       ? { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }
       : { day: "2-digit", month: "2-digit" };
-  return `agotada hasta ${new Intl.DateTimeFormat("en-GB", { ...options, timeZone }).format(until)}`;
+  return `agotada hasta ${new Intl.DateTimeFormat("en-GB", { ...options, timeZone: timeZone ?? DAY_ZONE }).format(until)}`;
 }
 
 export interface SeatsLike {
@@ -379,13 +356,16 @@ export interface SeatsLike {
   running: number;
   reserved: number;
   queued: ReadonlyArray<{ threadId: string; title: string | null }>;
+  /** Seats held from outside bb (`reserve`). */
+  external?: ReadonlyArray<{ id: string; until: number }>;
 }
 
-/** "seats 3/4", "seats 2/2 · 2 waiting"; null when the account has no limit. */
+/** "seats 3/4", "seats 2/2 · 1 external · 2 waiting"; null when the account has no limit. */
 export function seatsText(seats: SeatsLike | undefined): string | null {
   if (seats === undefined || seats.capacity === 0) return null;
   const waiting = seats.queued.length;
-  return `seats ${seats.running + seats.reserved}/${seats.capacity}${waiting > 0 ? ` · ${waiting} waiting` : ""}`;
+  const external = seats.external?.length ?? 0;
+  return `seats ${seats.running + seats.reserved + external}/${seats.capacity}${external > 0 ? ` · ${external} external` : ""}${waiting > 0 ? ` · ${waiting} waiting` : ""}`;
 }
 
 interface ListInput {
@@ -397,6 +377,8 @@ interface ListInput {
     name: string;
     problem: { kind: "unauthenticated" } | { kind: "error"; message: string } | null;
     usage: UsageLike | null;
+    /** The plan's short label («Ultra · sin tope de 5 h», «Team»), shown under the line. */
+    planShort?: string;
   }>;
   projects: ReadonlyArray<{
     name: string;
@@ -484,13 +466,16 @@ export function listText(state: ListInput, now: number, timeZone?: string): stri
     } else {
       const s = accountSummary(a.usage, state.preferredModel, now);
       const blank = (text: string) => " ".repeat(text.length);
+      const ses = `ses ${pct(s.session ?? 0)}`;
       const sem = `sem ${pct(s.weekly ?? 0)}`;
       const fable = `${model} ${pct(s.model?.percent ?? 0)}`;
       // Each column on its own: a locked account can have full windows too
       // (Codex E46-R5-002). Dropped while the line is too long, least
       // needed first: sem, LOCKED, agotada hasta, the model.
       const columns = [
-        { keep: 5, text: `ses ${pct(s.session)}` },
+        // No session on an Ultra account freed of the 5-hour window: its
+        // plan says so under the line.
+        { keep: 5, text: s.session === null ? blank(ses) : ses },
         { keep: 0, text: s.weekly === null ? blank(sem) : sem },
         ...(model === ""
           ? []
@@ -511,10 +496,15 @@ export function listText(state: ListInput, now: number, timeZone?: string): stri
       rest = join();
     }
     const line = `${name}  ${rest}`.trimEnd();
-    const seats = seatsText(state.seats?.[a.name]);
+    const details = [
+      a.planShort ?? null,
+      seatsText(state.seats?.[a.name]),
+    ].filter((d): d is string => d !== null && d !== "");
     return [
       line.length <= LIST_LINE ? line : `${line.slice(0, LIST_LINE - 1)}…`,
-      ...(seats === null ? [] : [`${" ".repeat(width)}  ${seats}`]),
+      ...(details.length === 0
+        ? []
+        : [`${" ".repeat(width)}  ${details.join(" · ")}`]),
     ];
   });
   const projects = projectsByAccount(state).map(
@@ -534,35 +524,4 @@ export function listText(state: ListInput, now: number, timeZone?: string): stri
       ...(waiting.length === 0 ? [] : ["", "Waiting for a seat:", ...waiting]),
     ].join("\n") + "\n"
   );
-}
-
-/**
- * The windows an account's card draws, in order: session, the general
- * weekly (none on a Team seat: it has no such limit) and each model's.
- * `short` is the card's text ("ses 10% · sem 40% · Fable 20%").
- */
-export function accountWindows<W extends ListWindow>(usage: {
-  session: W;
-  weekly: W;
-  models: Record<string, W>;
-}): { key: string; label: string; short: string; window: W }[] {
-  return [
-    { key: "session", label: "Session (5 h)", short: "ses", window: usage.session },
-    ...(usage.weekly.absent === true
-      ? []
-      : [
-          {
-            key: "weekly",
-            label: "Weekly (all models)",
-            short: "sem",
-            window: usage.weekly,
-          },
-        ]),
-    ...Object.entries(usage.models).map(([model, window]) => ({
-      key: model,
-      label: `Weekly · ${model}`,
-      short: model,
-      window,
-    })),
-  ];
 }

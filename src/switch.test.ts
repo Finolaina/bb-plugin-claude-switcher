@@ -1897,3 +1897,148 @@ describe("seats steer where a project goes, and never move one by themselves", (
     });
   });
 });
+
+describe("decidePlacement of background work (SPEC 2026-10-30 §2)", () => {
+  const accounts = [
+    account("main", { session: { usedPercent: 30, resetsAt: NOW + HOUR } }),
+    account("work", { session: { usedPercent: 5, resetsAt: NOW + HOUR } }),
+  ];
+  const saved = (name: string) => name === "work";
+
+  it("puts a new project of background work behind the accounts saved for the user", () => {
+    expect(
+      decidePlacement({ currentAccount: "main", isNew: true, accounts, preferredModel: "", now: NOW, savedForUser: saved }),
+    ).toEqual({ kind: "keep" });
+    expect(
+      decidePlacement({ currentAccount: "main", isNew: true, accounts, preferredModel: "", now: NOW }),
+    ).toEqual({ kind: "move", account: "work", why: "new-project" });
+  });
+
+  it("never moves a project already placed because of the pace", () => {
+    expect(
+      decidePlacement({
+        currentAccount: "work",
+        isNew: false,
+        accounts,
+        preferredModel: "",
+        now: NOW,
+        savedForUser: saved,
+      }),
+    ).toEqual({ kind: "keep" });
+  });
+});
+
+describe("background work in every choice of another account (Codex ULTRA-R01)", () => {
+  // main cannot run; work is the best by quota but saved for the user,
+  // spare is worse by quota and free for background work.
+  const accounts = [
+    account("main", { session: { usedPercent: 100, resetsAt: NOW + 2 * HOUR } }),
+    account("work", { session: { usedPercent: 5, resetsAt: NOW + HOUR } }),
+    account("spare", { session: { usedPercent: 60, resetsAt: NOW + HOUR } }),
+  ];
+  const saved = (name: string) => name === "work";
+
+  it("moves a project already placed off a blocked account to the account not saved for the user", () => {
+    const placed = { currentAccount: "main", isNew: false, accounts, preferredModel: "", now: NOW };
+    expect(decidePlacement({ ...placed, savedForUser: saved })).toEqual({
+      kind: "move",
+      account: "spare",
+      why: "current-blocked",
+    });
+    // The user's own thread: as before, the best by quota.
+    expect(decidePlacement(placed)).toEqual({ kind: "move", account: "work", why: "current-blocked" });
+    // Only a saved account left: background work still runs there.
+    expect(
+      decidePlacement({ ...placed, accounts: accounts.slice(0, 2), savedForUser: saved }),
+    ).toEqual({ kind: "move", account: "work", why: "current-blocked" });
+  });
+
+  it("puts a project without a login behind the saved accounts too", () => {
+    expect(
+      decidePlacement({
+        currentAccount: "main",
+        isNew: false,
+        accounts,
+        preferredModel: "",
+        now: NOW,
+        currentLoggedOut: true,
+        savedForUser: saved,
+      }),
+    ).toEqual({ kind: "move", account: "spare", why: "current-blocked" });
+    // Every other account keeps the reserved model: the reserve gives way,
+    // the accounts saved for the user still last.
+    const keepsFable = { Fable: { usedPercent: 5, resetsAt: NOW + 30 * HOUR } };
+    const reserved = {
+      currentAccount: "main",
+      isNew: false,
+      accounts: accounts.map((a) => ({ ...a, models: keepsFable })),
+      preferredModel: "Opus",
+      reserveModel: "Fable",
+      now: NOW,
+      currentLoggedOut: true,
+    };
+    expect(decidePlacement(reserved)).toEqual({ kind: "move", account: "work", why: "current-blocked" });
+    expect(decidePlacement({ ...reserved, savedForUser: saved })).toEqual({
+      kind: "move",
+      account: "spare",
+      why: "current-blocked",
+    });
+  });
+
+  it("goes home from an excursion only when home is not saved for the user", () => {
+    const seat = account("team1", {
+      weekly: { usedPercent: 0, resetsAt: null, absent: true },
+      session: { usedPercent: 100, resetsAt: NOW + 2 * HOUR },
+    });
+    const home = account("work", { models: { Fable: { usedPercent: 5, resetsAt: NOW + 30 * HOUR } } });
+    const other = account("spare", { models: { Fable: { usedPercent: 50, resetsAt: NOW + 30 * HOUR } } });
+    const excursion = {
+      currentAccount: "team1",
+      isNew: false,
+      accounts: [seat, home, other],
+      preferredModel: "Fable",
+      excursionFrom: "work",
+      now: NOW,
+    };
+    expect(decidePlacement(excursion)).toEqual({ kind: "move", account: "work", why: "back-from-excursion" });
+    expect(decidePlacement({ ...excursion, savedForUser: saved })).toEqual({
+      kind: "move",
+      account: "spare",
+      why: "current-blocked",
+    });
+  });
+
+  it("switches a failed turn of background work to the account not saved for the user", () => {
+    expect(decideSwitch(input({ accounts, savedForUser: saved }))).toEqual({
+      kind: "switch",
+      account: "spare",
+      model: null,
+    });
+    expect(decideSwitch(input({ accounts }))).toEqual({ kind: "switch", account: "work", model: null });
+    // With no free seat anywhere, the quota choice keeps the same order.
+    expect(
+      decideSwitch(input({ accounts, savedForUser: saved, freeSeats: () => 0 })),
+    ).toEqual({ kind: "switch", account: "spare", model: null });
+  });
+
+  it("moves background work ahead of the limit to the account not saved for the user", () => {
+    const ahead = {
+      currentAccount: "main",
+      preferredModel: "",
+      threshold: 90,
+      now: NOW,
+      accounts: [
+        account("main", { session: { usedPercent: 95, resetsAt: NOW + HOUR } }),
+        account("work", { session: { usedPercent: 1, resetsAt: NOW + HOUR } }),
+        account("spare", { session: { usedPercent: 40, resetsAt: NOW + HOUR } }),
+      ],
+    };
+    expect(decideAhead({ ...ahead, savedForUser: saved })).toMatchObject({ kind: "move", account: "spare" });
+    expect(decideAhead(ahead)).toMatchObject({ kind: "move", account: "work" });
+  });
+
+  it("names the account not saved for the user as the best for background work", () => {
+    expect(bestAccount(accounts.slice(1), "", NOW, undefined, undefined, saved)).toBe("spare");
+    expect(bestAccount(accounts.slice(1), "", NOW)).toBe("work");
+  });
+});

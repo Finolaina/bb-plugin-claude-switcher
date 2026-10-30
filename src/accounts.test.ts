@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { discoverAccounts, type AccountsIo } from "./accounts.js";
+import { readFileSync } from "node:fs";
+import { discoverAccounts, planOf, type AccountsIo } from "./accounts.js";
+import { parseUsage } from "./usage.js";
 
 const HOME = "/Users/someone";
 const ACCOUNTS = `${HOME}/.claude-accounts`;
@@ -200,5 +202,90 @@ describe("discoverAccounts", () => {
       ["odd", "unknown"],
       ["team1", "team"],
     ]);
+  });
+});
+
+describe("the plan behind a login (SPEC 2026-10-30 §1)", () => {
+  it("reads organizationRateLimitTier and planDisplayName from oauthAccount", async () => {
+    const io = fakeIo(
+      {
+        [`${HOME}/.claude.json`]: JSON.stringify({
+          oauthAccount: {
+            accountUuid: "uuid-main",
+            emailAddress: "main@example.com",
+            organizationType: "claude_max",
+            organizationRateLimitTier: "default_claude_max_20x",
+            planDisplayName: "Ultra",
+          },
+        }),
+      },
+      {},
+    );
+    const [main] = await discoverAccounts(io, {
+      accountsDir: ACCOUNTS,
+      defaultAccountName: "main",
+    });
+    expect(main).toMatchObject({
+      kind: "max",
+      tier: "default_claude_max_20x",
+      planName: "Ultra",
+    });
+  });
+
+  const usage = (name: string) =>
+    parseUsage(
+      JSON.parse(
+        readFileSync(new URL(`./fixtures/ultra/${name}.json`, import.meta.url), "utf8"),
+      ),
+    );
+  const max20x = { kind: "max", tier: "default_claude_max_20x" } as const;
+
+  it("an Ultra account without the 5-hour window is Ultra, never Team, with or without a profile (canary 1)", () => {
+    for (const login of [max20x, { kind: "unknown" } as const, { kind: "team" } as const])
+      expect(planOf(login, usage("ultra-sin-5h"))).toEqual({
+        plan: "ultra",
+        label: "Ultra · sin tope de 5 h",
+        short: "Ultra · sin tope de 5 h",
+        fiveHour: false,
+      });
+  });
+
+  it("a Team seat is Team, by its profile and without one (canary 2)", () => {
+    const team = { plan: "team", label: "Team", short: "Team", fiveHour: true };
+    expect(planOf({ kind: "team", tier: "default_raven" }, usage("team"))).toEqual(team);
+    expect(planOf({ kind: "unknown" }, usage("team"))).toEqual(team);
+  });
+
+  it("a max_20x login still on the 5-hour window is Ultra until Anthropic verifies it (canary 3)", () => {
+    for (const name of ["ultra-con-5h", "ultra-con-5h-b"])
+      expect(planOf(max20x, usage(name))).toEqual({
+        plan: "ultra",
+        label: "Ultra · 5 h hasta que Anthropic la verifique",
+        short: "Ultra · con 5 h",
+        fiveHour: true,
+      });
+    expect(planOf({ kind: "max", planName: "Ultra" }, usage("ultra-con-5h")).plan).toBe("ultra");
+  });
+
+  it("a Max 5x is Max; a Max login without tier nor plan name is «Max o Ultra»; nothing is «sin datos de plan»", () => {
+    expect(planOf({ kind: "max", tier: "default_claude_max_5x" }, usage("ultra-con-5h"))).toMatchObject({ plan: "max", label: "Max" });
+    expect(planOf({ kind: "max", planName: "Max" }, null)).toMatchObject({ plan: "max", fiveHour: null });
+    expect(planOf({ kind: "max" }, usage("ultra-con-5h"))).toMatchObject({ plan: "unknown", label: "Max o Ultra" });
+    expect(planOf({ kind: "unknown" }, null)).toEqual({
+      plan: "unknown",
+      label: "sin datos de plan",
+      short: "sin datos de plan",
+      fiveHour: null,
+    });
+    expect(planOf(max20x, null)).toMatchObject({ plan: "ultra", label: "Ultra", fiveHour: null });
+  });
+
+  it("an incomplete answer says nothing of the 5-hour window (canary 5)", () => {
+    const { five_hour: _, ...rest } = JSON.parse(
+      readFileSync(new URL("./fixtures/ultra/ultra-sin-5h.json", import.meta.url), "utf8"),
+    );
+    const info = planOf({ kind: "unknown" }, parseUsage(rest));
+    expect(info.plan).toBe("unknown");
+    expect(info.fiveHour).toBeNull();
   });
 });

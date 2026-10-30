@@ -4,6 +4,124 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.32] - 2026-10-30
+
+### Fixed
+
+- **An Ultra account freed of the 5-hour window was «blocked + unknown».**
+  Anthropic renamed Max 20x to Ultra and drops its 5-hour window account
+  by account (2026-10-30). The usage endpoint then answers `five_hour:
+null`, no `session` limit and a `weekly_all`: the plugin read the
+  missing session as an incomplete answer, so the account was never
+  chosen and `list` said `ses 100% LOCKED`. Such an answer now reads a
+  session absent at 0 % that never binds (the pattern of a Team seat's
+  absent weekly); without the `five_hour` key it is still incomplete. bb's
+  usage panel shows no 5-hour window for it, the account menu no
+  session, and `list` no `ses` column.
+
+### Added
+
+- **The plan behind each login: Ultra, Max, Team.** Read from
+  `oauthAccount.organizationRateLimitTier` and `planDisplayName` and the
+  windows (an account without a session is Ultra, never Team; a Team
+  seat is Team by its profile or, without one, by having no general
+  weekly). The state the app receives carries `plan`, `planLabel`
+  («Ultra · sin tope de 5 h», «Ultra · 5 h hasta que Anthropic la
+  verifique», «Max», «Team»), `planShort`, `fiveHour` and `pace`; `list`
+  shows the plan under each account. Ultra has the Max seats.
+- **The day's pace: background work does not eat the user's day.** Without
+  the 5-hour window, a night of background work could spend two days of
+  the week. Each day (from `dayStartHour`, 09:00 Europe/Madrid, to the
+  next) gets an even share of what is left of the account's weekly
+  window, from the day's first reading (kept in storage, `pace-day`). At
+  90 % of it the account is saved for the user: for a thread with a
+  parent thread or an origin plugin, every choice of another account (a
+  new project, a move off an account that cannot run before a turn, the
+  way back from an excursion, the switch after a failed turn, a waiting
+  turn moved to a free account, the move ahead of the limit) puts it
+  behind every other usable account, never left without one. A project
+  whose account can run is not moved for the pace. The user's own
+  threads are not affected. Unknown (no weekly reset) counts as saved; a
+  Team seat has no pace.
+- **`bb claude-switcher health [--json]`:** a stable read for other
+  threads and scripts, version 1, the same schema as the Mac's
+  `claude-cuentas.py salud --json`: per account `nombre`, `plan`,
+  `planTexto`, `cincoHoras`, `sesion`, `semana`, `modelos` (only those the
+  usage API reports), `ritmo`, `plazas` (with `externas`), `usable` and
+  `problema`; times ISO 8601 with Madrid's offset. `usable` is what the
+  automatic choice may pick, whatever the model: an account out at its
+  last good read, whose reset passed while the queries kept failing, is
+  not usable («reset sin confirmar…»).
+- **`bb claude-switcher reserve <account> --id <x> --until <ISO>` and
+  `unreserve --id <x>`:** a seat held for a run outside bb (`claude -p`
+  with the account's `CLAUDE_CONFIG_DIR`, which bb does not see), so bb
+  does not put more threads on it than its seats. Checked and taken in
+  one synchronous step; fails (exit 1) with no free seat beyond those
+  owed to threads already waiting, or for an unknown account. Right after
+  a reload it first waits, up to 5 s, for the threads already running to
+  be counted; not counted by then, it holds nothing and fails with exit
+  75 (`seats_counting`: ask again in a moment). It fails the same way
+  when that count left a running thread unread, and counts them again.
+  The same
+  id renews it. It ends at `until`, never more than 12 h after it was
+  asked for, and is kept in storage (`external-seats`) across reloads:
+  a hold that cannot be stored is undone and `reserve` fails (exit 1,
+  `not_stored`); an end that cannot be stored leaves the hold and
+  `unreserve` fails the same way. Counted in `list`, `seats` and `health`.
+
+### Changed
+
+- **Settings → Claude Switcher reads at a glance (design B).** On top, one
+  sentence: which accounts work now, which are kept for you (their day's
+  share is spent) and which free one has most of its week left. Below,
+  the Ultra and Max accounts by what is left of their week, most first,
+  then the Team seats by name; one row each with the plan («Ultra · con
+  5 h», «Ultra · sin tope de 5 h», «Team»), one bar of what is LEFT (of
+  the week, or of the 5 hours on a Team seat) with today's share striped
+  at its end, the state as an icon and a word (Out, Kept for you,
+  Working, Free; «No data» for a failed read), today's line or the
+  seat's threads, and when it is back («lun 09:00», «mañana 11:00»).
+  Working = it holds a seat, also one held from outside bb. Spanish for a
+  browser set to Spanish, English otherwise. The cards with one bar per
+  window and their «ses/sem» text are gone; the pace of the window that
+  matters is now in each row's tooltip and in the thread's menu, in the
+  same two languages.
+- **The thread's account in its header** shows its state as an icon, and
+  its menu opens on a small card with what is left in large type, the
+  bar and its line; every account of the menu, and every account
+  heading of Projects, says its state and what is left in one line.
+- **bb's usage panel** labels each card with the account's name and its
+  plan («aitor · Ultra · sin tope de 5 h», Codex ULTRA-R05). `plan` stays
+  null: bb 0.46 puts its own word («Max», «Team») in place of the label
+  for a plan id it knows, and the account's name would be lost.
+- **Every date in the panel, its rows and the menus is Madrid's**, not
+  the browser's zone (a reset at 09:00 in Madrid read «03:00» in New
+  York); so are the history's times and the «agotada hasta» of `list`.
+
+### Known limits
+
+- Two choices of another account have no thread behind them and treat
+  the work as the user's: the refresh's move of a project off an account
+  that cannot run, and the account the Opus advice in a declined
+  thread's banner names.
+- The day's first reading is kept by account name (Codex ULTRA-R2-001):
+  renaming the default account, or a second directory logged into the
+  same account found during the day, starts the day's pace again from
+  its next reading, which gives that day's spending back to background
+  work. Seats keep the login's identity; the pace does not yet.
+- `planOf` without a profile tier cannot tell an Ultra still on the
+  5-hour window from a Max: it says «sin datos de plan» until the login's
+  profile carries `organizationRateLimitTier` or `planDisplayName`.
+- Left open by the final inspection (Codex Astra r3, no high; for 0.2.33):
+  the refresh's rescue of a project off an account that cannot run does
+  not know whether its threads are background work, so it may move a
+  background-only project to an account kept for the user (ULTRA-R3-001);
+  moving an external hold to another account frees its old seat before the
+  hold is stored, so a thread admitted in that moment and a failed write
+  can leave two on one seat (ULTRA-R3-002); and a failed read of the
+  stored external holds at load starts with none, so their seats can be
+  granted again until they are reserved anew (ULTRA-R3-003).
+
 ## [0.2.31] - 2026-10-30
 
 ### Added

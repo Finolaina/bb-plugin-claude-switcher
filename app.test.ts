@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 // app.tsx has no DOM tests (see README, Development); this guards the r3
 // regression where two empty-state blocks were pasted twice.
@@ -12,6 +12,17 @@ describe("app.tsx", () => {
     // the message is for "no account is logged in".
     expect(source).not.toContain("state.accounts.length === 0");
     expect(source).toContain("noLoginFound(state.accounts)");
+  });
+});
+
+// No DOM tests: guards that the panel writes its dates through src/panel.ts,
+// in Madrid (Codex ULTRA-R2-005), never in the browser's zone.
+describe("the panel's dates", () => {
+  it("writes the history's times with moveTime and passes no browser zone", async () => {
+    const source = await readFile(new URL("./app.tsx", import.meta.url), "utf8");
+    expect(source).toContain("{moveTime(move.at)}");
+    expect(source).not.toMatch(/toLocale(String|DateString|TimeString)\(/);
+    expect(source).not.toContain("resolvedOptions().timeZone");
   });
 });
 
@@ -182,110 +193,113 @@ describe("the plugin's frontend registration", () => {
   });
 });
 
-// The compact panel (0.2.30): the decisions live in src/ui.ts (tested
-// there); these guard that app.tsx draws from them.
-describe("the compact accounts panel", () => {
-  it("draws each card's bars from accountWindows in one thin row, says when an account is out, and groups the projects by account", async () => {
+/**
+ * bb's Icon lives in the host's runtime (SDK 0.6.15, experimental_Icon); the
+ * SDK's own test runtime needs @testing-library/react, which this repo does
+ * not carry: a bare stand-in is enough to read what a view says.
+ */
+async function withIcon() {
+  const React = await import("react");
+  const host = globalThis as { __bbPluginRuntime?: unknown };
+  host.__bbPluginRuntime ??= {
+    react: React,
+    pluginSdkApp: {
+      experimental_Icon: ({ name }: { name: string }) =>
+        React.createElement("svg", { "data-icon": name, "aria-hidden": true }),
+    },
+  };
+}
+
+// Design B (0.2.32): the decisions live in src/panel.ts (tested there);
+// these render app.tsx's views with the real reading of 2026-10-30 22:46
+// (src/panel-fixture.ts) and read what is on screen.
+describe("design B in Settings", () => {
+  async function shown(lang: "es" | "en") {
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    await withIcon();
+    const { AccountsOverview } = await import("./app");
+    const { realReading, READING_AT } = await import("./src/panel-fixture");
+    const html = renderToStaticMarkup(
+      createElement(AccountsOverview, {
+        state: realReading(),
+        now: READING_AT,
+        lang,
+        timeZone: "Europe/Madrid",
+        onLogin: () => {},
+        onRefresh: () => {},
+      }),
+    );
+    // Tags (and the titles inside them) out: only what is on screen.
+    return { html, text: html.replace(/<[^>]*>/g, "").replace(/&#x27;/g, "'") };
+  }
+
+  it("says who works, who is kept and which has most week, then one row per account", async () => {
+    const { html, text } = await shown("es");
+    expect(text).toContain(
+      "Trabajan studio, ganaresenas, team2, team4. Guardadas para ti: viaulab y aitor. La que más semana tiene es agency (100 %).",
+    );
+    expect(text).toContain("Ultra · lo que queda de la semana");
+    expect(text).toContain("Team · lo que queda de sus 5 h");
+    expect(text).toContain("88 % de la semana");
+    expect(text).toContain("vuelve lun 09:00");
+    expect(text).toContain("Guardada para ti · Ya ha gastado lo de hoy");
+    expect(text).toContain("Fable al 89 % · 2 de 2 hilos · 4 esperando");
+    expect(text).toContain("sin Fable hasta dom 22:00");
+    // mariscal has no login: out, and the button to log it in.
+    expect(text).toContain("Agotada · sin sesión iniciada");
+    expect(text).toContain("Iniciar sesión");
+    // Each bar is read out; the state is an icon and a word.
+    expect(html).toContain('role="img" aria-label="Le queda el 2 % de la semana"');
+    expect(html).toContain('class="whitespace-nowrap font-medium cs-s-kept"');
+    // No jargon on screen (DISENO.md §Textos).
+    for (const word of ["ses ", "sem ", "LOCKED", "seats", "weekly", "Weekly"])
+      expect(text).not.toContain(word);
+  });
+
+  it("speaks English to a browser that is not set to Spanish", async () => {
+    const { text } = await shown("en");
+    expect(text).toContain(
+      "Working: studio, ganaresenas, team2, team4. Kept for you: viaulab and aitor. Most of the week left: agency (100 %).",
+    );
+    expect(text).toContain("88 % of the week");
+    expect(text).toContain("back Mon 09:00");
+    expect(text).toContain("Log in");
+    expect(text).not.toContain("Trabajando");
+  });
+
+  it("keeps the projects by account, each heading with its account's line, and reads the language from the browser", async () => {
     const source = await readFile(new URL("./app.tsx", import.meta.url), "utf8");
-    // No weekly bar of its own: a Team seat has none (accountWindows).
-    expect(source).not.toContain('label="Weekly (all models)"');
-    expect(source).toContain("accountWindows(usage).map(");
-    expect(source).toContain('className="mt-1 flex gap-1"');
-    expect(source).toContain("outText(summary.outUntil, now)");
     expect(source).toContain("projectsByAccount(state).map(");
-    // The menu's line has no weekly for a Team seat either.
-    expect(source).toContain("account.usage.weekly.absent === true");
+    expect(source).toContain("row={rowOf(state, account, lang)}");
+    expect(source).toContain("uiLang(typeof navigator === \"undefined\" ? undefined : navigator.language)");
+    expect(source).toContain('import "./app.css";');
   });
 });
 
-describe("an account's row in the panel (Codex E46-R6-003)", () => {
-  it("writes when each window resets and the pace that matters as text, not only in titles a keyboard or a touch never opens", async () => {
+describe("the thread's account in its menu", () => {
+  it("shows the thread's account as a card with its figure, its line and the pace of its window", async () => {
     const { renderToStaticMarkup } = await import("react-dom/server");
     const { createElement } = await import("react");
-    const { UsageRow } = await import("./app");
-    const NOW = Date.UTC(2026, 9, 29, 12, 0);
-    const H = 3_600_000;
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(NOW);
-    try {
-      const text = (props: Parameters<typeof UsageRow>[0]) =>
-        // Tags (and the titles inside them) out: only what is on screen.
-        renderToStaticMarkup(createElement(UsageRow, props)).replace(/<[^>]*>/g, "");
-      const shown = text({
-        usage: {
-          blocked: false,
-          session: { usedPercent: 40, resetsAt: NOW + 2 * H + 10 * 60_000 },
-          weekly: { usedPercent: 30, resetsAt: NOW + 76 * H },
-          models: { Fable: { usedPercent: 70, resetsAt: NOW + 26 * H } },
-        },
-        preferredModel: "Fable",
-        forecasts: {
-          weekly: { kind: "lasts", until: NOW + 76 * H, percentPerDay: 5 },
-          Fable: { kind: "runs-out", at: NOW + 20 * H, percentPerDay: 30 },
-        },
-      });
-      expect(shown).toContain("ses 40%");
-      expect(shown).toContain(
-        "resets ses 2 h 10 min, sem 3 d 4 h, Fable 1 d 2 h · Fable runs out in 20 h at this pace (30 %/day)",
-      );
-      // A Team seat: no weekly, and nothing to pace.
-      const seat = text({
-        usage: {
-          blocked: false,
-          session: { usedPercent: 5, resetsAt: NOW + 4 * H },
-          weekly: { usedPercent: 0, resetsAt: null, absent: true },
-          models: {},
-        },
-        preferredModel: "Fable",
-        forecasts: undefined,
-      });
-      expect(seat).toContain("resets ses 4 h 0 min");
-      expect(seat).not.toContain("sem");
-      expect(seat).not.toContain("runs out");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-});
-
-describe("an account's card shows its seats", () => {
-  it("writes seats taken, capacity and who waits in the card's header; nothing without a limit", async () => {
-    const { renderToStaticMarkup } = await import("react-dom/server");
-    const { createElement } = await import("react");
-    const { AccountCard } = await import("./app");
-    const account = {
-      name: "team1",
-      email: null,
-      accountUuid: null,
-      configDir: "/x/team1",
-      observedAt: null,
-      problem: null,
-      usage: null,
-    };
-    const text = (seats: Parameters<typeof AccountCard>[0]["seats"]) =>
+    const { ThreadAccountCard } = await import("./app");
+    const { accountRow } = await import("./src/panel");
+    const { realReading, READING_AT } = await import("./src/panel-fixture");
+    const state = realReading();
+    const ctx = { now: READING_AT, lang: "es" as const, timeZone: "Europe/Madrid", preferredModel: "Fable" };
+    const text = (name: string, forecast: string | null) =>
       renderToStaticMarkup(
-        createElement(AccountCard, {
-          account,
-          isDefault: false,
-          preferredModel: "",
-          forecasts: undefined,
-          seats,
+        createElement(ThreadAccountCard, {
+          row: accountRow(state.accounts.find((a) => a.name === name)!, state.seats?.[name], ctx),
+          forecast,
         }),
       ).replace(/<[^>]*>/g, "");
-    expect(
-      text({
-        capacity: 4,
-        running: 2,
-        reserved: 1,
-        queued: [
-          { threadId: "a", title: null },
-          { threadId: "b", title: "x" },
-        ],
-      }),
-    ).toContain("seats 3/4 · 2 waiting");
-    expect(
-      text({ capacity: 0, running: 9, reserved: 0, queued: [] }),
-    ).not.toContain("seats");
-    expect(text(undefined)).not.toContain("seats");
+    const aitor = text("aitor", null);
+    expect(aitor).toContain("2 %");
+    expect(aitor).toContain("Ultra · sin tope de 5 h · le queda el 2 % de la semana · vuelve dom 18:00");
+    // The pace the card shows comes from the fixture's forecast, in Spanish.
+    const { forecastText } = await import("./src/panel");
+    const pace = forecastText(state.forecasts, "studio", "Fable", READING_AT, "es");
+    expect(pace).toBe("Semana: llega al reinicio a este ritmo (24,3 %/día)");
+    expect(text("studio", pace)).toContain("(24,3 %/día)");
   });
 });
