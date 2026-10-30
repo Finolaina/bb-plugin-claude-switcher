@@ -29,9 +29,12 @@ project uses [Semantic Versioning](https://semver.org/).
   (`accountUuid`): two directories of one account share them, and a
   renamed default keeps them. The seats are kept in memory; after a
   reload the threads bb reports active are counted before any turn starts
-  (a message waits meanwhile, asked again in 5 s); a failed read is tried
-  three times, 2 s apart, and a thread that ends while counted is not
-  counted.
+  (a message waits meanwhile, asked again in 5 s); a read that fails or
+  gives no answer within 3 s is tried three times, 2 s apart, after which
+  turns go with what was counted, and a thread that ends while counted is
+  not counted. A project on an account the plugin no longer finds waits
+  like one whose account cannot be read; it never takes the default's
+  seat.
 - **A project is never moved to find a seat.** Seats only steer moves made
   for other reasons, and those go only to an account with a free seat (a
   new project, a move before a turn, a move off a long wait, a move ahead

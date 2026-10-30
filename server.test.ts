@@ -336,6 +336,8 @@ interface HostOptions {
   beforeEvents?: () => Promise<void>;
   /** Runs before threads.get answers (a failure's look at its thread, outside the project's queue). */
   beforeThreadGet?: () => Promise<void>;
+  /** Runs before threads.list answers (a list that never answers, Astra SEATS-R2-001). */
+  beforeThreadsList?: () => Promise<void>;
   /** Runs as queuedMessages.delete starts, before it lands or fails (bb's events meanwhile). */
   beforeDelete?: () => Promise<void>;
   /** Runs before queuedMessages.list answers (the plugin's look for a queued retry). */
@@ -454,6 +456,7 @@ async function host(
         },
         // Like bb: every thread, as threads.get answers for it.
         list: async () => {
+          await options.beforeThreadsList?.();
           if (options.queueAfterList !== undefined) {
             queued.push(...options.queueAfterList);
             options.queueAfterList = undefined;
@@ -4403,8 +4406,18 @@ describe("placing a project before a new thread's first turn", () => {
       dispose = () => h.harness.dispose();
       await vi.advanceTimersByTimeAsync(4_000);
       vi.useRealTimers();
+      // Its own account not among the accounts found (none can be): its
+      // seat unknown, it waits like an unread one, then goes; never on the
+      // default's seat (Astra SEATS-R2-003).
+      for (let i = 0; i < 3; i++)
+        expect(
+          await dispatched(h, "thread-1", "proj-1", "claude-haiku-5-5", i > 0),
+        ).toMatchObject({
+          action: "wait",
+          reason: "Claude Switcher: the project's account could not be read for its seat; trying again",
+        });
       expect(
-        await dispatched(h, "thread-1", "proj-1", "claude-haiku-5-5"),
+        await dispatched(h, "thread-1", "proj-1", "claude-haiku-5-5", true),
       ).toEqual({ action: "proceed" });
       expect(
         await dispatched(h, "thr-2", "proj-2", "claude-haiku-5-5"),
@@ -7083,11 +7096,15 @@ describe("the model a thread's turn runs on", () => {
     dispose = () => failing.harness.dispose();
     await failing.harness.behavior.callRpc("accounts_refresh", null).catch(() => {});
     // Its seat unknown, it waits a few times; then it goes (Astra SEATS-R01).
+    // bb asks again about the message it holds (Astra SEATS-R2-005).
+    const held = { queuedMessages: [{ id: "queued_1" }] as never };
     for (let i = 0; i < 3; i++)
-      expect(await dispatch(failing, "claude-opus-5-5")).toMatchObject({
+      expect(
+        await dispatch(failing, "claude-opus-5-5", i === 0 ? {} : held),
+      ).toMatchObject({
         action: "wait",
       });
-    expect(await dispatch(failing, "claude-opus-5-5")).toEqual({
+    expect(await dispatch(failing, "claude-opus-5-5", held)).toEqual({
       action: "proceed",
     });
     expect(failing.envSet).toEqual([]);
@@ -7109,11 +7126,11 @@ describe("the model a thread's turn runs on", () => {
     try {
       // The placement's read, then the seat's, each given up at 3 s.
       for (let i = 0; i < 3; i++) {
-        const answer = dispatch(hanging, "claude-opus-5-5");
+        const answer = dispatch(hanging, "claude-opus-5-5", i === 0 ? {} : held);
         await vi.advanceTimersByTimeAsync(6_000);
         expect(await answer).toMatchObject({ action: "wait" });
       }
-      const answer = dispatch(hanging, "claude-opus-5-5");
+      const answer = dispatch(hanging, "claude-opus-5-5", held);
       await vi.advanceTimersByTimeAsync(6_000);
       expect(await answer).toEqual({ action: "proceed" });
     } finally {
@@ -13671,6 +13688,16 @@ describe("seats hold through every way a turn starts (Astra SEATS-R01..R09)", ()
   const seatsOf = async (h: Awaited<ReturnType<typeof host>>) =>
     ((await h.harness.behavior.callRpc("accounts_list", null)) as State).seats;
   const OFF = { autoSwitch: false };
+  /** bb asking again about the message it holds (queued on the plugin's wait). */
+  const again = (h: Awaited<ReturnType<typeof host>>, id: string, projectId = "proj-1") =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id, projectId }),
+        requestedExecution: { providerId: "claude-code", model: null },
+        attempt: "start-turn",
+        queuedMessages: [{ id: `queued_${id}` }] as never,
+      }),
+    ) as Promise<Answer>;
   const counted = (h: Awaited<ReturnType<typeof host>>) =>
     vi.waitFor(() =>
       expect(
@@ -13697,17 +13724,42 @@ describe("seats hold through every way a turn starts (Astra SEATS-R01..R09)", ()
     const h = await host(ALL_FREE, { settings: { seatsMax: 1 }, failEnvRead: ["proj-1"] });
     dispose = () => h.harness.dispose();
     for (let i = 0; i < 3; i++)
-      expect(await ask(h, "t1")).toEqual({
+      expect(await (i === 0 ? ask : again)(h, "t1")).toEqual({
         action: "wait",
         reason: "Claude Switcher: the project's account could not be read for its seat; trying again",
         sendAt: NOW + SEAT_RECHECK_MS,
       });
-    expect(await ask(h, "t1")).toEqual({ action: "proceed" });
+    expect(await again(h, "t1")).toEqual({ action: "proceed" });
     expect(
       h.harness.logEntries.some(
         (e) => e.level === "warn" && e.message.includes("t1: proceeds without a seat"),
       ),
     ).toBe(true);
+  });
+
+  it("R2-005: the waits for an unread account are the message's: a new message after a cancelled one waits again", async () => {
+    const h = await host(ALL_FREE, { settings: { seatsMax: 1 }, failEnvRead: ["proj-1"] });
+    dispose = () => h.harness.dispose();
+    const unread = "Claude Switcher: the project's account could not be read for its seat; trying again";
+    expect((await ask(h, "t1")).reason).toBe(unread);
+    expect((await again(h, "t1")).reason).toBe(unread);
+    expect((await again(h, "t1")).reason).toBe(unread);
+    // The user cancels the held message.
+    await h.harness.behavior.emitThreadEvent("message.cancelled", {
+      entry: { id: "queued_t1", threadId: "t1", sendAt: NOW + SEAT_RECHECK_MS, payload: { kind: "inline" } } as never,
+    });
+    // A new message, the account still unread: it waits.
+    expect((await again(h, "t1")).reason).toBe(unread);
+  });
+
+  it("R2-005: a message sent anew (none queued) starts its own waits", async () => {
+    const h = await host(ALL_FREE, { settings: { seatsMax: 1 }, failEnvRead: ["proj-1"] });
+    dispose = () => h.harness.dispose();
+    const unread = "Claude Switcher: the project's account could not be read for its seat; trying again";
+    expect((await ask(h, "t1")).reason).toBe(unread);
+    expect((await again(h, "t1")).reason).toBe(unread);
+    expect((await again(h, "t1")).reason).toBe(unread);
+    expect((await ask(h, "t1")).reason).toBe(unread);
   });
 
   it("R02: a dispatch while the seats are counted after a reload waits; once counted, the threads bb said run fill the account", async () => {
@@ -13760,6 +13812,41 @@ describe("seats hold through every way a turn starts (Astra SEATS-R01..R09)", ()
     expect((await seatsOf(h))?.main).toMatchObject({ running: 1 });
   });
 
+  it("R2-001: threads.list never answers while counting: after its tries the seats count as none and a turn goes", async () => {
+    vi.useFakeTimers();
+    const h = await host(ALL_FREE, {
+      settings: { ...OFF, seatsMax: 1 },
+      threads: { r1: { status: "active" } },
+      beforeThreadsList: () => new Promise(() => {}),
+    });
+    dispose = () => h.harness.dispose();
+    await vi.advanceTimersByTimeAsync(3 * DISPATCH_LIMIT_MS + 2 * 2_000);
+    vi.useRealTimers();
+    await counted(h);
+    expect(await ask(h, "t9")).toEqual({ action: "proceed" });
+  });
+
+  it("R2-001: threads.get never answers for a thread read late: after its tries it is not counted and a turn goes", async () => {
+    vi.useFakeTimers();
+    let clock = NOW;
+    const h = await host(ALL_FREE, {
+      settings: { ...OFF, seatsMax: 1 },
+      clock: () => clock,
+      threads: { r1: { status: "active" } },
+      // The project's account read late: the thread is looked at again.
+      beforeEnvRead: async () => {
+        clock += 2_000;
+      },
+      beforeThreadGet: () => new Promise(() => {}),
+    });
+    dispose = () => h.harness.dispose();
+    await vi.advanceTimersByTimeAsync(3 * DISPATCH_LIMIT_MS + 2 * 2_000);
+    vi.useRealTimers();
+    await counted(h);
+    expect((await seatsOf(h))?.main?.running ?? 0).toBe(0);
+    expect((await ask(h, "t9")).action).toBe("proceed");
+  });
+
   for (const [what, end] of [
     ["idle", (h: Awaited<ReturnType<typeof host>>) =>
       h.harness.behavior.emitThreadEvent("thread.idle", { thread: thread({ id: "r1", projectId: "proj-1" }) })],
@@ -13808,6 +13895,45 @@ describe("seats hold through every way a turn starts (Astra SEATS-R01..R09)", ()
     expect((await seatsOf(h))?.spare).toMatchObject({ running: 0, reserved: 0 });
   });
 
+  it("R2-002: a reserved turn announced just before its reservation expires keeps its seat while its account is read", async () => {
+    let clock = NOW;
+    const gate = envGate();
+    let hold = false;
+    const h = await host(ALL_FREE, {
+      settings: { ...OFF, seatsMax: 1 },
+      clock: () => clock,
+      beforeEnvRead: async (projectId) => {
+        if (!hold || projectId !== "proj-1") return;
+        hold = false;
+        gate.captured();
+        await gate.held;
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await counted(h);
+    expect(await ask(h, "t1")).toEqual({ action: "proceed" });
+    // Announced at 89 s; its account is read for 2 s.
+    clock = NOW + 89_000;
+    hold = true;
+    const active = h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "t1", projectId: "proj-1" }),
+    });
+    await gate.reached;
+    clock = NOW + 90_000;
+    expect((await ask(h, "t2", "proj-2")).action).toBe("wait");
+    clock = NOW + 91_000;
+    gate.release();
+    await active;
+    expect((await seatsOf(h))?.main).toMatchObject({
+      running: 1,
+      reserved: 0,
+      queued: [{ threadId: "t2" }],
+    });
+    expect(
+      h.harness.logEntries.some((e) => e.message.includes("over capacity")),
+    ).toBe(false);
+  });
+
   it("R08: two directories logged into the same account share its seats", async () => {
     const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 } });
     dispose = () => h.harness.dispose();
@@ -13832,6 +13958,37 @@ describe("seats hold through every way a turn starts (Astra SEATS-R01..R09)", ()
     expect((await ask(h, "t2")).reason).toBe(
       "Waiting for a seat on home: 1/1 threads running, 0 ahead in the queue",
     );
+  });
+
+  it("R2-003: the default renamed with the automatic choice off: a project on a full spare waits on spare, never on the default", async () => {
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "spare" });
+    expect(await ask(h, "t1")).toEqual({ action: "proceed" });
+    await h.harness.behavior.setSettings({ defaultAccountName: "home" });
+    expect((await ask(h, "t2")).reason).toBe(
+      "Waiting for a seat on spare: 1/1 threads running, 0 ahead in the queue",
+    );
+    expect((await seatsOf(h))?.home).toMatchObject({ running: 0, reserved: 0 });
+  });
+
+  it("R2-003: a project on an account no longer found waits as an unread one; it never takes the default's seat", async () => {
+    let dirs = ["spare", "work"];
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 }, dirs: () => dirs });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "spare" });
+    dirs = ["work"];
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    for (let i = 0; i < 3; i++)
+      expect(await (i === 0 ? ask : again)(h, "t1")).toEqual({
+        action: "wait",
+        reason: "Claude Switcher: the project's account could not be read for its seat; trying again",
+        sendAt: NOW + SEAT_RECHECK_MS,
+      });
+    expect(await again(h, "t1")).toEqual({ action: "proceed" });
+    expect((await seatsOf(h))?.main).toMatchObject({ running: 0, reserved: 0 });
   });
 
   it("R09: a reservation announces accounts-changed; ten changes in a row, once", async () => {
@@ -13892,6 +14049,51 @@ describe("bb claude-switcher seats", () => {
     // 10 points each half hour with one seat: 20 % an hour per seat.
     const text = (await h.harness.behavior.runCli(["seats"])).stdout;
     expect(text).toContain("main\t20.0 % of the 5-hour window per hour and seat");
+  });
+
+  it("R2-006: samples older than a week go as they load, as they are stored and as they are listed, measured again or not", async () => {
+    const DAY = 24 * HOUR;
+    const sample = (at: number) => [at, 0, 0, 10, 40, null, null];
+    let clock = NOW;
+    let workDown = false;
+    const h = await host(
+      {
+        ...ALL_FREE,
+        work: () =>
+          workDown ? new Response("down", { status: 500 }) : Response.json(payload(5, 20)),
+      },
+      {
+        settings: { autoSwitch: false },
+        clock: () => clock,
+        kvPreset: {
+          "seat-samples": {
+            main: [sample(NOW - 8 * DAY), sample(NOW - 2 * DAY)],
+            spare: [sample(NOW - 8 * DAY)],
+            work: [sample(NOW - 6 * DAY)],
+          },
+        },
+      },
+    );
+    dispose = () => h.harness.dispose();
+    const listed = async () =>
+      JSON.parse((await h.harness.behavior.runCli(["seats", "--json"])).stdout).samples;
+    // On load: the ones of 8 days ago are gone, and spare with them.
+    expect(await listed()).toEqual({
+      main: [sample(NOW - 2 * DAY)],
+      work: [sample(NOW - 6 * DAY)],
+    });
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // Two days later work's query fails: it is not measured again, and its
+    // sample of then, now 8 days old, is not stored.
+    workDown = true;
+    clock = NOW + 2 * DAY;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const stored = (await h.bb.storage.kv.get("seat-samples")) as Record<string, unknown[]>;
+    expect(stored.work).toHaveLength(1);
+    expect(stored.work).not.toContainEqual(sample(NOW - 6 * DAY));
+    // Listed six days on, nothing measured: main's of 2 days before load is gone.
+    clock = NOW + 6 * DAY + 1;
+    expect((await listed()).main).not.toContainEqual(sample(NOW - 2 * DAY));
   });
 
   it("R07: measuring only one account leaves another's sample as it was measured", async () => {

@@ -519,7 +519,8 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   }
   // The way home first: it depends on home's measurement, not on the
   // current account's, which may be missing or incomplete (Codex
-  // BM-INSPECT-006).
+  // BM-INSPECT-006). Home with no free seat is no way back yet (Astra
+  // SEATS-R2-004): what follows decides, as with no excursion.
   if (
     !reserving(options) &&
     typeof input.excursionFrom === "string" &&
@@ -530,7 +531,8 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
       home !== undefined &&
       home.unknown !== true &&
       isUsable(home) &&
-      canRunModel(home, input.preferredModel)
+      canRunModel(home, input.preferredModel) &&
+      (input.freeSeats === undefined || input.freeSeats(home.name) > 0)
     )
       return { kind: "move", account: home.name, why: "back-from-excursion" };
   }
