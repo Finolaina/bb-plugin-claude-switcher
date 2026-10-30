@@ -834,37 +834,54 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
 - **Which kind.** From `oauthAccount.organizationType` in the account's
   `.claude.json` (`claude_max`, `claude_team`). Anything else: Team when
   the provider reports no general weekly window, Max otherwise.
+- **Whose seats.** The seats are the login's (`oauthAccount.accountUuid`):
+  two directories logged into the same account share them, and renaming
+  the default account keeps the seats it has taken.
 - **Waiting.** Just before a thread's turn starts (bb's dispatch
   checkpoint), the turn needs a seat on the account its project runs on.
   With none free the message waits, bb shows «Waiting for a seat on
   team1: 2/2 threads running, 1 ahead in the queue», and asks again every
-  30 s. When a turn ends (or fails, or its thread is archived or deleted)
-  its seat goes to the first in line, and bb is asked again at once:
+  30 s. Every turn is checked, placed by the plugin or not (the automatic
+  choice off, a model bb does not name, a placement that failed): when the
+  project's account cannot be read, the message waits up to three times
+  and then goes, with a warning in the log. When a turn ends (or fails,
+  or its thread is archived or deleted) its seat goes to the first in line, and bb is asked again at once:
   first come, first served. A seat reserved for a turn that does not start
   within 90 s is freed; a thread that stops asking (its message was
   removed) leaves the line.
 - **A project is never moved to find a seat**: moving it moves all its
   threads. Seats only steer the moves made for other reasons: a new
-  project, a switch on a limit, a move before a turn off an account that
-  cannot run it and a move off a long wait prefer an account with a free
-  seat (by quota among them; with none free anywhere, by quota alone);
-  a switch ahead of the limit only goes to an account with a free seat.
-  A project picked by hand waits for a seat on that account like any.
+  project, a move before a turn off an account that cannot run it, a
+  move off a long wait and a switch ahead of the limit go only to an
+  account with a free seat (by quota among them); with none free anywhere
+  the project stays, and its threads wait for a seat where it is. The one
+  exception is the switch after a turn failed on a limit: that account
+  cannot work, so with no seat free anywhere the project goes to the best
+  of the others by quota and its threads wait for a seat there. A project
+  picked by hand waits for a seat on that account like any.
 - **Counted anyway.** A turn sent past the checkpoint (a queued message
   sent by hand) takes a seat as it starts, even over the limit (logged
-  as «over capacity»). After a reload, the threads bb reports active are
-  counted on their project's account.
+  as «over capacity»). A turn that started keeps the seat its dispatch
+  reserved, even when its project moved before bb announced it. After a
+  reload, the threads bb reports active are counted on their project's
+  account before any turn starts: a message sent meanwhile waits («seats
+  are being counted after a reload», asked again in 5 s). A read that
+  fails is tried three times, 2 s apart; still failing, its threads are
+  left uncounted (they count as they start) and the log says so. A thread
+  that ends while it is counted is not counted.
 - **Where to see it.** `bb claude-switcher list` writes `seats 3/4` under
   each account with a limit, and a final «Waiting for a seat:» section
   (account, place in line, thread id, title). Each card in Settings shows
-  `seats 3/4 · 2 waiting`. The log has a line per admission, wait,
-  release and expired reservation.
-- **Measuring the right numbers.** The defaults are a guess. Every usage
-  sample also stores the seats taken as it was measured (storage key
-  `seat-samples`, a week of them, the same timestamp as the sample in
-  `usage-series`). `bb claude-switcher seats` prints them next to the
-  session and weekly use; with `--json`, the samples and the usage series
-  together, to compute the share of a window one seat costs per hour.
+  `seats 3/4 · 2 waiting`, updated as seats are taken and freed. The log
+  has a line per admission, wait, release and expired reservation.
+- **Measuring the right numbers.** The defaults are a guess. Each time an
+  account is measured, a sample whole in itself is stored (storage key
+  `seat-samples`, a week of them, one per account and measurement, never
+  rewritten): time, seats running and reserved at that moment, session %
+  and weekly %, and when each window resets. `bb claude-switcher seats`
+  prints them with, per sample, the session % spent per hour and seat
+  since the previous one (`—` across a reset), and per account the same
+  over the week; `--json` gives the samples.
 
 ## Known limitations
 
