@@ -68,6 +68,11 @@ export interface SwitchInput {
    * SEATS-R05); seats never move a project by themselves.
    */
   freeSeats?: (account: string) => number;
+  /**
+   * The thread is background work (see ChoiceOptions.savedForUser): the
+   * switch goes behind the accounts saved for the user (Codex ULTRA-R01).
+   */
+  savedForUser?: (account: string) => boolean;
   maximumWaitMs: number | null;
   now: number;
   random: number;
@@ -190,6 +195,7 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
   const options = {
     preferredModel: input.preferredModel,
     reserveModel: input.reserveModel,
+    savedForUser: input.savedForUser,
   };
   // A failure just reported rules its account out. Left in error, the thread
   // is judged on the measurements: the project may have moved since, and its
@@ -464,9 +470,11 @@ export interface PlacementInput {
    */
   freeSeats?: (account: string) => number;
   /**
-   * The thread is background work (see ChoiceOptions.savedForUser): a NEW
-   * project goes behind the accounts saved for the user. A project already
-   * placed is never moved for the pace.
+   * The thread is background work (see ChoiceOptions.savedForUser): every
+   * choice of another account (a new project, a move off an account that
+   * cannot run, the way home) goes behind the accounts saved for the user
+   * (Codex ULTRA-R01). A project whose account can run is never moved for
+   * the pace.
    */
   savedForUser?: (account: string) => boolean;
   now: number;
@@ -487,11 +495,13 @@ export function bestAccount(
   reserveModel?: string,
   /** Set: only an account with a free seat (see chooseSeated). */
   freeSeats?: (account: string) => number,
+  /** Set for background work (see ChoiceOptions.savedForUser). */
+  savedForUser?: (account: string) => boolean,
 ): string | null {
   return (
     chooseSeated(
       accounts.map((a) => settle(a, now)),
-      { preferredModel, reserveModel },
+      { preferredModel, reserveModel, savedForUser },
       freeSeats,
     )?.account ?? null
   );
@@ -517,13 +527,10 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   const options = {
     preferredModel: input.preferredModel,
     reserveModel: input.reserveModel,
+    savedForUser: input.savedForUser,
   };
   if (input.isNew) {
-    const choice = chooseSeated(
-      accounts,
-      { ...options, savedForUser: input.savedForUser },
-      input.freeSeats,
-    );
+    const choice = chooseSeated(accounts, options, input.freeSeats);
     return choice === null || choice.account === input.currentAccount
       ? { kind: "keep" }
       : { kind: "move", account: choice.account, why: "new-project" };
@@ -531,11 +538,14 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   // The way home first: it depends on home's measurement, not on the
   // current account's, which may be missing or incomplete (Codex
   // BM-INSPECT-006). Home with no free seat is no way back yet (Astra
-  // SEATS-R2-004): what follows decides, as with no excursion.
+  // SEATS-R2-004): what follows decides, as with no excursion. So does
+  // home saved for the user, for background work (Codex ULTRA-R01): it is
+  // then a last resort, as in any other choice.
   if (
     !reserving(options) &&
     typeof input.excursionFrom === "string" &&
-    input.excursionFrom !== input.currentAccount
+    input.excursionFrom !== input.currentAccount &&
+    input.savedForUser?.(input.excursionFrom) !== true
   ) {
     const home = accounts.find((a) => a.name === input.excursionFrom);
     if (
@@ -564,7 +574,10 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     (loggedOut
       ? chooseSeated(
           others,
-          { preferredModel: input.preferredModel },
+          {
+            preferredModel: input.preferredModel,
+            savedForUser: input.savedForUser,
+          },
           input.freeSeats,
         )
       : null);
@@ -616,6 +629,8 @@ export interface AheadInput {
   threshold: number;
   /** Seats free on an account: ahead of the limit, only an account with one is a target. */
   freeSeats?: (account: string) => number;
+  /** Set for background work: the target goes behind the accounts saved for the user (see ChoiceOptions.savedForUser). */
+  savedForUser?: (account: string) => boolean;
   now: number;
 }
 
@@ -660,6 +675,7 @@ export function decideAhead(input: AheadInput): AheadDecision {
     preferredModel: input.preferredModel,
     reserveModel: input.reserveModel,
     freeSeats: input.freeSeats,
+    savedForUser: input.savedForUser,
   });
   return choice === null
     ? { kind: "keep" }

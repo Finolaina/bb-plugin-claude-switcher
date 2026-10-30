@@ -893,11 +893,14 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
 
 ## Known limitations
 
-- **The day's pace only places new projects.** Background work (a thread
-  with a parent thread or opened by a plugin) puts a new project behind
-  the accounts saved for the user (their day at 90 %); a project already
-  placed is not moved for the pace, so a background thread in it runs
-  where the project is. A hidden thread is never placed at all, as before.
+- **The day's pace needs a thread to tell background work.** Background
+  work (a thread with a parent thread or opened by a plugin) puts the
+  accounts saved for the user (their day at 90 %) last in every choice of
+  another account it makes; a project whose account can run is not moved
+  for the pace. Two choices have no thread behind them and treat the work
+  as the user's: the refresh's move of a project off an account that
+  cannot run, and the account the Opus advice in a declined thread's
+  banner names. A hidden thread is never placed at all, as before.
 
 - **A wait can follow another account's limit report.** bb sends a
   thread's latest limit report with each failure, whichever turn it came
