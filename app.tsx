@@ -822,7 +822,10 @@ function usageLine(
     return `${used < 100 ? Math.min(99, Math.round(used)) : Math.round(used)}%`;
   };
   const parts = [
-    `session ${pct(account.usage.session)}`,
+    // An Ultra account freed of the 5-hour window has no session.
+    ...(account.usage.session.absent === true
+      ? []
+      : [`session ${pct(account.usage.session)}`]),
     // A Team seat has no general weekly.
     ...(account.usage.weekly.absent === true
       ? []

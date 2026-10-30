@@ -80,6 +80,23 @@ describe("provider-usage source mapping", () => {
     });
   });
 
+  it("gives bb's panel no 5-hour window for an account without a session (Ultra, 2026-10-30)", () => {
+    const measurement = toMeasurement(ACCOUNT, {
+      observedAt: NOW,
+      problem: null,
+      login: "yes",
+      usage: {
+        blocked: false,
+        session: { usedPercent: 0, resetsAt: null, absent: true },
+        weekly: { usedPercent: 98, resetsAt: null },
+        models: {},
+      },
+    });
+    expect(
+      measurement.usage.status === "ok" ? measurement.usage.windows.map((w) => w.id) : [],
+    ).toEqual(["weekly"]);
+  });
+
   it("reports no login, a failed collection and a never-observed account as usage states", () => {
     const base = {
       accountEmail: "work@example.com",
