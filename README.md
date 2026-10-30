@@ -760,7 +760,7 @@ bb claude-switcher refresh [--json]       # query the usage endpoint now
 bb claude-switcher history [--json]       # every move of a project, latest first, and why
 bb claude-switcher seats [--json]         # seats of every account, who waits, and each usage sample with the seats taken then
 bb claude-switcher health [--json]        # a stable read for other threads and scripts (version 1): plan, 5-hour window, weekly, models, the day's pace, seats, usable
-bb claude-switcher reserve <account> --id <x> --until <ISO with zone> [--json]   # hold a seat for a run outside bb (at most 12 h); fails with no free seat
+bb claude-switcher reserve <account> --id <x> --until <ISO with zone> [--json]   # hold a seat for a run outside bb (at most 12 h); fails with no free seat (exit 1), or with exit 75 while the seats are still being counted after a reload
 bb claude-switcher unreserve --id <x> [--json]   # end it; an id not held is no error
 bb claude-switcher use <project> <account | default>   # project id, or its name when unique
 bb claude-switcher release                # remove every CLAUDE_CONFIG_DIR this plugin set
@@ -894,11 +894,14 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
 
 ## Known limitations
 
-- **The day's pace only places new projects.** Background work (a thread
-  with a parent thread or opened by a plugin) puts a new project behind
-  the accounts saved for the user (their day at 90 %); a project already
-  placed is not moved for the pace, so a background thread in it runs
-  where the project is. A hidden thread is never placed at all, as before.
+- **The day's pace needs a thread to tell background work.** Background
+  work (a thread with a parent thread or opened by a plugin) puts the
+  accounts saved for the user (their day at 90 %) last in every choice of
+  another account it makes; a project whose account can run is not moved
+  for the pace. Two choices have no thread behind them and treat the work
+  as the user's: the refresh's move of a project off an account that
+  cannot run, and the account the Opus advice in a declined thread's
+  banner names. A hidden thread is never placed at all, as before.
 
 - **A wait can follow another account's limit report.** bb sends a
   thread's latest limit report with each failure, whichever turn it came

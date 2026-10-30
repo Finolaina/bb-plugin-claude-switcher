@@ -34,23 +34,33 @@ project uses [Semantic Versioning](https://semver.org/).
   the week. Each day (from `dayStartHour`, 09:00 Europe/Madrid, to the
   next) gets an even share of what is left of the account's weekly
   window, from the day's first reading (kept in storage, `pace-day`). At
-  90 % of it the account is saved for the user: a new project of a
-  thread with a parent thread or an origin plugin goes behind every
-  other usable account, never left without one. The user's own threads
-  are not affected. Unknown (no weekly reset) counts as saved; a Team
-  seat has no pace.
+  90 % of it the account is saved for the user: for a thread with a
+  parent thread or an origin plugin, every choice of another account (a
+  new project, a move off an account that cannot run before a turn, the
+  way back from an excursion, the switch after a failed turn, a waiting
+  turn moved to a free account, the move ahead of the limit) puts it
+  behind every other usable account, never left without one. A project
+  whose account can run is not moved for the pace. The user's own
+  threads are not affected. Unknown (no weekly reset) counts as saved; a
+  Team seat has no pace.
 - **`bb claude-switcher health [--json]`:** a stable read for other
   threads and scripts, version 1, the same schema as the Mac's
   `claude-cuentas.py salud --json`: per account `nombre`, `plan`,
   `planTexto`, `cincoHoras`, `sesion`, `semana`, `modelos` (only those the
   usage API reports), `ritmo`, `plazas` (with `externas`), `usable` and
-  `problema`; times ISO 8601 with Madrid's offset.
+  `problema`; times ISO 8601 with Madrid's offset. `usable` is what the
+  automatic choice may pick, whatever the model: an account out at its
+  last good read, whose reset passed while the queries kept failing, is
+  not usable («reset sin confirmar…»).
 - **`bb claude-switcher reserve <account> --id <x> --until <ISO>` and
   `unreserve --id <x>`:** a seat held for a run outside bb (`claude -p`
   with the account's `CLAUDE_CONFIG_DIR`, which bb does not see), so bb
   does not put more threads on it than its seats. Checked and taken in
   one synchronous step; fails (exit 1) with no free seat beyond those
-  owed to threads already waiting, or for an unknown account. The same
+  owed to threads already waiting, or for an unknown account. Right after
+  a reload it first waits, up to 5 s, for the threads already running to
+  be counted; not counted by then, it holds nothing and fails with exit
+  75 (`seats_counting`: ask again in a moment). The same
   id renews it. It ends at `until`, never more than 12 h after it was
   asked for, and is kept in storage (`external-seats`) across reloads.
   Counted in `list`, `seats` and `health`.
@@ -83,9 +93,10 @@ project uses [Semantic Versioning](https://semver.org/).
 
 ### Known limits
 
-- The pace places only new projects: a project already placed is not
-  moved for it (a background thread in it runs where it is), and the
-  failure path and the move ahead of the limit ignore it.
+- Two choices of another account have no thread behind them and treat
+  the work as the user's: the refresh's move of a project off an account
+  that cannot run, and the account the Opus advice in a declined
+  thread's banner names.
 - `planOf` without a profile tier cannot tell an Ultra still on the
   5-hour window from a Max: it says «sin datos de plan» until the login's
   profile carries `organizationRateLimitTier` or `planDisplayName`.

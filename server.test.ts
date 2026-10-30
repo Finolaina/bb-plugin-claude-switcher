@@ -14859,6 +14859,197 @@ describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
     );
   });
 
+  describe("a project already placed (Codex ULTRA-R01)", () => {
+    // main (where proj-1 is) out of session; work the best by quota but
+    // saved for the user; spare free for background work.
+    const blocked = { ...usage, main: () => Response.json(payload(100, 40)), spare: () => Response.json(payload(30, 20)) };
+    const opts = (threads: Record<string, Partial<ThreadResponse>> = {}) => ({
+      kvPreset: { "pace-day": { work: dayStart } },
+      threads,
+    });
+    const bg = { parentThreadId: "thr-parent" };
+
+    it("switches a failed turn of background work behind the account saved for the user", async () => {
+      const h = await host(blocked, opts({ "thread-1": bg }));
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+    });
+
+    it("switches the user's own failed turn to the best account, whatever its pace", async () => {
+      const h = await host(blocked, opts());
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    });
+
+    const send = (h: Awaited<ReturnType<typeof host>>, t: Partial<ThreadResponse>) =>
+      h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id: "thread-1", projectId: "proj-1", ...t }),
+          requestedExecution: { providerId: "claude-code", model: "claude-opus-5-5" },
+          attempt: "start-turn",
+        }),
+      );
+
+    it("places a background turn sent on a blocked account behind the account saved for the user", async () => {
+      const h = await host(blocked, opts());
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await send(h, { originPluginId: "some-automation" })).toEqual({ action: "proceed" });
+      expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+    });
+
+    it("places the user's own turn sent on a blocked account on the best account, whatever its pace", async () => {
+      const h = await host(blocked, opts());
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await send(h, {})).toEqual({ action: "proceed" });
+      expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    });
+
+    it("moves a waiting turn of background work to the account not saved for the user", async () => {
+      // A timed retry of thread-1's failed turn, queued an hour ago on main.
+      const row: QueuedRow = {
+        id: "r1",
+        threadId: "thread-1",
+        payload: { kind: "retry", attempt: 2, reason: "Waiting for main", retryOfTurnRequestId: "creq_r1" },
+        sendAt: NOW + 2 * HOUR + BUFFER,
+        waitingOn: { kind: "time" },
+        createdAt: NOW - HOUR,
+        model: "claude-opus-5-5",
+      };
+      const waiting = (t: Partial<ThreadResponse>) => ({
+        ...opts({ "thread-1": { status: "error", ...t } as Partial<ThreadResponse> }),
+        queued: [row],
+        threadEvents: {
+          "thread-1": [
+            {
+              id: "evt_r1",
+              scope: { kind: "thread" },
+              threadId: "thread-1",
+              seq: 1,
+              createdAt: NOW - HOUR,
+              type: "client/turn/requested",
+              data: { requestId: "creq_r1", execution: { model: "claude-opus-5-5" } },
+            },
+          ],
+        },
+      });
+      // No project listed: the refresh does not move proj-1 off main itself.
+      for (const [t, to] of [
+        [bg, "spare"],
+        [{}, "work"],
+      ] as const) {
+        const h = await hostListing([])(blocked, waiting(t) as HostOptions);
+        const before = h.usageCalls.length;
+        const run = h.harness.behavior.runService("usage-refresh");
+        await vi.waitFor(() => expect(h.usageCalls).toHaveLength(before + 3));
+        run.controller.abort();
+        await run.done;
+        await vi.waitFor(() => expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/${to}`]));
+        await h.harness.dispose();
+      }
+    });
+
+    it("moves background work ahead of the limit behind the account saved for the user", async () => {
+      let clock = NOW;
+      const h = await host(
+        { ...usage, main: () => Response.json(payload(95, 40)), spare: () => Response.json(payload(30, 20)) },
+        { ...opts(), settings: { switchAheadPercent: 90 }, clock: () => clock },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      clock = NOW + 5 * 60_000;
+      await h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: thread({ id: "thread-1", projectId: "proj-1", ...bg }),
+        lastAssistantText: null,
+      });
+      expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+    });
+  });
+
+  it("keeps as the day's first reading one bb's usage panel made (Codex ULTRA-R03)", async () => {
+    let clock = NOW;
+    let workWeekly = 30;
+    const h = await host(
+      { ...usage, work: () => Response.json(payload(5, workWeekly)) },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    // 12:00 in Madrid: the panel reads work at 30 %, the refresh a minute later at 55 %.
+    await h.harness.behavior.callRpc(usageFetchMethod, { resourceId: "work", refresh: true });
+    await vi.waitFor(async () => {
+      const stored = (await h.bb.storage.kv.get("pace-day")) as Record<string, { usedPercent: number }> | undefined;
+      expect(stored?.work?.usedPercent).toBe(30);
+    });
+    clock = NOW + 60_000;
+    workWeekly = 55;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const s = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(s.accounts.find((a) => a.name === "work")?.pace).toMatchObject({ spent: 25 });
+    const stored = (await h.bb.storage.kv.get("pace-day")) as Record<string, { usedPercent: number }>;
+    expect(stored.work?.usedPercent).toBe(30);
+  });
+
+  it("keeps the day's first reading through an incomplete answer of the usage API (Codex ULTRA-R04)", async () => {
+    let clock = NOW;
+    let answer: () => Payload = () => payload(5, 30);
+    const h = await host({ ...usage, work: () => Response.json(answer()) }, { clock: () => clock });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // No weekly_all, a seven_day bucket there: incomplete (weekly 100 %, no reset).
+    clock = NOW + 60_000;
+    answer = () => ({ ...payload(5, 30), limits: (payload(5, 30).limits as unknown[]).slice(0, 1) });
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    let s = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(s.accounts.find((a) => a.name === "work")?.usage?.unknown).toBe(true);
+    clock = NOW + 2 * 60_000;
+    answer = () => payload(5, 55);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    s = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(s.accounts.find((a) => a.name === "work")?.pace).toMatchObject({ spent: 25 });
+    await vi.waitFor(async () => {
+      const stored = (await h.bb.storage.kv.get("pace-day")) as Record<string, { usedPercent: number }>;
+      expect(stored.work?.usedPercent).toBe(30);
+    });
+  });
+
+  it("takes the weekly of an answer that lacks only its session as the day's first reading", async () => {
+    // Kept from yesterday; today's first answer has weekly_all (40 %) but no
+    // session: the week is read, so the day counts from 40 %, not from the
+    // next complete answer (55 %).
+    let clock = NOW;
+    let answer: () => Payload = () => ({ ...payload(5, 40), limits: (payload(5, 40).limits as unknown[]).slice(1) });
+    const h = await host(
+      { ...usage, work: () => Response.json(answer()) },
+      { clock: () => clock, kvPreset: { "pace-day": { work: { ...dayStart, at: NOW - 26 * HOUR, usedPercent: 10 } } } },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + 60_000;
+    answer = () => payload(5, 55);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const s = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(s.accounts.find((a) => a.name === "work")?.pace).toMatchObject({ spent: 15 });
+  });
+
+  it("keeps no first reading for a Team seat, whose general weekly is absent", async () => {
+    const h = await host(
+      { ...usage, spare: () => Response.json(teamPayload(10, 20)) },
+      { kvPreset: { "pace-day": { spare: dayStart } } },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await vi.waitFor(async () => {
+      const stored = (await h.bb.storage.kv.get("pace-day")) as Record<string, unknown>;
+      expect(stored.work).toBeDefined();
+      expect(stored.spare).toBeUndefined();
+    });
+  });
+
   it("keeps the day's first reading in storage, across a reload", async () => {
     const h = await host(usage);
     dispose = () => h.harness.dispose();
@@ -14871,6 +15062,28 @@ describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
 });
 
 describe("bb claude-switcher health (SPEC 2026-10-30 §4)", () => {
+  it("is not usable where the policy would not choose it: out at its last good read, its reset passed while the queries fail (Codex ULTRA-R06)", async () => {
+    let clock = NOW;
+    let down = false;
+    const answer = (p: Payload) => () => (down ? new Response("down", { status: 503 }) : Response.json(p));
+    const h = await host(
+      { main: answer(payload(100, 40)), spare: answer(payload(10, 20)), work: answer(payload(5, 30)) },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // main's session resets at NOW + 2 h; three hours on, every query fails.
+    down = true;
+    clock = NOW + 3 * HOUR;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    const byName = Object.fromEntries(report.cuentas.map((c: { nombre: string }) => [c.nombre, c]));
+    expect(byName.main.usable).toBe(false);
+    expect(byName.main.problema).toMatch(/^reset sin confirmar: la última lectura buena \(2026-09-29T12:00:00\+02:00\) la daba agotada/);
+    // A stale free read stays usable, as the policy keeps it.
+    expect(byName.spare).toMatchObject({ usable: true });
+  });
+
   it("answers version 1 with every account, the Ultra one usable and not Team (canaries 1 and 2)", async () => {
     const h = await host({
       main: () => Response.json(ultraFixture("ultra-sin-5h")),
@@ -14929,6 +15142,61 @@ describe("bb claude-switcher reserve / unreserve: a seat held from outside bb", 
       usadas: 2,
       total: 2,
       externas: [{ id: "night", hasta: "2026-09-29T13:00:00+02:00" }],
+    });
+  });
+
+  describe("after a reload, while the seats are being counted (Codex ULTRA-R02)", () => {
+    // r1 runs on proj-1 (main), whose account read is held: main's one seat
+    // is not counted yet.
+    const counting = (gate: EnvGate) => ({
+      settings: { ...OFF, seatsMax: 1 },
+      threads: { r1: { status: "active" as const } },
+      beforeEnvRead: async (projectId: string) => {
+        if (projectId !== "proj-1") return;
+        gate.captured();
+        await gate.held;
+      },
+    });
+
+    it("waits for the count, then fails on the seat a running thread already takes", async () => {
+      const gate = envGate();
+      const h = await host(ALL_FREE, counting(gate));
+      dispose = () => h.harness.dispose();
+      await gate.reached;
+      const r = h.harness.behavior.runCli(["reserve", "main", "--id", "night", "--until", until(NOW + HOUR)]);
+      await vi.waitFor(() =>
+        expect(h.harness.logEntries.some((e) => e.message.includes("waits for the seats to be counted"))).toBe(true),
+      );
+      gate.release();
+      const out = await r;
+      expect(out.exitCode).not.toBe(0);
+      expect(out.stderr).toContain("No free seat on main");
+      const seats = JSON.parse((await h.harness.behavior.runCli(["seats", "--json"])).stdout).seats;
+      expect(seats.main).toMatchObject({ running: 1 });
+      expect(seats.main.external).toBeUndefined();
+    });
+
+    it("fails with a temporary error and holds nothing when the count takes more than 5 s", async () => {
+      const gate = envGate();
+      const h = await host(ALL_FREE, counting(gate));
+      dispose = () => h.harness.dispose();
+      await gate.reached;
+      vi.useFakeTimers();
+      try {
+        const r = h.harness.behavior.runCli(["reserve", "main", "--id", "night", "--until", until(NOW + HOUR), "--json"]);
+        await vi.advanceTimersByTimeAsync(5_000);
+        const out = await r;
+        expect(out.exitCode).toBe(75);
+        expect(JSON.parse(out.stdout)).toMatchObject({ ok: false, error: { code: "seats_counting" } });
+      } finally {
+        vi.useRealTimers();
+      }
+      gate.release();
+      await vi.waitFor(() =>
+        expect(h.harness.logEntries.some((e) => e.message.startsWith("seats counted after loading"))).toBe(true),
+      );
+      const seats = JSON.parse((await h.harness.behavior.runCli(["seats", "--json"])).stdout).seats;
+      expect(seats.main.external).toBeUndefined();
     });
   });
 
