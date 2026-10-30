@@ -117,6 +117,18 @@ export const AHEAD_FRESH_MS = 60_000;
 /** bb fails a dispatch whose checkpoint takes 10 s: the placement before a turn is left behind well before. */
 export const DISPATCH_LIMIT_MS = 3_000;
 /**
+ * The whole dispatch checkpoint, every read in it together, answers within
+ * this long: each read gets what is left, at most DISPATCH_LIMIT_MS (Astra
+ * SEATS-R4-002).
+ */
+export const DISPATCH_BUDGET_MS = 8_000;
+/** Less than this left of DISPATCH_BUDGET_MS: no further read is started; the message waits. */
+const DISPATCH_MIN_MS = 500;
+/** A message whose dispatch ran out of DISPATCH_BUDGET_MS is asked about again this soon (Astra SEATS-R4-002). */
+const OUT_OF_TIME_WAIT_MS = 5_000;
+/** One project's rescue off an account that cannot run, its queue included, is not waited for longer (Astra SEATS-R4-004). */
+const RESCUE_LIMIT_MS = 10_000;
+/**
  * A new project's first message waits this long, once, when its placement
  * has not finished within DISPATCH_LIMIT_MS (the accounts are measured
  * first): bb asks again sooner, as soon as the placement ends (E44).
@@ -201,7 +213,7 @@ type TurnPlace =
   | {
       account: string;
       byDefault: boolean;
-      /** The project's writes (`movesOf().writes`) for which it is there (Astra SEATS-R3-002). */
+      /** The project's writes of its variable (`movesOf().envWrites`) for which it is there (Astra SEATS-R3-002, SEATS-R4-001). */
       writes: number;
     }
   | "external"
@@ -758,11 +770,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** Waits of a thread's message because its project's account could not be read for its seat (Astra SEATS-R01). */
   const seatReadWaits = new Map<string, number>();
   /**
+   * Each time a message of the thread takes a seat or a place in a queue,
+   * one more: a cancellation acts only on the place it found (Astra
+   * SEATS-R4-003). Forgotten as the thread goes.
+   */
+  const seatGenerations = new Map<string, number>();
+  /**
    * The seats are counted after the load (see rebuildSeats): till then a
    * turn waits, so none is let in against an empty count (Astra SEATS-R02).
    */
   let seatsReady = false;
-  let seatsCounted: Promise<void> = Promise.resolve();
   /** A message waited for the count: bb is asked again once it is done. */
   let seatsAwaited = false;
   /**
@@ -1607,7 +1624,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       inFlight: number;
       picks: number;
       writes: number;
-      writing: number;
+      envWrites: number;
+      envWriting: number;
     }
   >();
   function movesOf(projectId: string): {
@@ -1626,14 +1644,28 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
      */
     writes: number;
     /**
-     * Writes of the project's account under way: one may land any moment,
+     * Every write of the project's variable, a move's or one that confirms
+     * the account it names, counted as it starts and once it is over: a
+     * read of the account that one crossed says nothing about where a turn
+     * starts (Astra SEATS-R3-002, SEATS-R4-001).
+     */
+    envWrites: number;
+    /**
+     * Writes of the project's variable under way: one may land any moment,
      * so what a read said may no longer hold (Astra SEATS-R3-002).
      */
-    writing: number;
+    envWriting: number;
   } {
     let move = moves.get(projectId);
     if (move === undefined) {
-      move = { epoch: 0, inFlight: 0, picks: 0, writes: 0, writing: 0 };
+      move = {
+        epoch: 0,
+        inFlight: 0,
+        picks: 0,
+        writes: 0,
+        envWrites: 0,
+        envWriting: 0,
+      };
       moves.set(projectId, move);
     }
     return move;
@@ -1757,6 +1789,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       move.epoch += 1;
     }
     let wrote = false;
+    // Every write of the variable, also one that confirms the account the
+    // project is on: a seat is reserved only on a read no write crossed
+    // (Astra SEATS-R4-001).
+    const env = movesOf(projectId);
+    let envWrote = false;
     try {
       // The sessions first, while the move is counted in flight: a turn of
       // another thread of the project that reads the new account finds its
@@ -1790,8 +1827,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       }
       if (move !== null) {
         move.writes += 1;
-        move.writing += 1;
         wrote = true;
+      }
+      const unset = account === null || account.configDir === null;
+      if (!unset || from.owned) {
+        env.envWrites += 1;
+        env.envWriting += 1;
+        envWrote = true;
       }
       if (account === null || account.configDir === null) {
         // Default account = no variable. Only ours can be there (see above).
@@ -1812,11 +1854,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     } finally {
       // Also after a failure: a delete may have landed before it.
       projectsRead = null;
+      if (envWrote) {
+        env.envWrites += 1;
+        env.envWriting -= 1;
+      }
       if (move !== null) {
-        if (wrote) {
-          move.writes += 1;
-          move.writing -= 1;
-        }
+        if (wrote) move.writes += 1;
         move.inFlight -= 1;
         move.epoch += 1;
         // A banners' pass left the project unread for this move: it runs
@@ -3219,21 +3262,36 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       if (project === null || project.external) continue;
       if (stranded(project.account ?? current.defaultAccountName, now) === null)
         continue;
-      // One project that cannot be moved does not keep the rest where they are.
-      try {
-        await inProjectQueue(project.id, () => rescue(project.id, project.name));
-      } catch (error) {
+      // One project that cannot be moved, or whose queue is held, does not
+      // keep the rest where they are, nor the refresh (Astra SEATS-R4-004).
+      const rescued = await within(
+        inProjectQueue(project.id, () => rescue(project.id, project.name)),
+        RESCUE_LIMIT_MS,
+        `project ${project.name}: not moved off its account`,
+      );
+      if (rescued === "late")
         bb.log.warn(
-          `project ${project.name}: not moved off its account: ${error instanceof Error ? error.message : String(error)}`,
+          `project ${project.name}: not moved off its account: not done within ${RESCUE_LIMIT_MS / 1000} s; the refresh goes on`,
         );
-      }
     }
   }
   async function rescue(projectId: string, projectName: string): Promise<void> {
     if (!current.autoSwitch) return;
     const before = moveMark(projectId);
     // Read again, in the project's queue: the shared list may be 30 s old.
-    const from = await projectAccount(projectId);
+    // Within DISPATCH_LIMIT_MS: unread, this rescue is given up and nothing
+    // written (Astra SEATS-R4-004).
+    const read = await within(
+      projectAccount(projectId),
+      DISPATCH_LIMIT_MS,
+      `project ${projectName}: its account not read again to rescue it`,
+    );
+    if (read === "late")
+      bb.log.warn(
+        `project ${projectName}: its account not read again to rescue it: no answer in time`,
+      );
+    if (typeof read !== "object") return;
+    const from = read.value;
     if (from.external) return;
     const fromName = from.account ?? current.defaultAccountName;
     const now = deps.now();
@@ -3412,6 +3470,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     forgetStart(thread.id);
     releaseSeat(thread.id, "the thread is gone");
     seatReadWaits.delete(thread.id);
+    seatGenerations.delete(thread.id);
     startWaits.delete(thread.id);
     threadModel.delete(thread.id);
     adviceOver(thread.id);
@@ -3548,8 +3607,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (accounts.length === 0) await discover();
     const before = moveMark(projectId);
     // Taken before the read: the seat is reserved only while the project's
-    // account has not been written since (Astra SEATS-R3-002).
-    const writes = movesOf(projectId).writes;
+    // variable has not been written since (Astra SEATS-R3-002,
+    // SEATS-R4-001).
+    const writes = movesOf(projectId).envWrites;
     const from = await projectAccount(projectId);
     if (from.external) return "external";
     // An account it names that is not among the ones found: not judged as
@@ -3691,6 +3751,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
 
   /**
+   * One dispatch's DISPATCH_BUDGET_MS, from the moment bb asks: each read
+   * is given what is left, at most DISPATCH_LIMIT_MS, so the reads in a row
+   * never add up to bb's 10 s (Astra SEATS-R4-002).
+   */
+  type Budget = { limit: () => number; spent: () => boolean };
+  function dispatchBudget(): Budget {
+    const by = deps.now() + DISPATCH_BUDGET_MS;
+    return {
+      limit: () => Math.max(0, Math.min(DISPATCH_LIMIT_MS, by - deps.now())),
+      spent: () => by - deps.now() < DISPATCH_MIN_MS,
+    };
+  }
+
+  /**
    * Before a turn starts, with the automatic choice on: what bb should do
    * with the message; null = send it.
    */
@@ -3699,11 +3773,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     model: string | null,
     /** Set to where the turn was placed, when the placement said. */
     turnAt: { at?: TurnPlace },
+    budget: Budget,
   ): Promise<MessageDispatchHookDecision | null> {
     const first = placeNewProject(thread);
     const placed = await within(
       first,
-      DISPATCH_LIMIT_MS,
+      budget.limit(),
       `thread ${thread.id}: its new project not placed before its first turn`,
     );
     if (placed === "late") {
@@ -3726,7 +3801,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         ? null
         : within(
             placeTurn(thread, turnModel, turn),
-            DISPATCH_LIMIT_MS,
+            budget.limit(),
             `thread ${thread.id}: not placed before its turn`,
             () => {
               turn.abandoned = true;
@@ -3751,7 +3826,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
       await within(
         look,
-        DISPATCH_LIMIT_MS,
+        budget.limit(),
         `thread ${thread.id}: the default account's login not looked at`,
       );
     }
@@ -3772,11 +3847,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // set outside this plugin, runs on it whatever the accounts directory
     // says; bb passes the value it holds (Astra E44-R3-02). Read apart from
     // the placement, which needs that directory and a model. Not when the
-    // placement took too long: bb is slow, and the wait below covers it.
-    if (where === null && done !== "late") {
+    // placement took too long: bb is slow, and the wait below covers it; nor
+    // with too little of the dispatch's time left (Astra SEATS-R4-002).
+    if (where === null && done !== "late" && !budget.spent()) {
       const own = await within(
         projectAccount(thread.projectId),
-        DISPATCH_LIMIT_MS,
+        budget.limit(),
         `thread ${thread.id}: the project's account not read before its turn`,
       );
       if (typeof own === "object" && (own.value.owned || own.value.external)) {
@@ -3826,23 +3902,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       notTheUsersThread(thread) !== null
     )
       return { action: "proceed" };
+    const budget = dispatchBudget();
     // Seats not yet counted after a load: no turn is let in against an
-    // empty count (Astra SEATS-R02).
+    // empty count (Astra SEATS-R02). Not waited for here: bb is asked again
+    // once they are counted (Astra SEATS-R4-002).
     if (ctx.attempt === "start-turn" && !seatsReady) {
-      await within(
-        seatsCounted,
-        DISPATCH_LIMIT_MS,
-        `thread ${thread.id}: the seats not counted before its turn`,
-      );
-      if (!seatsReady) {
-        seatsAwaited = true;
-        bb.log.info(`thread ${thread.id}: its message waits (seats are being counted)`);
-        return {
-          action: "wait",
-          reason: "Claude Switcher: seats are being counted after a reload",
-          sendAt: deps.now() + SEATS_COUNTING_WAIT_MS,
-        };
-      }
+      seatsAwaited = true;
+      bb.log.info(`thread ${thread.id}: its message waits (seats are being counted)`);
+      return {
+        action: "wait",
+        reason: "Claude Switcher: seats are being counted after a reload",
+        sendAt: deps.now() + SEATS_COUNTING_WAIT_MS,
+      };
     }
     const model = modelFamily(ctx.requestedExecution.model);
     if (model !== null) threadModel.set(thread.id, model);
@@ -3851,7 +3922,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // A message sent now, not a queued one asked again: its own waits
       // (Astra E44-R2-03).
       if (ctx.queuedMessages.length === 0) startWaits.delete(thread.id);
-      const decision = await beforeStart(thread, model, placed);
+      const decision = await beforeStart(thread, model, placed, budget);
       if (decision !== null) {
         if (decision.action === "reject") startWaits.delete(thread.id);
         return decision;
@@ -3871,20 +3942,27 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
        * written: a move still sharing its sessions has not changed it yet.
        */
       const still = (writes: number) =>
-        move.writing === 0 && move.writes === writes;
+        move.envWriting === 0 && move.envWrites === writes;
       // Where the turn starts, and the project's moves it holds for (null:
       // an account set outside this plugin, which has no seats).
       let at: { account: string | null; writes: number } | null = null;
       // Placed, and the project not moved since: where the placement left
       // it. Moved meanwhile (a pick, a rescue, while the placement recorded
       // its move), it is read again (Astra SEATS-R3-002).
-      if (placed.at === "external") at = { account: null, writes: move.writes };
+      if (placed.at === "external")
+        at = { account: null, writes: move.envWrites };
       else if (
         placed.at !== undefined &&
         placed.at !== "unknown" &&
         still(placed.at.writes)
       )
         at = { account: placed.at.account, writes: placed.at.writes };
+      else if (budget.spent())
+        // Too little of the dispatch's time left to read it: the message
+        // waits, as for an account not read (Astra SEATS-R4-002).
+        bb.log.info(
+          `thread ${thread.id}: its project's account not read for its seat: the dispatch is out of time`,
+        );
       else {
         // Not placed (the automatic choice off, a model bb does not name, a
         // placement that failed or took too long), placed on an account not
@@ -3899,11 +3977,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           writes: number;
         }> => {
           for (let tries = 0; ; tries += 1) {
-            let writes = move.writes;
+            let writes = move.envWrites;
             let read = await projectAccount(thread.projectId);
             if (seatFor(read) === UNKNOWN_SEAT && accounts.length === 0) {
               await discover();
-              writes = move.writes;
+              writes = move.envWrites;
               read = await projectAccount(thread.projectId);
             }
             const seat = seatFor(read);
@@ -3917,7 +3995,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         };
         const read = await within(
           seatAccount(),
-          DISPATCH_LIMIT_MS,
+          budget.limit(),
           `thread ${thread.id}: the project's account not read for its seat`,
         );
         if (typeof read === "object") at = read.value;
@@ -3928,7 +4006,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       if (at === null) {
         // Unknown where it starts: it waits, and is asked again, a few
         // times; then it goes, as every wait of this plugin does, for bb
-        // is never left holding a message (see MAX_START_WAITS).
+        // is never left holding a message (see MAX_START_WAITS). Out of
+        // the dispatch's time, soon (Astra SEATS-R4-002).
         const waited = seatReadWaits.get(thread.id) ?? 0;
         if (waited < SEAT_READ_WAITS) {
           seatReadWaits.set(thread.id, waited + 1);
@@ -3936,7 +4015,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             action: "wait",
             reason:
               "Claude Switcher: the project's account could not be read for its seat; trying again",
-            sendAt: deps.now() + SEAT_RECHECK_MS,
+            sendAt:
+              deps.now() +
+              (budget.spent() ? OUT_OF_TIME_WAIT_MS : SEAT_RECHECK_MS),
           };
         }
         bb.log.warn(
@@ -3945,6 +4026,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       }
       seatReadWaits.delete(thread.id);
       if (at !== null && at.account !== null) {
+        // A cancellation of an earlier message that is still looking at the
+        // queue leaves this one's place alone (Astra SEATS-R4-003).
+        seatGenerations.set(thread.id, (seatGenerations.get(thread.id) ?? 0) + 1);
         const wait = seatWait(thread, at.account);
         if (wait !== null) return wait;
       }
@@ -4156,14 +4240,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const seat = seats.seatOf(threadId);
     if (seat?.state === "running") return;
     if (seat === null && seats.position(threadId) === null) return;
+    const generation = seatGenerations.get(threadId);
     const rows = await within(
       bb.sdk.threads.queuedMessages.list({ threadId }),
       DISPATCH_LIMIT_MS,
       `thread ${threadId}: its queued messages not read after a cancellation`,
     );
     if (typeof rows !== "object" || rows.value.length > 0) return;
-    // A turn of it started meanwhile keeps its seat.
+    // A turn of it started meanwhile keeps its seat, and so does a message
+    // of it sent meanwhile (Astra SEATS-R4-003).
     if (seats.seatOf(threadId)?.state === "running") return;
+    if (seatGenerations.get(threadId) !== generation) return;
     releaseSeat(threadId, "its waiting message was cancelled");
   }
 
@@ -5348,7 +5435,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           );
     }
   }
-  seatsCounted = rebuildSeats().catch((error: unknown) =>
+  void rebuildSeats().catch((error: unknown) =>
     bb.log.warn(
       `the running threads were not counted after loading (they count as they start): ${error instanceof Error ? error.message : String(error)}`,
     ),
