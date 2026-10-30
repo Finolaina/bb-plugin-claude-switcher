@@ -67,7 +67,15 @@ export class Seats {
   private readonly waiting = new Map<string, Waiting>();
   private arrivals = 0;
 
-  constructor(private readonly capacity: (account: string) => number) {}
+  /**
+   * `account` is the seat budget's identity (the login's accountUuid, else
+   * the name: Astra SEATS-R08); `changed` hears every change of the seats
+   * or the queues (Astra SEATS-R09).
+   */
+  constructor(
+    private readonly capacity: (account: string) => number,
+    private readonly changed: () => void = () => {},
+  ) {}
 
   private taken(account: string): number {
     let n = 0;
@@ -103,6 +111,7 @@ export class Seats {
     waiting.asked = now;
     this.waiting.set(threadId, waiting);
     const ahead = this.queue(account).findIndex((q) => q.threadId === threadId);
+    this.changed();
     if (this.free(account) <= ahead) return false;
     this.waiting.delete(threadId);
     this.seats.set(threadId, { account, state: "reserved", at: now });
@@ -120,6 +129,7 @@ export class Seats {
     const capacity = this.capacity(account);
     const over = capacity > 0 && this.taken(account) >= capacity;
     this.seats.set(threadId, { account, state: "running", at: now });
+    this.changed();
     return { over };
   }
 
@@ -131,6 +141,7 @@ export class Seats {
       null;
     this.seats.delete(threadId);
     this.waiting.delete(threadId);
+    if (account !== null) this.changed();
     return account;
   }
 
@@ -146,8 +157,13 @@ export class Seats {
         this.seats.delete(threadId);
         freed.add(seat.account);
       }
+    let left = false;
     for (const [threadId, waiting] of this.waiting)
-      if (now - waiting.asked >= ttl) this.waiting.delete(threadId);
+      if (now - waiting.asked >= ttl) {
+        this.waiting.delete(threadId);
+        left = true;
+      }
+    if (left || freed.size > 0) this.changed();
     return [...freed].sort();
   }
 
@@ -158,7 +174,22 @@ export class Seats {
     if (first === undefined) return null;
     this.waiting.delete(first.threadId);
     this.seats.set(first.threadId, { account, state: "reserved", at: now });
+    this.changed();
     return first.threadId;
+  }
+
+  /**
+   * The budget known as `from` is `to` from now on (a login's accountUuid
+   * found for an account counted by name): its seats and queue go along.
+   */
+  rekey(from: string, to: string): void {
+    let moved = false;
+    for (const entry of [...this.seats.values(), ...this.waiting.values()])
+      if (entry.account === from) {
+        entry.account = to;
+        moved = true;
+      }
+    if (moved) this.changed();
   }
 
   /** admitNext on every account until no seat or no one is left; the threads admitted. */

@@ -43,6 +43,8 @@ export interface Measurement {
 export interface CollectorDeps {
   io: CredentialIo;
   now: () => number;
+  /** Hears each measurement as it lands, account by account. */
+  onMeasured?: (name: string, measurement: Measurement) => void;
 }
 
 export class UsageCollector {
@@ -144,6 +146,7 @@ export class UsageCollector {
       };
     }
     this.cache.set(account.name, measurement);
+    this.deps.onMeasured?.(account.name, measurement);
     return measurement;
   }
 
