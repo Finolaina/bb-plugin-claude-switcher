@@ -29,7 +29,8 @@ project uses [Semantic Versioning](https://semver.org/).
   (`accountUuid`): two directories of one account share them, and a
   renamed default keeps them. The seats are kept in memory; after a
   reload the threads bb reports active are counted before any turn starts
-  (a message waits meanwhile, asked again in 5 s); a read that fails or
+  (a message waits meanwhile, at once, and bb asks again as soon as they
+  are counted); a read that fails or
   gives no answer within 3 s is tried three times, 2 s apart, after which
   turns go with what was counted, and a thread that ends while counted is
   not counted. A project on an account the plugin no longer finds waits
@@ -37,11 +38,15 @@ project uses [Semantic Versioning](https://semver.org/).
   turn; it never takes the default's seat, and its running threads are
   counted on nobody's. A project moved (picked by hand, rescued) while its
   turn was being placed takes its seat where it is now, never where the
-  placement left it; while a write of its account is under way, the turn
-  waits. A turn that starts without a reservation and whose account cannot
+  placement left it; while a write of its account is under way, also one
+  that confirms the account it is on, the turn waits. The whole dispatch
+  checkpoint answers within 8 s, every read in it together (bb fails the
+  message at 10 s): out of time, the message waits and is asked again in
+  5 s. A turn that starts without a reservation and whose account cannot
   be read within 3 s keeps the seat it held, or is counted on the next
   refresh. Cancelling the last message of a thread waiting for a seat
-  gives its place, or the seat reserved for it, to the next in line.
+  gives its place, or the seat reserved for it, to the next in line,
+  unless a new message of the thread took it meanwhile.
 - **A project is never moved to find a seat.** Seats only steer moves made
   for other reasons, and those go only to an account with a free seat (a
   new project, a move before a turn, a move off a long wait, a move ahead
@@ -62,8 +67,8 @@ project uses [Semantic Versioning](https://semver.org/).
   best account with a free seat, whatever `switchAheadPercent` says (bb
   greys out the composer of a project on an account at its limit, so no
   turn reached the checkpoint that moves it); a project whose account
-  cannot be read within 3 s is skipped with a warning and the others are
-  still looked at. An account left without a
+  cannot be read within 3 s, read again or moved within 10 s, is skipped
+  with a warning and the others are still looked at. An account left without a
   login now logs why, once: nothing in the store, a stored login it cannot
   parse, a refused refresh, or the usage endpoint's 401 with its answer.
 
