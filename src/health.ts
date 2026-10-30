@@ -19,7 +19,15 @@ export interface HealthAccount {
     { kind: "unauthenticated" } | { kind: "error"; message: string } | null;
   pace: Pace | null;
   /** Undefined when the plugin keeps none for the account. capacity 0 = no limit. */
-  seats: { capacity: number; running: number; reserved: number } | undefined;
+  seats:
+    | {
+        capacity: number;
+        running: number;
+        reserved: number;
+        /** Seats held from outside bb (`reserve`), counted as taken. */
+        external?: ReadonlyArray<{ id: string; until: number }>;
+      }
+    | undefined;
   /** It can run a turn now: logged in, measured whole, unlocked, session and weekly under 100 %. */
   usable: boolean;
 }
@@ -47,7 +55,12 @@ export interface HealthReport {
       pctDia: number;
       fondo: boolean;
     } | null;
-    plazas: { usadas: number; total: number | null } | null;
+    plazas: {
+      usadas: number;
+      total: number | null;
+      /** Held from outside bb (`reserve`); counted in usadas. */
+      externas: { id: string; hasta: string }[];
+    } | null;
     usable: boolean;
     problema: string | null;
   }>;
@@ -130,8 +143,15 @@ export function healthReport(input: {
           a.seats === undefined
             ? null
             : {
-                usadas: a.seats.running + a.seats.reserved,
+                usadas:
+                  a.seats.running +
+                  a.seats.reserved +
+                  (a.seats.external?.length ?? 0),
                 total: a.seats.capacity === 0 ? null : a.seats.capacity,
+                externas: (a.seats.external ?? []).map((e) => ({
+                  id: e.id,
+                  hasta: isoInZone(e.until),
+                })),
               },
         usable: a.usable,
         problema: problemText(a),

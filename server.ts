@@ -35,7 +35,12 @@ import {
   type AccountsIo,
 } from "./src/accounts.js";
 import { nextDayStart, paceOf, type DayStart, type Pace } from "./src/pace.js";
-import { healthReport, healthText, type HealthReport } from "./src/health.js";
+import {
+  healthReport,
+  healthText,
+  isoInZone,
+  type HealthReport,
+} from "./src/health.js";
 import {
   UsageCollector,
   type LoginState,
@@ -93,7 +98,7 @@ import {
 } from "./src/usage-source-contract.js";
 import { toMeasurement, toResource } from "./src/usage-source.js";
 import { shareSessions, type SessionsIo } from "./src/sessions.js";
-import { Seats, capacityFor } from "./src/seats.js";
+import { Seats, capacityFor, type ExternalHold } from "./src/seats.js";
 import { listText, projectName, sharedWith } from "./src/ui.js";
 
 export const ENV_VAR = "CLAUDE_CONFIG_DIR";
@@ -210,6 +215,14 @@ const KV_CANCELLED = "cancelled-retries";
 const KV_SERIES = "usage-series";
 /** The day's first reading of each account's weekly window, for the day's pace (see src/pace.ts). */
 const KV_PACE = "pace-day";
+/** Seats held from outside bb (`reserve`): a reload must not lose them. */
+const KV_EXTERNAL = "external-seats";
+const externalHoldSchema = z.object({
+  id: z.string(),
+  account: z.string(),
+  until: z.number(),
+  at: z.number(),
+});
 const HISTORY_LIMIT = 100;
 /** A thread as bb reports it (the SDK does not export the type by name). */
 type ThreadResponse = PluginThreadEventPayloads["thread.created"]["thread"];
@@ -392,6 +405,10 @@ const stateSchema = z.object({
         queued: z.array(
           z.object({ threadId: z.string(), title: z.string().nullable() }),
         ),
+        /** Seats held from outside bb (`reserve`), by id; only when there is one. */
+        external: z
+          .array(z.object({ id: z.string(), until: z.number() }))
+          .optional(),
       }),
     )
     .optional(),
@@ -775,7 +792,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       current,
       usage?.session.absent === true,
     );
-  }, seatsChanged);
+  }, seatsChanged, deps.now);
   /**
    * Per account, a sample of its seats and usage each time it is measured,
    * a week of them (see noteSeatSample): what share of a window an hour of
@@ -842,7 +859,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
   function occupancy(key: string): string {
     const s = seats.snapshot([key])[key]!;
-    const taken = s.running + s.reserved;
+    const taken = s.running + s.reserved + (s.external?.length ?? 0);
     return `${taken}/${s.capacity === 0 ? "∞" : s.capacity} taken, ${s.queued.length} waiting`;
   }
   /**
@@ -871,10 +888,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   function admitWaiting(): void {
     const now = deps.now();
+    const held = seats.holds().length;
     for (const key of seats.expire(now, SEAT_TTL_MS))
       bb.log.info(
-        `a seat reserved on ${seatName(key)} expired (its turn did not start); ${occupancy(key)}`,
+        `a seat reserved on ${seatName(key)} expired (its turn did not start, or its hold from outside bb ended); ${occupancy(key)}`,
       );
+    if (seats.holds().length !== held) storeHolds();
     const admitted = seats.admitAll(now);
     for (const threadId of admitted) {
       const key = seats.seatOf(threadId)?.account ?? "?";
@@ -890,6 +909,22 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             `bb not asked again after a seat freed: ${error instanceof Error ? error.message : String(error)}`,
           ),
         );
+  }
+  /** Writes in order; awaited by nothing that decides. */
+  let holdsWrites: Promise<void> = Promise.resolve();
+  /** The seats held from outside bb, to storage (KV_EXTERNAL). */
+  function storeHolds(): Promise<void> {
+    const snapshot = seats.holds();
+    holdsWrites = holdsWrites.then(async () => {
+      try {
+        await bb.storage.kv.set(KV_EXTERNAL, snapshot);
+      } catch (error) {
+        bb.log.warn(
+          `could not store the seats held from outside bb (a reload forgets them): ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    });
+    return holdsWrites;
   }
   /** The thread's turn ended or the thread went: its seat goes to the next in line. */
   function releaseSeat(threadId: string, why: string): void {
@@ -964,7 +999,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     seatTitles.set(thread.id, thread.title ?? null);
     const s = seats.snapshot([key])[key]!;
     const ahead = (seats.position(thread.id)?.position ?? 1) - 1;
-    const reason = `Waiting for a seat on ${account}: ${s.running + s.reserved}/${s.capacity} threads running, ${ahead} ahead in the queue`;
+    const reason = `Waiting for a seat on ${account}: ${s.running + s.reserved + (s.external?.length ?? 0)}/${s.capacity} threads running, ${ahead} ahead in the queue`;
     bb.log.info(`thread ${thread.id}: ${reason}`);
     return { action: "wait", reason, sendAt: now + SEAT_RECHECK_MS };
   }
@@ -1177,6 +1212,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   } catch (error) {
     bb.log.warn(
       `could not read the day's first readings; the day's pace starts again: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  // The seats held from outside bb before the reload.
+  try {
+    const parsed = z
+      .array(externalHoldSchema)
+      .safeParse(await bb.storage.kv.get<unknown>(KV_EXTERNAL));
+    if (parsed.success) seats.restoreHolds(parsed.data, deps.now());
+  } catch (error) {
+    bb.log.warn(
+      `could not read the seats held from outside bb; they are not counted: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
   // The seat samples kept; one of another shape (before 0.2.31's second
@@ -5240,7 +5286,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           usage,
           problem: m?.problem ?? null,
           pace: paceFor(account.name),
-          seats: taken[account.name],
+          seats:
+            taken[account.name] === undefined
+              ? undefined
+              : {
+                  ...taken[account.name]!,
+                  external: taken[account.name]!.external ?? [],
+                },
           usable:
             usage !== null &&
             usage.unknown !== true &&
@@ -5281,6 +5333,114 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
               stdout: options.json
                 ? `${JSON.stringify(report, null, 2)}\n`
                 : healthText(report),
+            };
+          },
+        }),
+        reserve: cliCommand({
+          summary:
+            "Hold a seat of an account for a run outside bb (claude -p with its CLAUDE_CONFIG_DIR) until a time, at most 12 h; fails when the account has no free seat. The same id renews it",
+          positionals: [
+            { name: "account", description: "Account name", required: true },
+          ] as const,
+          options: {
+            id: {
+              type: "string",
+              required: true,
+              description: "Who holds it: the same id renews the hold, unreserve ends it",
+            },
+            until: {
+              type: "string",
+              required: true,
+              description: "ISO 8601 with a zone (2026-10-31T07:00:00+01:00); never more than 12 h ahead",
+            },
+            json: JSON_OPTION,
+          },
+          async run({ positionals, options }) {
+            if (
+              !/(?:Z|[+-]\d{2}:\d{2})$/u.test(options.until) ||
+              Number.isNaN(Date.parse(options.until))
+            )
+              throw new PluginCliError(
+                `--until "${options.until}" is not an ISO 8601 time with a zone.`,
+                { code: "bad_until" },
+              );
+            await discover();
+            const name = positionals.account;
+            if (!accounts.some((a) => a.name === name))
+              throw new PluginCliError(
+                `Unknown account "${name}"; known: ${accounts.map((a) => a.name).join(", ") || "none"}`,
+                { code: "unknown_account" },
+              );
+            const key = seatKey(name);
+            // Expired reservations and holds go first; then the check and
+            // the hold in one synchronous step (see Seats.holdExternal).
+            admitWaiting();
+            const now = deps.now();
+            const result = seats.holdExternal(
+              options.id,
+              key,
+              Date.parse(options.until),
+              now,
+            );
+            if (!result.ok) {
+              throw new PluginCliError(
+                result.reason === "past"
+                  ? `--until ${options.until} is not ahead of now.`
+                  : `No free seat on ${name}: ${occupancy(key)}.`,
+                {
+                  code: result.reason === "past" ? "until_past" : "no_free_seat",
+                  exitCode: 1,
+                },
+              );
+            }
+            await storeHolds();
+            bb.log.info(
+              `seat on ${name} held from outside bb by ${options.id} until ${isoInZone(result.until)}${result.renewed ? " (renewed)" : ""}; ${occupancy(key)}`,
+            );
+            const out = {
+              id: options.id,
+              account: name,
+              until: isoInZone(result.until),
+              renewed: result.renewed,
+            };
+            return {
+              exitCode: 0,
+              stdout: options.json
+                ? `${JSON.stringify(out, null, 2)}\n`
+                : `${name}: seat held by ${out.id} until ${out.until}${out.renewed ? " (renewed)" : ""}\n`,
+            };
+          },
+        }),
+        unreserve: cliCommand({
+          summary: "End a seat held with reserve; an id not held is no error",
+          options: {
+            id: {
+              type: "string",
+              required: true,
+              description: "The id the seat was held with",
+            },
+            json: JSON_OPTION,
+          },
+          async run({ options }) {
+            const key = seats.releaseExternal(options.id);
+            if (key !== null) {
+              await storeHolds();
+              bb.log.info(
+                `seat on ${seatName(key)} held from outside bb by ${options.id} released; ${occupancy(key)}`,
+              );
+              admitWaiting();
+            }
+            const out =
+              key === null
+                ? { id: options.id, released: false }
+                : { id: options.id, released: true, account: seatName(key) };
+            return {
+              exitCode: 0,
+              stdout: options.json
+                ? `${JSON.stringify(out, null, 2)}\n`
+                : key === null
+                  ? `not held: ${options.id} (nothing to release)\n`
+                  : `${out.account}: seat held by ${options.id} released\n`,
             };
           },
         }),
@@ -5336,7 +5496,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             const lines: string[] = [];
             for (const [name, a] of Object.entries(taken))
               lines.push(
-                `${name}\tseats ${a.running + a.reserved}/${a.capacity === 0 ? "no limit" : a.capacity} (${a.running} running, ${a.reserved} reserved)\t${a.queued.length} waiting`,
+                `${name}\tseats ${a.running + a.reserved + (a.external?.length ?? 0)}/${a.capacity === 0 ? "no limit" : a.capacity} (${a.running} running, ${a.reserved} reserved${a.external === undefined ? "" : `, ${a.external.length} held outside bb: ${a.external.map((e) => `${e.id} until ${isoInZone(e.until)}`).join(", ")}`})\t${a.queued.length} waiting`,
               );
             const time = (at: number | null) =>
               at === null ? "" : new Date(at).toISOString();

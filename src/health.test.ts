@@ -84,7 +84,7 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
           semana: { pct: 98, vuelve: "2026-11-01T18:00:00+01:00" },
           modelos: { Fable: { pct: 100, vuelve: "2026-11-01T18:00:00+01:00" } },
           ritmo: { presupuesto: 1.2, gastado: 0.4, pctDia: 33, fondo: true },
-          plazas: { usadas: 1, total: 4 },
+          plazas: { usadas: 1, total: 4, externas: [] },
           usable: true,
           problema: null,
         },
@@ -161,9 +161,9 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
         "failing",
         "ultra",
         "consulta fallida: HTTP 429",
-        { usadas: 1, total: 4 },
+        { usadas: 1, total: 4, externas: [] },
       ],
-      ["never", "ultra", "sin medir", { usadas: 1, total: 4 }],
+      ["never", "ultra", "sin medir", { usadas: 1, total: 4, externas: [] }],
     ]);
     const { five_hour: _, ...incomplete } = JSON.parse(
       readFileSync(
@@ -204,7 +204,7 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
         }),
       ],
     }).cuentas;
-    expect(a!.plazas).toEqual({ usadas: 2, total: null });
+    expect(a!.plazas).toEqual({ usadas: 2, total: null, externas: [] });
   });
 });
 
