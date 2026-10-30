@@ -14903,3 +14903,75 @@ describe("bb claude-switcher health (SPEC 2026-10-30 §4)", () => {
     expect(text.stdout).toMatch(/^main +Ultra · sin tope de 5 h · sem 98%/m);
   });
 });
+
+describe("bb claude-switcher reserve / unreserve: a seat held from outside bb", () => {
+  const OFF = { autoSwitch: false };
+  const until = (ms: number) => new Date(ms).toISOString().replace("Z", "+00:00");
+  const ask = (h: Awaited<ReturnType<typeof host>>, id: string) =>
+    sent(h, id, "proj-1") as Promise<{ action: string; reason?: string }>;
+
+  it("holds a free seat, shows it in list, seats and health, and a bb thread then waits its turn", async () => {
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 2 } });
+    dispose = () => h.harness.dispose();
+    const r = await h.harness.behavior.runCli(["reserve", "main", "--id", "night", "--until", until(NOW + HOUR), "--json"]);
+    expect(r.exitCode).toBe(0);
+    expect(JSON.parse(r.stdout)).toEqual({ id: "night", account: "main", until: "2026-09-29T13:00:00+02:00", renewed: false });
+    expect(await ask(h, "t1")).toEqual({ action: "proceed" });
+    expect(await ask(h, "t2")).toMatchObject({
+      action: "wait",
+      reason: "Waiting for a seat on main: 2/2 threads running, 0 ahead in the queue",
+    });
+    const seats = JSON.parse((await h.harness.behavior.runCli(["seats", "--json"])).stdout).seats;
+    expect(seats.main.external).toEqual([{ id: "night", until: NOW + HOUR }]);
+    expect((await h.harness.behavior.runCli(["list"])).stdout).toContain("seats 2/2 · 1 external · 1 waiting");
+    const health = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    expect(health.cuentas.find((c: { nombre: string }) => c.nombre === "main").plazas).toEqual({
+      usadas: 2,
+      total: 2,
+      externas: [{ id: "night", hasta: "2026-09-29T13:00:00+02:00" }],
+    });
+  });
+
+  it("fails without a free seat and holds nothing; an unknown account or an until without zone is an error", async () => {
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    await ask(h, "t1");
+    const full = await h.harness.behavior.runCli(["reserve", "main", "--id", "night", "--until", until(NOW + HOUR)]);
+    expect(full.exitCode).not.toBe(0);
+    const seats = JSON.parse((await h.harness.behavior.runCli(["seats", "--json"])).stdout).seats;
+    expect(seats.main.external).toBeUndefined();
+    expect((await h.harness.behavior.runCli(["reserve", "nobody", "--id", "x", "--until", until(NOW + HOUR)])).exitCode).not.toBe(0);
+    expect((await h.harness.behavior.runCli(["reserve", "spare", "--id", "x", "--until", "2026-09-29T13:00:00"])).exitCode).not.toBe(0);
+  });
+
+  it("renews with the same id, caps at 12 h, and unreserve of an unknown id says it was not there", async () => {
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsTeam: 2, seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    expect((await h.harness.behavior.runCli(["reserve", "spare", "--id", "n", "--until", until(NOW + HOUR)])).exitCode).toBe(0);
+    const again = await h.harness.behavior.runCli(["reserve", "spare", "--id", "n", "--until", until(NOW + 30 * HOUR), "--json"]);
+    expect(again.exitCode).toBe(0);
+    expect(JSON.parse(again.stdout)).toMatchObject({ renewed: true, until: "2026-09-30T00:00:00+02:00" });
+    const off = await h.harness.behavior.runCli(["unreserve", "--id", "n", "--json"]);
+    expect(JSON.parse(off.stdout)).toEqual({ id: "n", released: true, account: "spare" });
+    const none = await h.harness.behavior.runCli(["unreserve", "--id", "n"]);
+    expect(none.exitCode).toBe(0);
+    expect(none.stdout).toMatch(/not held/);
+  });
+
+  it("is kept in storage: a reload counts it, and it ends at its until", async () => {
+    let clock = NOW;
+    const first = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 } });
+    await first.harness.behavior.runCli(["reserve", "main", "--id", "night", "--until", until(NOW + HOUR)]);
+    const stored = await first.bb.storage.kv.get("external-seats");
+    first.harness.dispose();
+    const h = await host(ALL_FREE, {
+      settings: { ...OFF, seatsMax: 1 },
+      kvPreset: { "external-seats": stored },
+      clock: () => clock,
+    });
+    dispose = () => h.harness.dispose();
+    expect((await ask(h, "t1")).action).toBe("wait");
+    clock = NOW + HOUR;
+    expect((await ask(h, "t1")).action).toBe("proceed");
+  });
+});

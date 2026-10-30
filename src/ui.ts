@@ -381,13 +381,16 @@ export interface SeatsLike {
   running: number;
   reserved: number;
   queued: ReadonlyArray<{ threadId: string; title: string | null }>;
+  /** Seats held from outside bb (`reserve`). */
+  external?: ReadonlyArray<{ id: string; until: number }>;
 }
 
-/** "seats 3/4", "seats 2/2 · 2 waiting"; null when the account has no limit. */
+/** "seats 3/4", "seats 2/2 · 1 external · 2 waiting"; null when the account has no limit. */
 export function seatsText(seats: SeatsLike | undefined): string | null {
   if (seats === undefined || seats.capacity === 0) return null;
   const waiting = seats.queued.length;
-  return `seats ${seats.running + seats.reserved}/${seats.capacity}${waiting > 0 ? ` · ${waiting} waiting` : ""}`;
+  const external = seats.external?.length ?? 0;
+  return `seats ${seats.running + seats.reserved + external}/${seats.capacity}${external > 0 ? ` · ${external} external` : ""}${waiting > 0 ? ` · ${waiting} waiting` : ""}`;
 }
 
 interface ListInput {
