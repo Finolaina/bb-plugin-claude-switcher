@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   accountRow,
   forecastText,
+  formatNumber,
   menuLine,
   panelList,
   panelWords,
@@ -452,8 +453,20 @@ describe("forecastText", () => {
   it("rounds to the minute: under half a minute is now, not «in 0 min»", () => {
     const f = (at: number) => ({ a: { weekly: { kind: "runs-out" as const, at, percentPerDay: 12.5 } } });
     expect(forecastText(f(NOW - 1), "a", "", NOW, "en")).toBe("Week: runs out now at this pace (12.5 %/day)");
-    expect(forecastText(f(NOW + 29_000), "a", "", NOW, "es")).toBe("Semana: se acaba ya a este ritmo (12.5 %/día)");
+    expect(forecastText(f(NOW + 29_000), "a", "", NOW, "es")).toBe("Semana: se acaba ya a este ritmo (12,5 %/día)");
     expect(forecastText(f(NOW + 31_000), "a", "", NOW, "en")).toBe("Week: runs out in 1 min at this pace (12.5 %/day)");
     expect(forecastText(f(NOW + 3 * H), "a", "", NOW, "en")).toBe("Week: runs out in 3 h at this pace (12.5 %/day)");
+  });
+});
+
+describe("formatNumber", () => {
+  it("writes a decimal with a comma in Spanish and a point in English, whole numbers as they are", () => {
+    expect(formatNumber(24.3, "es")).toBe("24,3");
+    expect(formatNumber(24.3, "en")).toBe("24.3");
+    expect(formatNumber(88, "es")).toBe("88");
+    expect(formatNumber(1234.5, "es")).toBe("1234,5");
+    const f = { a: { weekly: { kind: "lasts" as const, until: NOW + 76 * H, percentPerDay: 24.3 } } };
+    expect(forecastText(f, "a", "", NOW, "es")).toBe("Semana: llega al reinicio a este ritmo (24,3 %/día)");
+    expect(forecastText(f, "a", "", NOW, "en")).toBe("Week: lasts until the reset at this pace (24.3 %/day)");
   });
 });

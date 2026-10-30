@@ -15,6 +15,16 @@ export function uiLang(language: string | undefined): Lang {
   return language?.toLowerCase().startsWith("es") === true ? "es" : "en";
 }
 
+const NUMBERS: Record<Lang, Intl.NumberFormat> = {
+  es: new Intl.NumberFormat("es-ES", { maximumFractionDigits: 1, useGrouping: false }),
+  en: new Intl.NumberFormat("en-US", { maximumFractionDigits: 1, useGrouping: false }),
+};
+
+/** «24,3» in Spanish, «24.3» in English; one decimal at most (the forecast's pace has one). */
+export function formatNumber(n: number, lang: Lang): string {
+  return NUMBERS[lang].format(n);
+}
+
 const DAY_MS = 86_400_000;
 const DAYS: Record<Lang, string[]> = {
   es: ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"],
@@ -222,14 +232,14 @@ const T = {
     },
     ofWeek: "de la semana",
     ofFive: "de las 5 h",
-    leftWeek: (n: number) => `Le queda el ${n} % de la semana`,
-    leftFive: (n: number) => `Le queda el ${n} % de las 5 h`,
+    leftWeek: (n: number) => `Le queda el ${formatNumber(n, "es")} % de la semana`,
+    leftFive: (n: number) => `Le queda el ${formatNumber(n, "es")} % de las 5 h`,
     back: (when: string) => `vuelve ${when}`,
     backLong: (when: string) => `se recupera ${when}`,
     notStarted: "sin empezar",
     todaySpent: "Ya ha gastado lo de hoy",
-    todayShare: (n: number) => `Hoy ha gastado el ${n} % de su parte`,
-    modelAt: (model: string, n: number) => `${model} al ${n} %`,
+    todayShare: (n: number) => `Hoy ha gastado el ${formatNumber(n, "es")} % de su parte`,
+    modelAt: (model: string, n: number) => `${model} al ${formatNumber(n, "es")} %`,
     modelOut: (model: string, when: string) =>
       when === "" ? `sin ${model}` : `sin ${model} hasta ${when}`,
     threads: (used: number, of: number) => `${used} de ${of} hilos`,
@@ -256,14 +266,14 @@ const T = {
     },
     ofWeek: "of the week",
     ofFive: "of the 5 hours",
-    leftWeek: (n: number) => `${n} % of the week left`,
-    leftFive: (n: number) => `${n} % of the 5 hours left`,
+    leftWeek: (n: number) => `${formatNumber(n, "en")} % of the week left`,
+    leftFive: (n: number) => `${formatNumber(n, "en")} % of the 5 hours left`,
     back: (when: string) => `back ${when}`,
     backLong: (when: string) => `back ${when}`,
     notStarted: "not started",
     todaySpent: "Today's share is spent",
-    todayShare: (n: number) => `Spent ${n} % of today's share`,
-    modelAt: (model: string, n: number) => `${model} at ${n} %`,
+    todayShare: (n: number) => `Spent ${formatNumber(n, "en")} % of today's share`,
+    modelAt: (model: string, n: number) => `${model} at ${formatNumber(n, "en")} %`,
     modelOut: (model: string, when: string) =>
       when === "" ? `no ${model}` : `no ${model} until ${when}`,
     threads: (used: number, of: number) => `${used} of ${of} threads`,
@@ -438,7 +448,7 @@ export function accountRow(
     planShort: plan.short,
     planLong: plan.long,
     bar,
-    figure: left === null ? null : `${left} %`,
+    figure: left === null ? null : `${formatNumber(left, lang)} %`,
     figureOf: team ? t.ofFive : t.ofWeek,
     when,
     line,
@@ -546,7 +556,7 @@ export function panelList(
     sentence.push(
       { text: t.most, bold: false },
       { text: most.name, bold: true },
-      { text: ` (${most.bar.left} %).`, bold: false },
+      { text: ` (${formatNumber(most.bar.left, ctx.lang)} %).`, bold: false },
     );
   return { sentence, groups };
 }
@@ -636,15 +646,16 @@ export function forecastText(
   const [key, f] = picked;
   const name = key === "weekly" ? (lang === "es" ? "Semana" : "Week") : key;
   const es = lang === "es";
+  const pace = (f: { percentPerDay: number }) => formatNumber(f.percentPerDay, lang);
   switch (f.kind) {
     case "runs-out":
       return es
-        ? `${name}: se acaba ${inTime(f.at - now, lang)} a este ritmo (${f.percentPerDay} %/día)`
-        : `${name}: runs out ${inTime(f.at - now, lang)} at this pace (${f.percentPerDay} %/day)`;
+        ? `${name}: se acaba ${inTime(f.at - now, lang)} a este ritmo (${pace(f)} %/día)`
+        : `${name}: runs out ${inTime(f.at - now, lang)} at this pace (${pace(f)} %/day)`;
     case "lasts":
       return es
-        ? `${name}: llega al reinicio a este ritmo (${f.percentPerDay} %/día)`
-        : `${name}: lasts until the reset at this pace (${f.percentPerDay} %/day)`;
+        ? `${name}: llega al reinicio a este ritmo (${pace(f)} %/día)`
+        : `${name}: lasts until the reset at this pace (${pace(f)} %/day)`;
     default:
       return null;
   }
