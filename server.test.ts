@@ -15044,6 +15044,61 @@ describe("bb claude-switcher reserve / unreserve: a seat held from outside bb", 
     });
   });
 
+  describe("after a reload, while the seats are being counted (Codex ULTRA-R02)", () => {
+    // r1 runs on proj-1 (main), whose account read is held: main's one seat
+    // is not counted yet.
+    const counting = (gate: EnvGate) => ({
+      settings: { ...OFF, seatsMax: 1 },
+      threads: { r1: { status: "active" as const } },
+      beforeEnvRead: async (projectId: string) => {
+        if (projectId !== "proj-1") return;
+        gate.captured();
+        await gate.held;
+      },
+    });
+
+    it("waits for the count, then fails on the seat a running thread already takes", async () => {
+      const gate = envGate();
+      const h = await host(ALL_FREE, counting(gate));
+      dispose = () => h.harness.dispose();
+      await gate.reached;
+      const r = h.harness.behavior.runCli(["reserve", "main", "--id", "night", "--until", until(NOW + HOUR)]);
+      await vi.waitFor(() =>
+        expect(h.harness.logEntries.some((e) => e.message.includes("waits for the seats to be counted"))).toBe(true),
+      );
+      gate.release();
+      const out = await r;
+      expect(out.exitCode).not.toBe(0);
+      expect(out.stderr).toContain("No free seat on main");
+      const seats = JSON.parse((await h.harness.behavior.runCli(["seats", "--json"])).stdout).seats;
+      expect(seats.main).toMatchObject({ running: 1 });
+      expect(seats.main.external).toBeUndefined();
+    });
+
+    it("fails with a temporary error and holds nothing when the count takes more than 5 s", async () => {
+      const gate = envGate();
+      const h = await host(ALL_FREE, counting(gate));
+      dispose = () => h.harness.dispose();
+      await gate.reached;
+      vi.useFakeTimers();
+      try {
+        const r = h.harness.behavior.runCli(["reserve", "main", "--id", "night", "--until", until(NOW + HOUR), "--json"]);
+        await vi.advanceTimersByTimeAsync(5_000);
+        const out = await r;
+        expect(out.exitCode).toBe(75);
+        expect(JSON.parse(out.stdout)).toMatchObject({ ok: false, error: { code: "seats_counting" } });
+      } finally {
+        vi.useRealTimers();
+      }
+      gate.release();
+      await vi.waitFor(() =>
+        expect(h.harness.logEntries.some((e) => e.message.startsWith("seats counted after loading"))).toBe(true),
+      );
+      const seats = JSON.parse((await h.harness.behavior.runCli(["seats", "--json"])).stdout).seats;
+      expect(seats.main.external).toBeUndefined();
+    });
+  });
+
   it("fails without a free seat and holds nothing; an unknown account or an until without zone is an error", async () => {
     const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 } });
     dispose = () => h.harness.dispose();

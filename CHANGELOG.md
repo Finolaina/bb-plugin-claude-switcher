@@ -54,7 +54,10 @@ project uses [Semantic Versioning](https://semver.org/).
   with the account's `CLAUDE_CONFIG_DIR`, which bb does not see), so bb
   does not put more threads on it than its seats. Checked and taken in
   one synchronous step; fails (exit 1) with no free seat beyond those
-  owed to threads already waiting, or for an unknown account. The same
+  owed to threads already waiting, or for an unknown account. Right after
+  a reload it first waits, up to 5 s, for the threads already running to
+  be counted; not counted by then, it holds nothing and fails with exit
+  75 (`seats_counting`: ask again in a moment). The same
   id renews it. It ends at `until`, never more than 12 h after it was
   asked for, and is kept in storage (`external-seats`) across reloads.
   Counted in `list`, `seats` and `health`.

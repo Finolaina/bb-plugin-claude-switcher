@@ -164,6 +164,13 @@ export const SEAT_TTL_MS = 90_000;
 const SEAT_READ_WAITS = 3;
 /** A message sent while the seats are counted after a load is asked about again after this long (Astra SEATS-R02). */
 const SEATS_COUNTING_WAIT_MS = 5_000;
+/**
+ * How long `reserve` waits for the seats to be counted after a load before
+ * it fails, temporarily, granting nothing (Codex ULTRA-R02).
+ */
+const RESERVE_COUNT_WAIT_MS = 5_000;
+/** sysexits' EX_TEMPFAIL: `reserve` may be asked again in a moment. */
+const EXIT_TEMPFAIL = 75;
 /** Tries of each read that counts the seats after a load, this long apart (Astra SEATS-R02). */
 const SEAT_COUNT_TRIES = 3;
 const SEAT_COUNT_RETRY_MS = 2_000;
@@ -833,6 +840,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * turn waits, so none is let in against an empty count (Astra SEATS-R02).
    */
   let seatsReady = false;
+  /** The count after the load (see rebuildSeats), for `reserve` to wait for. */
+  let seatsCounted: Promise<void> = Promise.resolve();
   /** A message waited for the count: bb is asked again once it is done. */
   let seatsAwaited = false;
   /**
@@ -5404,6 +5413,23 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                 `Unknown account "${name}"; known: ${accounts.map((a) => a.name).join(", ") || "none"}`,
                 { code: "unknown_account" },
               );
+            // Never against the empty count of a load: the threads already
+            // running are counted first (Codex ULTRA-R02).
+            if (!seatsReady) {
+              bb.log.info(
+                `reserve ${name} for ${options.id} waits for the seats to be counted after loading`,
+              );
+              await within(
+                seatsCounted,
+                RESERVE_COUNT_WAIT_MS,
+                "the seats were not counted for reserve",
+              );
+              if (!seatsReady)
+                throw new PluginCliError(
+                  "The seats are still being counted after a reload; nothing held. Try again in a few seconds.",
+                  { code: "seats_counting", exitCode: EXIT_TEMPFAIL },
+                );
+            }
             const key = seatKey(name);
             // Expired reservations and holds go first; then the check and
             // the hold in one synchronous step (see Seats.holdExternal).
@@ -5788,7 +5814,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           );
     }
   }
-  void rebuildSeats().catch((error: unknown) =>
+  seatsCounted = rebuildSeats().catch((error: unknown) =>
     bb.log.warn(
       `the running threads were not counted after loading (they count as they start): ${error instanceof Error ? error.message : String(error)}`,
     ),
