@@ -71,7 +71,10 @@ export function toMeasurement(
   if (measurement?.usage) {
     const { session, weekly, models } = measurement.usage;
     const windows: PanelWindow[] = [
-      window("five-hour", "session", "Current session", session, null),
+      // None for an Ultra account freed of the 5-hour window (2026-10-30).
+      ...(session.absent === true
+        ? []
+        : [window("five-hour", "session", "Current session", session, null)]),
       window("weekly", "weekly", "Weekly limit", weekly, null),
       ...Object.entries(models).map(([model, w]) =>
         window("weekly", `weekly:${model}`, `Weekly · ${model}`, w, model),
