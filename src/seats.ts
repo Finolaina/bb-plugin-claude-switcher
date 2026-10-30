@@ -25,14 +25,19 @@ export interface SeatSettings {
 /**
  * An account's seats: by its kind, and when the kind is unknown by its
  * windows (the provider reports no general weekly window for a Team seat).
+ * An account without a session (`sessionAbsent`: an Ultra account freed of
+ * the 5-hour window, 2026-10-30) is never a Team seat: Ultra has the Max
+ * seats (SPEC 2026-10-30 §3).
  * 0 = no limit; a setting below 1 is no limit, a fraction is cut down.
  */
 export function capacityFor(
   kind: AccountKind | undefined,
   weeklyAbsent: boolean,
   settings: SeatSettings,
+  sessionAbsent = false,
 ): number {
-  const team = kind === "team" || (kind !== "max" && weeklyAbsent);
+  const team =
+    !sessionAbsent && (kind === "team" || (kind !== "max" && weeklyAbsent));
   const n = team ? settings.seatsTeam : settings.seatsMax;
   return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 0;
 }

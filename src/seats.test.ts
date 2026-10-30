@@ -23,6 +23,13 @@ describe("capacityFor", () => {
     expect(capacityFor(undefined, true, settings)).toBe(2);
   });
 
+  it("never gives an account without a session (Ultra freed of the 5-hour window) the Team seats", () => {
+    const settings = { seatsMax: 4, seatsTeam: 2 };
+    expect(capacityFor("team", false, settings, true)).toBe(4);
+    expect(capacityFor("unknown", true, settings, true)).toBe(4);
+    expect(capacityFor("max", false, settings, true)).toBe(4);
+  });
+
   it("reads 0, a negative or a fraction as no limit or whole seats", () => {
     expect(capacityFor("max", false, { seatsMax: 0, seatsTeam: 2 })).toBe(0);
     expect(capacityFor("max", false, { seatsMax: -3, seatsTeam: 2 })).toBe(0);

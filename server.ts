@@ -734,10 +734,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   const seats = new Seats((key) => {
     const name = namesOf(key)[0]!;
+    const usage = collector.get(name)?.usage;
     return capacityFor(
       accounts.find((a) => a.name === name)?.kind,
-      collector.get(name)?.usage?.weekly.absent === true,
+      usage?.weekly.absent === true,
       current,
+      usage?.session.absent === true,
     );
   }, seatsChanged);
   /**
