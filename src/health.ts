@@ -28,7 +28,13 @@ export interface HealthAccount {
         external?: ReadonlyArray<{ id: string; until: number }>;
       }
     | undefined;
-  /** It can run a turn now: logged in, measured whole, unlocked, session and weekly under 100 %. */
+  /**
+   * Set when the policy no longer trusts the latest good read (see
+   * UsageCollector.usable): it was out, only the clock frees it, and the
+   * queries have failed for too long since. When that read was taken.
+   */
+  unconfirmedSince?: number;
+  /** It can run a turn now: logged in, measured whole, unlocked, session and weekly under 100 %, and a read the policy trusts. */
   usable: boolean;
 }
 
@@ -88,6 +94,8 @@ function point(w: UsageWindow): Point {
 
 function problemText(a: HealthAccount): string | null {
   if (a.problem?.kind === "unauthenticated") return "sin login";
+  if (a.unconfirmedSince !== undefined)
+    return `reset sin confirmar: la última lectura buena (${isoInZone(a.unconfirmedSince)}) la daba agotada y las consultas fallan desde entonces${a.problem?.kind === "error" ? ` (${a.problem.message})` : ""}`;
   if (a.problem?.kind === "error")
     return `consulta fallida: ${a.problem.message}`;
   const u = a.usage;

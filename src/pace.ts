@@ -129,15 +129,19 @@ export function paceOf(
 
 /**
  * What to keep as the day's first reading after `reading`: the one kept
- * while it is still today's, of the same week; else the reading itself
- * when it is today's. Nothing for a window without a reset.
+ * while it is still today's, of the same week (its reset within 5 min);
+ * else the reading itself when it is today's. A reading without a reset
+ * (an incomplete answer) replaces nothing: the kept one stays, or else
+ * the next good reading would be the day's first and give away what was
+ * spent before it (Codex ULTRA-R04). The caller drops the kept one of a
+ * Team seat, which has no general weekly at all.
  */
 export function nextDayStart(
   kept: DayStart | undefined,
   reading: { at: number; usedPercent: number; resetsAt: number | null },
   hour: number,
 ): DayStart | undefined {
-  if (reading.resetsAt === null) return undefined;
+  if (reading.resetsAt === null) return kept;
   if (startsToday(kept, reading.resetsAt, reading.at, hour)) return kept;
   return reading.at >= countsFrom(reading.resetsAt, reading.at, hour)
     ? {
@@ -145,5 +149,5 @@ export function nextDayStart(
         usedPercent: reading.usedPercent,
         resetsAt: reading.resetsAt,
       }
-    : undefined;
+    : kept;
 }

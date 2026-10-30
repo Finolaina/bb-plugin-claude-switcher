@@ -192,6 +192,25 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
     });
   });
 
+  it("says why a read the policy no longer trusts is not usable (Codex ULTRA-R06)", () => {
+    const [x] = healthReport({
+      measured: NOW,
+      dayStartHour: 9,
+      accounts: [
+        account({
+          name: "x",
+          usage: usage("ultra-sin-5h"),
+          problem: { kind: "error", message: "HTTP 503" },
+          unconfirmedSince: Date.parse("2026-10-30T18:00:00Z"),
+          usable: false,
+        }),
+      ],
+    }).cuentas;
+    expect(x!.problema).toBe(
+      "reset sin confirmar: la última lectura buena (2026-10-30T19:00:00+01:00) la daba agotada y las consultas fallan desde entonces (HTTP 503)",
+    );
+  });
+
   it("says no limit of seats as a null total", () => {
     const [a] = healthReport({
       measured: NOW,
