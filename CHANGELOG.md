@@ -104,6 +104,11 @@ project uses [Semantic Versioning](https://semver.org/).
   the work as the user's: the refresh's move of a project off an account
   that cannot run, and the account the Opus advice in a declined
   thread's banner names.
+- The day's first reading is kept by account name (Codex ULTRA-R2-001):
+  renaming the default account, or a second directory logged into the
+  same account found during the day, starts the day's pace again from
+  its next reading, which gives that day's spending back to background
+  work. Seats keep the login's identity; the pace does not yet.
 - `planOf` without a profile tier cannot tell an Ultra still on the
   5-hour window from a Max: it says «sin datos de plan» until the login's
   profile carries `organizationRateLimitTier` or `planDisplayName`.
