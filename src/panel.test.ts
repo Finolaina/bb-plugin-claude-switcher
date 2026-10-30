@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   accountRow,
   forecastText,
   formatNumber,
   menuLine,
+  moveTime,
   panelList,
   panelWords,
   threadLine,
@@ -154,6 +155,43 @@ const seats = (running: number, capacity: number, queued = 0) => ({
 });
 const ES = { now: NOW, lang: "es" as const, timeZone: MADRID, preferredModel: "Fable" };
 const EN = { ...ES, lang: "en" as const };
+
+describe("the panel's dates are Madrid's, whatever the browser's zone (Codex ULTRA-R2-005)", () => {
+  const zone = process.env.TZ;
+  beforeAll(() => {
+    process.env.TZ = "America/New_York";
+  });
+  afterAll(() => {
+    if (zone === undefined) delete process.env.TZ;
+    else process.env.TZ = zone;
+  });
+  const monday = at("2026-11-02T09:00:00+01:00");
+
+  it("writes a reset at Madrid's 09:00 as 09:00, with no zone given", () => {
+    // In New York that is Monday 03:00.
+    expect(new Date(monday).getHours()).toBe(3);
+    expect(whenShort(monday, NOW, "es")).toBe("lun 09:00");
+    expect(whenLong(monday, NOW, "es")).toBe("el lunes 2, 09:00");
+    const row = accountRow(
+      ultra("studio", 10, "2026-11-02T09:00:00+01:00", { budget: 33.3, spent: 10 }),
+      seats(1, 4),
+      { now: NOW, lang: "es", preferredModel: "Fable" },
+    );
+    expect(row.when).toBe("vuelve lun 09:00");
+    expect(menuLine(row)).toContain("lun 09:00");
+  });
+
+  it("counts today and tomorrow by Madrid's calendar", () => {
+    // 00:30 on Saturday in Madrid is 19:30 on Friday in New York: today
+    // there, tomorrow in Madrid.
+    const late = at("2026-10-31T00:30:00+01:00");
+    expect(whenShort(late, NOW, "es")).toBe("mañana 00:30");
+  });
+
+  it("writes a move's time in Madrid", () => {
+    expect(moveTime(at("2026-10-30T21:55:00+01:00"), "en-GB")).toBe("30/10/2026, 21:55:00");
+  });
+});
 
 describe("accountRow", () => {
   it("draws an Ultra account by what is left of its week, today's share striped at its end", () => {

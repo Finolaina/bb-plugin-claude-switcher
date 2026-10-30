@@ -3,6 +3,7 @@ import type {
   PluginComposerScope,
   PluginRealtimeConnectionState,
 } from "@get-bb/plugin-sdk/app";
+import { DAY_ZONE } from "./pace.js";
 import { CLAUDE_CODE_PROVIDER } from "./switch.js";
 
 /** The notice "No Claude Code login found" applies when no listed account has a login. */
@@ -335,7 +336,7 @@ export function accountSummary(
   return summary;
 }
 
-/** "agotada hasta 14:00" within a day, "agotada hasta 03/11" beyond (local time, or `timeZone`). */
+/** "agotada hasta 14:00" within a day, "agotada hasta 03/11" beyond (Madrid's time, or `timeZone`; Codex ULTRA-R2-005). */
 export function outText(
   until: number | null,
   now: number,
@@ -346,7 +347,7 @@ export function outText(
     until - now < 24 * 3_600_000
       ? { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }
       : { day: "2-digit", month: "2-digit" };
-  return `agotada hasta ${new Intl.DateTimeFormat("en-GB", { ...options, timeZone }).format(until)}`;
+  return `agotada hasta ${new Intl.DateTimeFormat("en-GB", { ...options, timeZone: timeZone ?? DAY_ZONE }).format(until)}`;
 }
 
 export interface SeatsLike {
