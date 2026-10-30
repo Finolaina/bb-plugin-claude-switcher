@@ -47,6 +47,13 @@ project uses [Semantic Versioning](https://semver.org/).
   running and reserved then, session and weekly %, and their resets.
   `bb claude-switcher seats [--json]` prints them with the session % spent
   per hour and seat, to set the defaults from data (they are a guess).
+- No project stays on an account out of the preferred model or without a
+  login: after every refresh the plugin moves each one it manages to the
+  best account with a free seat, whatever `switchAheadPercent` says (bb
+  greys out the composer of a project on an account at its limit, so no
+  turn reached the checkpoint that moves it). An account left without a
+  login now logs why, once: nothing in the store, a stored login it cannot
+  parse, a refused refresh, or the usage endpoint's 401 with its answer.
 
 ## [0.2.30] - 2026-10-29
 
