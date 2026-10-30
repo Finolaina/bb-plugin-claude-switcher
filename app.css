@@ -1,0 +1,97 @@
+/*
+ * Claude Switcher: the four state colours of design B and its two motions
+ * (Optimizador informes/2026-10-30/ultra/propuestas/DISENO.md). Everything
+ * else comes from bb's tokens through Tailwind classes in app.tsx. bb marks
+ * its dark mode with a `.dark` class (bb theming reference), which Tailwind's
+ * `dark:` variant does not follow in a plugin build: hence these variables.
+ * Every class starts with `cs-`, as this sheet is not scoped to the plugin.
+ */
+.cs-tone {
+  /* text on bb's light surfaces: each above 4.5:1 on white */
+  --cs-run: #1d4ed8;
+  --cs-ok: #15803d;
+  --cs-keep: #a16207;
+  --cs-out: #57534e;
+  /* the bars: what is left of the week, low (15 % or less), a Team seat's 5 hours */
+  --cs-week: #22c55e;
+  --cs-week-low: #f59e0b;
+  --cs-five: #3b82f6;
+  --cs-today: rgb(0 0 0 / 0.3);
+  --cs-track: color-mix(in oklab, currentColor 12%, transparent);
+  --cs-ease: cubic-bezier(0.23, 1, 0.32, 1);
+}
+.dark .cs-tone {
+  --cs-run: #93c5fd;
+  --cs-ok: #4ade80;
+  --cs-keep: #fcd34d;
+  --cs-out: #a8a29e;
+  --cs-five: #60a5fa;
+  --cs-today: rgb(255 255 255 / 0.5);
+  --cs-track: color-mix(in oklab, currentColor 16%, transparent);
+}
+
+.cs-s-working {
+  color: var(--cs-run);
+}
+.cs-s-free {
+  color: var(--cs-ok);
+}
+.cs-s-kept {
+  color: var(--cs-keep);
+}
+.cs-s-out,
+.cs-s-nodata {
+  color: var(--cs-out);
+}
+
+/* A bar of what is left: the fill grows from the left with scaleX; today's
+   share is a striped band over its end, cut with clip-path so its stripes
+   keep their size. */
+.cs-bar {
+  position: relative;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--cs-track);
+}
+.cs-bar > .cs-fill,
+.cs-bar > .cs-today {
+  position: absolute;
+  inset: 0;
+}
+.cs-fill {
+  transform-origin: left center;
+  background: var(--cs-week);
+}
+.cs-fill.cs-low {
+  background: var(--cs-week-low);
+}
+.cs-fill.cs-five {
+  background: var(--cs-five);
+}
+.cs-today {
+  background: repeating-linear-gradient(
+    135deg,
+    var(--cs-today) 0 3px,
+    transparent 3px 6px
+  );
+}
+
+@keyframes cs-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .cs-fill {
+    transition: transform 300ms var(--cs-ease);
+  }
+  .cs-today {
+    transition: clip-path 300ms var(--cs-ease);
+  }
+  /* a row whose state changed: its icon and word fade in */
+  .cs-fade {
+    animation: cs-fade 150ms ease-out;
+  }
+}
