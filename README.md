@@ -146,6 +146,10 @@ at or above it, the project moves to an account below it, so the next
 turn does not fail first. Needs the automatic choice on. A second
 percentage covers threads running in another model, so an Opus thread
 moves at 95 % while Fable threads keep theirs.
+Whatever the percentages say, every refresh moves a project off an
+account out of the preferred model or without a login, to the best
+account with a free seat (bb greys out the composer of such a project, so
+no turn would get to move it); with no seat free, it stays.
 
 </td>
 </tr>
