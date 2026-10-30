@@ -6,6 +6,7 @@
 // handler, the background refresh) share one query, so an expired token is
 // refreshed once. Two refreshes with the same refresh token would log the
 // account out, because the token rotates.
+import { createHash } from "node:crypto";
 import type { Account } from "./accounts.js";
 import {
   accessToken,
@@ -13,6 +14,7 @@ import {
   keychainService,
   type CredentialIo,
   type PendingCredentials,
+  type TokenNotes,
 } from "./credentials.js";
 import { canRunModel, isUsable, type AccountUsage } from "./policy.js";
 import { settle } from "./switch.js";
@@ -45,12 +47,21 @@ export interface CollectorDeps {
   now: () => number;
   /** Hears each measurement as it lands, account by account. */
   onMeasured?: (name: string, measurement: Measurement) => void;
+  /** Why an account was left without a login: once per account and cause. */
+  warn?: (message: string) => void;
+}
+
+/** Enough of a token to tell two apart in the log, never the token. */
+function fingerprint(token: string): string {
+  return createHash("sha256").update(token).digest("hex").slice(0, 8);
 }
 
 export class UsageCollector {
   private readonly cache = new Map<string, Measurement>();
   private readonly inflight = new Map<string, Promise<Measurement>>();
   private readonly pending: PendingCredentials = new Map();
+  /** The cause last warned of per account, until it has a login again. */
+  private readonly warned = new Map<string, string>();
 
   constructor(private readonly deps: CollectorDeps) {}
 
@@ -76,14 +87,21 @@ export class UsageCollector {
     };
     let measurement: Measurement;
     let login: LoginState = "unknown";
+    // Why this attempt found no login: a cause kind (once per change), and the line.
+    let why: { cause: string; line: string } | null = null;
     try {
+      const notes: TokenNotes = {};
+      const now = this.deps.now();
       const token = await accessToken(
         this.deps.io,
         account.configDir,
-        this.deps.now(),
+        now,
         this.pending,
+        notes,
       );
       if (token === null) {
+        const line = notes.noLogin ?? "no login";
+        why = { cause: line, line };
         measurement = {
           observedAt: null,
           usage: null,
@@ -108,7 +126,12 @@ export class UsageCollector {
               login,
             };
             break;
-          case "unauthenticated":
+          case "unauthenticated": {
+            const expiresAt = notes.expiresAt ?? null;
+            why = {
+              cause: "401",
+              line: `usage endpoint answered 401 (token …${fingerprint(token.token)}, expires in ${expiresAt === null ? "?" : Math.round((expiresAt - now) / 60_000)} min, refreshed: ${token.refreshed ? "yes" : "no"}): ${result.body}`,
+            };
             measurement = {
               observedAt: null,
               usage: null,
@@ -116,6 +139,7 @@ export class UsageCollector {
               login: "no",
             };
             break;
+          }
           case "rate-limited":
             measurement = {
               ...stale,
@@ -144,6 +168,14 @@ export class UsageCollector {
         },
         login,
       };
+    }
+    // Aitor 2026-10-30, Añadido 2: «mariscal not logged in» while
+    // `claude auth status` said logged in, and nothing in the log said why.
+    if (why === null) {
+      if (measurement.login === "yes") this.warned.delete(account.name);
+    } else if (this.warned.get(account.name) !== why.cause) {
+      this.warned.set(account.name, why.cause);
+      this.deps.warn?.(`account ${account.name}: not logged in: ${why.line}`);
     }
     this.cache.set(account.name, measurement);
     this.deps.onMeasured?.(account.name, measurement);
