@@ -742,7 +742,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   const collector = new UsageCollector({
     io: deps.credentialIo,
     now: deps.now,
-    onMeasured: (name, measurement) => noteSeatSample(name, measurement),
+    onMeasured: (name, measurement) => {
+      noteSeatSample(name, measurement);
+      notePaceDay(name, measurement);
+    },
     warn: (message) => bb.log.warn(message),
   });
   let accounts: Account[] = [];
@@ -1360,17 +1363,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         string,
         { usedPercent: number; resetsAt: number | null },
       ][] = [["weekly", m.usage.weekly], ...Object.entries(m.usage.models)];
-      const day = nextDayStart(
-        paceDay[account.name],
-        {
-          at: m.observedAt,
-          usedPercent: m.usage.weekly.usedPercent,
-          resetsAt: m.usage.weekly.absent === true ? null : m.usage.weekly.resetsAt,
-        },
-        dayHour(),
-      );
-      if (day === undefined) delete paceDay[account.name];
-      else paceDay[account.name] = day;
       const updated: Record<string, Series> = {};
       for (const [name, w] of windows)
         updated[name] = recordSample(own[name], {
@@ -1397,13 +1389,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           `could not store the seat samples: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
-      try {
-        await bb.storage.kv.set(KV_PACE, paceSnapshot);
-      } catch (error) {
-        bb.log.warn(
-          `could not store the day's first readings: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
+      await storePaceDay(paceSnapshot);
       try {
         await bb.storage.kv.set(KV_SERIES, snapshot);
       } catch (error) {
@@ -1413,6 +1399,41 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       }
     });
     return seriesWrites;
+  }
+  /** The day's first readings, to storage; a failure is logged, not thrown. */
+  async function storePaceDay(snapshot: Record<string, DayStart>): Promise<void> {
+    try {
+      await bb.storage.kv.set(KV_PACE, snapshot);
+    } catch (error) {
+      bb.log.warn(
+        `could not store the day's first readings: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  /**
+   * The account was measured, by whichever path (the refresh, bb's usage
+   * panel, a placement): the day's first reading of its weekly window is
+   * kept or replaced, and stored when it changes (Codex ULTRA-R03). Only a
+   * fresh measurement counts: a failed query keeps the old usage.
+   */
+  function notePaceDay(name: string, m: Measurement): void {
+    if (m.observedAt === null || m.usage === null) return;
+    if (m.problem !== null && m.problem.kind === "error") return;
+    const kept = paceDay[name];
+    const day = nextDayStart(
+      kept,
+      {
+        at: m.observedAt,
+        usedPercent: m.usage.weekly.usedPercent,
+        resetsAt: m.usage.weekly.absent === true ? null : m.usage.weekly.resetsAt,
+      },
+      dayHour(),
+    );
+    if (day === kept) return;
+    if (day === undefined) delete paceDay[name];
+    else paceDay[name] = day;
+    const snapshot = { ...paceDay };
+    seriesWrites = seriesWrites.then(() => storePaceDay(snapshot));
   }
   /**
    * The account was measured: a sample of its seats as they are now, with
