@@ -758,6 +758,9 @@ bb claude-switcher list [--json]          # a line per account (ses, sem, prefer
 bb claude-switcher refresh [--json]       # query the usage endpoint now
 bb claude-switcher history [--json]       # every move of a project, latest first, and why
 bb claude-switcher seats [--json]         # seats of every account, who waits, and each usage sample with the seats taken then
+bb claude-switcher health [--json]        # a stable read for other threads and scripts (version 1): plan, 5-hour window, weekly, models, the day's pace, seats, usable
+bb claude-switcher reserve <account> --id <x> --until <ISO with zone> [--json]   # hold a seat for a run outside bb (at most 12 h); fails with no free seat
+bb claude-switcher unreserve --id <x> [--json]   # end it; an id not held is no error
 bb claude-switcher use <project> <account | default>   # project id, or its name when unique
 bb claude-switcher release                # remove every CLAUDE_CONFIG_DIR this plugin set
 ```
@@ -785,6 +788,7 @@ named `default`; the default account's own name always works.
 | `claudeCommand`      | `claude`             | The Claude Code executable used to log an account in from bb: a name looked up in the `PATH` of bb's server, or a full path.                                                                                        |
 | `seatsMax`           | `4`                  | Threads at once on a Max account: a thread whose turn is about to start waits when the project's account already runs this many. 0 = no limit. See [Seats per account](#seats-per-account). |
 | `seatsTeam`          | `2`                  | The same for a Team account. |
+| `dayStartHour`       | `9`                  | Hour the day starts in Europe/Madrid. Each day gets an even share of what is left of an account's weekly window; at 90 % of it the account takes no more background work (a thread another thread, an automation or a plugin opens) unless no other account can run it. Your own threads are never held back by it. |
 | `loginPrivateWindow` | `true`               | macOS: open logins in a private Chrome window, so they do not reuse the browser's Claude session. Off, without Chrome, or on Linux: the default browser.                                                            |
 
 The accounts are read again whenever you pick one (`use`, the picker) and
@@ -888,6 +892,12 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
   over the week; `--json` gives the samples.
 
 ## Known limitations
+
+- **The day's pace only places new projects.** Background work (a thread
+  with a parent thread or opened by a plugin) puts a new project behind
+  the accounts saved for the user (their day at 90 %); a project already
+  placed is not moved for the pace, so a background thread in it runs
+  where the project is. A hidden thread is never placed at all, as before.
 
 - **A wait can follow another account's limit report.** bb sends a
   thread's latest limit report with each failure, whichever turn it came

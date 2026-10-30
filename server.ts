@@ -98,7 +98,7 @@ import {
 } from "./src/usage-source-contract.js";
 import { toMeasurement, toResource } from "./src/usage-source.js";
 import { shareSessions, type SessionsIo } from "./src/sessions.js";
-import { Seats, capacityFor, type ExternalHold } from "./src/seats.js";
+import { Seats, capacityFor } from "./src/seats.js";
 import { listText, projectName, sharedWith } from "./src/ui.js";
 
 export const ENV_VAR = "CLAUDE_CONFIG_DIR";
