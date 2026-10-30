@@ -14,6 +14,8 @@ import {
   reserving,
   spendsReservedWeekly,
   type AccountUsage,
+  type Choice,
+  type ChoiceOptions,
   type UsageWindow,
 } from "./policy.js";
 
@@ -60,6 +62,11 @@ export interface SwitchInput {
   preferredModel: string;
   /** The model kept for its own threads; see ChoiceOptions.reserveModel. */
   reserveModel?: string;
+  /**
+   * Seats free on an account (see src/seats.ts). A move prefers an account
+   * with one; seats never move a project by themselves.
+   */
+  freeSeats?: (account: string) => number;
   maximumWaitMs: number | null;
   now: number;
   random: number;
@@ -154,6 +161,24 @@ function freeAt(account: AccountUsage, model: string): number | null {
   return Math.max(...blocking.map((w) => w.resetsAt as number));
 }
 
+/**
+ * The choice among the accounts with a free seat; with none free anywhere,
+ * by quota alone: the project goes where it can run, and its threads wait
+ * there for a seat.
+ */
+function chooseSeated(
+  accounts: AccountUsage[],
+  options: ChoiceOptions,
+  freeSeats: ((account: string) => number) | undefined,
+): Choice | null {
+  return (
+    (freeSeats === undefined
+      ? null
+      : chooseAccount(accounts, { ...options, freeSeats })) ??
+    chooseAccount(accounts, options)
+  );
+}
+
 export function decideSwitch(input: SwitchInput): SwitchDecision {
   const declined = declineReason(input.failure, input.stuck === true);
   if (declined !== null) return { kind: "decline", reason: declined };
@@ -188,7 +213,7 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
   const others = accounts.filter(
     (a) => a.name !== input.currentAccount && a.name !== failedOn,
   );
-  const choice = chooseAccount(others, options);
+  const choice = chooseSeated(others, options, input.freeSeats);
   if (choice !== null) {
     return {
       kind: "switch",
@@ -427,6 +452,11 @@ export interface PlacementInput {
    * Nothing to a turn in another model.
    */
   excursionFrom?: string | null;
+  /**
+   * Seats free on an account (see src/seats.ts). A move prefers an account
+   * with one; seats never move a project by themselves.
+   */
+  freeSeats?: (account: string) => number;
   now: number;
   /**
    * The current account has no login (its usage answered unauthenticated),
@@ -443,11 +473,14 @@ export function bestAccount(
   preferredModel: string,
   now: number,
   reserveModel?: string,
+  /** Set: an account with a free seat first (see chooseSeated). */
+  freeSeats?: (account: string) => number,
 ): string | null {
   return (
-    chooseAccount(
+    chooseSeated(
       accounts.map((a) => settle(a, now)),
       { preferredModel, reserveModel },
+      freeSeats,
     )?.account ?? null
   );
 }
@@ -474,7 +507,7 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     reserveModel: input.reserveModel,
   };
   if (input.isNew) {
-    const choice = chooseAccount(accounts, options);
+    const choice = chooseSeated(accounts, options, input.freeSeats);
     return choice === null || choice.account === input.currentAccount
       ? { kind: "keep" }
       : { kind: "move", account: choice.account, why: "new-project" };
@@ -508,10 +541,14 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   if (runs && !spendsReservedWeekly(current, options)) return { kind: "keep" };
   const others = accounts.filter((a) => a.name !== input.currentAccount);
   const choice =
-    chooseAccount(others, options) ??
+    chooseSeated(others, options, input.freeSeats) ??
     // Without a login a turn kept here fails for sure: the reserve gives way.
     (loggedOut
-      ? chooseAccount(others, { preferredModel: input.preferredModel })
+      ? chooseSeated(
+          others,
+          { preferredModel: input.preferredModel },
+          input.freeSeats,
+        )
       : null);
   if (choice === null)
     return runs ? { kind: "keep", why: "current-reserved" } : { kind: "keep" };
@@ -559,6 +596,8 @@ export interface AheadInput {
   reserveModel?: string;
   /** Share of a window (session, weekly or the preferred model's) at which the project moves ahead of the limit. */
   threshold: number;
+  /** Seats free on an account: ahead of the limit, only an account with one is a target. */
+  freeSeats?: (account: string) => number;
   now: number;
 }
 
@@ -602,6 +641,7 @@ export function decideAhead(input: AheadInput): AheadDecision {
   const choice = chooseAccount(roomy, {
     preferredModel: input.preferredModel,
     reserveModel: input.reserveModel,
+    freeSeats: input.freeSeats,
   });
   return choice === null
     ? { kind: "keep" }
