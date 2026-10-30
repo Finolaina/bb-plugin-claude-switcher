@@ -1419,16 +1419,23 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function notePaceDay(name: string, m: Measurement): void {
     if (m.observedAt === null || m.usage === null) return;
     if (m.problem !== null && m.problem.kind === "error") return;
+    // An answer without the general weekly (incomplete: no reset) touches
+    // nothing (see nextDayStart, Codex ULTRA-R04); one that has it is a
+    // reading of the week, whatever else it lacks. A Team seat has no
+    // general weekly at all: no first reading.
     const kept = paceDay[name];
-    const day = nextDayStart(
-      kept,
-      {
-        at: m.observedAt,
-        usedPercent: m.usage.weekly.usedPercent,
-        resetsAt: m.usage.weekly.absent === true ? null : m.usage.weekly.resetsAt,
-      },
-      dayHour(),
-    );
+    const day =
+      m.usage.weekly.absent === true
+        ? undefined
+        : nextDayStart(
+            kept,
+            {
+              at: m.observedAt,
+              usedPercent: m.usage.weekly.usedPercent,
+              resetsAt: m.usage.weekly.resetsAt,
+            },
+            dayHour(),
+          );
     if (day === kept) return;
     if (day === undefined) delete paceDay[name];
     else paceDay[name] = day;
