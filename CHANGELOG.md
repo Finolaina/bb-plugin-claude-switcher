@@ -34,11 +34,15 @@ project uses [Semantic Versioning](https://semver.org/).
   the week. Each day (from `dayStartHour`, 09:00 Europe/Madrid, to the
   next) gets an even share of what is left of the account's weekly
   window, from the day's first reading (kept in storage, `pace-day`). At
-  90 % of it the account is saved for the user: a new project of a
-  thread with a parent thread or an origin plugin goes behind every
-  other usable account, never left without one. The user's own threads
-  are not affected. Unknown (no weekly reset) counts as saved; a Team
-  seat has no pace.
+  90 % of it the account is saved for the user: for a thread with a
+  parent thread or an origin plugin, every choice of another account (a
+  new project, a move off an account that cannot run before a turn, the
+  way back from an excursion, the switch after a failed turn, a waiting
+  turn moved to a free account, the move ahead of the limit) puts it
+  behind every other usable account, never left without one. A project
+  whose account can run is not moved for the pace. The user's own
+  threads are not affected. Unknown (no weekly reset) counts as saved; a
+  Team seat has no pace.
 - **`bb claude-switcher health [--json]`:** a stable read for other
   threads and scripts, version 1, the same schema as the Mac's
   `claude-cuentas.py salud --json`: per account `nombre`, `plan`,
@@ -57,9 +61,10 @@ project uses [Semantic Versioning](https://semver.org/).
 
 ### Known limits
 
-- The pace places only new projects: a project already placed is not
-  moved for it (a background thread in it runs where it is), and the
-  failure path and the move ahead of the limit ignore it.
+- Two choices of another account have no thread behind them and treat
+  the work as the user's: the refresh's move of a project off an account
+  that cannot run, and the account the Opus advice in a declined
+  thread's banner names.
 - `planOf` without a profile tier cannot tell an Ultra still on the
   5-hour window from a Max: it says «sin datos de plan» until the login's
   profile carries `organizationRateLimitTier` or `planDisplayName`.

@@ -1298,6 +1298,23 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * at 90 %, or not known for a weekly window it has (no reset: nothing is
    * spent blind). A Team seat has no general weekly: no pace holds it back.
    */
+  /**
+   * Background work: a thread another thread, an automation or a plugin
+   * opened (the user opens the rest). Every choice of another account for
+   * it puts the accounts saved for the user last (Codex ULTRA-R01).
+   */
+  function isBackground(
+    thread: Pick<ThreadResponse, "parentThreadId" | "originPluginId">,
+  ): boolean {
+    return (
+      typeof thread.parentThreadId === "string" ||
+      typeof thread.originPluginId === "string"
+    );
+  }
+  /** savedForUser for background work; nothing (the pace does not count) for the user's own. */
+  function paceFilter(background: boolean) {
+    return background ? { savedForUser } : {};
+  }
   function savedForUser(name: string): boolean {
     const usage = collector.get(name)?.usage;
     if (usage === null || usage === undefined) return false;
@@ -2709,6 +2726,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     event: PluginTurnFailedEvent,
     started: string | null | undefined,
     projectId: string,
+    /** The thread is background work (see isBackground). */
+    background: boolean,
   ): string | null {
     if (
       recent.advice === undefined ||
@@ -2728,7 +2747,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         now,
       },
       unreadAccounts(),
-      placementOf(projectId, FALLBACK_MODEL, now),
+      placementOf(projectId, FALLBACK_MODEL, now, background),
     );
     return on === null ? null : opusInsteadText(model, on);
   }
@@ -3080,12 +3099,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const fromName = from.account ?? current.defaultAccountName;
     // Read before noteMove, which forgets it on the way home.
     const excursion = excursions.get(projectId);
-    // Background work: a thread another thread, an automation or a plugin
-    // opened (the user opens the rest). A new project of it goes behind the
-    // accounts saved for the user (SPEC 2026-10-30 §2).
-    const background =
-      typeof thread.parentThreadId === "string" ||
-      typeof thread.originPluginId === "string";
     const decision = decidePlacement({
       currentAccount: fromName,
       isNew,
@@ -3093,7 +3106,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       preferredModel: current.preferredModel,
       excursionFrom: wayHome(projectId, current.preferredModel, measured, now),
       freeSeats,
-      ...(background ? { savedForUser } : {}),
+      // Background work behind the accounts saved for the user (SPEC
+      // 2026-10-30 §2).
+      ...paceFilter(isBackground(thread)),
       now,
       currentLoggedOut: unconfirmed(fromName),
     });
@@ -3311,6 +3326,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       reserveModel: current.preferredModel,
       threshold,
       freeSeats,
+      ...paceFilter(isBackground(thread)),
       now,
     });
     if (decision.kind === "keep") return;
@@ -3732,6 +3748,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     projectId: string,
     model: string,
     now: number,
+    /** For a thread of background work (see isBackground); false when the thread is not known. */
+    background = false,
   ): Omit<PlacementInput, "currentAccount"> {
     const measured = measuredAccounts(model);
     return {
@@ -3741,6 +3759,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       reserveModel: current.preferredModel,
       excursionFrom: wayHome(projectId, model, measured, now),
       freeSeats,
+      ...paceFilter(background),
       now,
     };
   }
@@ -3777,7 +3796,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const now = deps.now();
     const excursion = excursions.get(projectId);
     const decision = decidePlacement({
-      ...placementOf(projectId, model, now),
+      ...placementOf(projectId, model, now, isBackground(thread)),
       currentAccount: fromName,
       currentLoggedOut: unconfirmed(fromName),
     });
@@ -4219,6 +4238,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     started: string | null | undefined,
     /** The thread's generation as its failure came (see generation). */
     judgedIn: number,
+    /** The thread is background work (see isBackground). */
+    background: boolean,
   ): Promise<void> {
     const now = deps.now();
     // The log first, for the turn that failed: a Send now or an edited
@@ -4272,7 +4293,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       recent.graced.add(event.threadId);
       if (typeof started === "string" && isRefusal(event))
         markRefused(started, now, event);
-      const told = followsAdvice(recent, model, now, event, started, projectId);
+      const told = followsAdvice(recent, model, now, event, started, projectId, background);
       const reason = `Retrying on account ${recent.to}${told === null ? "" : `. ${told}`}`;
       bb.log.info(
         `thread ${event.threadId}: ${reason} (switched ${now - recent.at} ms ago)`,
@@ -4320,7 +4341,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         const told =
           sendAt === undefined || recent === undefined
             ? null
-            : followsAdvice(recent, model, now, event, started, projectId);
+            : followsAdvice(recent, model, now, event, started, projectId, background);
         const reason = `Retrying on account ${currentName}${told === null ? "" : `. ${told}`}`;
         bb.log.info(
           `thread ${event.threadId}: ${reason} (its turn started on ${started})`,
@@ -4360,6 +4381,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       before,
       judgedIn,
       turn.chain,
+      background,
       started,
     );
   }
@@ -4501,6 +4523,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     judgedIn: number,
     /** The turn's retry chain (see loggedTurn), read before the judgment began. */
     chain: string | null,
+    /** The thread is background work (see isBackground): the switch goes behind the accounts saved for the user. */
+    background: boolean,
     ranOn?: string | null,
   ): Promise<void> {
     const turn = { requestId: event.requestId, chain };
@@ -4548,6 +4572,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       random: deps.random(),
       stuck,
       freeSeats,
+      ...paceFilter(background),
     };
     const decision = decideSwitch(input);
     // No Fable on any account, and an account with Opus: the thread is told
@@ -4557,7 +4582,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       decision,
       input,
       unreadAccounts(),
-      placementOf(projectId, FALLBACK_MODEL, now),
+      placementOf(projectId, FALLBACK_MODEL, now, background),
     );
     const advice = opusOn === null ? null : opusInsteadText(model, opusOn);
     const carried = advice === null ? undefined : { model };
@@ -4733,7 +4758,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     try {
       await inProjectQueue(thread.projectId, () =>
-        handleFailure(event, thread.projectId, started, judgedIn),
+        handleFailure(
+          event,
+          thread.projectId,
+          started,
+          judgedIn,
+          isBackground(thread),
+        ),
       );
     } catch (error) {
       // A retry of the turn is already on its way (queued by another plugin,
@@ -4890,6 +4921,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       judgedIn,
       // Its chain, as the log named it above.
       turn.original,
+      isBackground(live),
     );
   }
   /**
@@ -5095,6 +5127,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       now,
       current.preferredModel,
       freeSeats,
+      isBackground(thread) ? savedForUser : undefined,
     );
     if (to === null) {
       // Nothing to release it on; the wait fires on its own at sendAt and

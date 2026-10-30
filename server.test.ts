@@ -14859,6 +14859,118 @@ describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
     );
   });
 
+  describe("a project already placed (Codex ULTRA-R01)", () => {
+    // main (where proj-1 is) out of session; work the best by quota but
+    // saved for the user; spare free for background work.
+    const blocked = { ...usage, main: () => Response.json(payload(100, 40)), spare: () => Response.json(payload(30, 20)) };
+    const opts = (threads: Record<string, Partial<ThreadResponse>> = {}) => ({
+      kvPreset: { "pace-day": { work: dayStart } },
+      threads,
+    });
+    const bg = { parentThreadId: "thr-parent" };
+
+    it("switches a failed turn of background work behind the account saved for the user", async () => {
+      const h = await host(blocked, opts({ "thread-1": bg }));
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+    });
+
+    it("switches the user's own failed turn to the best account, whatever its pace", async () => {
+      const h = await host(blocked, opts());
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    });
+
+    const send = (h: Awaited<ReturnType<typeof host>>, t: Partial<ThreadResponse>) =>
+      h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id: "thread-1", projectId: "proj-1", ...t }),
+          requestedExecution: { providerId: "claude-code", model: "claude-opus-5-5" },
+          attempt: "start-turn",
+        }),
+      );
+
+    it("places a background turn sent on a blocked account behind the account saved for the user", async () => {
+      const h = await host(blocked, opts());
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await send(h, { originPluginId: "some-automation" })).toEqual({ action: "proceed" });
+      expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+    });
+
+    it("places the user's own turn sent on a blocked account on the best account, whatever its pace", async () => {
+      const h = await host(blocked, opts());
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await send(h, {})).toEqual({ action: "proceed" });
+      expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    });
+
+    it("moves a waiting turn of background work to the account not saved for the user", async () => {
+      // A timed retry of thread-1's failed turn, queued an hour ago on main.
+      const row: QueuedRow = {
+        id: "r1",
+        threadId: "thread-1",
+        payload: { kind: "retry", attempt: 2, reason: "Waiting for main", retryOfTurnRequestId: "creq_r1" },
+        sendAt: NOW + 2 * HOUR + BUFFER,
+        waitingOn: { kind: "time" },
+        createdAt: NOW - HOUR,
+        model: "claude-opus-5-5",
+      };
+      const waiting = (t: Partial<ThreadResponse>) => ({
+        ...opts({ "thread-1": { status: "error", ...t } as Partial<ThreadResponse> }),
+        queued: [row],
+        threadEvents: {
+          "thread-1": [
+            {
+              id: "evt_r1",
+              scope: { kind: "thread" },
+              threadId: "thread-1",
+              seq: 1,
+              createdAt: NOW - HOUR,
+              type: "client/turn/requested",
+              data: { requestId: "creq_r1", execution: { model: "claude-opus-5-5" } },
+            },
+          ],
+        },
+      });
+      // No project listed: the refresh does not move proj-1 off main itself.
+      for (const [t, to] of [
+        [bg, "spare"],
+        [{}, "work"],
+      ] as const) {
+        const h = await hostListing([])(blocked, waiting(t) as HostOptions);
+        const before = h.usageCalls.length;
+        const run = h.harness.behavior.runService("usage-refresh");
+        await vi.waitFor(() => expect(h.usageCalls).toHaveLength(before + 3));
+        run.controller.abort();
+        await run.done;
+        await vi.waitFor(() => expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/${to}`]));
+        await h.harness.dispose();
+      }
+    });
+
+    it("moves background work ahead of the limit behind the account saved for the user", async () => {
+      let clock = NOW;
+      const h = await host(
+        { ...usage, main: () => Response.json(payload(95, 40)), spare: () => Response.json(payload(30, 20)) },
+        { ...opts(), settings: { switchAheadPercent: 90 }, clock: () => clock },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      clock = NOW + 5 * 60_000;
+      await h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: thread({ id: "thread-1", projectId: "proj-1", ...bg }),
+        lastAssistantText: null,
+      });
+      expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+    });
+  });
+
   it("keeps the day's first reading in storage, across a reload", async () => {
     const h = await host(usage);
     dispose = () => h.harness.dispose();
