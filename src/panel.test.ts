@@ -157,7 +157,7 @@ const EN = { ...ES, lang: "en" as const };
 describe("accountRow", () => {
   it("draws an Ultra account by what is left of its week, today's share striped at its end", () => {
     const row = accountRow(
-      ultra("joytorm", 10, "2026-11-02T09:00:00+01:00", { budget: 33.3, spent: 10 }),
+      ultra("studio", 10, "2026-11-02T09:00:00+01:00", { budget: 33.3, spent: 10 }),
       seats(1, 4),
       ES,
     );
@@ -299,8 +299,8 @@ function realState() {
       ultra("mariscal", 100, "2026-10-31T11:00:00+01:00", null),
       ultra("aitor", 98, "2026-11-01T18:00:00+01:00", { budget: 5.5, spent: 11 }, false),
       ultra("ganaresenas", 90, "2026-11-01T22:00:00+01:00", { budget: 3.9, spent: 0 }),
-      ultra("joytorm", 10, "2026-11-02T09:00:00+01:00", { budget: 33.3, spent: 10 }),
-      ultra("siloeads", 0, "2026-11-06T12:00:00+01:00", { budget: 14.3, spent: 0 }),
+      ultra("studio", 10, "2026-11-02T09:00:00+01:00", { budget: 33.3, spent: 10 }),
+      ultra("agency", 0, "2026-11-06T12:00:00+01:00", { budget: 14.3, spent: 0 }),
       ultra("viaulab", 68, "2026-11-04T01:00:00+01:00", { budget: 11.1, spent: 20 }),
       team("team5", 60, "2026-10-31T00:00:00+01:00", 60),
       team("team1", 0, null, 76),
@@ -313,7 +313,7 @@ function realState() {
         : a,
     ),
     seats: {
-      joytorm: seats(1, 4),
+      studio: seats(1, 4),
       ganaresenas: seats(1, 4),
       team1: seats(0, 2),
       team2: seats(2, 2, 1),
@@ -330,15 +330,15 @@ describe("panelList", () => {
   it("says who works, who is kept and which has most week, then the two groups in order", () => {
     const list = panelList(realState(), ES);
     expect(said(list.sentence)).toBe(
-      "Trabajan **joytorm, ganaresenas, team2, team3**. Guardadas para ti: **viaulab y aitor**. La que más semana tiene es **siloeads** (100 %).",
+      "Trabajan **studio, ganaresenas, team2, team3**. Guardadas para ti: **viaulab y aitor**. La que más semana tiene es **agency** (100 %).",
     );
     expect(list.groups.map((g) => g.title)).toEqual([
       "Ultra · lo que queda de la semana",
       "Team · lo que queda de sus 5 h",
     ]);
     expect(list.groups[0].rows.map((r) => r.name)).toEqual([
-      "siloeads",
-      "joytorm",
+      "agency",
+      "studio",
       "viaulab",
       "ganaresenas",
       "aitor",
@@ -352,16 +352,16 @@ describe("panelList", () => {
       "team5",
     ]);
     expect(said(panelList(realState(), EN).sentence)).toBe(
-      "Working: **joytorm, ganaresenas, team2, team3**. Kept for you: **viaulab and aitor**. Most of the week left: **siloeads** (100 %).",
+      "Working: **studio, ganaresenas, team2, team3**. Kept for you: **viaulab and aitor**. Most of the week left: **agency** (100 %).",
     );
   });
 
   it("says one in the singular, none at all, and leaves out what is not there", () => {
     const one = {
-      accounts: [ultra("joytorm", 10, "2026-11-02T09:00:00+01:00", { budget: 33.3, spent: 10 })],
-      seats: { joytorm: seats(1, 4) },
+      accounts: [ultra("studio", 10, "2026-11-02T09:00:00+01:00", { budget: 33.3, spent: 10 })],
+      seats: { studio: seats(1, 4) },
     };
-    expect(said(panelList(one, ES).sentence)).toBe("Trabaja **joytorm**.");
+    expect(said(panelList(one, ES).sentence)).toBe("Trabaja **studio**.");
     const kept = {
       accounts: [ultra("aitor", 98, "2026-11-01T18:00:00+01:00", { budget: 5.5, spent: 11 }, false)],
       seats: {},
@@ -426,23 +426,23 @@ describe("panelWords", () => {
 describe("forecastText", () => {
   it("says when the window that matters runs out at this pace, in the user's language", () => {
     const forecasts = {
-      joytorm: {
+      studio: {
         weekly: { kind: "lasts" as const, until: NOW + 76 * H, percentPerDay: 5 },
         Fable: { kind: "runs-out" as const, at: NOW + 20 * H, percentPerDay: 30 },
       },
-      siloeads: { weekly: { kind: "runs-out" as const, at: NOW + 53 * H, percentPerDay: 12 } },
+      agency: { weekly: { kind: "runs-out" as const, at: NOW + 53 * H, percentPerDay: 12 } },
       team1: { Fable: { kind: "steady" as const } },
     };
-    expect(forecastText(forecasts, "joytorm", "Fable", NOW, "es")).toBe(
+    expect(forecastText(forecasts, "studio", "Fable", NOW, "es")).toBe(
       "Fable: se acaba en 20 h a este ritmo (30 %/día)",
     );
-    expect(forecastText(forecasts, "joytorm", "Fable", NOW, "en")).toBe(
+    expect(forecastText(forecasts, "studio", "Fable", NOW, "en")).toBe(
       "Fable: runs out in 20 h at this pace (30 %/day)",
     );
-    expect(forecastText(forecasts, "joytorm", "", NOW, "es")).toBe(
+    expect(forecastText(forecasts, "studio", "", NOW, "es")).toBe(
       "Semana: llega al reinicio a este ritmo (5 %/día)",
     );
-    expect(forecastText(forecasts, "siloeads", "Fable", NOW, "es")).toBe(
+    expect(forecastText(forecasts, "agency", "Fable", NOW, "es")).toBe(
       "Semana: se acaba en 2 d 5 h a este ritmo (12 %/día)",
     );
     expect(forecastText(forecasts, "team1", "Fable", NOW, "es")).toBeNull();

@@ -257,12 +257,12 @@ function StateWord({ row }: { row: PanelRow }) {
     <span
       key={row.state}
       className={cn(
-        "inline-flex shrink-0 items-center gap-1 font-medium",
+        "whitespace-nowrap font-medium",
         `cs-s-${row.state}`,
         changed && "cs-fade",
       )}
     >
-      <StateIcon state={row.state} />
+      <StateIcon state={row.state} className="mr-1 inline-block align-[-0.15em]" />
       {row.word}
     </span>
   );
@@ -329,7 +329,7 @@ export function AccountRowView({
     >
       <div className="col-start-1 row-start-1 flex min-w-0 flex-col items-start gap-1">
         <span
-          className="max-w-full truncate font-medium leading-tight"
+          className="max-w-full truncate font-semibold leading-tight"
           title={[email, isDefault ? "~/.claude" : null].filter(Boolean).join(" · ") || undefined}
         >
           {row.name}
@@ -345,10 +345,10 @@ export function AccountRowView({
       </div>
       <div className="col-span-2 row-start-2 min-w-0 @lg:col-span-1 @lg:col-start-2 @lg:row-start-1">
         <LeftBar bar={row.bar} />
-        <p className="mt-1.5 flex flex-wrap items-center gap-x-1.5 text-xs leading-snug">
+        <p className="mt-1.5 text-xs leading-snug text-pretty">
           <StateWord row={row} />
           {row.line === "" ? null : (
-            <span className="min-w-0 text-muted-foreground">· {row.line}</span>
+            <span className="text-muted-foreground"> · {row.line}</span>
           )}
         </p>
         {twin === null ? null : (
@@ -913,7 +913,7 @@ export function ThreadAccountCard({ row, forecast }: { row: PanelRow; forecast: 
       {row.line === "" || row.state === "out" || row.state === "nodata" ? null : (
         <p className="text-xs text-muted-foreground">{row.line}</p>
       )}
-      {forecast === null ? null : <p className="text-xs text-muted-foreground">{forecast}</p>}
+      {forecast === null ? null : <p className="text-xs text-pretty text-muted-foreground">{forecast}</p>}
     </div>
   );
 }
