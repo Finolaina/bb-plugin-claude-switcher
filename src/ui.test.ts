@@ -668,3 +668,43 @@ describe("projectsByAccount (the panel's project list)", () => {
     ]);
   });
 });
+
+describe("listText with seats", () => {
+  const NOW = Date.parse("2026-10-29T10:00:00.000Z");
+
+  it("puts each limited account's seats under its line and a final section with who waits", () => {
+    const state = {
+      ...tenAccounts(NOW),
+      seats: {
+        viaulab: { capacity: 4, running: 2, reserved: 1, queued: [] },
+        team1: {
+          capacity: 2,
+          running: 2,
+          reserved: 0,
+          queued: [
+            { threadId: "thr-a", title: "Fix the form" },
+            { threadId: "thr-b", title: null },
+          ],
+        },
+        max3: { capacity: 0, running: 5, reserved: 0, queued: [] },
+      },
+    };
+    const lines = listText(state, NOW, "UTC").split("\n");
+    const at = lines.indexOf("viaulab     ses  10% sem  40% Fable  20%");
+    expect(lines[at + 1]).toBe("            seats 3/4");
+    expect(lines).toContain("            seats 2/2 · 2 waiting");
+    // No limit: no seats line.
+    expect(lines[lines.indexOf("max3        ses   3% sem  12%") + 1]).not.toMatch(/seats/);
+    expect(lines.slice(lines.indexOf("Waiting for a seat:"))).toEqual([
+      "Waiting for a seat:",
+      "team1  #1  thr-a  Fix the form",
+      "team1  #2  thr-b",
+      "",
+    ]);
+  });
+
+  it("says nothing of seats when none are known or nobody waits", () => {
+    const text = listText(tenAccounts(NOW), NOW, "UTC");
+    expect(text).not.toMatch(/seat/i);
+  });
+});

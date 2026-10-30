@@ -247,3 +247,45 @@ describe("an account's row in the panel (Codex E46-R6-003)", () => {
     }
   });
 });
+
+describe("an account's card shows its seats", () => {
+  it("writes seats taken, capacity and who waits in the card's header; nothing without a limit", async () => {
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { AccountCard } = await import("./app");
+    const account = {
+      name: "team1",
+      email: null,
+      accountUuid: null,
+      configDir: "/x/team1",
+      observedAt: null,
+      problem: null,
+      usage: null,
+    };
+    const text = (seats: Parameters<typeof AccountCard>[0]["seats"]) =>
+      renderToStaticMarkup(
+        createElement(AccountCard, {
+          account,
+          isDefault: false,
+          preferredModel: "",
+          forecasts: undefined,
+          seats,
+        }),
+      ).replace(/<[^>]*>/g, "");
+    expect(
+      text({
+        capacity: 4,
+        running: 2,
+        reserved: 1,
+        queued: [
+          { threadId: "a", title: null },
+          { threadId: "b", title: "x" },
+        ],
+      }),
+    ).toContain("seats 3/4 · 2 waiting");
+    expect(
+      text({ capacity: 0, running: 9, reserved: 0, queued: [] }),
+    ).not.toContain("seats");
+    expect(text(undefined)).not.toContain("seats");
+  });
+});

@@ -966,6 +966,26 @@ describe("decidePlacement with a reserved model (2026-10-13: the Max accounts ar
       ).toEqual({ kind: "move", account: "spare", why: "back-from-excursion" });
     });
 
+    it("keeps the project where it is while home has no free seat (Astra SEATS-R2-004)", () => {
+      const accounts = [seat, maxWithFable];
+      // Home full, the seat runs Fable: it stays, its thread waits there.
+      expect(
+        decidePlacement({
+          ...onSeat,
+          accounts,
+          freeSeats: (name) => (name === "spare" ? 0 : 1),
+        }),
+      ).toEqual({ kind: "keep" });
+      // Every account full.
+      expect(
+        decidePlacement({ ...onSeat, accounts, freeSeats: () => 0 }),
+      ).toEqual({ kind: "keep" });
+      // A seat free at home again: back.
+      expect(
+        decidePlacement({ ...onSeat, accounts, freeSeats: () => 1 }),
+      ).toEqual({ kind: "move", account: "spare", why: "back-from-excursion" });
+    });
+
     it("keeps the project on the seat while home is out of Fable, blocked, unmeasured or vetoed (excursionFrom null)", () => {
       const out = { ...maxWithFable, models: { Fable: { usedPercent: 100, resetsAt: NOW + 24 * HOUR } } };
       expect(decidePlacement({ ...onSeat, accounts: [seat, out] })).toEqual({ kind: "keep" });
@@ -1743,5 +1763,137 @@ describe("placedOn: where the placement before a turn runs it", () => {
     expect(placedOn(opus("team1", [reset]))).toBe("team1");
     // A Max account keeping Fable runs a Fable turn.
     expect(placedOn({ ...opus("max1", [max]), preferredModel: "Fable" })).toBe("max1");
+  });
+});
+
+describe("seats steer where a project goes, and never move one by themselves", () => {
+  const free: Record<string, number> = { main: 0, work: 0, spare: 2 };
+  const freeSeats = (name: string) => free[name] ?? 0;
+
+  it("a new project goes to the best account with a free seat; with none free anywhere, it stays (Astra SEATS-R05)", () => {
+    const accounts = [
+      account("main"),
+      account("work", { session: { usedPercent: 1, resetsAt: NOW + HOUR } }),
+      account("spare", { session: { usedPercent: 40, resetsAt: NOW + HOUR } }),
+    ];
+    const placement = {
+      currentAccount: "main",
+      isNew: true,
+      accounts,
+      preferredModel: "",
+      now: NOW,
+    };
+    expect(decidePlacement(placement)).toEqual({
+      kind: "move",
+      account: "work",
+      why: "new-project",
+    });
+    expect(decidePlacement({ ...placement, freeSeats })).toEqual({
+      kind: "move",
+      account: "spare",
+      why: "new-project",
+    });
+    expect(decidePlacement({ ...placement, freeSeats: () => 0 })).toEqual({
+      kind: "keep",
+    });
+  });
+
+  it("a known project that can run stays on its account with no free seat (its thread waits there)", () => {
+    expect(
+      decidePlacement({
+        currentAccount: "main",
+        isNew: false,
+        accounts: [account("main"), account("spare")],
+        preferredModel: "",
+        now: NOW,
+        freeSeats,
+      }),
+    ).toEqual({ kind: "keep" });
+  });
+
+  it("a project moved off a blocked account goes where a seat is free", () => {
+    const accounts = [
+      account("main", { session: { usedPercent: 100, resetsAt: NOW + HOUR } }),
+      account("work", { session: { usedPercent: 1, resetsAt: NOW + HOUR } }),
+      account("spare", { session: { usedPercent: 40, resetsAt: NOW + HOUR } }),
+    ];
+    expect(
+      decidePlacement({
+        currentAccount: "main",
+        isNew: false,
+        accounts,
+        preferredModel: "",
+        now: NOW,
+        freeSeats,
+      }),
+    ).toEqual({ kind: "move", account: "spare", why: "current-blocked" });
+    // No seat free anywhere: it stays, and its thread waits there.
+    expect(
+      decidePlacement({
+        currentAccount: "main",
+        isNew: false,
+        accounts,
+        preferredModel: "",
+        now: NOW,
+        freeSeats: () => 0,
+      }),
+    ).toEqual({ kind: "keep" });
+  });
+
+  it("a wait released elsewhere goes only to an account with a free seat (Astra SEATS-R05)", () => {
+    const accounts = [
+      account("work", { session: { usedPercent: 1, resetsAt: NOW + HOUR } }),
+      account("spare", { session: { usedPercent: 40, resetsAt: NOW + HOUR } }),
+    ];
+    expect(bestAccount(accounts, "", NOW, undefined, freeSeats)).toBe("spare");
+    expect(bestAccount(accounts, "", NOW, undefined, () => 0)).toBeNull();
+  });
+
+  it("a switch on a limit picks a target with a free seat, and falls back to quota alone when none has one (the only move that may: Astra SEATS-R05)", () => {
+    const accounts = [
+      account("main", { session: { usedPercent: 100, resetsAt: NOW + 2 * HOUR } }),
+      account("work", { session: { usedPercent: 1, resetsAt: NOW + HOUR } }),
+      account("spare", { session: { usedPercent: 40, resetsAt: NOW + HOUR } }),
+    ];
+    expect(decideSwitch(input({ accounts, freeSeats }))).toMatchObject({
+      kind: "switch",
+      account: "spare",
+    });
+    expect(
+      decideSwitch(input({ accounts, freeSeats: () => 0 })),
+    ).toMatchObject({ kind: "switch", account: "work" });
+  });
+
+  it("a thread left in error is retried on its own account even with no free seat there", () => {
+    expect(
+      decideSwitch(
+        input({
+          stuck: true,
+          accounts: [account("main"), account("spare")],
+          freeSeats,
+        }),
+      ),
+    ).toMatchObject({ kind: "retry", account: "main" });
+  });
+
+  it("ahead of the limit, moves only to an account with a free seat, or not at all", () => {
+    const ahead = {
+      currentAccount: "main",
+      preferredModel: "",
+      threshold: 90,
+      now: NOW,
+      accounts: [
+        account("main", { session: { usedPercent: 95, resetsAt: NOW + HOUR } }),
+        account("work", { session: { usedPercent: 1, resetsAt: NOW + HOUR } }),
+        account("spare", { session: { usedPercent: 40, resetsAt: NOW + HOUR } }),
+      ],
+    };
+    expect(decideAhead({ ...ahead, freeSeats })).toMatchObject({
+      kind: "move",
+      account: "spare",
+    });
+    expect(decideAhead({ ...ahead, freeSeats: () => 0 })).toEqual({
+      kind: "keep",
+    });
   });
 });

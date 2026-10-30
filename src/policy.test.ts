@@ -637,3 +637,24 @@ describe("session quarter before the deadline (S1-S7, S12)", () => {
     ).toBe("max-a");
   });
 });
+
+describe("chooseAccount with seats", () => {
+  it("leaves out the accounts with no free seat, in the same quota order among the rest", () => {
+    const accounts = [
+      account("full", { weekly: { usedPercent: 90, resetsAt: NOW + 6 * HOUR } }),
+      account("second", { weekly: { usedPercent: 50, resetsAt: NOW + 24 * HOUR } }),
+      account("third", { weekly: { usedPercent: 10, resetsAt: NOW + 72 * HOUR } }),
+    ];
+    const free: Record<string, number> = { full: 0, second: 1, third: 3 };
+    expect(chooseAccount(accounts, { preferredModel: "" })?.account).toBe("full");
+    expect(
+      chooseAccount(accounts, {
+        preferredModel: "",
+        freeSeats: (name) => free[name] ?? 0,
+      })?.account,
+    ).toBe("second");
+    expect(
+      chooseAccount(accounts, { preferredModel: "", freeSeats: () => 0 }),
+    ).toBeNull();
+  });
+});

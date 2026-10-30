@@ -4,6 +4,85 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.31] - 2026-10-30
+
+### Added
+
+- **Seats per account: threads wait their turn instead of emptying one
+  account.** With many threads open, they all ran on the account with the
+  most room and emptied its 5-hour window in minutes (2026-10-29: 7 of 8
+  accounts at 100 % at once). Each account now has seats, threads running
+  turns on it at once: `seatsMax` (default 4) on a Max account, `seatsTeam`
+  (default 2) on a Team account, 0 = no limit. The kind comes from
+  `oauthAccount.organizationType` (`claude_max`, `claude_team`); unknown,
+  an account without a general weekly window is Team. At the dispatch
+  checkpoint, after the turn is placed, a thread whose account is full
+  waits («Waiting for a seat on <account>: 2/2 threads running, 1 ahead in
+  the queue», asked again every 30 s, not counted against the 3 waits of a
+  new project's placement); a turn that ends, fails or whose thread goes
+  frees its seat for the first in line and bb is asked again at once. A
+  reservation whose turn does not start within 90 s is freed. Every turn
+  is checked, placed by the plugin or not: when its project's account
+  cannot be read, the message waits up to three times, then goes with a
+  warning. A started turn keeps the seat its dispatch reserved, even when
+  the project moved before bb announced it. The seats are the login's
+  (`accountUuid`): two directories of one account share them, and a
+  renamed default keeps them. The seats are kept in memory; after a
+  reload the threads bb reports active are counted before any turn starts
+  (a message waits meanwhile, at once, and bb asks again as soon as they
+  are counted); a read that fails or
+  gives no answer within 3 s is tried three times, 2 s apart, after which
+  turns go with what was counted, and a thread that ends while counted is
+  not counted. A project on an account the plugin no longer finds waits
+  like one whose account cannot be read, also when the plugin places the
+  turn; it never takes the default's seat, and its running threads are
+  counted on nobody's. A project moved (picked by hand, rescued) while its
+  turn was being placed takes its seat where it is now, never where the
+  placement left it; while a write of its account is under way, also one
+  that confirms the account it is on, the turn waits. The whole dispatch
+  checkpoint answers within 8 s, every read in it together (bb fails the
+  message at 10 s): out of time, the message waits and is asked again in
+  5 s. A turn that starts without a reservation and whose account cannot
+  be read within 3 s keeps the seat it held, or is counted on the next
+  refresh. Cancelling the last message of a thread waiting for a seat
+  gives its place, or the seat reserved for it, to the next in line,
+  unless a new message of the thread took it meanwhile.
+- **A project is never moved to find a seat.** Seats only steer moves made
+  for other reasons, and those go only to an account with a free seat (a
+  new project, a move before a turn, a move off a long wait, a move ahead
+  of the limit); with none free anywhere the project stays and its
+  threads wait. The one exception is the switch after a turn failed on a
+  limit, which picks by quota among the others when none has a seat. A
+  pick by hand waits for a seat like any.
+- `bb claude-switcher list` shows `seats 3/4` under each limited account
+  and a «Waiting for a seat:» section; each account card in Settings shows
+  `seats 3/4 · 2 waiting`, updated as seats change.
+- Each measurement of an account stores a sample whole in itself
+  (`seat-samples`, a week, one per account and measurement): seats
+  running and reserved then, session and weekly %, and their resets.
+  `bb claude-switcher seats [--json]` prints them with the session % spent
+  per hour and seat, to set the defaults from data (they are a guess).
+- No project stays on an account out of the preferred model or without a
+  login: after every refresh the plugin moves each one it manages to the
+  best account with a free seat, whatever `switchAheadPercent` says (bb
+  greys out the composer of a project on an account at its limit, so no
+  turn reached the checkpoint that moves it); a project whose account
+  cannot be read within 3 s, read again or moved within 10 s, is skipped
+  with a warning and the others are still looked at. An account left without a
+  login now logs why, once: nothing in the store, a stored login it cannot
+  parse, a refused refresh, or the usage endpoint's 401 with its answer.
+
+### Known limits (Codex Astra, final inspection; left for 0.2.32)
+
+- Cancelling a second message queued on a thread whose first message was
+  just let through (between the dispatch and `thread.active`) releases the
+  seat the first one reserved, and another thread may take it before the
+  first turn is counted (SEATS-R5-001).
+- The rescue after a refresh takes a project whose variable names an
+  account the plugin no longer finds for one on the default account, and
+  judges it by the default's usage (SEATS-R5-002); the dispatch itself
+  already tells such an account apart and waits.
+
 ## [0.2.30] - 2026-10-29
 
 ### Fixed

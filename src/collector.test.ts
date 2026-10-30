@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Account } from "./accounts.js";
-import type { CredentialIo } from "./credentials.js";
+import { keychainService, type CredentialIo } from "./credentials.js";
 import { UsageCollector } from "./collector.js";
 
 const NOW = Date.parse("2026-09-29T10:00:00.000Z");
@@ -292,6 +292,43 @@ describe("UsageCollector", () => {
       login: "no",
       usage: null,
     });
+  });
+
+  it("warns once per cause why an account has no login, never with the token (Aitor 2026-10-30, Añadido 2)", async () => {
+    const warnings: string[] = [];
+    const responses = [
+      () => new Response('{"error":"bad token"}', { status: 401 }),
+      () => new Response('{"error":"bad token"}', { status: 401 }),
+      () => Response.json(PAYLOAD),
+      () => new Response("", { status: 401 }),
+    ];
+    const collector = new UsageCollector({
+      io: io(responses).credentialIo,
+      now: () => NOW,
+      warn: (message) => warnings.push(message),
+    });
+    await collector.collect(ACCOUNT);
+    await collector.collect(ACCOUNT);
+    expect(warnings).toEqual([
+      // sha256("tok")[:8]; the stored token expires an hour after NOW.
+      'account work: not logged in: usage endpoint answered 401 (token …1a7674eb, expires in 60 min, refreshed: no): {"error":"bad token"}',
+    ]);
+    // Logged in again, then refused again: a new line.
+    await collector.collect(ACCOUNT);
+    await collector.collect(ACCOUNT);
+    expect(warnings).toHaveLength(2);
+    expect(warnings.join("\n")).not.toMatch(/\btok\b/);
+
+    const none: string[] = [];
+    const missing = new UsageCollector({
+      io: io([], { loggedIn: false }).credentialIo,
+      now: () => NOW,
+      warn: (message) => none.push(message),
+    });
+    await missing.collect(ACCOUNT);
+    expect(none).toEqual([
+      `account work: not logged in: no login in the store (security rc 44 for "${keychainService(ACCOUNT.configDir)}")`,
+    ]);
   });
 
   it("turns a malformed payload into an error, never into zero usage", async () => {

@@ -5,6 +5,7 @@ import {
   keychainService,
   type CredentialIo,
   type PendingCredentials,
+  type TokenNotes,
 } from "./credentials.js";
 
 const NOW = Date.parse("2026-09-29T10:00:00.000Z");
@@ -289,10 +290,34 @@ describe("accessToken", () => {
     );
   });
 
-  it("returns null when there is no login (and never refreshes)", async () => {
+  it("returns null when there is no login (and never refreshes), noting why", async () => {
     const { io, posted } = fakeIo();
-    expect(await accessToken(io, DIR, NOW)).toBeNull();
+    const notes: TokenNotes = {};
+    expect(await accessToken(io, DIR, NOW, new Map(), notes)).toBeNull();
     expect(posted).toEqual([]);
+    expect(notes).toEqual({
+      noLogin: `no login in the store (security rc 44 for "${keychainService(DIR)}")`,
+    });
+  });
+
+  it("notes a login in the store it cannot parse apart from no login at all", async () => {
+    const { io, store } = fakeIo();
+    store.set(keychainService(DIR), "{not json");
+    const notes: TokenNotes = {};
+    expect(await accessToken(io, DIR, NOW, new Map(), notes)).toBeNull();
+    expect(notes.noLogin).toBe("credentials in the store could not be parsed");
+  });
+
+  it("notes the expiry of the token it answers, stored or refreshed", async () => {
+    const { io, store } = fakeIo();
+    store.set(keychainService(DIR), cred(NOW + 5));
+    const stored: TokenNotes = {};
+    await accessToken(io, DIR, NOW, new Map(), stored);
+    expect(stored).toEqual({ expiresAt: NOW + 5 });
+    store.set(keychainService(DIR), cred(NOW - 1));
+    const refreshed: TokenNotes = {};
+    await accessToken(io, DIR, NOW, new Map(), refreshed);
+    expect(refreshed).toEqual({ expiresAt: NOW + 3_600_000 });
   });
 
   it("returns null when the provider rejects the refresh token (the login is gone)", async () => {
@@ -301,7 +326,9 @@ describe("accessToken", () => {
         new Response('{"error":"invalid_grant"}', { status: 400 }),
     });
     store.set(keychainService(DIR), cred(NOW - 1));
-    expect(await accessToken(io, DIR, NOW)).toBeNull();
+    const notes: TokenNotes = {};
+    expect(await accessToken(io, DIR, NOW, new Map(), notes)).toBeNull();
+    expect(notes.noLogin).toBe("refresh rejected");
   });
 
   it("throws on a token endpoint outage or an unreadable body: not a logout", async () => {
@@ -380,11 +407,19 @@ describe("fetchUsage", () => {
 
   it("distinguishes 429, 401 and other failures", async () => {
     const statuses = [429, 401, 503];
+    // The refusal's body goes to the log, cut at 200 characters.
+    const refusal = `{"error":"invalid token"}${"x".repeat(300)}`;
     const { io } = fakeIo({
-      fetch: async () => new Response("", { status: statuses.shift() }),
+      fetch: async () => {
+        const status = statuses.shift();
+        return new Response(status === 401 ? refusal : "", { status });
+      },
     });
     expect(await fetchUsage(io, "tok")).toEqual({ status: "rate-limited" });
-    expect(await fetchUsage(io, "tok")).toEqual({ status: "unauthenticated" });
+    expect(await fetchUsage(io, "tok")).toEqual({
+      status: "unauthenticated",
+      body: refusal.slice(0, 200),
+    });
     expect(await fetchUsage(io, "tok")).toMatchObject({ status: "error" });
   });
 });
