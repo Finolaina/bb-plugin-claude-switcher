@@ -1750,7 +1750,7 @@ describe("seats steer where a project goes, and never move one by themselves", (
   const free: Record<string, number> = { main: 0, work: 0, spare: 2 };
   const freeSeats = (name: string) => free[name] ?? 0;
 
-  it("a new project goes to the best account with a free seat; with none free anywhere, to the best by quota", () => {
+  it("a new project goes to the best account with a free seat; with none free anywhere, it stays (Astra SEATS-R05)", () => {
     const accounts = [
       account("main"),
       account("work", { session: { usedPercent: 1, resetsAt: NOW + HOUR } }),
@@ -1774,9 +1774,7 @@ describe("seats steer where a project goes, and never move one by themselves", (
       why: "new-project",
     });
     expect(decidePlacement({ ...placement, freeSeats: () => 0 })).toEqual({
-      kind: "move",
-      account: "work",
-      why: "new-project",
+      kind: "keep",
     });
   });
 
@@ -1809,9 +1807,29 @@ describe("seats steer where a project goes, and never move one by themselves", (
         freeSeats,
       }),
     ).toEqual({ kind: "move", account: "spare", why: "current-blocked" });
+    // No seat free anywhere: it stays, and its thread waits there.
+    expect(
+      decidePlacement({
+        currentAccount: "main",
+        isNew: false,
+        accounts,
+        preferredModel: "",
+        now: NOW,
+        freeSeats: () => 0,
+      }),
+    ).toEqual({ kind: "keep" });
   });
 
-  it("a switch on a limit picks a target with a free seat, and falls back to quota alone when none has one", () => {
+  it("a wait released elsewhere goes only to an account with a free seat (Astra SEATS-R05)", () => {
+    const accounts = [
+      account("work", { session: { usedPercent: 1, resetsAt: NOW + HOUR } }),
+      account("spare", { session: { usedPercent: 40, resetsAt: NOW + HOUR } }),
+    ];
+    expect(bestAccount(accounts, "", NOW, undefined, freeSeats)).toBe("spare");
+    expect(bestAccount(accounts, "", NOW, undefined, () => 0)).toBeNull();
+  });
+
+  it("a switch on a limit picks a target with a free seat, and falls back to quota alone when none has one (the only move that may: Astra SEATS-R05)", () => {
     const accounts = [
       account("main", { session: { usedPercent: 100, resetsAt: NOW + 2 * HOUR } }),
       account("work", { session: { usedPercent: 1, resetsAt: NOW + HOUR } }),

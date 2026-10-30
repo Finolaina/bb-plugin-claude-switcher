@@ -63,8 +63,9 @@ export interface SwitchInput {
   /** The model kept for its own threads; see ChoiceOptions.reserveModel. */
   reserveModel?: string;
   /**
-   * Seats free on an account (see src/seats.ts). A move prefers an account
-   * with one; seats never move a project by themselves.
+   * Seats free on an account (see src/seats.ts). The switch goes to an
+   * account with one, and only with none anywhere by quota alone (Astra
+   * SEATS-R05); seats never move a project by themselves.
    */
   freeSeats?: (account: string) => number;
   maximumWaitMs: number | null;
@@ -162,21 +163,17 @@ function freeAt(account: AccountUsage, model: string): number | null {
 }
 
 /**
- * The choice among the accounts with a free seat; with none free anywhere,
- * by quota alone: the project goes where it can run, and its threads wait
- * there for a seat.
+ * The choice among the accounts with a free seat: an account with none is
+ * no target (Astra SEATS-R05), and with none free anywhere the project
+ * stays, its threads waiting for a seat where it is. Unset `freeSeats`:
+ * seats do not count.
  */
 function chooseSeated(
   accounts: AccountUsage[],
   options: ChoiceOptions,
   freeSeats: ((account: string) => number) | undefined,
 ): Choice | null {
-  return (
-    (freeSeats === undefined
-      ? null
-      : chooseAccount(accounts, { ...options, freeSeats })) ??
-    chooseAccount(accounts, options)
-  );
+  return chooseAccount(accounts, { ...options, freeSeats });
 }
 
 export function decideSwitch(input: SwitchInput): SwitchDecision {
@@ -213,7 +210,14 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
   const others = accounts.filter(
     (a) => a.name !== input.currentAccount && a.name !== failedOn,
   );
-  const choice = chooseSeated(others, options, input.freeSeats);
+  // The only move that may land on an account without a seat: this one
+  // cannot work, so the thread waits for a seat elsewhere.
+  // ponytail: the alternative is waiting for a seat on the spent account,
+  // which does not come back until its reset; a full target means a wait
+  // of a turn or two, and a quota choice may still pick the busiest one.
+  const choice =
+    chooseSeated(others, options, input.freeSeats) ??
+    chooseAccount(others, options);
   if (choice !== null) {
     return {
       kind: "switch",
@@ -453,8 +457,9 @@ export interface PlacementInput {
    */
   excursionFrom?: string | null;
   /**
-   * Seats free on an account (see src/seats.ts). A move prefers an account
-   * with one; seats never move a project by themselves.
+   * Seats free on an account (see src/seats.ts). A move goes only to an
+   * account with one (Astra SEATS-R05); seats never move a project by
+   * themselves.
    */
   freeSeats?: (account: string) => number;
   now: number;
@@ -473,7 +478,7 @@ export function bestAccount(
   preferredModel: string,
   now: number,
   reserveModel?: string,
-  /** Set: an account with a free seat first (see chooseSeated). */
+  /** Set: only an account with a free seat (see chooseSeated). */
   freeSeats?: (account: string) => number,
 ): string | null {
   return (
