@@ -130,7 +130,7 @@ export function realReading(): State {
         { ...ULTRA_5H, pace: pace(3.9, 2) },
       ),
       account(
-        "joytorm",
+        "studio",
         {
           blocked: false,
           session: w(12, "2026-10-31T03:10"),
@@ -140,7 +140,7 @@ export function realReading(): State {
         { ...ULTRA_5H, pace: pace(33.3, 12) },
       ),
       account(
-        "siloeads",
+        "agency",
         {
           blocked: false,
           session: w(0, null),
@@ -169,7 +169,7 @@ export function realReading(): State {
       {
         id: "p1",
         name: "web-shop",
-        account: "joytorm",
+        account: "studio",
         owned: true,
         external: false,
       },
@@ -193,10 +193,10 @@ export function realReading(): State {
     preferredModel: "Fable",
     autoSwitch: true,
     lastSwitch: null,
-    bestAccount: "siloeads",
+    bestAccount: "agency",
     history: [],
     forecasts: {
-      joytorm: {
+      studio: {
         weekly: {
           kind: "lasts",
           until: at("2026-11-02T09:00"),
@@ -216,8 +216,8 @@ export function realReading(): State {
       mariscal: seats(0, 0, 4, 0),
       aitor: seats(0, 0, 4, 0),
       ganaresenas: seats(1, 0, 4, 0),
-      joytorm: seats(1, 1, 4, 0),
-      siloeads: seats(0, 0, 4, 0),
+      studio: seats(1, 1, 4, 0),
+      agency: seats(0, 0, 4, 0),
       team1: seats(0, 0, 2, 0),
       team2: seats(2, 0, 2, 4),
       team3: seats(0, 0, 2, 0),
