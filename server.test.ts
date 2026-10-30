@@ -304,6 +304,13 @@ interface QueuedRow {
 
 interface HostOptions {
   settings?: Record<string, string | number | boolean>;
+  /**
+   * The projects bb lists, by id (default: proj-1, proj-2 and, on request,
+   * personal). Every refresh moves a listed project off an account that
+   * cannot run (rescueStranded): a test about another move lists only the
+   * projects it looks at.
+   */
+  listed?: string[];
   presetEnv?: Record<string, EnvVar[]>;
   /** Rows already queued (e.g. by provider-retry) when the plugin acts. */
   queued?: QueuedRow[];
@@ -623,13 +630,16 @@ async function host(
       },
       projects: {
         // Like bb: the personal project ("Don't work in a project") only on request.
-        list: async (args?: { includePersonal?: boolean }) => [
-          { id: "proj-1", name: "Website" },
-          { id: "proj-2", name: "Other" },
-          ...(args?.includePersonal === true
-            ? [{ id: "personal", name: "Personal" }]
-            : []),
-        ],
+        list: async (args?: { includePersonal?: boolean }) =>
+          [
+            { id: "proj-1", name: "Website" },
+            { id: "proj-2", name: "Other" },
+            ...(args?.includePersonal === true
+              ? [{ id: "personal", name: "Personal" }]
+              : []),
+          ].filter(
+            (p) => options.listed === undefined || options.listed.includes(p.id),
+          ),
         machineEnvironment: async ({ projectId }: { projectId: string }) => {
           envReads.push(projectId);
           if (options.failEnvRead?.includes(projectId))
@@ -779,6 +789,11 @@ function oneSessionIo(order: string[], link?: () => Promise<void>): SessionsIo {
   };
 }
 const SITE = { "proj-1": [{ path: "/home/someone/site" }] };
+
+/** host() with bb listing only the projects `listed` (see HostOptions.listed). */
+function hostListing(listed: string[]): typeof host {
+  return (usage, options = {}) => host(usage, { listed, ...options });
+}
 
 let dispose: (() => void) | null = null;
 afterEach(() => {
@@ -7634,6 +7649,9 @@ describe("an account that refuses the turn", () => {
 });
 
 describe("a wait another account can end sooner", () => {
+  // No project listed: a refresh would also move the projects off an
+  // account out of usage (rescueStranded, tested on its own).
+  const host = hostListing([]);
   // 2026-10-04: the «bots» mother thread waited until 03:00 for its
   // account's session while another account had been free since 00:45 (it
   // could not be measured when the wait was chosen). After each refresh, a
@@ -10556,6 +10574,9 @@ describe("an Opus turn never retried, released or placed on a Max account that k
   });
 
   describe("a waiting Opus turn and the refresh (Codex BM-R1-004, BM-R1-005)", () => {
+    // No project listed: a refresh would also move the projects off an
+    // account out of usage (rescueStranded, tested on its own).
+    const host = hostListing([]);
     it("moved by the refresh to a free seat: that is an excursion too, and the Fable turn goes back once the Max account can run", async () => {
       let mainSession = 100;
       const h = await host(
@@ -12144,6 +12165,9 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
   // the banner comes back with the reads. A thread with provider-retry's
   // retry queued is judged by nothing else meanwhile.
   describe("a refresh that fails still asks the banners (Sol B2-R5-001)", () => {
+    // No project listed: a refresh would also move the projects off an
+    // account out of usage (rescueStranded, tested on its own).
+    const host = hostListing([]);
     const refreshed = (h: Awaited<ReturnType<typeof host>>) =>
       h.harness.behavior.callRpc("accounts_refresh", null);
     /** provider-retry's retry of thread-1's turn, for main's session reset. */
@@ -12207,7 +12231,7 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       const failEnvRead: string[] = [];
       const h = await host(
         { ...NO_FABLE, spare: () => spare() },
-        { settings: { preferredModel: "Fable", maximumWaitHours: 1 }, failEnvRead },
+        { settings: { preferredModel: "Fable", maximumWaitHours: 1 }, failEnvRead, listed: ["proj-1"] },
       );
       dispose = () => h.harness.dispose();
       await h.harness.behavior.emitThreadEvent("turn.failed", failure());
@@ -13897,6 +13921,176 @@ describe("bb claude-switcher seats", () => {
     expect(samples.main.map((s: number[]) => s.slice(0, 3))).toEqual([
       [NOW, 0, 0],
       [t, 0, 1],
+    ]);
+  });
+});
+
+// Aitor 2026-10-30, Añadido 2: bb greys out the composer of a project whose
+// account is at its limit (Mariscal · Web on ganaresenas, Fable at 100 %),
+// so no turn reaches the checkpoint that would move it. Every refresh moves
+// such a project, and one on an account without a login, to the best
+// account with a free seat, whatever switchAheadPercent says.
+describe("no project is left on an account out of the preferred model or without a login", () => {
+  /** main (where every project starts) is out of Fable until 14:00; work ranks first, spare second. */
+  const MAIN_OUT_OF_FABLE = {
+    main: () => Response.json(payload(10, 40, 100)),
+    spare: () => Response.json(payload(10, 60, 20)),
+    work: () => Response.json(payload(5, 20, 30)),
+  };
+  /** Only proj-1 is listed: the projects of the seat holders do not move. */
+  const OPTIONS = {
+    listed: ["proj-1"],
+    settings: { preferredModel: "Fable", seatsMax: 1 },
+  };
+  const onWork = {
+    "proj-2": [
+      { name: ENV_VAR, note: ownNote("work"), secret: true, value: null },
+    ],
+  };
+  async function onePass(h: Awaited<ReturnType<typeof host>>) {
+    const before = h.usageCalls.length;
+    const run = h.harness.behavior.runService("usage-refresh");
+    await vi.waitFor(() => {
+      expect(h.usageCalls).toHaveLength(before + 3);
+    });
+    run.controller.abort();
+    await run.done;
+  }
+  const logged = (h: Awaited<ReturnType<typeof host>>, level: string) =>
+    h.harness.logEntries
+      .filter((e) => e.level === level)
+      .map((e) => e.message);
+
+  it("moves a project off an account out of Fable to the best account, with switchAheadPercent at 0", async () => {
+    const h = await host(MAIN_OUT_OF_FABLE, OPTIONS);
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-1", `${ACCOUNTS}/work`],
+    ]);
+    expect(logged(h, "info")).toContain(
+      "project Website: moved from main (exhausted for Fable until 2026-09-29 14:00) to work (seats 0/1)",
+    );
+    const state = (await h.harness.behavior.callRpc(
+      "accounts_list",
+      null,
+    )) as State;
+    expect(state.history[0]).toMatchObject({
+      projectId: "proj-1",
+      from: "main",
+      to: "work",
+      reason: "Moved to account work: main exhausted for Fable until 2026-09-29 14:00",
+    });
+    // Done: the next refresh finds it on an account that can run.
+    await onePass(h);
+    expect(h.envSet).toHaveLength(1);
+  });
+
+  it("only to an account with a free seat: the best one full, the next one", async () => {
+    const h = await host(MAIN_OUT_OF_FABLE, { ...OPTIONS, presetEnv: onWork });
+    dispose = () => h.harness.dispose();
+    // proj-2's thread takes work's only seat.
+    expect(await sent(h, "thr-2", "proj-2")).toEqual({ action: "proceed" });
+    await onePass(h);
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-1", `${ACCOUNTS}/spare`],
+    ]);
+  });
+
+  it("stays when no other account with a free seat can run Fable, and says so", async () => {
+    const h = await host(MAIN_OUT_OF_FABLE, {
+      ...OPTIONS,
+      presetEnv: {
+        ...onWork,
+        personal: [
+          { name: ENV_VAR, note: ownNote("spare"), secret: true, value: null },
+        ],
+      },
+    });
+    dispose = () => h.harness.dispose();
+    expect(await sent(h, "thr-2", "proj-2")).toEqual({ action: "proceed" });
+    expect(await sent(h, "thr-3", "personal")).toEqual({ action: "proceed" });
+    await onePass(h);
+    expect(h.envSet).toEqual([]);
+    expect(logged(h, "debug")).toContain(
+      "project Website: left on main (exhausted for Fable until 2026-09-29 14:00): no other account with a free seat can run Fable",
+    );
+  });
+
+  it("moves a project off an account without a login, and the log says why it has none", async () => {
+    const h = await host(
+      { ...MAIN_OUT_OF_FABLE, main: () => new Response("{}", { status: 401 }) },
+      OPTIONS,
+    );
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-1", `${ACCOUNTS}/work`],
+    ]);
+    expect(logged(h, "info")).toContain(
+      "project Website: moved from main (not logged in) to work (seats 0/1)",
+    );
+    expect(logged(h, "warn")).toContainEqual(
+      expect.stringMatching(
+        /^account main: not logged in: usage endpoint answered 401 \(token …[0-9a-f]{8}, expires in \d+ min, refreshed: no\): \{\}$/,
+      ),
+    );
+  });
+
+  it("one project that cannot be moved does not keep the others where they are", async () => {
+    const h = await host(MAIN_OUT_OF_FABLE, {
+      ...OPTIONS,
+      listed: ["proj-1", "proj-2"],
+      failSet: ["proj-1"],
+    });
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-2", `${ACCOUNTS}/work`],
+    ]);
+    expect(logged(h, "warn")).toContainEqual(
+      expect.stringMatching(/^project Website: not moved off its account: /),
+    );
+  });
+
+  it("never moves a project whose account variable was set outside the plugin, nor any with automatic switching off", async () => {
+    const byHand = await host(MAIN_OUT_OF_FABLE, {
+      ...OPTIONS,
+      presetEnv: {
+        "proj-1": [
+          { name: ENV_VAR, note: "set by hand", secret: true, value: null },
+        ],
+      },
+    });
+    dispose = () => byHand.harness.dispose();
+    await onePass(byHand);
+    expect(byHand.envSet).toEqual([]);
+    byHand.harness.dispose();
+    const off = await host(MAIN_OUT_OF_FABLE, {
+      ...OPTIONS,
+      settings: { ...OPTIONS.settings, autoSwitch: false },
+    });
+    dispose = () => off.harness.dispose();
+    await onePass(off);
+    expect(off.envSet).toEqual([]);
+  });
+
+  it("a turn of a project on an account out of Fable goes out on another account with a free seat at the checkpoint, with switchAheadPercent at 0", async () => {
+    const h = await host(MAIN_OUT_OF_FABLE, { ...OPTIONS, presetEnv: onWork });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect(await sent(h, "thr-2", "proj-2")).toEqual({ action: "proceed" });
+    // As bb asks it: the message names its model.
+    const fable = await h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: "thr-1", projectId: "proj-1" }),
+        requestedExecution: { providerId: "claude-code", model: "claude-fable-5-1" },
+        attempt: "start-turn",
+      }),
+    );
+    expect(fable).toEqual({ action: "proceed" });
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-1", `${ACCOUNTS}/spare`],
     ]);
   });
 });
