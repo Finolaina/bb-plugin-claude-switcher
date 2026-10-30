@@ -72,6 +72,17 @@ project uses [Semantic Versioning](https://semver.org/).
   login now logs why, once: nothing in the store, a stored login it cannot
   parse, a refused refresh, or the usage endpoint's 401 with its answer.
 
+### Known limits (Codex Astra, final inspection; left for 0.2.32)
+
+- Cancelling a second message queued on a thread whose first message was
+  just let through (between the dispatch and `thread.active`) releases the
+  seat the first one reserved, and another thread may take it before the
+  first turn is counted (SEATS-R5-001).
+- The rescue after a refresh takes a project whose variable names an
+  account the plugin no longer finds for one on the default account, and
+  judges it by the default's usage (SEATS-R5-002); the dispatch itself
+  already tells such an account apart and waits.
+
 ## [0.2.30] - 2026-10-29
 
 ### Fixed
