@@ -15062,6 +15062,28 @@ describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
 });
 
 describe("bb claude-switcher health (SPEC 2026-10-30 §4)", () => {
+  it("is not usable where the policy would not choose it: out at its last good read, its reset passed while the queries fail (Codex ULTRA-R06)", async () => {
+    let clock = NOW;
+    let down = false;
+    const answer = (p: Payload) => () => (down ? new Response("down", { status: 503 }) : Response.json(p));
+    const h = await host(
+      { main: answer(payload(100, 40)), spare: answer(payload(10, 20)), work: answer(payload(5, 30)) },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // main's session resets at NOW + 2 h; three hours on, every query fails.
+    down = true;
+    clock = NOW + 3 * HOUR;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    const byName = Object.fromEntries(report.cuentas.map((c: { nombre: string }) => [c.nombre, c]));
+    expect(byName.main.usable).toBe(false);
+    expect(byName.main.problema).toMatch(/^reset sin confirmar: la última lectura buena \(2026-09-29T12:00:00\+02:00\) la daba agotada/);
+    // A stale free read stays usable, as the policy keeps it.
+    expect(byName.spare).toMatchObject({ usable: true });
+  });
+
   it("answers version 1 with every account, the Ultra one usable and not Team (canaries 1 and 2)", async () => {
     const h = await host({
       main: () => Response.json(ultraFixture("ultra-sin-5h")),

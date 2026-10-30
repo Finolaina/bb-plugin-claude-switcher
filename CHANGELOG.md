@@ -48,7 +48,10 @@ project uses [Semantic Versioning](https://semver.org/).
   `claude-cuentas.py salud --json`: per account `nombre`, `plan`,
   `planTexto`, `cincoHoras`, `sesion`, `semana`, `modelos` (only those the
   usage API reports), `ritmo`, `plazas` (with `externas`), `usable` and
-  `problema`; times ISO 8601 with Madrid's offset.
+  `problema`; times ISO 8601 with Madrid's offset. `usable` is what the
+  automatic choice may pick, whatever the model: an account out at its
+  last good read, whose reset passed while the queries kept failing, is
+  not usable («reset sin confirmar…»).
 - **`bb claude-switcher reserve <account> --id <x> --until <ISO>` and
   `unreserve --id <x>`:** a seat held for a run outside bb (`claude -p`
   with the account's `CLAUDE_CONFIG_DIR`, which bb does not see), so bb
