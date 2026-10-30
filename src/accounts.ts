@@ -19,7 +19,15 @@ export interface Account {
   configDir: string | null;
   email: string | null;
   accountUuid: string | null;
+  /**
+   * The subscription behind the login (`oauthAccount.organizationType`):
+   * `claude_max` is max, `claude_team` is team, anything else or nothing is
+   * unknown. Unset where an account is made up rather than discovered.
+   */
+  kind?: AccountKind;
 }
+
+export type AccountKind = "max" | "team" | "unknown";
 
 export interface DiscoverOptions {
   accountsDir: string;
@@ -33,11 +41,12 @@ const claudeJsonSchema = z.looseObject({
     .looseObject({
       accountUuid: z.string().optional(),
       emailAddress: z.string().optional(),
+      organizationType: z.string().optional(),
     })
     .optional(),
 });
 
-type Login = Pick<Account, "email" | "accountUuid">;
+type Login = Pick<Account, "email" | "accountUuid" | "kind">;
 
 export function expandHome(path: string, home: string): string {
   return path === "~" || path.startsWith("~/") ? home + path.slice(1) : path;
@@ -70,6 +79,12 @@ async function login(io: AccountsIo, file: string): Promise<Login | null> {
     email: oauth?.emailAddress ?? null,
     // Empty is none: two directories without an id are not one account.
     accountUuid: oauth?.accountUuid || null,
+    kind:
+      oauth?.organizationType === "claude_max"
+        ? "max"
+        : oauth?.organizationType === "claude_team"
+          ? "team"
+          : "unknown",
   };
 }
 
@@ -90,7 +105,7 @@ export async function discoverAccounts(
       `accountsDir "${options.accountsDir}" must be an absolute path (or start with ~/)`,
     );
   }
-  const none: Login = { email: null, accountUuid: null };
+  const none: Login = { email: null, accountUuid: null, kind: "unknown" };
   const accounts: Account[] = [
     {
       name: options.defaultAccountName,

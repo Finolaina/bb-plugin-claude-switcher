@@ -30,10 +30,7 @@ describe("discoverAccounts", () => {
   it("lists the default dir first and every accounts subdir that has a .claude.json", async () => {
     const io = fakeIo(
       {
-        [`${HOME}/.claude.json`]: claudeJson(
-          "main@example.com",
-          "uuid-main",
-        ),
+        [`${HOME}/.claude.json`]: claudeJson("main@example.com", "uuid-main"),
         [`${ACCOUNTS}/work/.claude.json`]: claudeJson(
           "work@example.com",
           "uuid-work",
@@ -55,18 +52,21 @@ describe("discoverAccounts", () => {
         configDir: null,
         email: "main@example.com",
         accountUuid: "uuid-main",
+        kind: "unknown",
       },
       {
         name: "spare",
         configDir: `${ACCOUNTS}/spare`,
         email: "spare@example.com",
         accountUuid: "uuid-spare",
+        kind: "unknown",
       },
       {
         name: "work",
         configDir: `${ACCOUNTS}/work`,
         email: "work@example.com",
         accountUuid: "uuid-work",
+        kind: "unknown",
       },
     ]);
   });
@@ -83,12 +83,13 @@ describe("discoverAccounts", () => {
       defaultAccountName: "default",
     });
     expect(accounts).toEqual([
-      { name: "default", configDir: null, email: null, accountUuid: null },
+      { name: "default", configDir: null, email: null, accountUuid: null, kind: "unknown" },
       {
         name: "fresh",
         configDir: `${ACCOUNTS}/fresh`,
         email: null,
         accountUuid: null,
+        kind: "unknown",
       },
     ]);
   });
@@ -114,7 +115,7 @@ describe("discoverAccounts", () => {
       defaultAccountName: "default",
     });
     expect(accounts).toEqual([
-      { name: "default", configDir: null, email: null, accountUuid: null },
+      { name: "default", configDir: null, email: null, accountUuid: null, kind: "unknown" },
     ]);
   });
 
@@ -167,5 +168,37 @@ describe("discoverAccounts", () => {
         defaultAccountName: "default",
       }),
     ).rejects.toThrow(/absolute/);
+  });
+
+  it("reads the account's kind from oauthAccount.organizationType (Max, Team, anything else unknown)", async () => {
+    const withOrg = (organizationType?: string) =>
+      JSON.stringify({
+        oauthAccount: {
+          accountUuid: `uuid-${organizationType ?? "none"}`,
+          emailAddress: "x@example.com",
+          ...(organizationType === undefined ? {} : { organizationType }),
+        },
+      });
+    const io = fakeIo(
+      {
+        [`${HOME}/.claude.json`]: withOrg("claude_max"),
+        [`${ACCOUNTS}/team1/.claude.json`]: withOrg("claude_team"),
+        [`${ACCOUNTS}/odd/.claude.json`]: withOrg("claude_enterprise"),
+        [`${ACCOUNTS}/bare/.claude.json`]: withOrg(),
+        [`${ACCOUNTS}/broken/.claude.json`]: "{not json",
+      },
+      { [ACCOUNTS]: ["team1", "odd", "bare", "broken"] },
+    );
+    const accounts = await discoverAccounts(io, {
+      accountsDir: ACCOUNTS,
+      defaultAccountName: "aitor",
+    });
+    expect(accounts.map((a) => [a.name, a.kind])).toEqual([
+      ["aitor", "max"],
+      ["bare", "unknown"],
+      ["broken", "unknown"],
+      ["odd", "unknown"],
+      ["team1", "team"],
+    ]);
   });
 });
