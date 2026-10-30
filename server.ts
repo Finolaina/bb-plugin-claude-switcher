@@ -76,7 +76,13 @@ import {
   type PlacementInput,
   type SwitchDecision,
 } from "./src/switch.js";
-import { reserving, spendsReservedWeekly } from "./src/policy.js";
+import {
+  canRunModel,
+  isUsable,
+  modelWindow,
+  reserving,
+  spendsReservedWeekly,
+} from "./src/policy.js";
 import {
   usageFetchMethod,
   usageListMethod,
@@ -654,6 +660,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     io: deps.credentialIo,
     now: deps.now,
     onMeasured: (name, measurement) => noteSeatSample(name, measurement),
+    warn: (message) => bb.log.warn(message),
   });
   let accounts: Account[] = [];
   /**
@@ -2940,6 +2947,44 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     string,
     { account: string; model: string; threshold: number }
   >();
+  /**
+   * The accounts a move made while nothing failed may take the project to,
+   * its own included. Nothing fails if the project stays, so a target has
+   * to be sure: an account listed now, measured within two refresh periods
+   * (a query that keeps failing leaves an old measurement), another Claude
+   * account (a directory of the same one shares its usage and gains
+   * nothing), and not the account the project last left ahead of the limit
+   * while it is still at or above that share (see aheadLeft).
+   */
+  function aheadTargets(
+    projectId: string,
+    fromName: string,
+    model: string,
+    now: number,
+  ) {
+    const maxAgeMs = maxReadAgeMs();
+    const own = accounts.find((a) => a.name === fromName);
+    const left = aheadLeft.get(projectId);
+    return measuredAccounts(model).filter((usage) => {
+      if (usage.name === fromName) return true;
+      if (
+        left !== undefined &&
+        usage.name === left.account &&
+        fullestWindow(settle(usage, now), left.model).used >= left.threshold
+      )
+        return false;
+      const account = accounts.find((a) => a.name === usage.name);
+      const observedAt = collector.get(usage.name)?.observedAt ?? null;
+      return (
+        account !== undefined &&
+        observedAt !== null &&
+        now - observedAt <= maxAgeMs &&
+        (own === undefined ||
+          own.accountUuid === null ||
+          account.accountUuid !== own.accountUuid)
+      );
+    });
+  }
   async function moveAhead(
     thread: ThreadResponse,
     model: string,
@@ -2959,35 +3004,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (from.external) return;
     const fromName = from.account ?? current.defaultAccountName;
     const now = deps.now();
-    // Nothing fails if the project stays, so a target has to be sure: an
-    // account listed now, measured within two refresh periods (a query that
-    // keeps failing leaves an old measurement), and another Claude account
-    // (a directory of the same one shares its usage and gains nothing).
-    const maxAgeMs = maxReadAgeMs();
-    const own = accounts.find((a) => a.name === fromName);
-    const left = aheadLeft.get(projectId);
-    const candidates = measuredAccounts(model).filter((usage) => {
-      if (usage.name === fromName) return true;
-      if (
-        left !== undefined &&
-        usage.name === left.account &&
-        fullestWindow(settle(usage, now), left.model).used >= left.threshold
-      )
-        return false;
-      const account = accounts.find((a) => a.name === usage.name);
-      const observedAt = collector.get(usage.name)?.observedAt ?? null;
-      return (
-        account !== undefined &&
-        observedAt !== null &&
-        now - observedAt <= maxAgeMs &&
-        (own === undefined ||
-          own.accountUuid === null ||
-          account.accountUuid !== own.accountUuid)
-      );
-    });
     const decision = decideAhead({
       currentAccount: fromName,
-      accounts: candidates,
+      accounts: aheadTargets(projectId, fromName, model, now),
       preferredModel: model,
       reserveModel: current.preferredModel,
       threshold,
@@ -3043,6 +3062,109 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     await measureForAhead(thread.projectId);
     await inProjectQueue(thread.projectId, () => moveAhead(thread, model));
   });
+
+  // ---- No project left where a turn cannot run ---------------------------
+  /**
+   * Why `name` cannot run the preferred model, as measured now: not logged
+   * in, or out of it (session, weekly or the model's own window full, or
+   * locked) until when; null when it can, or nothing is known of it.
+   */
+  function stranded(name: string, now: number): string | null {
+    if (loggedOut(name)) return "not logged in";
+    const known = measuredAccounts().find((a) => a.name === name);
+    if (known === undefined || known.unknown === true) return null;
+    const settled = settle(known, now);
+    const model = current.preferredModel;
+    if (isUsable(settled) && canRunModel(settled, model)) return null;
+    const full = [
+      settled.session,
+      settled.weekly,
+      modelWindow(settled, model),
+    ].filter((w) => w !== undefined && w.usedPercent >= 100);
+    const until = Math.max(...full.map((w) => w!.resetsAt ?? 0), 0);
+    return `exhausted for ${model === "" ? "every model" : model} until ${until === 0 ? "unknown" : new Date(until).toISOString().slice(0, 16).replace("T", " ")}`;
+  }
+  /**
+   * After every refresh (Aitor 2026-10-30, Añadido 2: «that no project stays
+   * on an exhausted account or one without a login without moving by
+   * itself, respecting the seats»): bb greys out the composer of a project
+   * whose account is at its limit, so the dispatch checkpoint never gets to
+   * move it (Mariscal · Web on ganaresenas, Fable at 100 %). Each project
+   * this plugin may move (not external) whose account cannot run the
+   * preferred model goes to the best account with a free seat, as a
+   * placement would choose it, whatever switchAheadPercent says. With none,
+   * it stays, said once per project and refresh.
+   */
+  async function rescueStranded(): Promise<void> {
+    if (!current.autoSwitch) return;
+    const now = deps.now();
+    const projects = await sharedProjects();
+    for (const project of projects) {
+      if (project.external) continue;
+      if (stranded(project.account ?? current.defaultAccountName, now) === null)
+        continue;
+      // One project that cannot be moved does not keep the rest where they are.
+      try {
+        await inProjectQueue(project.id, () => rescue(project.id, project.name));
+      } catch (error) {
+        bb.log.warn(
+          `project ${project.name}: not moved off its account: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  }
+  async function rescue(projectId: string, projectName: string): Promise<void> {
+    if (!current.autoSwitch) return;
+    const before = moveMark(projectId);
+    // Read again, in the project's queue: the shared list may be 30 s old.
+    const from = await projectAccount(projectId);
+    if (from.external) return;
+    const fromName = from.account ?? current.defaultAccountName;
+    const now = deps.now();
+    const why = stranded(fromName, now);
+    if (why === null) return;
+    const model = current.preferredModel;
+    const decision = decidePlacement({
+      currentAccount: fromName,
+      isNew: false,
+      accounts: aheadTargets(projectId, fromName, model, now),
+      preferredModel: model,
+      freeSeats,
+      now,
+      currentLoggedOut: loggedOut(fromName),
+    });
+    if (decision.kind === "keep") {
+      bb.log.debug(
+        `project ${projectName}: left on ${fromName} (${why}): no other account with a free seat can run ${model === "" ? "a turn" : model}`,
+      );
+      return;
+    }
+    if (
+      !(await applyAccount(projectId, accountOrDefault(decision.account), from))
+    )
+      return;
+    await markHandled(projectId);
+    noteMove(projectId, fromName, decision.account, model, before);
+    const s = seats.snapshot([seatKey(decision.account)])[
+      seatKey(decision.account)
+    ]!;
+    bb.log.info(
+      `project ${projectName}: moved from ${fromName} (${why}) to ${decision.account} (seats ${s.running + s.reserved}/${s.capacity === 0 ? "∞" : s.capacity})`,
+    );
+    await recordMove(
+      {
+        at: now,
+        threadId: "",
+        projectId,
+        from: fromName,
+        to: decision.account,
+        reason: `Moved to account ${decision.account}: ${fromName} ${why}`,
+      },
+      // No failure caused it: a turn still running on the old account gets
+      // the grace retry on the new one, as after a placement.
+      null,
+    );
+  }
 
   /**
    * The account each thread's turn started on (read when it turned active):
@@ -4644,6 +4766,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         } catch (error) {
           bb.log.warn(
             `the waiting turns were not looked at again: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        // After the waits: a project they move has its turns retried there;
+        // this moves only the projects left where no turn can run.
+        try {
+          await rescueStranded();
+        } catch (error) {
+          bb.log.warn(
+            `the projects on an account that cannot run were not looked at: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
         await sleep(Math.max(1, current.refreshMinutes) * 60_000, signal);
