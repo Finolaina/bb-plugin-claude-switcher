@@ -12,7 +12,9 @@ export interface UsageWindow {
   resetsAt: number | null;
   /**
    * The provider reported no such window at all: a Team seat's general
-   * weekly (measured 2026-10-11: session and per-model windows only). Set
+   * weekly (measured 2026-10-11: session and per-model windows only), or
+   * the session of an Ultra account without the 5-hour window (measured
+   * 2026-10-30: five_hour null, weekly_all only). Set
    * only by the usage parser; a window whose reset merely passed is not
    * absent, it is empty until the next measurement.
    */
