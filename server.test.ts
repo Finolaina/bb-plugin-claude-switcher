@@ -15216,6 +15216,37 @@ describe("bb claude-switcher reserve / unreserve: a seat held from outside bb", 
       expect(seats.main.external).toBeUndefined();
     });
 
+    it("grants nothing on a count that left a project unread, and counts again (Codex ULTRA-R2-003)", async () => {
+      vi.useFakeTimers();
+      let failing = true;
+      const h = await host(ALL_FREE, {
+        settings: { ...OFF, seatsMax: 1 },
+        threads: { r1: { status: "active" as const } },
+        beforeEnvRead: async (projectId: string) => {
+          if (projectId === "proj-1" && failing) throw new Error("HTTP 503");
+        },
+      });
+      dispose = () => h.harness.dispose();
+      // Three tries 2 s apart: the count ends with proj-1 unread.
+      await vi.advanceTimersByTimeAsync(4_000);
+      vi.useRealTimers();
+      const countedTimes = () =>
+        h.harness.logEntries.filter((e) => e.message.startsWith("seats counted after loading")).length;
+      await vi.waitFor(() => expect(countedTimes()).toBe(1));
+      failing = false;
+      const first = await h.harness.behavior.runCli(["reserve", "main", "--id", "night", "--until", until(NOW + HOUR), "--json"]);
+      expect(first.exitCode).toBe(75);
+      expect(JSON.parse(first.stdout)).toMatchObject({ ok: false, error: { code: "seats_counting" } });
+      // Counted again, whole this time: r1 takes main's one seat.
+      await vi.waitFor(() => expect(countedTimes()).toBe(2));
+      const again = await h.harness.behavior.runCli(["reserve", "main", "--id", "night", "--until", until(NOW + HOUR)]);
+      expect(again.exitCode).toBe(1);
+      expect(again.stderr).toContain("No free seat on main");
+      const seats = JSON.parse((await h.harness.behavior.runCli(["seats", "--json"])).stdout).seats;
+      expect(seats.main).toMatchObject({ running: 1 });
+      expect(seats.main.external).toBeUndefined();
+    });
+
     it("fails with a temporary error and holds nothing when the count takes more than 5 s", async () => {
       const gate = envGate();
       const h = await host(ALL_FREE, counting(gate));
