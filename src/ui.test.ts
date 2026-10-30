@@ -6,9 +6,7 @@ import {
   projectRead,
   composerProject,
   picksOnSelect,
-  forecastLine,
   headerStatus,
-  accountWindows,
   listText,
   noLoginFound,
   projectsByAccount,
@@ -228,54 +226,6 @@ describe("headerStatus", () => {
       canSwitch: false,
     });
     expect(headerStatus(base, "p-missing", NOW)).toBeNull();
-  });
-});
-
-describe("forecastLine", () => {
-  const NOW = Date.parse("2026-09-30T10:00:00.000Z");
-  const DAY = 24 * 3_600_000;
-
-  it("says when the window runs out, in a day count or a date, with the pace", () => {
-    expect(
-      forecastLine(
-        { kind: "runs-out", at: NOW + 3 * 3_600_000, percentPerDay: 30 },
-        NOW,
-      ),
-    ).toBe(`runs out in 3 h at this pace (30 %/day)`);
-    expect(
-      forecastLine(
-        {
-          kind: "runs-out",
-          at: NOW + 2 * DAY + 5 * 3_600_000,
-          percentPerDay: 12.5,
-        },
-        NOW,
-      ),
-    ).toBe(`runs out in 2 d 5 h at this pace (12.5 %/day)`);
-    expect(
-      forecastLine({ kind: "runs-out", at: NOW - 1, percentPerDay: 99 }, NOW),
-    ).toBe(`runs out now at this pace (99 %/day)`);
-    // Under half a minute is now, not "in 0 min".
-    expect(
-      forecastLine(
-        { kind: "runs-out", at: NOW + 29_000, percentPerDay: 99 },
-        NOW,
-      ),
-    ).toBe(`runs out now at this pace (99 %/day)`);
-    expect(
-      forecastLine(
-        { kind: "runs-out", at: NOW + 31_000, percentPerDay: 99 },
-        NOW,
-      ),
-    ).toBe(`runs out in 1 min at this pace (99 %/day)`);
-  });
-
-  it("says the window lasts until its reset, and nothing for a steady or unknown one", () => {
-    expect(
-      forecastLine({ kind: "lasts", until: NOW + DAY, percentPerDay: 4 }, NOW),
-    ).toBe("lasts until the reset at this pace (4 %/day)");
-    expect(forecastLine({ kind: "steady" }, NOW)).toBeNull();
-    expect(forecastLine({ kind: "unknown" }, NOW)).toBeNull();
   });
 });
 
@@ -631,28 +581,6 @@ describe("outText", () => {
   });
 });
 
-describe("accountWindows (the panel's bars)", () => {
-  const NOW = Date.parse("2026-10-29T10:00:00.000Z");
-  const [max, , , , , team] = tenAccounts(NOW).accounts;
-
-  it("has no weekly bar for a Team seat, and one for a Max account", () => {
-    expect(accountWindows(team!.usage!).map((w) => w.label)).toEqual([
-      "Session (5 h)",
-      "Weekly · Fable",
-    ]);
-    expect(accountWindows(max!.usage!).map((w) => w.label)).toEqual([
-      "Session (5 h)",
-      "Weekly (all models)",
-      "Weekly · Fable",
-    ]);
-    expect(accountWindows(max!.usage!).map((w) => w.short)).toEqual([
-      "ses",
-      "sem",
-      "Fable",
-    ]);
-  });
-});
-
 describe("projectsByAccount (the panel's project list)", () => {
   it("groups the projects under their account, in the accounts' order, external and vanished ones last", () => {
     const groups = projectsByAccount(
@@ -753,8 +681,7 @@ describe("an Ultra account without the 5-hour window (2026-10-30)", () => {
     ]);
   });
 
-  it("draws no session bar and sums up no session", () => {
-    expect(accountWindows(usage).map((w) => w.key)).toEqual(["weekly", "Fable"]);
+  it("sums up no session", () => {
     expect(accountSummary(usage, "Fable", NOW)).toEqual({
       session: null,
       weekly: 98,

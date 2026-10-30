@@ -6,6 +6,8 @@
 // has a test; app.tsx only draws it. The words match the Mac menu-bar app
 // (cuentas-claude, Sources/CuentasCore/Lista.swift) so both say the same.
 
+import { windowForecast } from "./ui.js";
+
 export type Lang = "es" | "en";
 
 /** Spanish for a browser set to any Spanish, English otherwise (the plugin is public). */
@@ -572,4 +574,78 @@ export function menuLine(row: PanelRow): string {
   return [whyNot(row) ?? (row.figure === null ? null : `${row.figure} ${row.figureOf}`), row.when]
     .filter((s) => s !== null && s !== "")
     .join(" · ");
+}
+
+const WORDS = {
+  es: {
+    refresh: "Actualizar",
+    refreshing: "Actualizando…",
+    logIn: "Iniciar sesión",
+    logInAgain: "Iniciar sesión otra vez",
+    sameAs: (name: string) =>
+      `Misma cuenta de Claude que ${name}: comparten el uso`,
+    noFigure: "sin dato",
+  },
+  en: {
+    refresh: "Refresh",
+    refreshing: "Refreshing…",
+    logIn: "Log in",
+    logInAgain: "Log in again",
+    sameAs: (name: string) => `Same Claude account as ${name}: they share one usage`,
+    noFigure: "no reading",
+  },
+} as const;
+
+/** The view's other words: its buttons and notes. */
+export function panelWords(lang: Lang) {
+  return WORDS[lang];
+}
+
+type ForecastLike =
+  | { kind: "runs-out"; at: number; percentPerDay: number }
+  | { kind: "lasts"; until: number; percentPerDay: number }
+  | { kind: "steady" }
+  | { kind: "unknown" };
+
+/** «en 2 d 5 h», «en 3 h», «en 40 min», «ya». */
+function inTime(ms: number, lang: Lang): string {
+  const minutes = Math.round(ms / 60_000);
+  if (minutes <= 0) return lang === "es" ? "ya" : "now";
+  const pre = lang === "es" ? "en" : "in";
+  if (minutes < 60) return `${pre} ${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${pre} ${hours} h`;
+  return `${pre} ${Math.floor(hours / 24)} d ${hours % 24} h`;
+}
+
+/**
+ * The pace of the window that matters for an account (its preferred
+ * model's, else its weekly one; windowForecast in src/ui.ts):
+ * «Fable: se acaba en 20 h a este ritmo (30 %/día)». Null when there is
+ * nothing worth saying.
+ */
+export function forecastText(
+  forecasts: Record<string, Record<string, ForecastLike>> | undefined,
+  account: string,
+  preferredModel: string,
+  now: number,
+  lang: Lang,
+): string | null {
+  const picked = windowForecast(forecasts, account, preferredModel);
+  if (picked === null) return null;
+  const [key, f] = picked;
+  const name = key === "weekly" ? (lang === "es" ? "Semana" : "Week") : key;
+  const es = lang === "es";
+  switch (f.kind) {
+    case "runs-out":
+      return es
+        ? `${name}: se acaba ${inTime(f.at - now, lang)} a este ritmo (${f.percentPerDay} %/día)`
+        : `${name}: runs out ${inTime(f.at - now, lang)} at this pace (${f.percentPerDay} %/day)`;
+    case "lasts":
+      return es
+        ? `${name}: llega al reinicio a este ritmo (${f.percentPerDay} %/día)`
+        : `${name}: lasts until the reset at this pace (${f.percentPerDay} %/day)`;
+    default:
+      return null;
+  }
 }
