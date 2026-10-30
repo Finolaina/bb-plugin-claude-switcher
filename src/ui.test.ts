@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  accountSummary,
   askForProject,
   newestFirst,
   projectRead,
@@ -706,5 +707,59 @@ describe("listText with seats", () => {
   it("says nothing of seats when none are known or nobody waits", () => {
     const text = listText(tenAccounts(NOW), NOW, "UTC");
     expect(text).not.toMatch(/seat/i);
+  });
+});
+
+describe("an Ultra account without the 5-hour window (2026-10-30)", () => {
+  const NOW = Date.parse("2026-10-30T20:55:00.000Z");
+  type W = { usedPercent: number; resetsAt: number | null; absent?: true };
+  const usage: { blocked: boolean; session: W; weekly: W; models: Record<string, W> } = {
+    blocked: false,
+    session: { usedPercent: 0, resetsAt: null, absent: true as const },
+    weekly: { usedPercent: 98, resetsAt: Date.parse("2026-11-01T17:00:00Z") },
+    models: { Fable: { usedPercent: 100, resetsAt: Date.parse("2026-11-01T17:00:00Z") } },
+  };
+
+  it("lists its plan instead of a session, never «ses 100%» nor LOCKED", () => {
+    const text = listText(
+      {
+        defaultAccountName: "main",
+        preferredModel: "Fable",
+        accounts: [
+          { name: "main", problem: null, usage, planShort: "Ultra · sin tope de 5 h" },
+          {
+            name: "team1",
+            problem: null,
+            planShort: "Team",
+            usage: {
+              blocked: false,
+              session: { usedPercent: 30, resetsAt: NOW + 3_600_000 },
+              weekly: { usedPercent: 0, resetsAt: null, absent: true as const },
+              models: {},
+            },
+          },
+        ],
+        projects: [],
+        seats: { main: { capacity: 4, running: 1, reserved: 0, queued: [] } },
+      },
+      NOW,
+      "UTC",
+    );
+    expect(text.split("\n").slice(0, 4)).toEqual([
+      "main            sem  98% Fable 100% agotada hasta 01/11",
+      "       Ultra · sin tope de 5 h · seats 1/4",
+      "team1  ses  30%",
+      "       Team",
+    ]);
+  });
+
+  it("draws no session bar and sums up no session", () => {
+    expect(accountWindows(usage).map((w) => w.key)).toEqual(["weekly", "Fable"]);
+    expect(accountSummary(usage, "Fable", NOW)).toEqual({
+      session: null,
+      weekly: 98,
+      model: { name: "Fable", percent: 100 },
+      outUntil: Date.parse("2026-11-01T17:00:00Z"),
+    });
   });
 });
