@@ -15185,6 +15185,82 @@ describe("bb claude-switcher reserve / unreserve: a seat held from outside bb", 
     });
   });
 
+  describe("only a hold stored is a hold (Codex ULTRA-R2-004)", () => {
+    /** The writes of the holds fail while `failing`; `gate`, when set, holds each until it opens. */
+    function storage(h: Awaited<ReturnType<typeof host>>) {
+      const ctl = { failing: true, gate: null as Promise<void> | null };
+      const set = h.bb.storage.kv.set.bind(h.bb.storage.kv);
+      h.bb.storage.kv.set = async (key: string, value: unknown) => {
+        if (key === "external-seats") {
+          const failing = ctl.failing;
+          if (ctl.gate !== null) await ctl.gate;
+          if (failing) throw new Error("storage down");
+        }
+        return set(key, value);
+      };
+      return ctl;
+    }
+    const externals = async (h: Awaited<ReturnType<typeof host>>) =>
+      JSON.parse((await h.harness.behavior.runCli(["seats", "--json"])).stdout).seats.main.external;
+
+    it("reserve whose hold is not stored fails and holds nothing: the seat goes to a thread", async () => {
+      const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 } });
+      dispose = () => h.harness.dispose();
+      storage(h);
+      const r = await h.harness.behavior.runCli(["reserve", "main", "--id", "night", "--until", until(NOW + HOUR)]);
+      expect(r.exitCode).not.toBe(0);
+      expect(await externals(h)).toBeUndefined();
+      expect(await ask(h, "t1")).toEqual({ action: "proceed" });
+    });
+
+    it("a renewal not stored leaves the hold as it was", async () => {
+      const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 } });
+      dispose = () => h.harness.dispose();
+      const ctl = storage(h);
+      ctl.failing = false;
+      expect((await h.harness.behavior.runCli(["reserve", "main", "--id", "night", "--until", until(NOW + HOUR)])).exitCode).toBe(0);
+      ctl.failing = true;
+      const r = await h.harness.behavior.runCli(["reserve", "main", "--id", "night", "--until", until(NOW + 5 * HOUR)]);
+      expect(r.exitCode).not.toBe(0);
+      expect(await externals(h)).toEqual([{ id: "night", until: NOW + HOUR }]);
+    });
+
+    it("a failed write does not undo a renewal another reserve stored meanwhile", async () => {
+      const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 } });
+      dispose = () => h.harness.dispose();
+      const ctl = storage(h);
+      let open!: () => void;
+      ctl.gate = new Promise<void>((resolve) => (open = resolve));
+      const first = h.harness.behavior.runCli(["reserve", "main", "--id", "night", "--until", until(NOW + HOUR)]);
+      await vi.waitFor(async () => expect(await externals(h)).toHaveLength(1));
+      ctl.failing = false;
+      const second = h.harness.behavior.runCli(["reserve", "main", "--id", "night", "--until", until(NOW + 2 * HOUR)]);
+      await vi.waitFor(async () => expect(await externals(h)).toEqual([{ id: "night", until: NOW + 2 * HOUR }]));
+      open();
+      expect((await first).exitCode).not.toBe(0);
+      expect((await second).exitCode).toBe(0);
+      expect(await externals(h)).toEqual([{ id: "night", until: NOW + 2 * HOUR }]);
+      expect(await h.bb.storage.kv.get("external-seats")).toEqual([
+        expect.objectContaining({ id: "night", until: NOW + 2 * HOUR }),
+      ]);
+    });
+
+    it("unreserve whose end is not stored fails and keeps the hold", async () => {
+      const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 } });
+      dispose = () => h.harness.dispose();
+      const ctl = storage(h);
+      ctl.failing = false;
+      expect((await h.harness.behavior.runCli(["reserve", "main", "--id", "night", "--until", until(NOW + HOUR)])).exitCode).toBe(0);
+      ctl.failing = true;
+      const off = await h.harness.behavior.runCli(["unreserve", "--id", "night"]);
+      expect(off.exitCode).not.toBe(0);
+      expect(await externals(h)).toEqual([{ id: "night", until: NOW + HOUR }]);
+      // The seat is still the hold's: a thread waits.
+      expect(await ask(h, "t1")).toMatchObject({ action: "wait" });
+      expect(await h.bb.storage.kv.get("external-seats")).toEqual([expect.objectContaining({ id: "night" })]);
+    });
+  });
+
   describe("after a reload, while the seats are being counted (Codex ULTRA-R02)", () => {
     // r1 runs on proj-1 (main), whose account read is held: main's one seat
     // is not counted yet.

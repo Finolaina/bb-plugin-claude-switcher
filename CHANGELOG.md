@@ -64,8 +64,10 @@ project uses [Semantic Versioning](https://semver.org/).
   when that count left a running thread unread, and counts them again.
   The same
   id renews it. It ends at `until`, never more than 12 h after it was
-  asked for, and is kept in storage (`external-seats`) across reloads.
-  Counted in `list`, `seats` and `health`.
+  asked for, and is kept in storage (`external-seats`) across reloads:
+  a hold that cannot be stored is undone and `reserve` fails (exit 1,
+  `not_stored`); an end that cannot be stored leaves the hold and
+  `unreserve` fails the same way. Counted in `list`, `seats` and `health`.
 
 ### Changed
 
