@@ -373,7 +373,24 @@ export function outText(
   return `agotada hasta ${new Intl.DateTimeFormat("en-GB", { ...options, timeZone }).format(until)}`;
 }
 
+export interface SeatsLike {
+  /** 0 = no limit. */
+  capacity: number;
+  running: number;
+  reserved: number;
+  queued: ReadonlyArray<{ threadId: string; title: string | null }>;
+}
+
+/** "seats 3/4", "seats 2/2 · 2 waiting"; null when the account has no limit. */
+export function seatsText(seats: SeatsLike | undefined): string | null {
+  if (seats === undefined || seats.capacity === 0) return null;
+  const waiting = seats.queued.length;
+  return `seats ${seats.running + seats.reserved}/${seats.capacity}${waiting > 0 ? ` · ${waiting} waiting` : ""}`;
+}
+
 interface ListInput {
+  /** Per account: its seats and who waits for one (see src/seats.ts). */
+  seats?: Readonly<Record<string, SeatsLike>>;
   defaultAccountName: string;
   preferredModel: string;
   accounts: ReadonlyArray<{
@@ -494,12 +511,29 @@ export function listText(state: ListInput, now: number, timeZone?: string): stri
       rest = join();
     }
     const line = `${name}  ${rest}`.trimEnd();
-    return line.length <= LIST_LINE ? line : `${line.slice(0, LIST_LINE - 1)}…`;
+    const seats = seatsText(state.seats?.[a.name]);
+    return [
+      line.length <= LIST_LINE ? line : `${line.slice(0, LIST_LINE - 1)}…`,
+      ...(seats === null ? [] : [`${" ".repeat(width)}  ${seats}`]),
+    ];
   });
   const projects = projectsByAccount(state).map(
     (g) => `${g.heading}: ${g.projects.map((p) => p.name).join(" · ")}`,
   );
-  return [...lines, "", "projects:", ...projects].join("\n") + "\n";
+  const waiting = Object.entries(state.seats ?? {}).flatMap(([account, s]) =>
+    s.queued.map((q, i) =>
+      `${account}  #${i + 1}  ${q.threadId}${q.title === null ? "" : `  ${q.title}`}`,
+    ),
+  );
+  return (
+    [
+      ...lines.flat(),
+      "",
+      "projects:",
+      ...projects,
+      ...(waiting.length === 0 ? [] : ["", "Waiting for a seat:", ...waiting]),
+    ].join("\n") + "\n"
+  );
 }
 
 /**
