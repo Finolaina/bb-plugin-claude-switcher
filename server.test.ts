@@ -14869,3 +14869,37 @@ describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
     });
   });
 });
+
+describe("bb claude-switcher health (SPEC 2026-10-30 §4)", () => {
+  it("answers version 1 with every account, the Ultra one usable and not Team (canaries 1 and 2)", async () => {
+    const h = await host({
+      main: () => Response.json(ultraFixture("ultra-sin-5h")),
+      spare: () => Response.json(ultraFixture("team")),
+      work: () => Response.json(ultraFixture("ultra-con-5h-b")),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const out = await h.harness.behavior.runCli(["health", "--json"]);
+    expect(out.exitCode).toBe(0);
+    const report = JSON.parse(out.stdout);
+    expect(report).toMatchObject({ version: 1, inicioDia: 9 });
+    expect(report.medido).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d$/);
+    const byName = Object.fromEntries(
+      report.cuentas.map((c: { nombre: string }) => [c.nombre, c]),
+    );
+    expect(byName.main).toMatchObject({
+      plan: "ultra",
+      planTexto: "Ultra · sin tope de 5 h",
+      cincoHoras: false,
+      sesion: null,
+      semana: { pct: 98 },
+      plazas: { usadas: 0, total: 4 },
+      usable: true,
+      problema: null,
+    });
+    expect(byName.spare).toMatchObject({ plan: "team", planTexto: "Team", semana: null, ritmo: null, plazas: { total: 2 } });
+    expect(byName.work).toMatchObject({ cincoHoras: true, sesion: { pct: 2 } });
+    const text = await h.harness.behavior.runCli(["health"]);
+    expect(text.stdout).toMatch(/^main +Ultra · sin tope de 5 h · sem 98%/m);
+  });
+});
