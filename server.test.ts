@@ -14994,6 +14994,62 @@ describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
     expect(stored.work?.usedPercent).toBe(30);
   });
 
+  it("keeps the day's first reading through an incomplete answer of the usage API (Codex ULTRA-R04)", async () => {
+    let clock = NOW;
+    let answer: () => Payload = () => payload(5, 30);
+    const h = await host({ ...usage, work: () => Response.json(answer()) }, { clock: () => clock });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // No weekly_all, a seven_day bucket there: incomplete (weekly 100 %, no reset).
+    clock = NOW + 60_000;
+    answer = () => ({ ...payload(5, 30), limits: (payload(5, 30).limits as unknown[]).slice(0, 1) });
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    let s = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(s.accounts.find((a) => a.name === "work")?.usage?.unknown).toBe(true);
+    clock = NOW + 2 * 60_000;
+    answer = () => payload(5, 55);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    s = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(s.accounts.find((a) => a.name === "work")?.pace).toMatchObject({ spent: 25 });
+    await vi.waitFor(async () => {
+      const stored = (await h.bb.storage.kv.get("pace-day")) as Record<string, { usedPercent: number }>;
+      expect(stored.work?.usedPercent).toBe(30);
+    });
+  });
+
+  it("takes the weekly of an answer that lacks only its session as the day's first reading", async () => {
+    // Kept from yesterday; today's first answer has weekly_all (40 %) but no
+    // session: the week is read, so the day counts from 40 %, not from the
+    // next complete answer (55 %).
+    let clock = NOW;
+    let answer: () => Payload = () => ({ ...payload(5, 40), limits: (payload(5, 40).limits as unknown[]).slice(1) });
+    const h = await host(
+      { ...usage, work: () => Response.json(answer()) },
+      { clock: () => clock, kvPreset: { "pace-day": { work: { ...dayStart, at: NOW - 26 * HOUR, usedPercent: 10 } } } },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + 60_000;
+    answer = () => payload(5, 55);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const s = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(s.accounts.find((a) => a.name === "work")?.pace).toMatchObject({ spent: 15 });
+  });
+
+  it("keeps no first reading for a Team seat, whose general weekly is absent", async () => {
+    const h = await host(
+      { ...usage, spare: () => Response.json(teamPayload(10, 20)) },
+      { kvPreset: { "pace-day": { spare: dayStart } } },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await vi.waitFor(async () => {
+      const stored = (await h.bb.storage.kv.get("pace-day")) as Record<string, unknown>;
+      expect(stored.work).toBeDefined();
+      expect(stored.spare).toBeUndefined();
+    });
+  });
+
   it("keeps the day's first reading in storage, across a reload", async () => {
     const h = await host(usage);
     dispose = () => h.harness.dispose();

@@ -136,9 +136,24 @@ describe("nextDayStart (what is kept as the day's first reading)", () => {
     expect(nextDayStart(undefined, newWeek, 9)).toEqual(newWeek);
   });
 
-  it("keeps nothing for a window without a reset", () => {
+  it("keeps the kept reading through a reading without a reset (Codex ULTRA-R04)", () => {
+    // An incomplete answer (no weekly reset) is no first reading, and takes
+    // none away: the next good one of the same week is measured from 30 %.
     expect(
-      nextDayStart(kept, { at: T0 + H, usedPercent: 0, resetsAt: null }, 9),
+      nextDayStart(kept, { at: T0 + H, usedPercent: 100, resetsAt: null }, 9),
+    ).toBe(kept);
+    expect(
+      nextDayStart(undefined, { at: T0 + H, usedPercent: 100, resetsAt: null }, 9),
     ).toBeUndefined();
+  });
+
+  it("is replaced by a week's reset more than 5 min off, and not by one within 5 min", () => {
+    // A week that began yesterday, so the reset's drift moves no start of it.
+    const week = T0 + 6 * D;
+    const first: DayStart = { ...kept, resetsAt: week };
+    const at = T0 + 2 * H;
+    expect(nextDayStart(first, { at, usedPercent: 40, resetsAt: week + 5 * 60_000 }, 9)).toBe(first);
+    const moved = { at, usedPercent: 40, resetsAt: week + 5 * 60_000 + 1 };
+    expect(nextDayStart(first, moved, 9)).toEqual(moved);
   });
 });
