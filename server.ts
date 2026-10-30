@@ -931,21 +931,31 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           ),
         );
   }
-  /** Writes in order; awaited by nothing that decides. */
+  /** Writes in order (see storeHolds). */
   let holdsWrites: Promise<void> = Promise.resolve();
-  /** The seats held from outside bb, to storage (KV_EXTERNAL). */
-  function storeHolds(): Promise<void> {
-    const snapshot = seats.holds();
-    holdsWrites = holdsWrites.then(async () => {
+  /**
+   * The seats held from outside bb (or `snapshot`, what they are to be),
+   * to storage (KV_EXTERNAL), in order: true when written. A failure is
+   * logged; reserve and unreserve say it (Codex ULTRA-R2-004).
+   */
+  function storeHolds(snapshot = seats.holds()): Promise<boolean> {
+    const written = holdsWrites.then(async () => {
       try {
         await bb.storage.kv.set(KV_EXTERNAL, snapshot);
+        return true;
       } catch (error) {
         bb.log.warn(
           `could not store the seats held from outside bb (a reload forgets them): ${error instanceof Error ? error.message : String(error)}`,
         );
+        return false;
       }
     });
-    return holdsWrites;
+    holdsWrites = written.then(() => {});
+    return written;
+  }
+  /** The hold `id` as it counts now, if any. */
+  function holdOf(id: string) {
+    return seats.holds().find((h) => h.id === id);
   }
   /** The thread's turn ended or the thread went: its seat goes to the next in line. */
   function releaseSeat(threadId: string, why: string): void {
@@ -5486,6 +5496,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             // the hold in one synchronous step (see Seats.holdExternal).
             admitWaiting();
             const now = deps.now();
+            const before = holdOf(options.id);
             const result = seats.holdExternal(
               options.id,
               key,
@@ -5503,7 +5514,30 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                 },
               );
             }
-            await storeHolds();
+            // Granted only once stored: a hold a reload would forget lets bb
+            // fill the seat under the run (Codex ULTRA-R2-004). Not stored,
+            // it is undone, unless another reserve or unreserve of the id
+            // changed it meanwhile: that one stands.
+            const mine = holdOf(options.id);
+            if (!(await storeHolds())) {
+              const now2 = holdOf(options.id);
+              if (
+                mine !== undefined &&
+                now2 !== undefined &&
+                now2.account === mine.account &&
+                now2.until === mine.until &&
+                now2.at === mine.at
+              ) {
+                seats.releaseExternal(options.id);
+                if (before !== undefined) seats.restoreHolds([before], deps.now());
+                void storeHolds();
+                admitWaiting();
+              }
+              throw new PluginCliError(
+                `The seat on ${name} could not be stored (a reload would forget it); nothing held${before === undefined ? "" : ", the hold stays as it was"}.`,
+                { code: "not_stored", exitCode: 1 },
+              );
+            }
             bb.log.info(
               `seat on ${name} held from outside bb by ${options.id} until ${isoInZone(result.until)}${result.renewed ? " (renewed)" : ""}; ${occupancy(key)}`,
             );
@@ -5532,9 +5566,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             json: JSON_OPTION,
           },
           async run({ options }) {
+            // Stored first, without it: not stored, the hold stays, in
+            // memory as in storage (Codex ULTRA-R2-004).
+            if (holdOf(options.id) !== undefined) {
+              const without = seats.holds().filter((h) => h.id !== options.id);
+              if (!(await storeHolds(without)))
+                throw new PluginCliError(
+                  `The end of the seat held by ${options.id} could not be stored; it stays held.`,
+                  { code: "not_stored", exitCode: 1 },
+                );
+            }
             const key = seats.releaseExternal(options.id);
             if (key !== null) {
-              await storeHolds();
+              // What changed meanwhile, stored after the write above.
+              void storeHolds();
               bb.log.info(
                 `seat on ${seatName(key)} held from outside bb by ${options.id} released; ${occupancy(key)}`,
               );
