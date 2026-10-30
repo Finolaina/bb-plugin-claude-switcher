@@ -80,6 +80,7 @@ import {
 } from "./src/usage-source-contract.js";
 import { toMeasurement, toResource } from "./src/usage-source.js";
 import { shareSessions, type SessionsIo } from "./src/sessions.js";
+import { Seats, capacityFor } from "./src/seats.js";
 import { listText, projectName, sharedWith } from "./src/ui.js";
 
 export const ENV_VAR = "CLAUDE_CONFIG_DIR";
@@ -125,6 +126,13 @@ export const MAX_START_WAITS = 3;
 export const SESSIONS_LIMIT_MS = 2_000;
 /** A login left waiting in the browser this long is given up. */
 export const LOGIN_TIMEOUT_MS = 10 * 60_000;
+/** A thread waiting for a seat is asked about again after this long (sooner when a seat frees). */
+export const SEAT_RECHECK_MS = 30_000;
+/** A seat reserved for a turn that has not started within this long is freed. */
+export const SEAT_TTL_MS = 90_000;
+const KV_SEATS = "seat-samples";
+/** The seat samples kept: a week of them (see recordSamples). */
+const SEAT_SAMPLES_MS = 7 * 24 * 60 * 60_000;
 /** An account directory name: one path segment, no leading dot. */
 const ACCOUNT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 /** Note written next to CLAUDE_CONFIG_DIR; the account name is read back from it (values are secret). */
@@ -287,6 +295,20 @@ const stateSchema = z.object({
   forecasts: z.record(z.string(), z.record(z.string(), forecastSchema)),
   /** The login started from bb, running or just ended; null when none. */
   login: loginStatusSchema.nullable(),
+  /** Per account: its seats (capacity 0 = no limit), taken and waited for. */
+  seats: z
+    .record(
+      z.string(),
+      z.object({
+        capacity: z.number(),
+        running: z.number(),
+        reserved: z.number(),
+        queued: z.array(
+          z.object({ threadId: z.string(), title: z.string().nullable() }),
+        ),
+      }),
+    )
+    .optional(),
 });
 export type State = z.infer<typeof stateSchema>;
 export type SwitchRecord = z.infer<typeof switchRecordSchema>;
@@ -420,6 +442,24 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       description:
         "Used to log an account in from bb (`claude auth login`). A name looked up in the bb server's PATH, or a full path.",
       default: "claude",
+    },
+    // ponytail: 4 and 2 are a guess, not measured per thread. Each usage
+    // sample carries the seats taken then (KV_SEATS, `bb claude-switcher
+    // seats`): with a week of them, the share of a window per hour and per
+    // seat sets these defaults.
+    seatsMax: {
+      type: "number",
+      label: "Threads at once per Max account",
+      description:
+        "A thread whose turn is about to start waits when the project's account already runs this many; it starts as soon as one of them ends, first come first served. A project is never moved to find a seat. 0 = no limit.",
+      default: 4,
+    },
+    seatsTeam: {
+      type: "number",
+      label: "Threads at once per Team account",
+      description:
+        "A thread whose turn is about to start waits when the project's account already runs this many; it starts as soon as one of them ends, first come first served. A project is never moved to find a seat. 0 = no limit.",
+      default: 2,
     },
     loginPrivateWindow: {
       type: "boolean",
@@ -583,6 +623,103 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     now: deps.now,
   });
   let accounts: Account[] = [];
+  /**
+   * Seats per account (see src/seats.ts): a thread's turn starts only with
+   * one. Kept in memory: a reload counts again the threads bb says run
+   * (see rebuildSeats).
+   */
+  const seats = new Seats((name) =>
+    capacityFor(
+      accounts.find((a) => a.name === name)?.kind,
+      collector.get(name)?.usage?.weekly.absent === true,
+      current,
+    ),
+  );
+  /** Titles of the threads waiting for a seat, for the list. */
+  const seatTitles = new Map<string, string | null>();
+  const freeSeats = (name: string) => seats.free(name);
+  function occupancy(account: string): string {
+    const s = seats.snapshot([account])[account]!;
+    const taken = s.running + s.reserved;
+    return `${taken}/${s.capacity === 0 ? "∞" : s.capacity} taken, ${s.queued.length} waiting`;
+  }
+  /**
+   * Reservations whose turn never started are freed, and every free seat
+   * goes to the first in its account's queue; bb is asked again at once
+   * when someone got one.
+   */
+  function admitWaiting(): void {
+    const now = deps.now();
+    for (const account of seats.expire(now, SEAT_TTL_MS))
+      bb.log.info(
+        `a seat reserved on ${account} expired (its turn did not start); ${occupancy(account)}`,
+      );
+    const admitted = seats.admitAll(now);
+    for (const threadId of admitted) {
+      const account = seats.seatOf(threadId)?.account ?? "?";
+      bb.log.info(
+        `thread ${threadId}: admitted to a seat on ${account}; ${occupancy(account)}`,
+      );
+    }
+    if (admitted.length > 0)
+      void bb.experimental_hooks
+        .recheck("message.dispatch")
+        .catch((error: unknown) =>
+          bb.log.warn(
+            `bb not asked again after a seat freed: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        );
+  }
+  /** The thread's turn ended or the thread went: its seat goes to the next in line. */
+  function releaseSeat(threadId: string, why: string): void {
+    seatTitles.delete(threadId);
+    const account = seats.release(threadId);
+    if (account === null) return;
+    bb.log.info(
+      `thread ${threadId}: seat on ${account} released (${why}); ${occupancy(account)}`,
+    );
+    admitWaiting();
+  }
+  /**
+   * Before a turn of the thread starts on `account`: null when it has a
+   * seat there, else the wait bb holds its message on.
+   */
+  function seatWait(
+    thread: ThreadResponse,
+    account: string,
+  ): MessageDispatchHookDecision | null {
+    admitWaiting();
+    const now = deps.now();
+    const queuedBefore = seats.position(thread.id) !== null;
+    if (seats.reserve(thread.id, account, now)) {
+      seatTitles.delete(thread.id);
+      if (queuedBefore)
+        bb.log.info(
+          `thread ${thread.id}: admitted to a seat on ${account}; ${occupancy(account)}`,
+        );
+      return null;
+    }
+    seatTitles.set(thread.id, thread.title ?? null);
+    const s = seats.snapshot([account])[account]!;
+    const ahead = (seats.position(thread.id)?.position ?? 1) - 1;
+    const reason = `Waiting for a seat on ${account}: ${s.running + s.reserved}/${s.capacity} threads running, ${ahead} ahead in the queue`;
+    bb.log.info(`thread ${thread.id}: ${reason}`);
+    return { action: "wait", reason, sendAt: now + SEAT_RECHECK_MS };
+  }
+  function seatsState(): NonNullable<State["seats"]> {
+    const out: NonNullable<State["seats"]> = {};
+    for (const [name, s] of Object.entries(
+      seats.snapshot(accounts.map((a) => a.name)),
+    ))
+      out[name] = {
+        ...s,
+        queued: s.queued.map((threadId) => ({
+          threadId,
+          title: seatTitles.get(threadId) ?? null,
+        })),
+      };
+    return out;
+  }
   /** The views' latest read of every project's account (see sharedProjects). */
   let projectsRead: {
     at: number;
@@ -761,6 +898,23 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       `could not read the usage samples; starting them again: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  /**
+   * Per account, the seats taken at each usage sample: [at, running,
+   * reserved], `at` the sample's own time (the same as its point in
+   * KV_SERIES), a week of them. With the usage they say what share of a
+   * window an hour of one seat costs (see `bb claude-switcher seats`).
+   */
+  let seatSamples: Record<string, [number, number, number][]> = {};
+  try {
+    const parsed = z
+      .record(z.string(), z.array(z.tuple([z.number(), z.number(), z.number()])))
+      .safeParse(await bb.storage.kv.get<unknown>(KV_SEATS));
+    if (parsed.success) seatSamples = parsed.data;
+  } catch (error) {
+    bb.log.warn(
+      `could not read the seat samples; starting them again: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   // What the banners were asked on before the restart, thread by thread:
   // checked against bb by the first refresh (see reviseAdvice). None with
   // the automatic choice off, which ends them all.
@@ -837,10 +991,29 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           resetsAt: w.resetsAt,
         });
       next[account.name] = updated;
+      // The seats taken as it was measured, for the same instant.
+      const taken = seats.snapshot([account.name])[account.name]!;
+      const own2 = (seatSamples[account.name] ?? []).filter(
+        ([at]) => at < m.observedAt! && m.observedAt! - at <= SEAT_SAMPLES_MS,
+      );
+      seatSamples[account.name] = [
+        ...own2,
+        [m.observedAt, taken.running, taken.reserved],
+      ];
     }
     series = next;
+    for (const name of Object.keys(seatSamples))
+      if (next[name] === undefined) delete seatSamples[name];
     const snapshot = series;
+    const seatSnapshot = seatSamples;
     seriesWrites = seriesWrites.then(async () => {
+      try {
+        await bb.storage.kv.set(KV_SEATS, seatSnapshot);
+      } catch (error) {
+        bb.log.warn(
+          `could not store the seat samples: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       try {
         await bb.storage.kv.set(KV_SERIES, snapshot);
       } catch (error) {
@@ -1099,6 +1272,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       bb.realtime.publish(CHANGED, { at: deps.now() });
     } finally {
       refreshes += 1;
+      // Seats reserved for turns that never started are freed with it.
+      admitWaiting();
       // Also when the refresh fails: the reads it left grow old, and a
       // banner on reads older than two refreshes must go (Sol B2-R5-001).
       askBannersAgain();
@@ -1549,6 +1724,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       history,
       forecasts: forecasts(),
       login: loginStatus(),
+      seats: seatsState(),
     };
   }
 
@@ -2463,6 +2639,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       accounts: measured,
       preferredModel: current.preferredModel,
       excursionFrom: wayHome(projectId, current.preferredModel, measured, now),
+      freeSeats,
       now,
       currentLoggedOut: unconfirmed(fromName),
     });
@@ -2667,6 +2844,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       preferredModel: model,
       reserveModel: current.preferredModel,
       threshold,
+      freeSeats,
       now,
     });
     if (decision.kind === "keep") return;
@@ -2779,6 +2957,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // what that said stands, not this stale read (code-reviewer r12).
     if (starting.get(thread.id) !== token) return;
     forgetStart(thread.id);
+    // Its seat runs, reserved or not: a turn sent past the checkpoint
+    // spends the account all the same. Where it runs is what the read says
+    // (null: the seat it reserved, else the default's); an account set
+    // outside this plugin has no seats.
+    if (account !== undefined) {
+      const on =
+        account ?? seats.seatOf(thread.id)?.account ?? current.defaultAccountName;
+      const { over } = seats.confirm(thread.id, on, deps.now());
+      seatTitles.delete(thread.id);
+      const line = `thread ${thread.id}: running on ${on}${over ? " over capacity" : ""}; ${occupancy(on)}`;
+      if (over) bb.log.warn(line);
+      else bb.log.info(line);
+    }
     // The project was being moved, or moved, since the turn was sent or
     // while its account was read: the read says where the project is (or
     // was) going, not where the turn started. Unknown, rather than the new
@@ -2802,10 +2993,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // announces (a turn refused at the door) is the project's account's,
     // not a leftover of the account this turn ran on (code-reviewer r11).
     forgetStart(thread.id);
+    // Reserved too: a turn that ended needs none (its next asks again,
+    // and one that starts unannounced is counted as it starts).
+    releaseSeat(thread.id, "its turn ended");
   });
   /** The thread archived or deleted: nothing of its turns runs again, and what is kept for it goes. */
   async function threadGone({ thread }: { thread: ThreadResponse }) {
     forgetStart(thread.id);
+    releaseSeat(thread.id, "the thread is gone");
     startWaits.delete(thread.id);
     threadModel.delete(thread.id);
     adviceOver(thread.id);
@@ -2917,6 +3112,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       preferredModel: model,
       reserveModel: current.preferredModel,
       excursionFrom: wayHome(projectId, model, measured, now),
+      freeSeats,
       now,
     };
   }
@@ -3078,6 +3274,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   async function beforeStart(
     thread: ThreadResponse,
     model: string | null,
+    /** Set to where the turn was placed, when the placement said. */
+    turnAt: { at?: TurnPlace },
   ): Promise<MessageDispatchHookDecision | null> {
     const first = placeNewProject(thread);
     const placed = await within(
@@ -3137,6 +3335,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const done = turnPlaced === null ? null : await turnPlaced;
     const where: TurnPlace | null =
       typeof done === "object" && done !== null ? done.value : null;
+    if (where !== null) turnAt.at = where;
     const login = defaultLogin();
     if (login === "yes") return null;
     if (where === "external" || (where !== null && !where.byDefault))
@@ -3202,16 +3401,46 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return { action: "proceed" };
     const model = modelFamily(ctx.requestedExecution.model);
     if (model !== null) threadModel.set(thread.id, model);
+    const placed: { at?: TurnPlace } = {};
     if (current.autoSwitch && ctx.attempt === "start-turn") {
       // A message sent now, not a queued one asked again: its own waits
       // (Astra E44-R2-03).
       if (ctx.queuedMessages.length === 0) startWaits.delete(thread.id);
-      const decision = await beforeStart(thread, model);
+      const decision = await beforeStart(thread, model, placed);
       if (decision !== null) {
         if (decision.action === "reject") startWaits.delete(thread.id);
         return decision;
       }
       startWaits.delete(thread.id);
+    }
+    // A seat on the account the turn starts on, last: placed, the project
+    // stays where it is, and a full account makes the thread wait there.
+    // Not a turn under way joined, nor an account set outside this plugin.
+    if (ctx.attempt === "start-turn") {
+      let account: string | null = null;
+      if (placed.at !== undefined) {
+        if (placed.at !== "external") account = placed.at.account;
+      } else if (current.autoSwitch) {
+        // The placement failed, took too long or was not tried (a model bb
+        // does not name): the project's account is not read again here (bb
+        // waits on this answer, and the read belongs to thread.active); its
+        // turn takes a seat as it starts.
+        bb.log.debug(
+          `thread ${thread.id}: no seat checked (where its turn starts is unknown)`,
+        );
+      } else {
+        const read = await within(
+          projectAccount(thread.projectId),
+          DISPATCH_LIMIT_MS,
+          `thread ${thread.id}: the project's account not read for its seat`,
+        );
+        if (typeof read === "object" && !read.value.external)
+          account = read.value.account ?? current.defaultAccountName;
+      }
+      if (account !== null) {
+        const wait = seatWait(thread, account);
+        if (wait !== null) return wait;
+      }
     }
     // Where the project stands as the turn is sent, for `thread.active`.
     dispatchEpoch.set(thread.id, movesOf(thread.projectId).epoch);
@@ -3541,6 +3770,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       now,
       random: deps.random(),
       stuck,
+      freeSeats,
     };
     const decision = decideSwitch(input);
     // No Fable on any account, and an account with Opus: the thread is told
@@ -3705,6 +3935,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // Its judgment's generation, taken before any read (see generation).
     const judgedIn = generation(event.threadId);
     forgetStart(event.threadId);
+    releaseSeat(event.threadId, "its turn failed");
     if (!current.autoSwitch) return;
     // Pure guards first: another provider's limit must not query every account.
     const declined = declineReason(event);
@@ -4086,6 +4317,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       model,
       now,
       current.preferredModel,
+      freeSeats,
     );
     if (to === null) {
       // Nothing to release it on; the wait fires on its own at sendAt and
@@ -4294,6 +4526,34 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             };
           },
         }),
+        seats: cliCommand({
+          summary:
+            "Show the seats of every account and who waits, then each usage sample with the seats taken as it was measured",
+          options: { json: JSON_OPTION },
+          async run({ options }) {
+            const s = await state();
+            const taken = seatsState();
+            if (options.json)
+              return {
+                exitCode: 0,
+                stdout: `${JSON.stringify({ seats: taken, samples: seatSamples, series }, null, 2)}\n`,
+              };
+            const lines: string[] = [];
+            for (const [name, a] of Object.entries(taken))
+              lines.push(
+                `${name}\tseats ${a.running + a.reserved}/${a.capacity === 0 ? "no limit" : a.capacity} (${a.running} running, ${a.reserved} reserved)\t${a.queued.length} waiting`,
+              );
+            lines.push("", "time\taccount\trunning\treserved\tsession %\tweekly %");
+            for (const [name, samples] of Object.entries(seatSamples)) {
+              const weekly = new Map(series[name]?.weekly?.points ?? []);
+              for (const [at, running, reserved] of samples)
+                lines.push(
+                  `${new Date(at).toISOString()}\t${name}\t${running}\t${reserved}\t${collector.get(name)?.observedAt === at ? (s.accounts.find((x) => x.name === name)?.usage?.session.usedPercent ?? "") : ""}\t${weekly.get(at) ?? ""}`,
+                );
+            }
+            return { exitCode: 0, stdout: `${lines.join("\n")}\n` };
+          },
+        }),
         use: cliCommand({
           summary: "Pin a project to an account (or `default` to unpin)",
           positionals: [
@@ -4384,6 +4644,45 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         }),
       },
     }),
+  );
+
+  /**
+   * After a load the seats are empty: the threads bb says run count as
+   * running, each on its project's account (a thread on an account set
+   * outside this plugin has none).
+   */
+  async function rebuildSeats(): Promise<void> {
+    if (accounts.length === 0) await discover();
+    const PAGE = 200;
+    for (let offset = 0; ; offset += PAGE) {
+      const page = await bb.sdk.threads.list({
+        archived: false,
+        limit: PAGE,
+        offset,
+      });
+      for (const t of page) {
+        if (
+          t.providerId !== CLAUDE_CODE_PROVIDER ||
+          notTheUsersThread(t) !== null ||
+          !TURN_UNDER_WAY.has(t.status) ||
+          seats.seatOf(t.id) !== null
+        )
+          continue;
+        const at = await projectAccount(t.projectId);
+        if (at.external) continue;
+        const on = at.account ?? current.defaultAccountName;
+        // A turn announced while the project was read counted itself.
+        if (seats.seatOf(t.id) === null) seats.confirm(t.id, on, deps.now());
+      }
+      if (page.length < PAGE) break;
+    }
+    for (const [name, s] of Object.entries(seats.snapshot()))
+      bb.log.info(`seats on ${name} after loading: ${s.running} running`);
+  }
+  void rebuildSeats().catch((error: unknown) =>
+    bb.log.warn(
+      `the running threads were not counted after loading: ${error instanceof Error ? error.message : String(error)}`,
+    ),
   );
 
   bb.log.info("loaded");
