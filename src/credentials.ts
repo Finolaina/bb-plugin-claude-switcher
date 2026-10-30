@@ -225,6 +225,18 @@ export interface AccessToken {
 }
 
 /**
+ * What accessToken saw, for the log line of an account left without a login
+ * (Aitor 2026-10-30, Añadido 2: «mariscal not logged in» said nothing of
+ * why). Filled by accessToken; never holds a token.
+ */
+export interface TokenNotes {
+  /** Why it answered null: no login in the store, an unparsable one, a refused refresh. */
+  noLogin?: string;
+  /** Expiry of the token it answered, epoch ms; null when the login has none. */
+  expiresAt?: number | null;
+}
+
+/**
  * Valid access token of the account, refreshing only if it already expired.
  * Null = no login. `pending` carries rotated logins across calls (one map per
  * process); without it a refresh whose write failed would be lost.
@@ -234,13 +246,23 @@ export async function accessToken(
   configDir: string | null,
   now: number,
   pending: PendingCredentials = new Map(),
+  notes: TokenNotes = {},
 ): Promise<AccessToken | null> {
   const service = keychainService(configDir);
-  const stored = parseCredentials(await readRaw(io, configDir));
+  const raw = await readRaw(io, configDir);
+  const stored = parseCredentials(raw);
   // An unreadable store proves nothing about a held login: it stays for the
   // next call. Only a store holding a DIFFERENT login means someone else
   // rotated it since, and what we hold is dead.
-  if (stored === null) return null;
+  if (stored === null) {
+    notes.noLogin =
+      raw !== null
+        ? "credentials in the store could not be parsed"
+        : io.platform === "darwin"
+          ? `no login in the store (security rc 44 for "${service}")`
+          : `no login in the store (no ${credentialsPath(io, configDir)})`;
+    return null;
+  }
   let credentials = stored;
   const held = pending.get(service);
   if (held !== undefined) {
@@ -251,6 +273,7 @@ export async function accessToken(
     }
   }
   if ((credentials.claudeAiOauth.expiresAt ?? 0) >= now) {
+    notes.expiresAt = credentials.claudeAiOauth.expiresAt ?? null;
     const unsaved = await persist(io, configDir, pending);
     return {
       token: credentials.claudeAiOauth.accessToken,
@@ -261,8 +284,10 @@ export async function accessToken(
   const refreshed = await refresh(io, credentials, now);
   if (refreshed === null) {
     pending.delete(service);
+    notes.noLogin = "refresh rejected";
     return null;
   }
+  notes.expiresAt = refreshed.claudeAiOauth.expiresAt ?? null;
   pending.set(service, {
     credentials: refreshed,
     basedOn: stored.claudeAiOauth.refreshToken,
@@ -278,7 +303,8 @@ export async function accessToken(
 export type UsageFetch =
   | { status: "ok"; payload: unknown }
   | { status: "rate-limited" }
-  | { status: "unauthenticated" }
+  /** `body`: the first 200 characters of the refusal, for the log. */
+  | { status: "unauthenticated"; body: string }
   | { status: "error"; message: string };
 
 export async function fetchUsage(
@@ -304,7 +330,10 @@ export async function fetchUsage(
     };
   }
   if (response.status === 429) return { status: "rate-limited" };
-  if (response.status === 401) return { status: "unauthenticated" };
+  if (response.status === 401) {
+    const body = await response.text().catch(() => "");
+    return { status: "unauthenticated", body: body.slice(0, 200) };
+  }
   if (!response.ok) {
     return {
       status: "error",
