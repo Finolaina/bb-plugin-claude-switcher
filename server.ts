@@ -30,10 +30,19 @@ import { z } from "zod";
 import {
   discoverAccounts,
   expandHome,
+  planOf,
   type Account,
   type AccountsIo,
 } from "./src/accounts.js";
+import { nextDayStart, paceOf, type DayStart, type Pace } from "./src/pace.js";
 import {
+  healthReport,
+  healthText,
+  isoInZone,
+  type HealthReport,
+} from "./src/health.js";
+import {
+  freshReading,
   UsageCollector,
   type LoginState,
   type Measurement,
@@ -156,6 +165,13 @@ export const SEAT_TTL_MS = 90_000;
 const SEAT_READ_WAITS = 3;
 /** A message sent while the seats are counted after a load is asked about again after this long (Astra SEATS-R02). */
 const SEATS_COUNTING_WAIT_MS = 5_000;
+/**
+ * How long `reserve` waits for the seats to be counted after a load before
+ * it fails, temporarily, granting nothing (Codex ULTRA-R02).
+ */
+const RESERVE_COUNT_WAIT_MS = 5_000;
+/** sysexits' EX_TEMPFAIL: `reserve` may be asked again in a moment. */
+const EXIT_TEMPFAIL = 75;
 /** Tries of each read that counts the seats after a load, this long apart (Astra SEATS-R02). */
 const SEAT_COUNT_TRIES = 3;
 const SEAT_COUNT_RETRY_MS = 2_000;
@@ -205,6 +221,16 @@ const KV_HISTORY = "switch-history";
 const KV_CANCELLED = "cancelled-retries";
 /** Usage samples per account and window, for the forecast. */
 const KV_SERIES = "usage-series";
+/** The day's first reading of each account's weekly window, for the day's pace (see src/pace.ts). */
+const KV_PACE = "pace-day";
+/** Seats held from outside bb (`reserve`): a reload must not lose them. */
+const KV_EXTERNAL = "external-seats";
+const externalHoldSchema = z.object({
+  id: z.string(),
+  account: z.string(),
+  until: z.number(),
+  at: z.number(),
+});
 const HISTORY_LIMIT = 100;
 /** A thread as bb reports it (the SDK does not export the type by name). */
 type ThreadResponse = PluginThreadEventPayloads["thread.created"]["thread"];
@@ -265,6 +291,12 @@ function notTheUsersThread(
     : "hidden thread";
 }
 
+const paceSchema = z.object({
+  budget: z.number(),
+  spent: z.number(),
+  dayPercent: z.number(),
+  background: z.boolean(),
+});
 const windowSchema = z.object({
   usedPercent: z.number(),
   resetsAt: z.number().nullable(),
@@ -293,6 +325,17 @@ const accountStateSchema = z.object({
       models: z.record(z.string(), windowSchema),
     })
     .nullable(),
+  // Optional: a server older than the app (during an update) sends none.
+  /** The plan behind the login (see planOf): ultra, max, team or unknown. */
+  plan: z.enum(["ultra", "max", "team", "unknown"]).optional(),
+  /** «Ultra · sin tope de 5 h», «Team»...: the same text on every screen. */
+  planLabel: z.string().optional(),
+  /** The label where room is short (the CLI's list): «Ultra · con 5 h». */
+  planShort: z.string().optional(),
+  /** Whether the account has the 5-hour window; null while its usage says nothing. */
+  fiveHour: z.boolean().nullable().optional(),
+  /** The day's pace of its weekly window; null on a Team seat or without a reset. */
+  pace: paceSchema.nullable().optional(),
 });
 const projectStateSchema = z.object({
   id: z.string(),
@@ -318,6 +361,11 @@ const forecastSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("steady") }),
   z.object({ kind: z.literal("unknown") }),
 ]);
+const dayStartSchema = z.object({
+  at: z.number(),
+  usedPercent: z.number(),
+  resetsAt: z.number(),
+});
 const seriesSchema = z.object({
   resetsAt: z.number().nullable(),
   points: z.array(z.tuple([z.number(), z.number()])),
@@ -365,6 +413,10 @@ const stateSchema = z.object({
         queued: z.array(
           z.object({ threadId: z.string(), title: z.string().nullable() }),
         ),
+        /** Seats held from outside bb (`reserve`), by id; only when there is one. */
+        external: z
+          .array(z.object({ id: z.string(), until: z.number() }))
+          .optional(),
       }),
     )
     .optional(),
@@ -519,6 +571,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       description:
         "A thread whose turn is about to start waits when the project's account already runs this many; it starts as soon as one of them ends, first come first served. A project is never moved to find a seat. 0 = no limit.",
       default: 2,
+    },
+    dayStartHour: {
+      type: "number",
+      label: "Hour the day starts (Europe/Madrid)",
+      description:
+        "Each day from this hour gets an even share of what is left of an account's weekly window. At 90 % of it the account takes no more background work (threads another thread, an automation or a plugin opens) unless no other account can run it; your own threads are never held back by it.",
+      default: 9,
     },
     loginPrivateWindow: {
       type: "boolean",
@@ -684,7 +743,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   const collector = new UsageCollector({
     io: deps.credentialIo,
     now: deps.now,
-    onMeasured: (name, measurement) => noteSeatSample(name, measurement),
+    onMeasured: (name, measurement) => {
+      noteSeatSample(name, measurement);
+      notePaceDay(name, measurement);
+    },
     warn: (message) => bb.log.warn(message),
   });
   let accounts: Account[] = [];
@@ -734,12 +796,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   const seats = new Seats((key) => {
     const name = namesOf(key)[0]!;
+    const usage = collector.get(name)?.usage;
     return capacityFor(
       accounts.find((a) => a.name === name)?.kind,
-      collector.get(name)?.usage?.weekly.absent === true,
+      usage?.weekly.absent === true,
       current,
+      usage?.session.absent === true,
     );
-  }, seatsChanged);
+  }, seatsChanged, deps.now);
   /**
    * Per account, a sample of its seats and usage each time it is measured,
    * a week of them (see noteSeatSample): what share of a window an hour of
@@ -780,6 +844,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * turn waits, so none is let in against an empty count (Astra SEATS-R02).
    */
   let seatsReady = false;
+  /** The count after the load (see rebuildSeats), for `reserve` to wait for. */
+  let seatsCounted: Promise<void> = Promise.resolve();
+  /**
+   * The last count read every thread it found running (Codex ULTRA-R2-003):
+   * a count that ended with a read failed (seatsReady all the same) leaves
+   * seats it could not tell, and `reserve` grants none on it.
+   */
+  let seatsComplete = false;
+  /** A count is under way (see countSeats). */
+  let seatsCounting = false;
   /** A message waited for the count: bb is asked again once it is done. */
   let seatsAwaited = false;
   /**
@@ -806,7 +880,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
   function occupancy(key: string): string {
     const s = seats.snapshot([key])[key]!;
-    const taken = s.running + s.reserved;
+    const taken = s.running + s.reserved + (s.external?.length ?? 0);
     return `${taken}/${s.capacity === 0 ? "∞" : s.capacity} taken, ${s.queued.length} waiting`;
   }
   /**
@@ -835,10 +909,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   function admitWaiting(): void {
     const now = deps.now();
+    const held = seats.holds().length;
     for (const key of seats.expire(now, SEAT_TTL_MS))
       bb.log.info(
-        `a seat reserved on ${seatName(key)} expired (its turn did not start); ${occupancy(key)}`,
+        `a seat reserved on ${seatName(key)} expired (its turn did not start, or its hold from outside bb ended); ${occupancy(key)}`,
       );
+    if (seats.holds().length !== held) storeHolds();
     const admitted = seats.admitAll(now);
     for (const threadId of admitted) {
       const key = seats.seatOf(threadId)?.account ?? "?";
@@ -854,6 +930,32 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             `bb not asked again after a seat freed: ${error instanceof Error ? error.message : String(error)}`,
           ),
         );
+  }
+  /** Writes in order (see storeHolds). */
+  let holdsWrites: Promise<void> = Promise.resolve();
+  /**
+   * The seats held from outside bb (or `snapshot`, what they are to be),
+   * to storage (KV_EXTERNAL), in order: true when written. A failure is
+   * logged; reserve and unreserve say it (Codex ULTRA-R2-004).
+   */
+  function storeHolds(snapshot = seats.holds()): Promise<boolean> {
+    const written = holdsWrites.then(async () => {
+      try {
+        await bb.storage.kv.set(KV_EXTERNAL, snapshot);
+        return true;
+      } catch (error) {
+        bb.log.warn(
+          `could not store the seats held from outside bb (a reload forgets them): ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return false;
+      }
+    });
+    holdsWrites = written.then(() => {});
+    return written;
+  }
+  /** The hold `id` as it counts now, if any. */
+  function holdOf(id: string) {
+    return seats.holds().find((h) => h.id === id);
   }
   /** The thread's turn ended or the thread went: its seat goes to the next in line. */
   function releaseSeat(threadId: string, why: string): void {
@@ -928,7 +1030,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     seatTitles.set(thread.id, thread.title ?? null);
     const s = seats.snapshot([key])[key]!;
     const ahead = (seats.position(thread.id)?.position ?? 1) - 1;
-    const reason = `Waiting for a seat on ${account}: ${s.running + s.reserved}/${s.capacity} threads running, ${ahead} ahead in the queue`;
+    const reason = `Waiting for a seat on ${account}: ${s.running + s.reserved + (s.external?.length ?? 0)}/${s.capacity} threads running, ${ahead} ahead in the queue`;
     bb.log.info(`thread ${thread.id}: ${reason}`);
     return { action: "wait", reason, sendAt: now + SEAT_RECHECK_MS };
   }
@@ -1131,6 +1233,29 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       `could not read the usage samples; starting them again: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  /** The day's first reading of each account's weekly window (see src/pace.ts). */
+  let paceDay: Record<string, DayStart> = {};
+  try {
+    const parsed = z
+      .record(z.string(), dayStartSchema)
+      .safeParse(await bb.storage.kv.get<unknown>(KV_PACE));
+    if (parsed.success) paceDay = parsed.data;
+  } catch (error) {
+    bb.log.warn(
+      `could not read the day's first readings; the day's pace starts again: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  // The seats held from outside bb before the reload.
+  try {
+    const parsed = z
+      .array(externalHoldSchema)
+      .safeParse(await bb.storage.kv.get<unknown>(KV_EXTERNAL));
+    if (parsed.success) seats.restoreHolds(parsed.data, deps.now());
+  } catch (error) {
+    bb.log.warn(
+      `could not read the seats held from outside bb; they are not counted: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   // The seat samples kept; one of another shape (before 0.2.31's second
   // round: no usage in it) is left out.
   try {
@@ -1187,6 +1312,46 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       `could not read what the banners are asked on; they come back with the next judgments: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  /** The hour the day starts in Madrid (the setting, a whole hour 0-23; 9 when unreadable). */
+  function dayHour(): number {
+    const h = Math.floor(current.dayStartHour);
+    return Number.isFinite(h) && h >= 0 && h <= 23 ? h : 9;
+  }
+  /** The day's pace of the account's weekly window now; null on a Team seat, without a reset or unmeasured. */
+  function paceFor(name: string): Pace | null {
+    const usage = collector.get(name)?.usage;
+    if (usage === null || usage === undefined) return null;
+    const now = deps.now();
+    return paceOf(settle({ ...usage, name }, now).weekly, paceDay[name], now, dayHour());
+  }
+  /**
+   * The account is saved for the user (SPEC 2026-10-30 §2): its day's pace
+   * at 90 %, or not known for a weekly window it has (no reset: nothing is
+   * spent blind). A Team seat has no general weekly: no pace holds it back.
+   */
+  /**
+   * Background work: a thread another thread, an automation or a plugin
+   * opened (the user opens the rest). Every choice of another account for
+   * it puts the accounts saved for the user last (Codex ULTRA-R01).
+   */
+  function isBackground(
+    thread: Pick<ThreadResponse, "parentThreadId" | "originPluginId">,
+  ): boolean {
+    return (
+      typeof thread.parentThreadId === "string" ||
+      typeof thread.originPluginId === "string"
+    );
+  }
+  /** savedForUser for background work; nothing (the pace does not count) for the user's own. */
+  function paceFilter(background: boolean) {
+    return background ? { savedForUser } : {};
+  }
+  function savedForUser(name: string): boolean {
+    const usage = collector.get(name)?.usage;
+    if (usage === null || usage === undefined) return false;
+    if (usage.weekly.absent === true) return false;
+    return paceFor(name)?.background !== true;
+  }
   let seriesWrites: Promise<void> = Promise.resolve();
   /**
    * Note the measured windows of every known account (the weekly one and
@@ -1209,7 +1374,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         continue;
       }
       // Only a fresh measurement is a sample: a failed query keeps the old usage.
-      if (m.problem !== null && m.problem.kind === "error") {
+      if (!freshReading(m)) {
         next[account.name] = own;
         continue;
       }
@@ -1229,6 +1394,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     series = next;
     for (const name of Object.keys(seatSamples))
       if (next[name] === undefined) delete seatSamples[name];
+    for (const name of Object.keys(paceDay))
+      if (!accounts.some((a) => a.name === name)) delete paceDay[name];
+    const paceSnapshot = { ...paceDay };
     const snapshot = series;
     pruneSeatSamples();
     const seatSnapshot = structuredClone(seatSamples);
@@ -1240,6 +1408,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           `could not store the seat samples: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
+      await storePaceDay(paceSnapshot);
       try {
         await bb.storage.kv.set(KV_SERIES, snapshot);
       } catch (error) {
@@ -1250,6 +1419,47 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     });
     return seriesWrites;
   }
+  /** The day's first readings, to storage; a failure is logged, not thrown. */
+  async function storePaceDay(snapshot: Record<string, DayStart>): Promise<void> {
+    try {
+      await bb.storage.kv.set(KV_PACE, snapshot);
+    } catch (error) {
+      bb.log.warn(
+        `could not store the day's first readings: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  /**
+   * The account was measured, by whichever path (the refresh, bb's usage
+   * panel, a placement): the day's first reading of its weekly window is
+   * kept or replaced, and stored when it changes (Codex ULTRA-R03). Only a
+   * fresh measurement counts: a failed query keeps the old usage.
+   */
+  function notePaceDay(name: string, m: Measurement): void {
+    if (!freshReading(m)) return;
+    // An answer without the general weekly (incomplete: no reset) touches
+    // nothing (see nextDayStart, Codex ULTRA-R04); one that has it is a
+    // reading of the week, whatever else it lacks. A Team seat has no
+    // general weekly at all: no first reading.
+    const kept = paceDay[name];
+    const day =
+      m.usage.weekly.absent === true
+        ? undefined
+        : nextDayStart(
+            kept,
+            {
+              at: m.observedAt,
+              usedPercent: m.usage.weekly.usedPercent,
+              resetsAt: m.usage.weekly.resetsAt,
+            },
+            dayHour(),
+          );
+    if (day === kept) return;
+    if (day === undefined) delete paceDay[name];
+    else paceDay[name] = day;
+    const snapshot = { ...paceDay };
+    seriesWrites = seriesWrites.then(() => storePaceDay(snapshot));
+  }
   /**
    * The account was measured: a sample of its seats as they are now, with
    * the usage it was measured at, whole in itself (Astra SEATS-R06/R07).
@@ -1257,8 +1467,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * query keeps the old one) adds nothing and changes nothing.
    */
   function noteSeatSample(name: string, m: Measurement): void {
-    if (m.observedAt === null || m.usage === null) return;
-    if (m.problem !== null && m.problem.kind === "error") return;
+    if (!freshReading(m)) return;
     const at = m.observedAt;
     const own = (seatSamples[name] ?? []).filter(
       ([t]) => at - t <= SEAT_SAMPLES_MS,
@@ -2004,6 +2213,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           observedAt: m?.observedAt ?? null,
           problem: m?.problem ?? null,
           usage: m?.usage ?? null,
+          ...planState(account, m?.usage ?? null),
+          pace: paceFor(account.name),
         };
       }),
       projects,
@@ -2021,6 +2232,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       forecasts: forecasts(),
       login: loginStatus(),
       seats: seatsState(),
+    };
+  }
+
+  /** What the views and `health` say of an account's plan (see planOf). */
+  function planState(account: Account, usage: Measurement["usage"]) {
+    const info = planOf(account, usage);
+    return {
+      plan: info.plan,
+      planLabel: info.label,
+      planShort: info.short,
+      fiveHour: info.fiveHour,
     };
   }
 
@@ -2558,6 +2780,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     event: PluginTurnFailedEvent,
     started: string | null | undefined,
     projectId: string,
+    /** The thread is background work (see isBackground). */
+    background: boolean,
   ): string | null {
     if (
       recent.advice === undefined ||
@@ -2577,7 +2801,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         now,
       },
       unreadAccounts(),
-      placementOf(projectId, FALLBACK_MODEL, now),
+      placementOf(projectId, FALLBACK_MODEL, now, background),
     );
     return on === null ? null : opusInsteadText(model, on);
   }
@@ -2936,6 +3160,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       preferredModel: current.preferredModel,
       excursionFrom: wayHome(projectId, current.preferredModel, measured, now),
       freeSeats,
+      // Background work behind the accounts saved for the user (SPEC
+      // 2026-10-30 §2).
+      ...paceFilter(isBackground(thread)),
       now,
       currentLoggedOut: unconfirmed(fromName),
     });
@@ -3153,6 +3380,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       reserveModel: current.preferredModel,
       threshold,
       freeSeats,
+      ...paceFilter(isBackground(thread)),
       now,
     });
     if (decision.kind === "keep") return;
@@ -3574,6 +3802,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     projectId: string,
     model: string,
     now: number,
+    /** For a thread of background work (see isBackground); false when the thread is not known. */
+    background = false,
   ): Omit<PlacementInput, "currentAccount"> {
     const measured = measuredAccounts(model);
     return {
@@ -3583,6 +3813,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       reserveModel: current.preferredModel,
       excursionFrom: wayHome(projectId, model, measured, now),
       freeSeats,
+      ...paceFilter(background),
       now,
     };
   }
@@ -3619,7 +3850,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const now = deps.now();
     const excursion = excursions.get(projectId);
     const decision = decidePlacement({
-      ...placementOf(projectId, model, now),
+      ...placementOf(projectId, model, now, isBackground(thread)),
       currentAccount: fromName,
       currentLoggedOut: unconfirmed(fromName),
     });
@@ -4061,6 +4292,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     started: string | null | undefined,
     /** The thread's generation as its failure came (see generation). */
     judgedIn: number,
+    /** The thread is background work (see isBackground). */
+    background: boolean,
   ): Promise<void> {
     const now = deps.now();
     // The log first, for the turn that failed: a Send now or an edited
@@ -4114,7 +4347,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       recent.graced.add(event.threadId);
       if (typeof started === "string" && isRefusal(event))
         markRefused(started, now, event);
-      const told = followsAdvice(recent, model, now, event, started, projectId);
+      const told = followsAdvice(recent, model, now, event, started, projectId, background);
       const reason = `Retrying on account ${recent.to}${told === null ? "" : `. ${told}`}`;
       bb.log.info(
         `thread ${event.threadId}: ${reason} (switched ${now - recent.at} ms ago)`,
@@ -4162,7 +4395,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         const told =
           sendAt === undefined || recent === undefined
             ? null
-            : followsAdvice(recent, model, now, event, started, projectId);
+            : followsAdvice(recent, model, now, event, started, projectId, background);
         const reason = `Retrying on account ${currentName}${told === null ? "" : `. ${told}`}`;
         bb.log.info(
           `thread ${event.threadId}: ${reason} (its turn started on ${started})`,
@@ -4202,6 +4435,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       before,
       judgedIn,
       turn.chain,
+      background,
       started,
     );
   }
@@ -4343,6 +4577,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     judgedIn: number,
     /** The turn's retry chain (see loggedTurn), read before the judgment began. */
     chain: string | null,
+    /** The thread is background work (see isBackground): the switch goes behind the accounts saved for the user. */
+    background: boolean,
     ranOn?: string | null,
   ): Promise<void> {
     const turn = { requestId: event.requestId, chain };
@@ -4390,6 +4626,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       random: deps.random(),
       stuck,
       freeSeats,
+      ...paceFilter(background),
     };
     const decision = decideSwitch(input);
     // No Fable on any account, and an account with Opus: the thread is told
@@ -4399,7 +4636,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       decision,
       input,
       unreadAccounts(),
-      placementOf(projectId, FALLBACK_MODEL, now),
+      placementOf(projectId, FALLBACK_MODEL, now, background),
     );
     const advice = opusOn === null ? null : opusInsteadText(model, opusOn);
     const carried = advice === null ? undefined : { model };
@@ -4575,7 +4812,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     try {
       await inProjectQueue(thread.projectId, () =>
-        handleFailure(event, thread.projectId, started, judgedIn),
+        handleFailure(
+          event,
+          thread.projectId,
+          started,
+          judgedIn,
+          isBackground(thread),
+        ),
       );
     } catch (error) {
       // A retry of the turn is already on its way (queued by another plugin,
@@ -4732,6 +4975,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       judgedIn,
       // Its chain, as the log named it above.
       turn.original,
+      isBackground(live),
     );
   }
   /**
@@ -4937,6 +5181,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       now,
       current.preferredModel,
       freeSeats,
+      isBackground(thread) ? savedForUser : undefined,
     );
     if (to === null) {
       // Nothing to release it on; the wait fires on its own at sendAt and
@@ -5105,6 +5350,53 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function textState(s: State): string {
     return listText(s, deps.now());
   }
+  /** `health`: every account as SPEC 2026-10-30 §4 has it (version 1). */
+  async function health(): Promise<HealthReport> {
+    if (accounts.length === 0) await discover();
+    const now = deps.now();
+    const taken = seatsState();
+    // What the policy may choose, whatever the model (Codex ULTRA-R06): a
+    // read it no longer trusts is no usable account here either.
+    const trusted = new Set(collector.usable(maxReadAgeMs()).map((a) => a.name));
+    const observed = accounts
+      .map((a) => collector.get(a.name)?.observedAt ?? null)
+      .filter((at): at is number => at !== null);
+    return healthReport({
+      measured: observed.length === 0 ? now : Math.max(...observed),
+      dayStartHour: dayHour(),
+      accounts: accounts.map((account) => {
+        const m = collector.get(account.name);
+        const usage =
+          m?.usage === null || m?.usage === undefined
+            ? null
+            : settle({ ...m.usage, name: account.name }, now);
+        const unconfirmed =
+          usage !== null && !trusted.has(account.name) && m?.observedAt != null;
+        return {
+          name: account.name,
+          plan: planOf(account, m?.usage ?? null),
+          usage,
+          problem: m?.problem ?? null,
+          pace: paceFor(account.name),
+          seats:
+            taken[account.name] === undefined
+              ? undefined
+              : {
+                  ...taken[account.name]!,
+                  external: taken[account.name]!.external ?? [],
+                },
+          ...(unconfirmed ? { unconfirmedSince: m!.observedAt! } : {}),
+          usable:
+            usage !== null &&
+            !unconfirmed &&
+            usage.unknown !== true &&
+            !loggedOut(account.name) &&
+            !refusing(account.name) &&
+            isUsable(usage),
+        };
+      }),
+    });
+  }
   bb.cli.register(
     defineCli({
       name: "claude-switcher",
@@ -5121,6 +5413,189 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
               stdout: options.json
                 ? `${JSON.stringify(s, null, 2)}\n`
                 : textState(s),
+            };
+          },
+        }),
+        health: cliCommand({
+          summary:
+            "A stable read of every account for other threads and scripts: plan, 5-hour window, weekly, models, the day's pace, seats, usable and why not (version 1)",
+          options: { json: JSON_OPTION },
+          async run({ options }) {
+            const report = await health();
+            return {
+              exitCode: 0,
+              stdout: options.json
+                ? `${JSON.stringify(report, null, 2)}\n`
+                : healthText(report),
+            };
+          },
+        }),
+        reserve: cliCommand({
+          summary:
+            "Hold a seat of an account for a run outside bb (claude -p with its CLAUDE_CONFIG_DIR) until a time, at most 12 h; fails when the account has no free seat. The same id renews it",
+          positionals: [
+            { name: "account", description: "Account name", required: true },
+          ] as const,
+          options: {
+            id: {
+              type: "string",
+              required: true,
+              description: "Who holds it: the same id renews the hold, unreserve ends it",
+            },
+            until: {
+              type: "string",
+              required: true,
+              description: "ISO 8601 with a zone (2026-10-31T07:00:00+01:00); never more than 12 h ahead",
+            },
+            json: JSON_OPTION,
+          },
+          async run({ positionals, options }) {
+            if (
+              !/(?:Z|[+-]\d{2}:\d{2})$/u.test(options.until) ||
+              Number.isNaN(Date.parse(options.until))
+            )
+              throw new PluginCliError(
+                `--until "${options.until}" is not an ISO 8601 time with a zone.`,
+                { code: "bad_until" },
+              );
+            await discover();
+            const name = positionals.account;
+            if (!accounts.some((a) => a.name === name))
+              throw new PluginCliError(
+                `Unknown account "${name}"; known: ${accounts.map((a) => a.name).join(", ") || "none"}`,
+                { code: "unknown_account" },
+              );
+            // Never against the empty count of a load: the threads already
+            // running are counted first (Codex ULTRA-R02).
+            if (!seatsReady) {
+              bb.log.info(
+                `reserve ${name} for ${options.id} waits for the seats to be counted after loading`,
+              );
+              await within(
+                seatsCounted,
+                RESERVE_COUNT_WAIT_MS,
+                "the seats were not counted for reserve",
+              );
+              if (!seatsReady)
+                throw new PluginCliError(
+                  "The seats are still being counted after a reload; nothing held. Try again in a few seconds.",
+                  { code: "seats_counting", exitCode: EXIT_TEMPFAIL },
+                );
+            }
+            // A count that left running threads unread is no count to grant
+            // on: they are counted again (Codex ULTRA-R2-003).
+            if (!seatsComplete) {
+              countSeats();
+              throw new PluginCliError(
+                "Some running threads could not be counted after a reload; counting them again, nothing held. Try again in a few seconds.",
+                { code: "seats_counting", exitCode: EXIT_TEMPFAIL },
+              );
+            }
+            const key = seatKey(name);
+            // Expired reservations and holds go first; then the check and
+            // the hold in one synchronous step (see Seats.holdExternal).
+            admitWaiting();
+            const now = deps.now();
+            const before = holdOf(options.id);
+            const result = seats.holdExternal(
+              options.id,
+              key,
+              Date.parse(options.until),
+              now,
+            );
+            if (!result.ok) {
+              throw new PluginCliError(
+                result.reason === "past"
+                  ? `--until ${options.until} is not ahead of now.`
+                  : `No free seat on ${name}: ${occupancy(key)}.`,
+                {
+                  code: result.reason === "past" ? "until_past" : "no_free_seat",
+                  exitCode: 1,
+                },
+              );
+            }
+            // Granted only once stored: a hold a reload would forget lets bb
+            // fill the seat under the run (Codex ULTRA-R2-004). Not stored,
+            // it is undone, unless another reserve or unreserve of the id
+            // changed it meanwhile: that one stands.
+            const mine = holdOf(options.id);
+            if (!(await storeHolds())) {
+              const now2 = holdOf(options.id);
+              if (
+                mine !== undefined &&
+                now2 !== undefined &&
+                now2.account === mine.account &&
+                now2.until === mine.until &&
+                now2.at === mine.at
+              ) {
+                seats.releaseExternal(options.id);
+                if (before !== undefined) seats.restoreHolds([before], deps.now());
+                void storeHolds();
+                admitWaiting();
+              }
+              throw new PluginCliError(
+                `The seat on ${name} could not be stored (a reload would forget it); nothing held${before === undefined ? "" : ", the hold stays as it was"}.`,
+                { code: "not_stored", exitCode: 1 },
+              );
+            }
+            bb.log.info(
+              `seat on ${name} held from outside bb by ${options.id} until ${isoInZone(result.until)}${result.renewed ? " (renewed)" : ""}; ${occupancy(key)}`,
+            );
+            const out = {
+              id: options.id,
+              account: name,
+              until: isoInZone(result.until),
+              renewed: result.renewed,
+            };
+            return {
+              exitCode: 0,
+              stdout: options.json
+                ? `${JSON.stringify(out, null, 2)}\n`
+                : `${name}: seat held by ${out.id} until ${out.until}${out.renewed ? " (renewed)" : ""}\n`,
+            };
+          },
+        }),
+        unreserve: cliCommand({
+          summary: "End a seat held with reserve; an id not held is no error",
+          options: {
+            id: {
+              type: "string",
+              required: true,
+              description: "The id the seat was held with",
+            },
+            json: JSON_OPTION,
+          },
+          async run({ options }) {
+            // Stored first, without it: not stored, the hold stays, in
+            // memory as in storage (Codex ULTRA-R2-004).
+            if (holdOf(options.id) !== undefined) {
+              const without = seats.holds().filter((h) => h.id !== options.id);
+              if (!(await storeHolds(without)))
+                throw new PluginCliError(
+                  `The end of the seat held by ${options.id} could not be stored; it stays held.`,
+                  { code: "not_stored", exitCode: 1 },
+                );
+            }
+            const key = seats.releaseExternal(options.id);
+            if (key !== null) {
+              // What changed meanwhile, stored after the write above.
+              void storeHolds();
+              bb.log.info(
+                `seat on ${seatName(key)} held from outside bb by ${options.id} released; ${occupancy(key)}`,
+              );
+              admitWaiting();
+            }
+            const out =
+              key === null
+                ? { id: options.id, released: false }
+                : { id: options.id, released: true, account: seatName(key) };
+            return {
+              exitCode: 0,
+              stdout: options.json
+                ? `${JSON.stringify(out, null, 2)}\n`
+                : key === null
+                  ? `not held: ${options.id} (nothing to release)\n`
+                  : `${out.account}: seat held by ${options.id} released\n`,
             };
           },
         }),
@@ -5176,7 +5651,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             const lines: string[] = [];
             for (const [name, a] of Object.entries(taken))
               lines.push(
-                `${name}\tseats ${a.running + a.reserved}/${a.capacity === 0 ? "no limit" : a.capacity} (${a.running} running, ${a.reserved} reserved)\t${a.queued.length} waiting`,
+                `${name}\tseats ${a.running + a.reserved + (a.external?.length ?? 0)}/${a.capacity === 0 ? "no limit" : a.capacity} (${a.running} running, ${a.reserved} reserved${a.external === undefined ? "" : `, ${a.external.length} held outside bb: ${a.external.map((e) => `${e.id} until ${isoInZone(e.until)}`).join(", ")}`})\t${a.queued.length} waiting`,
               );
             const time = (at: number | null) =>
               at === null ? "" : new Date(at).toISOString();
@@ -5344,9 +5819,24 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * read that fails is tried again, and one that still fails leaves its
    * threads uncounted (they count as they start again): fail open, said.
    */
+  /** Counts the seats (see rebuildSeats), unless a count is under way. */
+  function countSeats(): void {
+    if (seatsCounting) return;
+    seatsCounted = rebuildSeats().catch((error: unknown) =>
+      bb.log.warn(
+        `the running threads were not counted after loading (they count as they start): ${error instanceof Error ? error.message : String(error)}`,
+      ),
+    );
+  }
   async function rebuildSeats(): Promise<void> {
     const ended = new Set<string>();
     endedWhileCounting = ended;
+    seatsCounting = true;
+    seatsComplete = false;
+    // Every running thread read: set at the end of the count, unless a
+    // read failed on the way.
+    let complete = false;
+    let unread = false;
     try {
       if (accounts.length === 0) await countTries("the accounts", discover);
       const running: { id: string; projectId: string }[] = [];
@@ -5375,6 +5865,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             countTries(`the account of project ${t.projectId}`, () =>
               projectAccount(t.projectId),
             ).catch((error: unknown) => {
+              unread = true;
               bb.log.warn(
                 `the threads of project ${t.projectId} not counted after loading (they count as they start): ${error instanceof Error ? error.message : String(error)}`,
               );
@@ -5405,6 +5896,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             const live = await countTries(`thread ${t.id}`, () =>
               bb.sdk.threads.get({ threadId: t.id }),
             ).catch((error: unknown) => {
+              unread = true;
               bb.log.warn(
                 `thread ${t.id} not counted after loading (it counts as it starts): ${error instanceof Error ? error.message : String(error)}`,
               );
@@ -5418,9 +5910,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           seats.confirm(t.id, seatKey(seat), deps.now());
         }),
       );
+      complete = !unread;
     } finally {
       endedWhileCounting = null;
       seatsReady = true;
+      seatsComplete = complete;
+      seatsCounting = false;
       const taken = Object.entries(seats.snapshot())
         .map(([key, s]) => `${seatName(key)} ${s.running} running`)
         .join(", ");
@@ -5435,11 +5930,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           );
     }
   }
-  void rebuildSeats().catch((error: unknown) =>
-    bb.log.warn(
-      `the running threads were not counted after loading (they count as they start): ${error instanceof Error ? error.message : String(error)}`,
-    ),
-  );
+  countSeats();
 
   bb.log.info("loaded");
 }

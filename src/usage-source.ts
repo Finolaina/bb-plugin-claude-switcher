@@ -1,6 +1,6 @@
 // Shapes this plugin's accounts and measurements the way bb's provider-usage
 // panel expects them (usage-source-contract.ts).
-import type { Account } from "./accounts.js";
+import { planOf, type Account } from "./accounts.js";
 import type { Measurement } from "./collector.js";
 import type { UsageWindow } from "./policy.js";
 import type { z } from "zod";
@@ -61,17 +61,26 @@ export function toMeasurement(
   measurement: Measurement | undefined,
 ): UsageMeasurement {
   // The panel heads each card with the email and shows planLabel as a small
-  // badge; the account name goes there so two cards are never ambiguous.
+  // badge; the account name goes there so two cards are never ambiguous,
+  // with the plan's short text beside it (the same as the plugin's own
+  // views). `plan` stays null: bb's panel (provider-usage, bb 0.46) puts its
+  // own word ("Max", "Team") in place of planLabel for a plan id it knows,
+  // and the name would be lost (Codex ULTRA-R05).
+  const info = planOf(account, measurement?.usage ?? null);
+  const known = info.plan !== "unknown" || account.kind === "max";
   const fields = {
     plan: null,
     accountEmail: account.email,
-    planLabel: account.name,
+    planLabel: known ? `${account.name} · ${info.short}` : account.name,
   };
   const key = accountKey(account);
   if (measurement?.usage) {
     const { session, weekly, models } = measurement.usage;
     const windows: PanelWindow[] = [
-      window("five-hour", "session", "Current session", session, null),
+      // None for an Ultra account freed of the 5-hour window (2026-10-30).
+      ...(session.absent === true
+        ? []
+        : [window("five-hour", "session", "Current session", session, null)]),
       window("weekly", "weekly", "Weekly limit", weekly, null),
       ...Object.entries(models).map(([model, w]) =>
         window("weekly", `weekly:${model}`, `Weekly · ${model}`, w, model),

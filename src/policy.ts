@@ -12,7 +12,9 @@ export interface UsageWindow {
   resetsAt: number | null;
   /**
    * The provider reported no such window at all: a Team seat's general
-   * weekly (measured 2026-10-11: session and per-model windows only). Set
+   * weekly (measured 2026-10-11: session and per-model windows only), or
+   * the session of an Ultra account without the 5-hour window (measured
+   * 2026-10-30: five_hour null, weekly_all only). Set
    * only by the usage parser; a window whose reset merely passed is not
    * absent, it is empty until the next measurement.
    */
@@ -46,6 +48,14 @@ export interface ChoiceOptions {
    * is left out, and the rest keep their order. Unset = seats do not count.
    */
   freeSeats?: (account: string) => number;
+  /**
+   * Set for background work only (a thread another thread, an automation or
+   * a plugin opened): the accounts saved for the user, their day's pace at
+   * 90 % (see src/pace.ts), go behind every other usable one. Never left
+   * out: with no other account, background work still runs there. Unset =
+   * the pace does not count (the user's own threads).
+   */
+  savedForUser?: (account: string) => boolean;
 }
 
 export interface Choice {
@@ -153,7 +163,8 @@ function sessionQuarter(account: AccountUsage): number {
 function rank(
   account: AccountUsage,
   options: ChoiceOptions,
-): [number, number, number, number, number] {
+): [number, number, number, number, number, number] {
+  const saved = options.savedForUser?.(account.name) === true ? 1 : 0;
   const keepsReserve =
     reserving(options) && canRunModel(account, options.reserveModel!) ? 1 : 0;
   // Among the accounts that keep the reserved model, a turn with another
@@ -167,6 +178,7 @@ function rank(
       ? 1
       : 0;
   return [
+    saved,
     keepsReserve,
     spendsWeekly,
     sessionQuarter(account),
@@ -176,7 +188,8 @@ function rank(
 }
 
 /**
- * Accounts out of the reserved model first (when reserving), then those
+ * For background work, the accounts saved for the user last (see
+ * savedForUser). Then accounts out of the reserved model first (when reserving), then those
  * that spend no weekly window for the model (Team seats), then the lowest
  * session quarter, then the closest deadline for the model, then lowest
  * session use, then name: never the order measured. Within a quarter what
@@ -190,8 +203,9 @@ function sortedByRank(
   options: ChoiceOptions,
 ): AccountUsage[] {
   return [...accounts].sort((a, b) => {
-    const [ka, wa, ta, da, sa] = rank(a, options);
-    const [kb, wb, tb, db, sb] = rank(b, options);
+    const [va, ka, wa, ta, da, sa] = rank(a, options);
+    const [vb, kb, wb, tb, db, sb] = rank(b, options);
+    if (va !== vb) return va - vb;
     if (ka !== kb) return ka - kb;
     if (wa !== wb) return wa - wb;
     if (ta !== tb) return ta - tb;

@@ -1,13 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  accountSummary,
   askForProject,
   newestFirst,
   projectRead,
   composerProject,
   picksOnSelect,
-  forecastLine,
   headerStatus,
-  accountWindows,
   listText,
   noLoginFound,
   projectsByAccount,
@@ -230,54 +229,6 @@ describe("headerStatus", () => {
   });
 });
 
-describe("forecastLine", () => {
-  const NOW = Date.parse("2026-09-30T10:00:00.000Z");
-  const DAY = 24 * 3_600_000;
-
-  it("says when the window runs out, in a day count or a date, with the pace", () => {
-    expect(
-      forecastLine(
-        { kind: "runs-out", at: NOW + 3 * 3_600_000, percentPerDay: 30 },
-        NOW,
-      ),
-    ).toBe(`runs out in 3 h at this pace (30 %/day)`);
-    expect(
-      forecastLine(
-        {
-          kind: "runs-out",
-          at: NOW + 2 * DAY + 5 * 3_600_000,
-          percentPerDay: 12.5,
-        },
-        NOW,
-      ),
-    ).toBe(`runs out in 2 d 5 h at this pace (12.5 %/day)`);
-    expect(
-      forecastLine({ kind: "runs-out", at: NOW - 1, percentPerDay: 99 }, NOW),
-    ).toBe(`runs out now at this pace (99 %/day)`);
-    // Under half a minute is now, not "in 0 min".
-    expect(
-      forecastLine(
-        { kind: "runs-out", at: NOW + 29_000, percentPerDay: 99 },
-        NOW,
-      ),
-    ).toBe(`runs out now at this pace (99 %/day)`);
-    expect(
-      forecastLine(
-        { kind: "runs-out", at: NOW + 31_000, percentPerDay: 99 },
-        NOW,
-      ),
-    ).toBe(`runs out in 1 min at this pace (99 %/day)`);
-  });
-
-  it("says the window lasts until its reset, and nothing for a steady or unknown one", () => {
-    expect(
-      forecastLine({ kind: "lasts", until: NOW + DAY, percentPerDay: 4 }, NOW),
-    ).toBe("lasts until the reset at this pace (4 %/day)");
-    expect(forecastLine({ kind: "steady" }, NOW)).toBeNull();
-    expect(forecastLine({ kind: "unknown" }, NOW)).toBeNull();
-  });
-});
-
 describe("windowForecast", () => {
   const runsOut = { kind: "runs-out" as const, at: 1, percentPerDay: 1 };
   const lasts = { kind: "lasts" as const, until: 1, percentPerDay: 1 };
@@ -485,6 +436,23 @@ describe("signalsBack", () => {
   });
 });
 
+describe("outText on a machine in another zone (Codex ULTRA-R2-005)", () => {
+  it("writes when an account is back in Madrid's time, with no zone given", () => {
+    const zone = process.env.TZ;
+    process.env.TZ = "America/New_York";
+    try {
+      const now = Date.parse("2026-10-29T10:00:00Z");
+      // 13:00 in Madrid (CET), 08:00 in New York.
+      expect(outText(Date.parse("2026-10-29T12:00:00Z"), now)).toBe("agotada hasta 13:00");
+      // 00:30 on 31 Oct in Madrid is still the 30th in New York.
+      expect(outText(Date.parse("2026-10-30T23:30:00Z"), now)).toBe("agotada hasta 31/10");
+    } finally {
+      if (zone === undefined) delete process.env.TZ;
+      else process.env.TZ = zone;
+    }
+  });
+});
+
 describe("listText (bb claude-switcher list)", () => {
   const NOW = Date.parse("2026-10-29T10:00:00.000Z");
 
@@ -630,28 +598,6 @@ describe("outText", () => {
   });
 });
 
-describe("accountWindows (the panel's bars)", () => {
-  const NOW = Date.parse("2026-10-29T10:00:00.000Z");
-  const [max, , , , , team] = tenAccounts(NOW).accounts;
-
-  it("has no weekly bar for a Team seat, and one for a Max account", () => {
-    expect(accountWindows(team!.usage!).map((w) => w.label)).toEqual([
-      "Session (5 h)",
-      "Weekly · Fable",
-    ]);
-    expect(accountWindows(max!.usage!).map((w) => w.label)).toEqual([
-      "Session (5 h)",
-      "Weekly (all models)",
-      "Weekly · Fable",
-    ]);
-    expect(accountWindows(max!.usage!).map((w) => w.short)).toEqual([
-      "ses",
-      "sem",
-      "Fable",
-    ]);
-  });
-});
-
 describe("projectsByAccount (the panel's project list)", () => {
   it("groups the projects under their account, in the accounts' order, external and vanished ones last", () => {
     const groups = projectsByAccount(
@@ -706,5 +652,58 @@ describe("listText with seats", () => {
   it("says nothing of seats when none are known or nobody waits", () => {
     const text = listText(tenAccounts(NOW), NOW, "UTC");
     expect(text).not.toMatch(/seat/i);
+  });
+});
+
+describe("an Ultra account without the 5-hour window (2026-10-30)", () => {
+  const NOW = Date.parse("2026-10-30T20:55:00.000Z");
+  type W = { usedPercent: number; resetsAt: number | null; absent?: true };
+  const usage: { blocked: boolean; session: W; weekly: W; models: Record<string, W> } = {
+    blocked: false,
+    session: { usedPercent: 0, resetsAt: null, absent: true as const },
+    weekly: { usedPercent: 98, resetsAt: Date.parse("2026-11-01T17:00:00Z") },
+    models: { Fable: { usedPercent: 100, resetsAt: Date.parse("2026-11-01T17:00:00Z") } },
+  };
+
+  it("lists its plan instead of a session, never «ses 100%» nor LOCKED", () => {
+    const text = listText(
+      {
+        defaultAccountName: "main",
+        preferredModel: "Fable",
+        accounts: [
+          { name: "main", problem: null, usage, planShort: "Ultra · sin tope de 5 h" },
+          {
+            name: "team1",
+            problem: null,
+            planShort: "Team",
+            usage: {
+              blocked: false,
+              session: { usedPercent: 30, resetsAt: NOW + 3_600_000 },
+              weekly: { usedPercent: 0, resetsAt: null, absent: true as const },
+              models: {},
+            },
+          },
+        ],
+        projects: [],
+        seats: { main: { capacity: 4, running: 1, reserved: 0, queued: [] } },
+      },
+      NOW,
+      "UTC",
+    );
+    expect(text.split("\n").slice(0, 4)).toEqual([
+      "main            sem  98% Fable 100% agotada hasta 01/11",
+      "       Ultra · sin tope de 5 h · seats 1/4",
+      "team1  ses  30%",
+      "       Team",
+    ]);
+  });
+
+  it("sums up no session", () => {
+    expect(accountSummary(usage, "Fable", NOW)).toEqual({
+      session: null,
+      weekly: 98,
+      model: { name: "Fable", percent: 100 },
+      outUntil: Date.parse("2026-11-01T17:00:00Z"),
+    });
   });
 });

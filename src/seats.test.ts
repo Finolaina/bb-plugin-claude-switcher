@@ -23,6 +23,13 @@ describe("capacityFor", () => {
     expect(capacityFor(undefined, true, settings)).toBe(2);
   });
 
+  it("never gives an account without a session (Ultra freed of the 5-hour window) the Team seats", () => {
+    const settings = { seatsMax: 4, seatsTeam: 2 };
+    expect(capacityFor("team", false, settings, true)).toBe(4);
+    expect(capacityFor("unknown", true, settings, true)).toBe(4);
+    expect(capacityFor("max", false, settings, true)).toBe(4);
+  });
+
   it("reads 0, a negative or a fraction as no limit or whole seats", () => {
     expect(capacityFor("max", false, { seatsMax: 0, seatsTeam: 2 })).toBe(0);
     expect(capacityFor("max", false, { seatsMax: -3, seatsTeam: 2 })).toBe(0);
@@ -198,5 +205,92 @@ describe("Seats", () => {
     s.release("t1");
     s.release("t2");
     expect(s.admitAll(T0 + 1).sort()).toEqual(["qa", "qb"]);
+  });
+});
+
+describe("Seats: external holds (a `claude -p` run outside bb, 2026-10-30)", () => {
+  const H = 3_600_000;
+  function clocked(caps: Record<string, number> = { team: 2, free: 0 }) {
+    let now = T0;
+    const s = new Seats((account) => caps[account] ?? 0, () => {}, () => now);
+    return { s, at: (t: number) => (now = t) };
+  }
+
+  it("takes a free seat of the account, and a thread then waits its turn in the queue", () => {
+    const { s } = clocked();
+    expect(s.holdExternal("night", "team", T0 + H, T0)).toEqual({ ok: true, until: T0 + H, renewed: false });
+    expect(s.reserve("t1", "team", T0)).toBe(true);
+    expect(s.reserve("t2", "team", T0)).toBe(false);
+    expect(s.position("t2")).toEqual({ account: "team", position: 1 });
+    expect(s.snapshot().team).toEqual({
+      capacity: 2,
+      running: 0,
+      reserved: 1,
+      queued: ["t2"],
+      external: [{ id: "night", until: T0 + H }],
+    });
+  });
+
+  it("is refused, and nothing held, on an account with no free seat", () => {
+    const { s } = clocked();
+    s.reserve("t1", "team", T0);
+    s.reserve("t2", "team", T0);
+    expect(s.holdExternal("night", "team", T0 + H, T0)).toEqual({ ok: false, reason: "full" });
+    expect(s.snapshot().team?.external).toBeUndefined();
+    // Nor ahead of a thread already waiting for the seat.
+    s.release("t1");
+    s.reserve("t3", "team", T0);
+    expect(s.holdExternal("night2", "team", T0 + H, T0)).toEqual({ ok: false, reason: "full" });
+  });
+
+  it("counts until `until` and not at it", () => {
+    const { s, at } = clocked();
+    s.holdExternal("a", "team", T0 + H, T0);
+    s.holdExternal("b", "team", T0 + 2 * H, T0);
+    at(T0 + H - 1);
+    expect(s.free("team")).toBe(0);
+    at(T0 + H);
+    expect(s.free("team")).toBe(1);
+    expect(s.reserve("t1", "team", T0 + H)).toBe(true);
+    expect(s.holds().map((h) => h.id)).toEqual(["b"]);
+  });
+
+  it("renews with the same id on the same account without asking for another seat", () => {
+    const { s } = clocked();
+    s.holdExternal("night", "team", T0 + H, T0);
+    s.reserve("t1", "team", T0);
+    expect(s.holdExternal("night", "team", T0 + 3 * H, T0 + 10)).toEqual({ ok: true, until: T0 + 3 * H, renewed: true });
+    expect(s.holds()).toEqual([{ id: "night", account: "team", until: T0 + 3 * H, at: T0 + 10 }]);
+    expect(s.free("team")).toBe(0);
+  });
+
+  it("never holds longer than 12 h from the request, and refuses an `until` already past", () => {
+    const { s } = clocked();
+    expect(s.holdExternal("night", "team", T0 + 30 * H, T0)).toEqual({ ok: true, until: T0 + 12 * H, renewed: false });
+    expect(s.holdExternal("late", "team", T0, T0)).toEqual({ ok: false, reason: "past" });
+  });
+
+  it("is let go by id, once; an unknown id says it was not there", () => {
+    const { s } = clocked();
+    s.holdExternal("night", "team", T0 + H, T0);
+    expect(s.releaseExternal("night")).toBe("team");
+    expect(s.releaseExternal("night")).toBeNull();
+    expect(s.free("team")).toBe(2);
+  });
+
+  it("comes back as it was stored, the expired ones and those beyond 12 h cut", () => {
+    const { s } = clocked();
+    s.restoreHolds(
+      [
+        { id: "a", account: "team", until: T0 + H, at: T0 - H },
+        { id: "old", account: "team", until: T0 - 1, at: T0 - 2 * H },
+        { id: "long", account: "free", until: T0 + 20 * H, at: T0 - H },
+      ],
+      T0,
+    );
+    expect(s.holds()).toEqual([
+      { id: "a", account: "team", until: T0 + H, at: T0 - H },
+      { id: "long", account: "free", until: T0 + 11 * H, at: T0 - H },
+    ]);
   });
 });

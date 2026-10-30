@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Account } from "./accounts.js";
 import { keychainService, type CredentialIo } from "./credentials.js";
-import { UsageCollector } from "./collector.js";
+import { freshReading, UsageCollector } from "./collector.js";
 
 const NOW = Date.parse("2026-09-29T10:00:00.000Z");
 const ACCOUNT: Account = {
@@ -387,7 +387,24 @@ describe("UsageCollector", () => {
     expect(measurement.problem).toEqual({
       kind: "error",
       message: expect.stringMatching(/not written back/),
+      fresh: true,
     });
+  });
+
+  it("tells a fresh read with a warning from a failed query that reuses the old usage (Codex ULTRA-R2-002)", async () => {
+    const unsaved = new UsageCollector({
+      io: io([() => Response.json(PAYLOAD)], { expiresAt: NOW - 1, addCode: 1 }).credentialIo,
+      now: () => NOW,
+    });
+    expect(freshReading(await unsaved.collect(ACCOUNT))).toBe(true);
+    const collector = new UsageCollector({
+      io: io([() => Response.json(PAYLOAD), () => new Response("busy", { status: 429 })]).credentialIo,
+      now: () => NOW,
+    });
+    expect(freshReading(await collector.collect(ACCOUNT))).toBe(true);
+    const failed = await collector.collect(ACCOUNT);
+    expect(failed.usage).not.toBeNull();
+    expect(freshReading(failed)).toBe(false);
   });
 
   it("keeps the last good usage when the token endpoint is down (5xx is not a logout)", async () => {

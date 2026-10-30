@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { parseUsage } from "./usage.js";
 
@@ -221,5 +222,56 @@ describe("parseUsage", () => {
       ),
     };
     expect(() => parseUsage(naive)).toThrow(/timezone/);
+  });
+});
+
+// Real payloads of 2026-10-30 (usage numbers only, no identity): an Ultra
+// account already freed of the 5-hour window, a Team seat and an Ultra
+// account still on it (Optimizador informes/2026-10-30/ultra/SPEC.md §5).
+function fixture(name: string): unknown {
+  return JSON.parse(
+    readFileSync(new URL(`./fixtures/ultra/${name}.json`, import.meta.url), "utf8"),
+  );
+}
+
+describe("an account without the 5-hour window (Ultra, 2026-10-30)", () => {
+  it("reads a session absent at 0 %, neither blocked nor unknown (canary 1)", () => {
+    const usage = parseUsage(fixture("ultra-sin-5h"));
+    expect(usage.blocked).toBe(false);
+    expect(usage.unknown).toBeUndefined();
+    expect(usage.session).toEqual({ usedPercent: 0, resetsAt: null, absent: true });
+    expect(usage.weekly).toEqual({
+      usedPercent: 98,
+      resetsAt: Date.parse("2026-11-01T17:00:00.146425+00:00"),
+    });
+    expect(usage.models.Fable?.usedPercent).toBe(100);
+  });
+
+  it("keeps an answer without session and without the five_hour key incomplete (canary 5)", () => {
+    const { five_hour: _, ...rest } = fixture("ultra-sin-5h") as Record<string, unknown>;
+    const usage = parseUsage(rest);
+    expect(usage.blocked).toBe(true);
+    expect(usage.unknown).toBe(true);
+    expect(usage.session.absent).toBeUndefined();
+  });
+
+  it("keeps an answer with five_hour null but no weekly_all incomplete", () => {
+    const payload = fixture("ultra-sin-5h") as { limits: { kind: string }[] };
+    const usage = parseUsage({
+      ...payload,
+      limits: payload.limits.filter((l) => l.kind !== "weekly_all"),
+    });
+    expect(usage.unknown).toBe(true);
+  });
+
+  it("still reads the session of an Ultra account on the 5-hour window and of a Team seat", () => {
+    expect(parseUsage(fixture("ultra-con-5h-b")).session).toEqual({
+      usedPercent: 2,
+      resetsAt: Date.parse("2026-10-30T21:10:00.511499+00:00"),
+    });
+    const team = parseUsage(fixture("team"));
+    expect(team.session.absent).toBeUndefined();
+    expect(team.weekly.absent).toBe(true);
+    expect(team.blocked).toBe(false);
   });
 });
