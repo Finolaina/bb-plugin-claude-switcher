@@ -34,7 +34,9 @@ import {
   projectName,
   projectRead,
   retryDelayMs,
+  seatsText,
   sharedWith,
+  type SeatsLike,
   signalsBack,
   windowForecast,
   windowPercent,
@@ -299,7 +301,7 @@ export function UsageRow({
   );
 }
 
-function AccountCard({
+export function AccountCard({
   account,
   isDefault,
   preferredModel,
@@ -307,6 +309,7 @@ function AccountCard({
   twin = null,
   onLogin,
   busy = false,
+  seats,
 }: {
   account: AccountState;
   isDefault: boolean;
@@ -321,8 +324,11 @@ function AccountCard({
   onLogin?: () => void;
   /** Another request of this page is on its way. */
   busy?: boolean;
+  /** Its seats (threads at once) and who waits for one. */
+  seats?: SeatsLike;
 }) {
   const usage = account.usage;
+  const seated = seatsText(seats);
   const status =
     account.problem?.kind === "unauthenticated"
       ? isDefault
@@ -357,6 +363,14 @@ function AccountCard({
           )}
         </div>
         <span className="shrink-0 text-xs text-muted-foreground">
+          {seated === null ? null : (
+            <span
+              className="mr-1.5"
+              title="Threads running or about to start on this account, of the most allowed at once, and threads waiting for a seat"
+            >
+              {seated} ·
+            </span>
+          )}
           {formatObserved(account.observedAt)}
         </span>
       </div>
@@ -611,6 +625,7 @@ function AccountsSection() {
             preferredModel={state.preferredModel}
             forecasts={state.forecasts?.[account.name]}
             twin={sharedWith(account, state.accounts)}
+            seats={state.seats?.[account.name]}
             onLogin={
               state.login?.phase === "running"
                 ? undefined

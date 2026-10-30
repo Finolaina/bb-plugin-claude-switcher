@@ -33,7 +33,11 @@ import {
   type Account,
   type AccountsIo,
 } from "./src/accounts.js";
-import { UsageCollector, type LoginState } from "./src/collector.js";
+import {
+  UsageCollector,
+  type LoginState,
+  type Measurement,
+} from "./src/collector.js";
 import {
   forecastWindow,
   recordSample,
@@ -72,7 +76,13 @@ import {
   type PlacementInput,
   type SwitchDecision,
 } from "./src/switch.js";
-import { reserving, spendsReservedWeekly } from "./src/policy.js";
+import {
+  canRunModel,
+  isUsable,
+  modelWindow,
+  reserving,
+  spendsReservedWeekly,
+} from "./src/policy.js";
 import {
   usageFetchMethod,
   usageListMethod,
@@ -80,6 +90,7 @@ import {
 } from "./src/usage-source-contract.js";
 import { toMeasurement, toResource } from "./src/usage-source.js";
 import { shareSessions, type SessionsIo } from "./src/sessions.js";
+import { Seats, capacityFor } from "./src/seats.js";
 import { listText, projectName, sharedWith } from "./src/ui.js";
 
 export const ENV_VAR = "CLAUDE_CONFIG_DIR";
@@ -106,6 +117,18 @@ export const AHEAD_FRESH_MS = 60_000;
 /** bb fails a dispatch whose checkpoint takes 10 s: the placement before a turn is left behind well before. */
 export const DISPATCH_LIMIT_MS = 3_000;
 /**
+ * The whole dispatch checkpoint, every read in it together, answers within
+ * this long: each read gets what is left, at most DISPATCH_LIMIT_MS (Astra
+ * SEATS-R4-002).
+ */
+export const DISPATCH_BUDGET_MS = 8_000;
+/** Less than this left of DISPATCH_BUDGET_MS: no further read is started; the message waits. */
+const DISPATCH_MIN_MS = 500;
+/** A message whose dispatch ran out of DISPATCH_BUDGET_MS is asked about again this soon (Astra SEATS-R4-002). */
+const OUT_OF_TIME_WAIT_MS = 5_000;
+/** One project's rescue off an account that cannot run, its queue included, is not waited for longer (Astra SEATS-R4-004). */
+const RESCUE_LIMIT_MS = 10_000;
+/**
  * A new project's first message waits this long, once, when its placement
  * has not finished within DISPATCH_LIMIT_MS (the accounts are measured
  * first): bb asks again sooner, as soon as the placement ends (E44).
@@ -125,6 +148,37 @@ export const MAX_START_WAITS = 3;
 export const SESSIONS_LIMIT_MS = 2_000;
 /** A login left waiting in the browser this long is given up. */
 export const LOGIN_TIMEOUT_MS = 10 * 60_000;
+/** A thread waiting for a seat is asked about again after this long (sooner when a seat frees). */
+export const SEAT_RECHECK_MS = 30_000;
+/** A seat reserved for a turn that has not started within this long is freed. */
+export const SEAT_TTL_MS = 90_000;
+/** Times a message waits because its project's account could not be read for its seat; then it goes (Astra SEATS-R01). */
+const SEAT_READ_WAITS = 3;
+/** A message sent while the seats are counted after a load is asked about again after this long (Astra SEATS-R02). */
+const SEATS_COUNTING_WAIT_MS = 5_000;
+/** Tries of each read that counts the seats after a load, this long apart (Astra SEATS-R02). */
+const SEAT_COUNT_TRIES = 3;
+const SEAT_COUNT_RETRY_MS = 2_000;
+/** Changes of the seats within this long are announced once (Astra SEATS-R09). */
+const SEATS_CHANGED_MS = 250;
+const KV_SEATS = "seat-samples";
+/** The seat samples kept: a week of them (see noteSeatSample). */
+const SEAT_SAMPLES_MS = 7 * 24 * 60 * 60_000;
+/**
+ * A seat sample, whole in itself (Astra SEATS-R06): [at, running,
+ * reserved, session %, weekly % (null: no weekly window), session reset,
+ * weekly reset], `at` the measurement's own time.
+ */
+const seatSampleSchema = z.tuple([
+  z.number(),
+  z.number(),
+  z.number(),
+  z.number(),
+  z.number().nullable(),
+  z.number().nullable(),
+  z.number().nullable(),
+]);
+type SeatSample = z.infer<typeof seatSampleSchema>;
 /** An account directory name: one path segment, no leading dot. */
 const ACCOUNT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 /** Note written next to CLAUDE_CONFIG_DIR; the account name is read back from it (values are secret). */
@@ -155,7 +209,20 @@ const HISTORY_LIMIT = 100;
 /** A thread as bb reports it (the SDK does not export the type by name). */
 type ThreadResponse = PluginThreadEventPayloads["thread.created"]["thread"];
 /** Where a turn runs, as placeTurn leaves it (see there). */
-type TurnPlace = { account: string; byDefault: boolean } | "external";
+type TurnPlace =
+  | {
+      account: string;
+      byDefault: boolean;
+      /** The project's writes of its variable (`movesOf().envWrites`) for which it is there (Astra SEATS-R3-002, SEATS-R4-001). */
+      writes: number;
+    }
+  | "external"
+  | "unknown";
+/**
+ * The seat of a project whose variable names an account not among the ones
+ * found: nobody's, never the default's (Astra SEATS-R3-001).
+ */
+const UNKNOWN_SEAT = Symbol("unknown seat");
 /** A queued row bb removed, as `message.cancelled` reports it. */
 type CancelledEntry = PluginThreadEventPayloads["message.cancelled"]["entry"];
 /** When this plugin first ran: a project created later is new. */
@@ -287,6 +354,20 @@ const stateSchema = z.object({
   forecasts: z.record(z.string(), z.record(z.string(), forecastSchema)),
   /** The login started from bb, running or just ended; null when none. */
   login: loginStatusSchema.nullable(),
+  /** Per account: its seats (capacity 0 = no limit), taken and waited for. */
+  seats: z
+    .record(
+      z.string(),
+      z.object({
+        capacity: z.number(),
+        running: z.number(),
+        reserved: z.number(),
+        queued: z.array(
+          z.object({ threadId: z.string(), title: z.string().nullable() }),
+        ),
+      }),
+    )
+    .optional(),
 });
 export type State = z.infer<typeof stateSchema>;
 export type SwitchRecord = z.infer<typeof switchRecordSchema>;
@@ -420,6 +501,24 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       description:
         "Used to log an account in from bb (`claude auth login`). A name looked up in the bb server's PATH, or a full path.",
       default: "claude",
+    },
+    // ponytail: 4 and 2 are a guess, not measured per thread. Each usage
+    // sample carries the seats taken then (KV_SEATS, `bb claude-switcher
+    // seats`): with a week of them, the share of a window per hour and per
+    // seat sets these defaults.
+    seatsMax: {
+      type: "number",
+      label: "Threads at once per Max account",
+      description:
+        "A thread whose turn is about to start waits when the project's account already runs this many; it starts as soon as one of them ends, first come first served. A project is never moved to find a seat. 0 = no limit.",
+      default: 4,
+    },
+    seatsTeam: {
+      type: "number",
+      label: "Threads at once per Team account",
+      description:
+        "A thread whose turn is about to start waits when the project's account already runs this many; it starts as soon as one of them ends, first come first served. A project is never moved to find a seat. 0 = no limit.",
+      default: 2,
     },
     loginPrivateWindow: {
       type: "boolean",
@@ -563,6 +662,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const moved =
       next.accountsDir !== current.accountsDir ||
       next.defaultAccountName !== current.defaultAccountName;
+    // The default is `~/.claude` whatever it is called: renamed, it keeps
+    // the seats it has taken (Astra SEATS-R08).
+    if (next.defaultAccountName !== current.defaultAccountName)
+      seatKeys.set(next.defaultAccountName, seatKey(current.defaultAccountName));
     current = next;
     // A Map visits no key deleted before its turn: the current one may go.
     if (!next.autoSwitch) {
@@ -581,8 +684,275 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   const collector = new UsageCollector({
     io: deps.credentialIo,
     now: deps.now,
+    onMeasured: (name, measurement) => noteSeatSample(name, measurement),
+    warn: (message) => bb.log.warn(message),
   });
   let accounts: Account[] = [];
+  /**
+   * Each account's seat budget by name, kept while the accounts are looked
+   * for again (a directory changed, the default renamed): see seatKey.
+   */
+  const seatKeys = new Map<string, string>();
+  /** The budgets known to be a login's (an accountUuid), not a name's. */
+  const loginKeys = new Set<string>();
+  /**
+   * An account's seat budget: its login (accountUuid), so two directories
+   * logged into one account share it and a renamed default keeps it; its
+   * name while the login is unknown (Astra SEATS-R08).
+   */
+  function seatKey(name: string): string {
+    return (
+      accounts.find((a) => a.name === name)?.accountUuid ??
+      seatKeys.get(name) ??
+      name
+    );
+  }
+  /** The names a seat budget goes by: one, or the aliases of one login. */
+  function namesOf(key: string): string[] {
+    const names = accounts
+      .filter((a) => seatKey(a.name) === key)
+      .map((a) => a.name);
+    for (const [name, k] of seatKeys)
+      if (k === key && !names.includes(name)) names.push(name);
+    return names.length > 0 ? names : [key];
+  }
+  /** The accounts found: each name's budget is its login's from now on, with what was counted under it before. */
+  function noteSeatKeys(): void {
+    for (const a of accounts) {
+      if (a.accountUuid === null) continue;
+      const was = seatKeys.get(a.name) ?? a.name;
+      if (was !== a.accountUuid && !loginKeys.has(was))
+        seats.rekey(was, a.accountUuid);
+      seatKeys.set(a.name, a.accountUuid);
+      loginKeys.add(a.accountUuid);
+    }
+  }
+  /**
+   * Seats per account (see src/seats.ts): a thread's turn starts only with
+   * one. Kept in memory: a reload counts again the threads bb says run
+   * (see rebuildSeats). Keyed by seatKey; every change is announced.
+   */
+  const seats = new Seats((key) => {
+    const name = namesOf(key)[0]!;
+    return capacityFor(
+      accounts.find((a) => a.name === name)?.kind,
+      collector.get(name)?.usage?.weekly.absent === true,
+      current,
+    );
+  }, seatsChanged);
+  /**
+   * Per account, a sample of its seats and usage each time it is measured,
+   * a week of them (see noteSeatSample): what share of a window an hour of
+   * one seat costs (`bb claude-switcher seats`).
+   */
+  const seatSamples: Record<string, SeatSample[]> = {};
+  /**
+   * The samples older than a week go, by the clock and not only as their
+   * account is measured again: as they load, are stored and are listed
+   * (Astra SEATS-R2-006). An account left with none goes too.
+   */
+  function pruneSeatSamples(): void {
+    const now = deps.now();
+    for (const [name, samples] of Object.entries(seatSamples)) {
+      const kept = samples.filter(([t]) => now - t <= SEAT_SAMPLES_MS);
+      if (kept.length === 0) delete seatSamples[name];
+      else seatSamples[name] = kept;
+    }
+  }
+  /** Titles of the threads waiting for a seat, for the list. */
+  const seatTitles = new Map<string, string | null>();
+  /**
+   * Turns announced without a reservation whose project's account was not
+   * read in time, by thread: their project. Each refresh reads it again and
+   * counts the seat (Astra SEATS-R3-003); the turn's end forgets it.
+   */
+  const unseated = new Map<string, string>();
+  /** Waits of a thread's message because its project's account could not be read for its seat (Astra SEATS-R01). */
+  const seatReadWaits = new Map<string, number>();
+  /**
+   * Each time a message of the thread takes a seat or a place in a queue,
+   * one more: a cancellation acts only on the place it found (Astra
+   * SEATS-R4-003). Forgotten as the thread goes.
+   */
+  const seatGenerations = new Map<string, number>();
+  /**
+   * The seats are counted after the load (see rebuildSeats): till then a
+   * turn waits, so none is let in against an empty count (Astra SEATS-R02).
+   */
+  let seatsReady = false;
+  /** A message waited for the count: bb is asked again once it is done. */
+  let seatsAwaited = false;
+  /**
+   * The threads whose turn ended (or that went) while the seats are being
+   * counted: none of them is counted as running (Astra SEATS-R03). Null
+   * when no count is under way.
+   */
+  let endedWhileCounting: Set<string> | null = null;
+  const freeSeats = (name: string) => seats.free(seatKey(name));
+  /**
+   * Whose seat a turn of a project on `at` takes (Astra SEATS-R3-001): its
+   * account's (by name), the default's when it has no variable, none (null)
+   * on an account set outside this plugin, and UNKNOWN_SEAT when the
+   * variable names an account not among the ones found: never the default's.
+   */
+  function seatFor(at: ProjectAccount): string | typeof UNKNOWN_SEAT | null {
+    if (at.external) return null;
+    if (at.owned && at.account === null) return UNKNOWN_SEAT;
+    return at.account ?? current.defaultAccountName;
+  }
+  /** A seat budget for the log: the account's name. */
+  function seatName(key: string): string {
+    return namesOf(key)[0]!;
+  }
+  function occupancy(key: string): string {
+    const s = seats.snapshot([key])[key]!;
+    const taken = s.running + s.reserved;
+    return `${taken}/${s.capacity === 0 ? "∞" : s.capacity} taken, ${s.queued.length} waiting`;
+  }
+  /**
+   * The card hears every change of the seats (it has no clock of its own),
+   * the changes of SEATS_CHANGED_MS as one, and only when the seats did
+   * change (Astra SEATS-R09).
+   */
+  let seatsAnnounce: ReturnType<typeof setTimeout> | null = null;
+  let seatsAnnounced = "";
+  function seatsChanged(): void {
+    seatsAnnounce ??= setTimeout(() => {
+      seatsAnnounce = null;
+      const now = JSON.stringify(seats.snapshot());
+      if (now === seatsAnnounced) return;
+      seatsAnnounced = now;
+      bb.realtime.publish(CHANGED, { at: deps.now() });
+    }, SEATS_CHANGED_MS);
+  }
+  bb.onDispose(() => {
+    if (seatsAnnounce !== null) clearTimeout(seatsAnnounce);
+  });
+  /**
+   * Reservations whose turn never started are freed, and every free seat
+   * goes to the first in its account's queue; bb is asked again at once
+   * when someone got one.
+   */
+  function admitWaiting(): void {
+    const now = deps.now();
+    for (const key of seats.expire(now, SEAT_TTL_MS))
+      bb.log.info(
+        `a seat reserved on ${seatName(key)} expired (its turn did not start); ${occupancy(key)}`,
+      );
+    const admitted = seats.admitAll(now);
+    for (const threadId of admitted) {
+      const key = seats.seatOf(threadId)?.account ?? "?";
+      bb.log.info(
+        `thread ${threadId}: admitted to a seat on ${seatName(key)}; ${occupancy(key)}`,
+      );
+    }
+    if (admitted.length > 0)
+      void bb.experimental_hooks
+        .recheck("message.dispatch")
+        .catch((error: unknown) =>
+          bb.log.warn(
+            `bb not asked again after a seat freed: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        );
+  }
+  /** The thread's turn ended or the thread went: its seat goes to the next in line. */
+  function releaseSeat(threadId: string, why: string): void {
+    seatTitles.delete(threadId);
+    unseated.delete(threadId);
+    endedWhileCounting?.add(threadId);
+    const key = seats.release(threadId);
+    if (key === null) return;
+    bb.log.info(
+      `thread ${threadId}: seat on ${seatName(key)} released (${why}); ${occupancy(key)}`,
+    );
+    admitWaiting();
+  }
+  /** The thread's turn started on the seat budget `key`: its seat runs there. */
+  function confirmSeat(threadId: string, key: string): void {
+    unseated.delete(threadId);
+    const { over } = seats.confirm(threadId, key, deps.now());
+    seatTitles.delete(threadId);
+    const line = `thread ${threadId}: running on ${seatName(key)}${over ? " over capacity" : ""}; ${occupancy(key)}`;
+    if (over) bb.log.warn(line);
+    else bb.log.info(line);
+  }
+  /**
+   * The turns not counted as they started (see unseated): counted now, each
+   * read within DISPATCH_LIMIT_MS; one still unread waits for the next
+   * refresh (Astra SEATS-R3-003).
+   */
+  async function countUnseated(): Promise<void> {
+    await Promise.all(
+      [...unseated].map(async ([threadId, projectId]) => {
+        const read = await within(
+          projectAccount(projectId),
+          DISPATCH_LIMIT_MS,
+          `thread ${threadId}: its project's account not read to count its seat`,
+        );
+        // Ended, or counted, meanwhile.
+        if (typeof read !== "object" || unseated.get(threadId) !== projectId)
+          return;
+        unseated.delete(threadId);
+        if (seats.seatOf(threadId) !== null) return;
+        const seat = seatFor(read.value);
+        if (seat === UNKNOWN_SEAT) {
+          bb.log.debug(
+            `thread ${threadId}: no seat counted: its project's account is not among the accounts found`,
+          );
+          return;
+        }
+        if (seat !== null) confirmSeat(threadId, seatKey(seat));
+      }),
+    );
+  }
+  /**
+   * Before a turn of the thread starts on `account`: null when it has a
+   * seat there, else the wait bb holds its message on.
+   */
+  function seatWait(
+    thread: ThreadResponse,
+    account: string,
+  ): MessageDispatchHookDecision | null {
+    admitWaiting();
+    const now = deps.now();
+    const key = seatKey(account);
+    const queuedBefore = seats.position(thread.id) !== null;
+    if (seats.reserve(thread.id, key, now)) {
+      seatTitles.delete(thread.id);
+      if (queuedBefore)
+        bb.log.info(
+          `thread ${thread.id}: admitted to a seat on ${account}; ${occupancy(key)}`,
+        );
+      return null;
+    }
+    seatTitles.set(thread.id, thread.title ?? null);
+    const s = seats.snapshot([key])[key]!;
+    const ahead = (seats.position(thread.id)?.position ?? 1) - 1;
+    const reason = `Waiting for a seat on ${account}: ${s.running + s.reserved}/${s.capacity} threads running, ${ahead} ahead in the queue`;
+    bb.log.info(`thread ${thread.id}: ${reason}`);
+    return { action: "wait", reason, sendAt: now + SEAT_RECHECK_MS };
+  }
+  /** By account name: aliases of one login show the same seats. */
+  function seatsState(): NonNullable<State["seats"]> {
+    const out: NonNullable<State["seats"]> = {};
+    const snapshot = seats.snapshot(accounts.map((a) => seatKey(a.name)));
+    const named = new Set<string>();
+    const show = (name: string, key: string) => {
+      const s = snapshot[key]!;
+      named.add(key);
+      out[name] = {
+        ...s,
+        queued: s.queued.map((threadId) => ({
+          threadId,
+          title: seatTitles.get(threadId) ?? null,
+        })),
+      };
+    };
+    for (const a of accounts) show(a.name, seatKey(a.name));
+    for (const key of Object.keys(snapshot))
+      if (!named.has(key)) show(seatName(key), key);
+    return out;
+  }
   /** The views' latest read of every project's account (see sharedProjects). */
   let projectsRead: {
     at: number;
@@ -761,6 +1131,24 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       `could not read the usage samples; starting them again: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  // The seat samples kept; one of another shape (before 0.2.31's second
+  // round: no usage in it) is left out.
+  try {
+    const parsed = z
+      .record(z.string(), z.array(z.unknown()))
+      .safeParse(await bb.storage.kv.get<unknown>(KV_SEATS));
+    if (parsed.success)
+      for (const [name, samples] of Object.entries(parsed.data))
+        seatSamples[name] = samples.flatMap((sample) => {
+          const one = seatSampleSchema.safeParse(sample);
+          return one.success ? [one.data] : [];
+        });
+    pruneSeatSamples();
+  } catch (error) {
+    bb.log.warn(
+      `could not read the seat samples; starting them again: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   // What the banners were asked on before the restart, thread by thread:
   // checked against bb by the first refresh (see reviseAdvice). None with
   // the automatic choice off, which ends them all.
@@ -839,8 +1227,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       next[account.name] = updated;
     }
     series = next;
+    for (const name of Object.keys(seatSamples))
+      if (next[name] === undefined) delete seatSamples[name];
     const snapshot = series;
+    pruneSeatSamples();
+    const seatSnapshot = structuredClone(seatSamples);
     seriesWrites = seriesWrites.then(async () => {
+      try {
+        await bb.storage.kv.set(KV_SEATS, seatSnapshot);
+      } catch (error) {
+        bb.log.warn(
+          `could not store the seat samples: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       try {
         await bb.storage.kv.set(KV_SERIES, snapshot);
       } catch (error) {
@@ -850,6 +1249,34 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       }
     });
     return seriesWrites;
+  }
+  /**
+   * The account was measured: a sample of its seats as they are now, with
+   * the usage it was measured at, whole in itself (Astra SEATS-R06/R07).
+   * One per account and measurement: a measurement seen again (a failed
+   * query keeps the old one) adds nothing and changes nothing.
+   */
+  function noteSeatSample(name: string, m: Measurement): void {
+    if (m.observedAt === null || m.usage === null) return;
+    if (m.problem !== null && m.problem.kind === "error") return;
+    const at = m.observedAt;
+    const own = (seatSamples[name] ?? []).filter(
+      ([t]) => at - t <= SEAT_SAMPLES_MS,
+    );
+    if (own.some(([t]) => t === at)) return;
+    const key = seatKey(name);
+    const taken = seats.snapshot([key])[key]!;
+    const { session, weekly } = m.usage;
+    own.push([
+      at,
+      taken.running,
+      taken.reserved,
+      session.usedPercent,
+      weekly.absent === true ? null : weekly.usedPercent,
+      session.resetsAt,
+      weekly.absent === true ? null : weekly.resetsAt,
+    ]);
+    seatSamples[name] = own;
   }
   function forecasts(): State["forecasts"] {
     const now = deps.now();
@@ -1043,6 +1470,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       defaultAccountName: current.defaultAccountName,
       warn: (message) => bb.log.warn(message),
     });
+    noteSeatKeys();
     // A measurement of an account that is gone must never be chosen.
     collector.prune(accounts);
     // Which account a project's note names depends on the accounts found.
@@ -1099,6 +1527,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       bb.realtime.publish(CHANGED, { at: deps.now() });
     } finally {
       refreshes += 1;
+      // Seats reserved for turns that never started are freed with it.
+      admitWaiting();
       // Also when the refresh fails: the reads it left grow old, and a
       // banner on reads older than two refreshes must go (Sol B2-R5-001).
       askBannersAgain();
@@ -1189,7 +1619,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   type MoveMark = { writes: number; picks: number };
   const moves = new Map<
     string,
-    { epoch: number; inFlight: number; picks: number; writes: number }
+    {
+      epoch: number;
+      inFlight: number;
+      picks: number;
+      writes: number;
+      envWrites: number;
+      envWriting: number;
+    }
   >();
   function movesOf(projectId: string): {
     epoch: number;
@@ -1206,10 +1643,29 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
      * of the account that a move crossed it.
      */
     writes: number;
+    /**
+     * Every write of the project's variable, a move's or one that confirms
+     * the account it names, counted as it starts and once it is over: a
+     * read of the account that one crossed says nothing about where a turn
+     * starts (Astra SEATS-R3-002, SEATS-R4-001).
+     */
+    envWrites: number;
+    /**
+     * Writes of the project's variable under way: one may land any moment,
+     * so what a read said may no longer hold (Astra SEATS-R3-002).
+     */
+    envWriting: number;
   } {
     let move = moves.get(projectId);
     if (move === undefined) {
-      move = { epoch: 0, inFlight: 0, picks: 0, writes: 0 };
+      move = {
+        epoch: 0,
+        inFlight: 0,
+        picks: 0,
+        writes: 0,
+        envWrites: 0,
+        envWriting: 0,
+      };
       moves.set(projectId, move);
     }
     return move;
@@ -1333,6 +1789,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       move.epoch += 1;
     }
     let wrote = false;
+    // Every write of the variable, also one that confirms the account the
+    // project is on: a seat is reserved only on a read no write crossed
+    // (Astra SEATS-R4-001).
+    const env = movesOf(projectId);
+    let envWrote = false;
     try {
       // The sessions first, while the move is counted in flight: a turn of
       // another thread of the project that reads the new account finds its
@@ -1368,6 +1829,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         move.writes += 1;
         wrote = true;
       }
+      const unset = account === null || account.configDir === null;
+      if (!unset || from.owned) {
+        env.envWrites += 1;
+        env.envWriting += 1;
+        envWrote = true;
+      }
       if (account === null || account.configDir === null) {
         // Default account = no variable. Only ours can be there (see above).
         if (from.owned) {
@@ -1387,6 +1854,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     } finally {
       // Also after a failure: a delete may have landed before it.
       projectsRead = null;
+      if (envWrote) {
+        env.envWrites += 1;
+        env.envWriting -= 1;
+      }
       if (move !== null) {
         if (wrote) move.writes += 1;
         move.inFlight -= 1;
@@ -1549,6 +2020,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       history,
       forecasts: forecasts(),
       login: loginStatus(),
+      seats: seatsState(),
     };
   }
 
@@ -2463,6 +2935,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       accounts: measured,
       preferredModel: current.preferredModel,
       excursionFrom: wayHome(projectId, current.preferredModel, measured, now),
+      freeSeats,
       now,
       currentLoggedOut: unconfirmed(fromName),
     });
@@ -2616,6 +3089,44 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     string,
     { account: string; model: string; threshold: number }
   >();
+  /**
+   * The accounts a move made while nothing failed may take the project to,
+   * its own included. Nothing fails if the project stays, so a target has
+   * to be sure: an account listed now, measured within two refresh periods
+   * (a query that keeps failing leaves an old measurement), another Claude
+   * account (a directory of the same one shares its usage and gains
+   * nothing), and not the account the project last left ahead of the limit
+   * while it is still at or above that share (see aheadLeft).
+   */
+  function aheadTargets(
+    projectId: string,
+    fromName: string,
+    model: string,
+    now: number,
+  ) {
+    const maxAgeMs = maxReadAgeMs();
+    const own = accounts.find((a) => a.name === fromName);
+    const left = aheadLeft.get(projectId);
+    return measuredAccounts(model).filter((usage) => {
+      if (usage.name === fromName) return true;
+      if (
+        left !== undefined &&
+        usage.name === left.account &&
+        fullestWindow(settle(usage, now), left.model).used >= left.threshold
+      )
+        return false;
+      const account = accounts.find((a) => a.name === usage.name);
+      const observedAt = collector.get(usage.name)?.observedAt ?? null;
+      return (
+        account !== undefined &&
+        observedAt !== null &&
+        now - observedAt <= maxAgeMs &&
+        (own === undefined ||
+          own.accountUuid === null ||
+          account.accountUuid !== own.accountUuid)
+      );
+    });
+  }
   async function moveAhead(
     thread: ThreadResponse,
     model: string,
@@ -2635,38 +3146,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (from.external) return;
     const fromName = from.account ?? current.defaultAccountName;
     const now = deps.now();
-    // Nothing fails if the project stays, so a target has to be sure: an
-    // account listed now, measured within two refresh periods (a query that
-    // keeps failing leaves an old measurement), and another Claude account
-    // (a directory of the same one shares its usage and gains nothing).
-    const maxAgeMs = maxReadAgeMs();
-    const own = accounts.find((a) => a.name === fromName);
-    const left = aheadLeft.get(projectId);
-    const candidates = measuredAccounts(model).filter((usage) => {
-      if (usage.name === fromName) return true;
-      if (
-        left !== undefined &&
-        usage.name === left.account &&
-        fullestWindow(settle(usage, now), left.model).used >= left.threshold
-      )
-        return false;
-      const account = accounts.find((a) => a.name === usage.name);
-      const observedAt = collector.get(usage.name)?.observedAt ?? null;
-      return (
-        account !== undefined &&
-        observedAt !== null &&
-        now - observedAt <= maxAgeMs &&
-        (own === undefined ||
-          own.accountUuid === null ||
-          account.accountUuid !== own.accountUuid)
-      );
-    });
     const decision = decideAhead({
       currentAccount: fromName,
-      accounts: candidates,
+      accounts: aheadTargets(projectId, fromName, model, now),
       preferredModel: model,
       reserveModel: current.preferredModel,
       threshold,
+      freeSeats,
       now,
     });
     if (decision.kind === "keep") return;
@@ -2719,6 +3205,141 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     await inProjectQueue(thread.projectId, () => moveAhead(thread, model));
   });
 
+  // ---- No project left where a turn cannot run ---------------------------
+  /**
+   * Why `name` cannot run the preferred model, as measured now: not logged
+   * in, or out of it (session, weekly or the model's own window full, or
+   * locked) until when; null when it can, or nothing is known of it.
+   */
+  function stranded(name: string, now: number): string | null {
+    if (loggedOut(name)) return "not logged in";
+    const known = measuredAccounts().find((a) => a.name === name);
+    if (known === undefined || known.unknown === true) return null;
+    const settled = settle(known, now);
+    const model = current.preferredModel;
+    if (isUsable(settled) && canRunModel(settled, model)) return null;
+    const full = [
+      settled.session,
+      settled.weekly,
+      modelWindow(settled, model),
+    ].filter((w) => w !== undefined && w.usedPercent >= 100);
+    const until = Math.max(...full.map((w) => w!.resetsAt ?? 0), 0);
+    return `exhausted for ${model === "" ? "every model" : model} until ${until === 0 ? "unknown" : new Date(until).toISOString().slice(0, 16).replace("T", " ")}`;
+  }
+  /**
+   * After every refresh (Aitor 2026-10-30, Añadido 2: «that no project stays
+   * on an exhausted account or one without a login without moving by
+   * itself, respecting the seats»): bb greys out the composer of a project
+   * whose account is at its limit, so the dispatch checkpoint never gets to
+   * move it (Mariscal · Web on ganaresenas, Fable at 100 %). Each project
+   * this plugin may move (not external) whose account cannot run the
+   * preferred model goes to the best account with a free seat, as a
+   * placement would choose it, whatever switchAheadPercent says. With none,
+   * it stays, said once per project and refresh.
+   */
+  async function rescueStranded(): Promise<void> {
+    if (!current.autoSwitch) return;
+    const now = deps.now();
+    // Each project read apart, within DISPATCH_LIMIT_MS: one that cannot be
+    // read is said and left out, the rest are looked at (Astra
+    // SEATS-R3-005).
+    const listed = await bb.sdk.projects.list({ includePersonal: true });
+    const projects = await Promise.all(
+      listed.map(async (p) => {
+        const read = await within(
+          projectAccount(p.id),
+          DISPATCH_LIMIT_MS,
+          `project ${p.name}: its account not read to rescue it`,
+        );
+        if (read === "late")
+          bb.log.warn(
+            `project ${p.name}: its account not read to rescue it: no answer in time`,
+          );
+        return typeof read === "object" ? { ...p, ...read.value } : null;
+      }),
+    );
+    for (const project of projects) {
+      if (project === null || project.external) continue;
+      if (stranded(project.account ?? current.defaultAccountName, now) === null)
+        continue;
+      // One project that cannot be moved, or whose queue is held, does not
+      // keep the rest where they are, nor the refresh (Astra SEATS-R4-004).
+      const rescued = await within(
+        inProjectQueue(project.id, () => rescue(project.id, project.name)),
+        RESCUE_LIMIT_MS,
+        `project ${project.name}: not moved off its account`,
+      );
+      if (rescued === "late")
+        bb.log.warn(
+          `project ${project.name}: not moved off its account: not done within ${RESCUE_LIMIT_MS / 1000} s; the refresh goes on`,
+        );
+    }
+  }
+  async function rescue(projectId: string, projectName: string): Promise<void> {
+    if (!current.autoSwitch) return;
+    const before = moveMark(projectId);
+    // Read again, in the project's queue: the shared list may be 30 s old.
+    // Within DISPATCH_LIMIT_MS: unread, this rescue is given up and nothing
+    // written (Astra SEATS-R4-004).
+    const read = await within(
+      projectAccount(projectId),
+      DISPATCH_LIMIT_MS,
+      `project ${projectName}: its account not read again to rescue it`,
+    );
+    if (read === "late")
+      bb.log.warn(
+        `project ${projectName}: its account not read again to rescue it: no answer in time`,
+      );
+    if (typeof read !== "object") return;
+    const from = read.value;
+    if (from.external) return;
+    const fromName = from.account ?? current.defaultAccountName;
+    const now = deps.now();
+    const why = stranded(fromName, now);
+    if (why === null) return;
+    const model = current.preferredModel;
+    const decision = decidePlacement({
+      currentAccount: fromName,
+      isNew: false,
+      accounts: aheadTargets(projectId, fromName, model, now),
+      preferredModel: model,
+      freeSeats,
+      now,
+      currentLoggedOut: loggedOut(fromName),
+    });
+    if (decision.kind === "keep") {
+      bb.log.debug(
+        `project ${projectName}: left on ${fromName} (${why}): no other account with a free seat can run ${model === "" ? "a turn" : model}`,
+      );
+      return;
+    }
+    if (
+      !(await applyAccount(projectId, accountOrDefault(decision.account), from))
+    )
+      return;
+    await markHandled(projectId);
+    noteMove(projectId, fromName, decision.account, model, before);
+    const s = seats.snapshot([seatKey(decision.account)])[
+      seatKey(decision.account)
+    ]!;
+    bb.log.info(
+      `project ${projectName}: moved from ${fromName} (${why}) to ${decision.account} (seats ${s.running + s.reserved}/${s.capacity === 0 ? "∞" : s.capacity})`,
+    );
+    await recordMove(
+      {
+        at: now,
+        threadId: "",
+        projectId,
+        from: fromName,
+        to: decision.account,
+        reason: `Moved to account ${decision.account}: ${fromName} ${why}`,
+      },
+      // No failure caused it: a turn still running on the old account gets
+      // the grace retry on the new one, as after a placement.
+      null,
+    );
+  }
+
   /**
    * The account each thread's turn started on (read when it turned active):
    * a turn that started before its project moved runs on the old account,
@@ -2759,6 +3380,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // The previous turn's start is not this turn's, read or still being
     // read (code-reviewer r13).
     const anchor = dispatchEpoch.get(thread.id);
+    // The seat this turn's dispatch reserved: where it runs, whatever the
+    // read below says if the project moved meanwhile (Astra SEATS-R04).
+    const reserved =
+      anchor === undefined ? null : (seats.seatOf(thread.id)?.account ?? null);
+    // Its seat runs, reserved or not: a turn sent past the checkpoint
+    // spends the account all the same. An account set outside this plugin
+    // has no seats.
+    // Reserved by its dispatch: on the account it reserved (a move since
+    // does not take the turn along: Astra SEATS-R04), and at once, before
+    // anything is awaited, or the reservation may expire under the read
+    // below and its seat go to another (Astra SEATS-R2-002).
+    if (reserved !== null) confirmSeat(thread.id, reserved);
+    // A new turn: the previous one's pending count is not this one's.
+    else unseated.delete(thread.id);
     forgetStart(thread.id);
     const token = ++starts;
     starting.set(thread.id, token);
@@ -2766,19 +3401,43 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     startedOn.set(thread.id, null);
     const move = movesOf(thread.projectId);
     const busy = move.inFlight > 0;
-    let account: string | null | undefined;
-    try {
-      const at = await projectAccount(thread.projectId);
-      account = at.external
-        ? undefined
-        : (at.account ?? current.defaultAccountName);
-    } catch {
-      account = null;
-    }
+    // Within DISPATCH_LIMIT_MS: a read that hangs leaves the turn to be
+    // counted by the next refresh, not uncounted for all of it (Astra
+    // SEATS-R3-003).
+    const read = await within(
+      projectAccount(thread.projectId),
+      DISPATCH_LIMIT_MS,
+      `thread ${thread.id}: its project's account not read as its turn started`,
+    );
+    const seat = typeof read === "object" ? seatFor(read.value) : undefined;
+    // Unknown (null) also on an account not among the ones found: never
+    // the default's (Astra SEATS-R3-001).
+    let account: string | null | undefined =
+      seat === null ? undefined : typeof seat === "string" ? seat : null;
     // The turn ended, or a newer one started, while the account was read:
     // what that said stands, not this stale read (code-reviewer r12).
     if (starting.get(thread.id) !== token) return;
     forgetStart(thread.id);
+    // Not reserved: where the read says. Not read: on a seat it holds, else
+    // counted by the next refresh (Astra SEATS-R3-003). On an account not
+    // found: on nobody's (Astra SEATS-R3-001).
+    if (reserved === null) {
+      if (typeof seat === "string") confirmSeat(thread.id, seatKey(seat));
+      else if (seat === UNKNOWN_SEAT)
+        bb.log.debug(
+          `thread ${thread.id}: no seat counted: its project's account is not among the accounts found`,
+        );
+      else if (seat === undefined) {
+        const held = seats.seatOf(thread.id)?.account;
+        if (held !== undefined) confirmSeat(thread.id, held);
+        else {
+          unseated.set(thread.id, thread.projectId);
+          bb.log.info(
+            `thread ${thread.id}: its seat is counted on the next refresh (its project's account was not read)`,
+          );
+        }
+      }
+    }
     // The project was being moved, or moved, since the turn was sent or
     // while its account was read: the read says where the project is (or
     // was) going, not where the turn started. Unknown, rather than the new
@@ -2802,10 +3461,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // announces (a turn refused at the door) is the project's account's,
     // not a leftover of the account this turn ran on (code-reviewer r11).
     forgetStart(thread.id);
+    // Reserved too: a turn that ended needs none (its next asks again,
+    // and one that starts unannounced is counted as it starts).
+    releaseSeat(thread.id, "its turn ended");
   });
   /** The thread archived or deleted: nothing of its turns runs again, and what is kept for it goes. */
   async function threadGone({ thread }: { thread: ThreadResponse }) {
     forgetStart(thread.id);
+    releaseSeat(thread.id, "the thread is gone");
+    seatReadWaits.delete(thread.id);
+    seatGenerations.delete(thread.id);
     startWaits.delete(thread.id);
     threadModel.delete(thread.id);
     adviceOver(thread.id);
@@ -2917,6 +3582,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       preferredModel: model,
       reserveModel: current.preferredModel,
       excursionFrom: wayHome(projectId, model, measured, now),
+      freeSeats,
       now,
     };
   }
@@ -2940,8 +3606,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // Emptied by a change of the accounts directory, until the next look.
     if (accounts.length === 0) await discover();
     const before = moveMark(projectId);
+    // Taken before the read: the seat is reserved only while the project's
+    // variable has not been written since (Astra SEATS-R3-002,
+    // SEATS-R4-001).
+    const writes = movesOf(projectId).envWrites;
     const from = await projectAccount(projectId);
     if (from.external) return "external";
+    // An account it names that is not among the ones found: not judged as
+    // the default; the dispatch looks for it again (Astra SEATS-R3-001).
+    if (seatFor(from) === UNKNOWN_SEAT) return "unknown";
     const fromName = from.account ?? current.defaultAccountName;
     const now = deps.now();
     const excursion = excursions.get(projectId);
@@ -2957,7 +3630,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         bb.log.info(
           `thread ${thread.id}: ${model} turn stays on ${fromName}: no account spares ${current.preferredModel}`,
         );
-      return { account: fromName, byDefault: !from.owned };
+      return { account: fromName, byDefault: !from.owned, writes };
     }
     if (turn.abandoned) return null;
     const to = accountOrDefault(decision.account);
@@ -2982,7 +3655,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // Its turn has not started: it runs on the new account.
       thread.id,
     );
-    return { account: decision.account, byDefault: to === null };
+    return {
+      account: decision.account,
+      byDefault: to === null,
+      // Its own write (counted as it starts and once it is over) and no
+      // other.
+      writes: writes + (decision.account === fromName ? 0 : 2),
+    };
   }
 
   // bb holds every message it asks about on this answer and fails the
@@ -3072,17 +3751,34 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
 
   /**
+   * One dispatch's DISPATCH_BUDGET_MS, from the moment bb asks: each read
+   * is given what is left, at most DISPATCH_LIMIT_MS, so the reads in a row
+   * never add up to bb's 10 s (Astra SEATS-R4-002).
+   */
+  type Budget = { limit: () => number; spent: () => boolean };
+  function dispatchBudget(): Budget {
+    const by = deps.now() + DISPATCH_BUDGET_MS;
+    return {
+      limit: () => Math.max(0, Math.min(DISPATCH_LIMIT_MS, by - deps.now())),
+      spent: () => by - deps.now() < DISPATCH_MIN_MS,
+    };
+  }
+
+  /**
    * Before a turn starts, with the automatic choice on: what bb should do
    * with the message; null = send it.
    */
   async function beforeStart(
     thread: ThreadResponse,
     model: string | null,
+    /** Set to where the turn was placed, when the placement said. */
+    turnAt: { at?: TurnPlace },
+    budget: Budget,
   ): Promise<MessageDispatchHookDecision | null> {
     const first = placeNewProject(thread);
     const placed = await within(
       first,
-      DISPATCH_LIMIT_MS,
+      budget.limit(),
       `thread ${thread.id}: its new project not placed before its first turn`,
     );
     if (placed === "late") {
@@ -3105,7 +3801,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         ? null
         : within(
             placeTurn(thread, turnModel, turn),
-            DISPATCH_LIMIT_MS,
+            budget.limit(),
             `thread ${thread.id}: not placed before its turn`,
             () => {
               turn.abandoned = true;
@@ -3130,27 +3826,33 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
       await within(
         look,
-        DISPATCH_LIMIT_MS,
+        budget.limit(),
         `thread ${thread.id}: the default account's login not looked at`,
       );
     }
     const done = turnPlaced === null ? null : await turnPlaced;
     const where: TurnPlace | null =
       typeof done === "object" && done !== null ? done.value : null;
+    if (where !== null) turnAt.at = where;
     const login = defaultLogin();
     if (login === "yes") return null;
-    if (where === "external" || (where !== null && !where.byDefault))
+    if (
+      where === "external" ||
+      where === "unknown" ||
+      (where !== null && !where.byDefault)
+    )
       return null;
     // Not known where because the placement failed or was not tried (a
     // model bb does not name): a project with a variable of its own, or one
     // set outside this plugin, runs on it whatever the accounts directory
     // says; bb passes the value it holds (Astra E44-R3-02). Read apart from
     // the placement, which needs that directory and a model. Not when the
-    // placement took too long: bb is slow, and the wait below covers it.
-    if (where === null && done !== "late") {
+    // placement took too long: bb is slow, and the wait below covers it; nor
+    // with too little of the dispatch's time left (Astra SEATS-R4-002).
+    if (where === null && done !== "late" && !budget.spent()) {
       const own = await within(
         projectAccount(thread.projectId),
-        DISPATCH_LIMIT_MS,
+        budget.limit(),
         `thread ${thread.id}: the project's account not read before its turn`,
       );
       if (typeof own === "object" && (own.value.owned || own.value.external)) {
@@ -3200,18 +3902,136 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       notTheUsersThread(thread) !== null
     )
       return { action: "proceed" };
+    const budget = dispatchBudget();
+    // Seats not yet counted after a load: no turn is let in against an
+    // empty count (Astra SEATS-R02). Not waited for here: bb is asked again
+    // once they are counted (Astra SEATS-R4-002).
+    if (ctx.attempt === "start-turn" && !seatsReady) {
+      seatsAwaited = true;
+      bb.log.info(`thread ${thread.id}: its message waits (seats are being counted)`);
+      return {
+        action: "wait",
+        reason: "Claude Switcher: seats are being counted after a reload",
+        sendAt: deps.now() + SEATS_COUNTING_WAIT_MS,
+      };
+    }
     const model = modelFamily(ctx.requestedExecution.model);
     if (model !== null) threadModel.set(thread.id, model);
+    const placed: { at?: TurnPlace } = {};
     if (current.autoSwitch && ctx.attempt === "start-turn") {
       // A message sent now, not a queued one asked again: its own waits
       // (Astra E44-R2-03).
       if (ctx.queuedMessages.length === 0) startWaits.delete(thread.id);
-      const decision = await beforeStart(thread, model);
+      const decision = await beforeStart(thread, model, placed, budget);
       if (decision !== null) {
         if (decision.action === "reject") startWaits.delete(thread.id);
         return decision;
       }
       startWaits.delete(thread.id);
+    }
+    // A seat on the account the turn starts on, last: placed, the project
+    // stays where it is, and a full account makes the thread wait there.
+    // Not a turn under way joined, nor an account set outside this plugin.
+    if (ctx.attempt === "start-turn") {
+      // A message sent now, not a queued one asked again: its own waits
+      // (Astra SEATS-R2-005).
+      if (ctx.queuedMessages.length === 0) seatReadWaits.delete(thread.id);
+      const move = movesOf(thread.projectId);
+      /**
+       * The project's account not written since `writes`, nor being
+       * written: a move still sharing its sessions has not changed it yet.
+       */
+      const still = (writes: number) =>
+        move.envWriting === 0 && move.envWrites === writes;
+      // Where the turn starts, and the project's moves it holds for (null:
+      // an account set outside this plugin, which has no seats).
+      let at: { account: string | null; writes: number } | null = null;
+      // Placed, and the project not moved since: where the placement left
+      // it. Moved meanwhile (a pick, a rescue, while the placement recorded
+      // its move), it is read again (Astra SEATS-R3-002).
+      if (placed.at === "external")
+        at = { account: null, writes: move.envWrites };
+      else if (
+        placed.at !== undefined &&
+        placed.at !== "unknown" &&
+        still(placed.at.writes)
+      )
+        at = { account: placed.at.account, writes: placed.at.writes };
+      else if (budget.spent())
+        // Too little of the dispatch's time left to read it: the message
+        // waits, as for an account not read (Astra SEATS-R4-002).
+        bb.log.info(
+          `thread ${thread.id}: its project's account not read for its seat: the dispatch is out of time`,
+        );
+      else {
+        // Not placed (the automatic choice off, a model bb does not name, a
+        // placement that failed or took too long), placed on an account not
+        // found, or moved since: the account is the project's, read apart
+        // from the model (Astra SEATS-R01). One it names that is not among
+        // the accounts found (none are, after the directory or the default
+        // is renamed) is looked for again; still not found, it is not read,
+        // never the default's (Astra SEATS-R2-003, SEATS-R3-001). A read a
+        // move crossed is made again, once (Astra SEATS-R3-002).
+        const seatAccount = async (): Promise<{
+          account: string | null;
+          writes: number;
+        }> => {
+          for (let tries = 0; ; tries += 1) {
+            let writes = move.envWrites;
+            let read = await projectAccount(thread.projectId);
+            if (seatFor(read) === UNKNOWN_SEAT && accounts.length === 0) {
+              await discover();
+              writes = move.envWrites;
+              read = await projectAccount(thread.projectId);
+            }
+            const seat = seatFor(read);
+            if (seat === UNKNOWN_SEAT)
+              throw new Error(
+                "the account it names is not among the accounts found",
+              );
+            if (still(writes)) return { account: seat, writes };
+            if (tries >= 1) throw new Error("the project moved while it was read");
+          }
+        };
+        const read = await within(
+          seatAccount(),
+          budget.limit(),
+          `thread ${thread.id}: the project's account not read for its seat`,
+        );
+        if (typeof read === "object") at = read.value;
+      }
+      // Checked last, with nothing awaited till the seat is reserved: the
+      // project moved after it was read is read again (Astra SEATS-R3-002).
+      if (at !== null && at.account !== null && !still(at.writes)) at = null;
+      if (at === null) {
+        // Unknown where it starts: it waits, and is asked again, a few
+        // times; then it goes, as every wait of this plugin does, for bb
+        // is never left holding a message (see MAX_START_WAITS). Out of
+        // the dispatch's time, soon (Astra SEATS-R4-002).
+        const waited = seatReadWaits.get(thread.id) ?? 0;
+        if (waited < SEAT_READ_WAITS) {
+          seatReadWaits.set(thread.id, waited + 1);
+          return {
+            action: "wait",
+            reason:
+              "Claude Switcher: the project's account could not be read for its seat; trying again",
+            sendAt:
+              deps.now() +
+              (budget.spent() ? OUT_OF_TIME_WAIT_MS : SEAT_RECHECK_MS),
+          };
+        }
+        bb.log.warn(
+          `thread ${thread.id}: proceeds without a seat: its project's account could not be read ${waited + 1} times`,
+        );
+      }
+      seatReadWaits.delete(thread.id);
+      if (at !== null && at.account !== null) {
+        // A cancellation of an earlier message that is still looking at the
+        // queue leaves this one's place alone (Astra SEATS-R4-003).
+        seatGenerations.set(thread.id, (seatGenerations.get(thread.id) ?? 0) + 1);
+        const wait = seatWait(thread, at.account);
+        if (wait !== null) return wait;
+      }
     }
     // Where the project stands as the turn is sent, for `thread.active`.
     dispatchEpoch.set(thread.id, movesOf(thread.projectId).epoch);
@@ -3397,14 +4217,42 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * thread.
    */
   bb.events.on("message.cancelled", async ({ entry }) => {
+    // The message that waited for its account to be read is gone: the
+    // next one waits on its own count (Astra SEATS-R2-005).
+    seatReadWaits.delete(entry.threadId);
     const own = ownDeletes.get(entry.id);
     if (own !== undefined) {
       if (own.done) ownDeletes.delete(entry.id);
       else own.held = entry;
       return;
     }
+    await leaveSeatQueue(entry.threadId);
     await cancelledByHand(entry);
   });
+
+  /**
+   * The user cancelled the thread's last message waiting for a seat: its
+   * place in the queue, or the seat reserved for it, goes to the next in
+   * line (Astra SEATS-R3-004). Not while another message of it is queued,
+   * nor a seat whose turn runs; unread, the reservation expires on its own.
+   */
+  async function leaveSeatQueue(threadId: string): Promise<void> {
+    const seat = seats.seatOf(threadId);
+    if (seat?.state === "running") return;
+    if (seat === null && seats.position(threadId) === null) return;
+    const generation = seatGenerations.get(threadId);
+    const rows = await within(
+      bb.sdk.threads.queuedMessages.list({ threadId }),
+      DISPATCH_LIMIT_MS,
+      `thread ${threadId}: its queued messages not read after a cancellation`,
+    );
+    if (typeof rows !== "object" || rows.value.length > 0) return;
+    // A turn of it started meanwhile keeps its seat, and so does a message
+    // of it sent meanwhile (Astra SEATS-R4-003).
+    if (seats.seatOf(threadId)?.state === "running") return;
+    if (seatGenerations.get(threadId) !== generation) return;
+    releaseSeat(threadId, "its waiting message was cancelled");
+  }
 
   async function cancelledByHand(entry: CancelledEntry): Promise<void> {
     if (entry.payload.kind !== "retry") return;
@@ -3541,6 +4389,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       now,
       random: deps.random(),
       stuck,
+      freeSeats,
     };
     const decision = decideSwitch(input);
     // No Fable on any account, and an account with Opus: the thread is told
@@ -3705,6 +4554,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // Its judgment's generation, taken before any read (see generation).
     const judgedIn = generation(event.threadId);
     forgetStart(event.threadId);
+    releaseSeat(event.threadId, "its turn failed");
     if (!current.autoSwitch) return;
     // Pure guards first: another provider's limit must not query every account.
     const declined = declineReason(event);
@@ -4086,6 +4936,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       model,
       now,
       current.preferredModel,
+      freeSeats,
     );
     if (to === null) {
       // Nothing to release it on; the wait fires on its own at sendAt and
@@ -4219,10 +5070,26 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           );
         }
         try {
+          await countUnseated();
+        } catch (error) {
+          bb.log.warn(
+            `the turns not counted as they started were not counted: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        try {
           await revisitWaits();
         } catch (error) {
           bb.log.warn(
             `the waiting turns were not looked at again: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        // After the waits: a project they move has its turns retried there;
+        // this moves only the projects left where no turn can run.
+        try {
+          await rescueStranded();
+        } catch (error) {
+          bb.log.warn(
+            `the projects on an account that cannot run were not looked at: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
         await sleep(Math.max(1, current.refreshMinutes) * 60_000, signal);
@@ -4292,6 +5159,65 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
               stdout:
                 (lines.length === 0 ? "no moves yet" : lines.join("\n")) + "\n",
             };
+          },
+        }),
+        seats: cliCommand({
+          summary:
+            "Show the seats of every account and who waits, then each usage sample with the seats taken as it was measured",
+          options: { json: JSON_OPTION },
+          async run({ options }) {
+            const taken = seatsState();
+            pruneSeatSamples();
+            if (options.json)
+              return {
+                exitCode: 0,
+                stdout: `${JSON.stringify({ seats: taken, samples: seatSamples }, null, 2)}\n`,
+              };
+            const lines: string[] = [];
+            for (const [name, a] of Object.entries(taken))
+              lines.push(
+                `${name}\tseats ${a.running + a.reserved}/${a.capacity === 0 ? "no limit" : a.capacity} (${a.running} running, ${a.reserved} reserved)\t${a.queued.length} waiting`,
+              );
+            const time = (at: number | null) =>
+              at === null ? "" : new Date(at).toISOString();
+            lines.push(
+              "",
+              "time\taccount\trunning\treserved\tsession %\tweekly %\tsession resets\tweekly resets\tsession % per hour and seat",
+            );
+            const spend: string[] = [];
+            for (const [name, samples] of Object.entries(seatSamples)) {
+              // The 5-hour window's share an hour of one seat spent, between
+              // samples of the same window: Δ% ÷ hours ÷ the seats running
+              // on average. None across a reset.
+              let used = 0;
+              let seatHours = 0;
+              samples.forEach((sample, i) => {
+                const [at, running, reserved, session, weekly, resets, weeklyResets] = sample;
+                const before = samples[i - 1];
+                let rate = "—";
+                if (
+                  before !== undefined &&
+                  resets !== null &&
+                  before[5] === resets &&
+                  at > before[0]
+                ) {
+                  const hours = ((at - before[0]) / 3_600_000) * ((running + before[1]) / 2);
+                  if (hours > 0) {
+                    used += session - before[3];
+                    seatHours += hours;
+                    rate = ((session - before[3]) / hours).toFixed(1);
+                  }
+                }
+                lines.push(
+                  `${time(at)}\t${name}\t${running}\t${reserved}\t${session}\t${weekly ?? ""}\t${time(resets)}\t${time(weeklyResets)}\t${rate}`,
+                );
+              });
+              spend.push(
+                `${name}\t${seatHours > 0 ? `${(used / seatHours).toFixed(1)} %` : "—"} of the 5-hour window per hour and seat`,
+              );
+            }
+            lines.push("", ...spend);
+            return { exitCode: 0, stdout: `${lines.join("\n")}\n` };
           },
         }),
         use: cliCommand({
@@ -4384,6 +5310,135 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         }),
       },
     }),
+  );
+
+  /**
+   * `read`, tried SEAT_COUNT_TRIES times SEAT_COUNT_RETRY_MS apart, each try
+   * within DISPATCH_LIMIT_MS (one that never answers is a failed try: Astra
+   * SEATS-R2-001); the last failure is thrown.
+   */
+  async function countTries<T>(what: string, read: () => Promise<T>): Promise<T> {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        const got = await within(
+          read(),
+          DISPATCH_LIMIT_MS,
+          `${what} not read to count the seats`,
+        );
+        if (typeof got !== "object")
+          throw new Error(got === "late" ? "no answer in time" : "the read failed");
+        return got.value;
+      } catch (error) {
+        if (attempt >= SEAT_COUNT_TRIES) throw error;
+        bb.log.warn(
+          `${what} not read to count the seats (try ${attempt}): ${error instanceof Error ? error.message : String(error)}; trying again`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, SEAT_COUNT_RETRY_MS));
+      }
+    }
+  }
+  /**
+   * After a load the seats are empty: the threads bb says run count as
+   * running, each on its project's account (a thread on an account set
+   * outside this plugin has none). Turns wait for it (Astra SEATS-R02); a
+   * read that fails is tried again, and one that still fails leaves its
+   * threads uncounted (they count as they start again): fail open, said.
+   */
+  async function rebuildSeats(): Promise<void> {
+    const ended = new Set<string>();
+    endedWhileCounting = ended;
+    try {
+      if (accounts.length === 0) await countTries("the accounts", discover);
+      const running: { id: string; projectId: string }[] = [];
+      const PAGE = 200;
+      for (let offset = 0; ; offset += PAGE) {
+        const page = await countTries("the threads", () =>
+          bb.sdk.threads.list({ archived: false, limit: PAGE, offset }),
+        );
+        running.push(
+          ...page.filter(
+            (t) =>
+              t.providerId === CLAUDE_CODE_PROVIDER &&
+              notTheUsersThread(t) === null &&
+              TURN_UNDER_WAY.has(t.status),
+          ),
+        );
+        if (page.length < PAGE) break;
+      }
+      const listedAt = deps.now();
+      // Each project's account read once, all at once.
+      const reads = new Map<string, Promise<ProjectAccount | null>>();
+      for (const t of running)
+        if (!reads.has(t.projectId))
+          reads.set(
+            t.projectId,
+            countTries(`the account of project ${t.projectId}`, () =>
+              projectAccount(t.projectId),
+            ).catch((error: unknown) => {
+              bb.log.warn(
+                `the threads of project ${t.projectId} not counted after loading (they count as they start): ${error instanceof Error ? error.message : String(error)}`,
+              );
+              return null;
+            }),
+          );
+      // Each thread looked at apart, all at once: one whose reads hang
+      // holds up no other (Astra SEATS-R2-001).
+      await Promise.all(
+        running.map(async (t) => {
+          const at = await reads.get(t.projectId)!;
+          if (at === null) return;
+          // On an account set outside this plugin: no seats. On one not
+          // among the accounts found: nobody's, never the default's (Astra
+          // SEATS-R3-001).
+          const seat = seatFor(at);
+          if (seat === null) return;
+          if (seat === UNKNOWN_SEAT) {
+            bb.log.debug(
+              `thread ${t.id} not counted after loading: its project's account is not among the accounts found`,
+            );
+            return;
+          }
+          // A read that took long: is the turn still under way? Unknown is
+          // not counted, for a seat counted running is never freed but by
+          // the thread (Astra SEATS-R03).
+          if (deps.now() - listedAt >= SEAT_COUNT_RETRY_MS) {
+            const live = await countTries(`thread ${t.id}`, () =>
+              bb.sdk.threads.get({ threadId: t.id }),
+            ).catch((error: unknown) => {
+              bb.log.warn(
+                `thread ${t.id} not counted after loading (it counts as it starts): ${error instanceof Error ? error.message : String(error)}`,
+              );
+              return null;
+            });
+            if (live === null || !TURN_UNDER_WAY.has(live.status)) return;
+          }
+          // Ended while counted (Astra SEATS-R03), or announced or reserved
+          // meanwhile (it counted itself).
+          if (ended.has(t.id) || seats.seatOf(t.id) !== null) return;
+          seats.confirm(t.id, seatKey(seat), deps.now());
+        }),
+      );
+    } finally {
+      endedWhileCounting = null;
+      seatsReady = true;
+      const taken = Object.entries(seats.snapshot())
+        .map(([key, s]) => `${seatName(key)} ${s.running} running`)
+        .join(", ");
+      bb.log.info(`seats counted after loading: ${taken === "" ? "none taken" : taken}`);
+      if (seatsAwaited)
+        void bb.experimental_hooks
+          .recheck("message.dispatch")
+          .catch((error: unknown) =>
+            bb.log.warn(
+              `bb not asked again after the seats were counted: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          );
+    }
+  }
+  void rebuildSeats().catch((error: unknown) =>
+    bb.log.warn(
+      `the running threads were not counted after loading (they count as they start): ${error instanceof Error ? error.message : String(error)}`,
+    ),
   );
 
   bb.log.info("loaded");

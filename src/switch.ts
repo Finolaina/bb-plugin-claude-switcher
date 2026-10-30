@@ -14,6 +14,8 @@ import {
   reserving,
   spendsReservedWeekly,
   type AccountUsage,
+  type Choice,
+  type ChoiceOptions,
   type UsageWindow,
 } from "./policy.js";
 
@@ -60,6 +62,12 @@ export interface SwitchInput {
   preferredModel: string;
   /** The model kept for its own threads; see ChoiceOptions.reserveModel. */
   reserveModel?: string;
+  /**
+   * Seats free on an account (see src/seats.ts). The switch goes to an
+   * account with one, and only with none anywhere by quota alone (Astra
+   * SEATS-R05); seats never move a project by themselves.
+   */
+  freeSeats?: (account: string) => number;
   maximumWaitMs: number | null;
   now: number;
   random: number;
@@ -154,6 +162,20 @@ function freeAt(account: AccountUsage, model: string): number | null {
   return Math.max(...blocking.map((w) => w.resetsAt as number));
 }
 
+/**
+ * The choice among the accounts with a free seat: an account with none is
+ * no target (Astra SEATS-R05), and with none free anywhere the project
+ * stays, its threads waiting for a seat where it is. Unset `freeSeats`:
+ * seats do not count.
+ */
+function chooseSeated(
+  accounts: AccountUsage[],
+  options: ChoiceOptions,
+  freeSeats: ((account: string) => number) | undefined,
+): Choice | null {
+  return chooseAccount(accounts, { ...options, freeSeats });
+}
+
 export function decideSwitch(input: SwitchInput): SwitchDecision {
   const declined = declineReason(input.failure, input.stuck === true);
   if (declined !== null) return { kind: "decline", reason: declined };
@@ -188,7 +210,15 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
   const others = accounts.filter(
     (a) => a.name !== input.currentAccount && a.name !== failedOn,
   );
-  const choice = chooseAccount(others, options);
+  // The only move that may land on an account without a seat: this one
+  // cannot work, so the thread waits for a seat elsewhere.
+  // ponytail: the alternative is waiting for a seat on the spent account,
+  // which does not come back until its reset; a full target means a wait
+  // of a turn or two, and a quota choice may still pick the busiest one.
+  // Kept on purpose (Astra SEATS-R3-006, Fable 2026-10-30).
+  const choice =
+    chooseSeated(others, options, input.freeSeats) ??
+    chooseAccount(others, options);
   if (choice !== null) {
     return {
       kind: "switch",
@@ -427,6 +457,12 @@ export interface PlacementInput {
    * Nothing to a turn in another model.
    */
   excursionFrom?: string | null;
+  /**
+   * Seats free on an account (see src/seats.ts). A move goes only to an
+   * account with one (Astra SEATS-R05); seats never move a project by
+   * themselves.
+   */
+  freeSeats?: (account: string) => number;
   now: number;
   /**
    * The current account has no login (its usage answered unauthenticated),
@@ -443,11 +479,14 @@ export function bestAccount(
   preferredModel: string,
   now: number,
   reserveModel?: string,
+  /** Set: only an account with a free seat (see chooseSeated). */
+  freeSeats?: (account: string) => number,
 ): string | null {
   return (
-    chooseAccount(
+    chooseSeated(
       accounts.map((a) => settle(a, now)),
       { preferredModel, reserveModel },
+      freeSeats,
     )?.account ?? null
   );
 }
@@ -474,14 +513,15 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     reserveModel: input.reserveModel,
   };
   if (input.isNew) {
-    const choice = chooseAccount(accounts, options);
+    const choice = chooseSeated(accounts, options, input.freeSeats);
     return choice === null || choice.account === input.currentAccount
       ? { kind: "keep" }
       : { kind: "move", account: choice.account, why: "new-project" };
   }
   // The way home first: it depends on home's measurement, not on the
   // current account's, which may be missing or incomplete (Codex
-  // BM-INSPECT-006).
+  // BM-INSPECT-006). Home with no free seat is no way back yet (Astra
+  // SEATS-R2-004): what follows decides, as with no excursion.
   if (
     !reserving(options) &&
     typeof input.excursionFrom === "string" &&
@@ -492,7 +532,8 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
       home !== undefined &&
       home.unknown !== true &&
       isUsable(home) &&
-      canRunModel(home, input.preferredModel)
+      canRunModel(home, input.preferredModel) &&
+      (input.freeSeats === undefined || input.freeSeats(home.name) > 0)
     )
       return { kind: "move", account: home.name, why: "back-from-excursion" };
   }
@@ -508,10 +549,14 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   if (runs && !spendsReservedWeekly(current, options)) return { kind: "keep" };
   const others = accounts.filter((a) => a.name !== input.currentAccount);
   const choice =
-    chooseAccount(others, options) ??
+    chooseSeated(others, options, input.freeSeats) ??
     // Without a login a turn kept here fails for sure: the reserve gives way.
     (loggedOut
-      ? chooseAccount(others, { preferredModel: input.preferredModel })
+      ? chooseSeated(
+          others,
+          { preferredModel: input.preferredModel },
+          input.freeSeats,
+        )
       : null);
   if (choice === null)
     return runs ? { kind: "keep", why: "current-reserved" } : { kind: "keep" };
@@ -559,6 +604,8 @@ export interface AheadInput {
   reserveModel?: string;
   /** Share of a window (session, weekly or the preferred model's) at which the project moves ahead of the limit. */
   threshold: number;
+  /** Seats free on an account: ahead of the limit, only an account with one is a target. */
+  freeSeats?: (account: string) => number;
   now: number;
 }
 
@@ -602,6 +649,7 @@ export function decideAhead(input: AheadInput): AheadDecision {
   const choice = chooseAccount(roomy, {
     preferredModel: input.preferredModel,
     reserveModel: input.reserveModel,
+    freeSeats: input.freeSeats,
   });
   return choice === null
     ? { kind: "keep" }

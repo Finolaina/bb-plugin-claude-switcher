@@ -41,6 +41,11 @@ export interface ChoiceOptions {
    * account that still has it. "", unset, or the same model = no effect.
    */
   reserveModel?: string;
+  /**
+   * Seats free on an account (see src/seats.ts); set, an account with none
+   * is left out, and the rest keep their order. Unset = seats do not count.
+   */
+  freeSeats?: (account: string) => number;
 }
 
 export interface Choice {
@@ -204,7 +209,10 @@ export function chooseAccount(
     accounts
       .filter(isUsable)
       .filter((a) => canRunModel(a, options.preferredModel))
-      .filter((a) => !spendsReservedWeekly(a, options)),
+      .filter((a) => !spendsReservedWeekly(a, options))
+      .filter(
+        (a) => options.freeSeats === undefined || options.freeSeats(a.name) > 0,
+      ),
     options,
   );
   return usable.length > 0

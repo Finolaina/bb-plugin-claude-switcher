@@ -14,9 +14,12 @@ import type {
 type ThreadResponse = PluginThreadEventPayloads["thread.created"]["thread"];
 import {
   createPlugin,
+  DISPATCH_BUDGET_MS,
+  DISPATCH_LIMIT_MS,
   ENV_VAR,
   FIRST_PLACEMENT_WAIT_MS,
   MAX_START_WAITS,
+  SEAT_RECHECK_MS,
   type State,
 } from "./server.js";
 import type { AccountsIo } from "./src/accounts.js";
@@ -302,6 +305,13 @@ interface QueuedRow {
 
 interface HostOptions {
   settings?: Record<string, string | number | boolean>;
+  /**
+   * The projects bb lists, by id (default: proj-1, proj-2 and, on request,
+   * personal). Every refresh moves a listed project off an account that
+   * cannot run (rescueStranded): a test about another move lists only the
+   * projects it looks at.
+   */
+  listed?: string[];
   presetEnv?: Record<string, EnvVar[]>;
   /** Rows already queued (e.g. by provider-retry) when the plugin acts. */
   queued?: QueuedRow[];
@@ -327,6 +337,8 @@ interface HostOptions {
   beforeEvents?: () => Promise<void>;
   /** Runs before threads.get answers (a failure's look at its thread, outside the project's queue). */
   beforeThreadGet?: () => Promise<void>;
+  /** Runs before threads.list answers (a list that never answers, Astra SEATS-R2-001). */
+  beforeThreadsList?: () => Promise<void>;
   /** Runs as queuedMessages.delete starts, before it lands or fails (bb's events meanwhile). */
   beforeDelete?: () => Promise<void>;
   /** Runs before queuedMessages.list answers (the plugin's look for a queued retry). */
@@ -350,6 +362,8 @@ interface HostOptions {
   /** machineEnvironment throws for these projects (a bb hiccup), or never answers. */
   failEnvRead?: string[];
   hangEnvRead?: string[];
+  /** Runs as each projects.get starts, before it answers (Astra SEATS-R4-002). */
+  beforeProjectGet?: () => Promise<unknown>;
   /** Runs as each machineEnvironment read starts, before it answers. */
   beforeEnvRead?: (projectId: string) => Promise<unknown>;
   /** Runs once each machineEnvironment read has its answer, before bb returns it (the answer is then stale). */
@@ -445,6 +459,7 @@ async function host(
         },
         // Like bb: every thread, as threads.get answers for it.
         list: async () => {
+          await options.beforeThreadsList?.();
           if (options.queueAfterList !== undefined) {
             queued.push(...options.queueAfterList);
             options.queueAfterList = undefined;
@@ -621,13 +636,16 @@ async function host(
       },
       projects: {
         // Like bb: the personal project ("Don't work in a project") only on request.
-        list: async (args?: { includePersonal?: boolean }) => [
-          { id: "proj-1", name: "Website" },
-          { id: "proj-2", name: "Other" },
-          ...(args?.includePersonal === true
-            ? [{ id: "personal", name: "Personal" }]
-            : []),
-        ],
+        list: async (args?: { includePersonal?: boolean }) =>
+          [
+            { id: "proj-1", name: "Website" },
+            { id: "proj-2", name: "Other" },
+            ...(args?.includePersonal === true
+              ? [{ id: "personal", name: "Personal" }]
+              : []),
+          ].filter(
+            (p) => options.listed === undefined || options.listed.includes(p.id),
+          ),
         machineEnvironment: async ({ projectId }: { projectId: string }) => {
           envReads.push(projectId);
           if (options.failEnvRead?.includes(projectId))
@@ -639,7 +657,9 @@ async function host(
           if (options.afterEnvRead) await options.afterEnvRead(projectId);
           return answer;
         },
-        get: async ({ projectId }: { projectId: string }) => ({
+        get: async ({ projectId }: { projectId: string }) => {
+          await options.beforeProjectGet?.();
+          return {
           id: projectId,
           name: projectId,
           createdAt:
@@ -647,7 +667,8 @@ async function host(
             (projectId === "proj-1" || projectId === "proj-2"
               ? NOW - 24 * HOUR
               : NOW + 1_000),
-        }),
+          };
+        },
         setMachineEnvironmentVariable: async (args: EnvCall) => {
           await options.beforeSet?.();
           if (options.failSet?.includes(args.projectId)) {
@@ -703,6 +724,16 @@ async function host(
       : { sessionsIo: options.sessionsIo }),
   });
   fake.bb.storage.kv.get = kvGet;
+  // The seats counted after the load, as they are by the time a user sends
+  // a message, unless the test holds the count: a message meanwhile waits
+  // at once (Astra SEATS-R4-002).
+  for (
+    let i = 0;
+    i < 1_000 &&
+    !fake.harness.logEntries.some((e) => e.message.startsWith("seats counted after loading"));
+    i++
+  )
+    await Promise.resolve();
   return {
     ...fake,
     env,
@@ -778,6 +809,11 @@ function oneSessionIo(order: string[], link?: () => Promise<void>): SessionsIo {
 }
 const SITE = { "proj-1": [{ path: "/home/someone/site" }] };
 
+/** host() with bb listing only the projects `listed` (see HostOptions.listed). */
+function hostListing(listed: string[]): typeof host {
+  return (usage, options = {}) => host(usage, { listed, ...options });
+}
+
 let dispose: (() => void) | null = null;
 afterEach(() => {
   dispose?.();
@@ -799,6 +835,8 @@ describe("claude accounts plugin", () => {
       "maximumWaitHours",
       "preferredModel",
       "refreshMinutes",
+      "seatsMax",
+      "seatsTeam",
       "switchAheadOtherPercent",
       "switchAheadPercent",
     ]);
@@ -2228,8 +2266,10 @@ describe("claude accounts plugin", () => {
     };
     dispose = () => h.harness.dispose();
     const first = envGate();
-    pending = first;
+    // The dispatch reads the project's account for its seat first (Astra
+    // SEATS-R01): the gate holds the read of thread.active, after it.
     await sent(h, "thread-3", "proj-1");
+    pending = first;
     const firstActive = h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-3", projectId: "proj-1" }),
     });
@@ -2238,8 +2278,8 @@ describe("claude accounts plugin", () => {
       thread: thread({ id: "thread-3", projectId: "proj-1" }),
     });
     const second = envGate();
-    pending = second;
     await sent(h, "thread-3", "proj-1");
+    pending = second;
     const secondActive = h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-3", projectId: "proj-1" }),
     });
@@ -2500,8 +2540,10 @@ describe("claude accounts plugin", () => {
     dispose = () => h.harness.dispose();
     const refusedWhileRead = async (attemptNumber: number, requestId: string) => {
       const gate = envGate();
-      pending = gate;
+      // The dispatch reads the project's account for its seat first (Astra
+      // SEATS-R01): the gate holds the read of thread.active, after it.
       await sent(h, "thread-3", "proj-1");
+      pending = gate;
       const active = h.harness.behavior.emitThreadEvent("thread.active", {
         thread: thread({ id: "thread-3", projectId: "proj-1" }),
       });
@@ -4360,6 +4402,9 @@ describe("placing a project before a new thread's first turn", () => {
     });
 
     it("lets a project with an account of its own, or one set outside the plugin, start its turn when the accounts directory cannot be read after a reload, and says so in the log (Astra E44-R3-02)", async () => {
+      // The seats are counted first: the directory tried three times, 2 s
+      // apart (Astra SEATS-R02).
+      vi.useFakeTimers();
       const h = await host(NO_DEFAULT_LOGIN, {
         ...FABLE,
         dirs: () => {
@@ -4375,8 +4420,20 @@ describe("placing a project before a new thread's first turn", () => {
         },
       });
       dispose = () => h.harness.dispose();
+      await vi.advanceTimersByTimeAsync(4_000);
+      vi.useRealTimers();
+      // Its own account not among the accounts found (none can be): its
+      // seat unknown, it waits like an unread one, then goes; never on the
+      // default's seat (Astra SEATS-R2-003).
+      for (let i = 0; i < 3; i++)
+        expect(
+          await dispatched(h, "thread-1", "proj-1", "claude-haiku-5-5", i > 0),
+        ).toMatchObject({
+          action: "wait",
+          reason: "Claude Switcher: the project's account could not be read for its seat; trying again",
+        });
       expect(
-        await dispatched(h, "thread-1", "proj-1", "claude-haiku-5-5"),
+        await dispatched(h, "thread-1", "proj-1", "claude-haiku-5-5", true),
       ).toEqual({ action: "proceed" });
       expect(
         await dispatched(h, "thr-2", "proj-2", "claude-haiku-5-5"),
@@ -7015,7 +7072,8 @@ describe("the model a thread's turn runs on", () => {
       await vi.advanceTimersByTimeAsync(3_000);
       expect(await answer).toEqual({ action: "proceed" });
       await vi.advanceTimersByTimeAsync(3_000);
-      expect(reads).toBe(1);
+      // The placement's, given up, and the seat's (Astra SEATS-R01).
+      expect(reads).toBe(2);
       expect(h.envSet).toEqual([]);
     } finally {
       vi.useRealTimers();
@@ -7053,18 +7111,26 @@ describe("the model a thread's turn runs on", () => {
     });
     dispose = () => failing.harness.dispose();
     await failing.harness.behavior.callRpc("accounts_refresh", null).catch(() => {});
-    expect(await dispatch(failing, "claude-opus-5-5")).toEqual({
+    // Its seat unknown, it waits a few times; then it goes (Astra SEATS-R01).
+    // bb asks again about the message it holds (Astra SEATS-R2-005).
+    const held = { queuedMessages: [{ id: "queued_1" }] as never };
+    for (let i = 0; i < 3; i++)
+      expect(
+        await dispatch(failing, "claude-opus-5-5", i === 0 ? {} : held),
+      ).toMatchObject({
+        action: "wait",
+      });
+    expect(await dispatch(failing, "claude-opus-5-5", held)).toEqual({
       action: "proceed",
     });
     expect(failing.envSet).toEqual([]);
     expect(
-      failing.harness.logEntries.filter((entry) => entry.level === "warn"),
-    ).toMatchObject([
-      {
-        message:
-          "thread thread-1: not placed before its turn: HTTP 503: could not read proj-1",
-      },
-    ]);
+      failing.harness.logEntries
+        .filter((entry) => entry.level === "warn")
+        .map((entry) => entry.message),
+    ).toContain(
+      "thread thread-1: not placed before its turn: HTTP 503: could not read proj-1",
+    );
     failing.harness.dispose();
 
     const hanging = await host(OPUS_ELSEWHERE, {
@@ -7074,8 +7140,14 @@ describe("the model a thread's turn runs on", () => {
     dispose = () => hanging.harness.dispose();
     vi.useFakeTimers();
     try {
-      const answer = dispatch(hanging, "claude-opus-5-5");
-      await vi.advanceTimersByTimeAsync(3_000);
+      // The placement's read, then the seat's, each given up at 3 s.
+      for (let i = 0; i < 3; i++) {
+        const answer = dispatch(hanging, "claude-opus-5-5", i === 0 ? {} : held);
+        await vi.advanceTimersByTimeAsync(6_000);
+        expect(await answer).toMatchObject({ action: "wait" });
+      }
+      const answer = dispatch(hanging, "claude-opus-5-5", held);
+      await vi.advanceTimersByTimeAsync(6_000);
       expect(await answer).toEqual({ action: "proceed" });
     } finally {
       vi.useRealTimers();
@@ -7610,6 +7682,9 @@ describe("an account that refuses the turn", () => {
 });
 
 describe("a wait another account can end sooner", () => {
+  // No project listed: a refresh would also move the projects off an
+  // account out of usage (rescueStranded, tested on its own).
+  const host = hostListing([]);
   // 2026-10-04: the «bots» mother thread waited until 03:00 for its
   // account's session while another account had been free since 00:45 (it
   // could not be measured when the wait was chosen). After each refresh, a
@@ -10532,6 +10607,9 @@ describe("an Opus turn never retried, released or placed on a Max account that k
   });
 
   describe("a waiting Opus turn and the refresh (Codex BM-R1-004, BM-R1-005)", () => {
+    // No project listed: a refresh would also move the projects off an
+    // account out of usage (rescueStranded, tested on its own).
+    const host = hostListing([]);
     it("moved by the refresh to a free seat: that is an excursion too, and the Fable turn goes back once the Max account can run", async () => {
       let mainSession = 100;
       const h = await host(
@@ -10660,7 +10738,12 @@ describe("an Opus turn never retried, released or placed on a Max account that k
       armed = true;
       const opus = dispatch(h, "thread-2", OPUS_ID);
       await gate.reached;
-      expect(await dispatch(h, "thread-3", FABLE_ID)).toEqual({ action: "proceed" });
+      // Taken home, but the Opus write still under way: where its turn
+      // starts is not known, so its seat waits (Astra SEATS-R3-002).
+      expect(await dispatch(h, "thread-3", FABLE_ID)).toMatchObject({
+        action: "wait",
+        reason: "Claude Switcher: the project's account could not be read for its seat; trying again",
+      });
       expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-1"]);
       gate.release();
       expect(await opus).toEqual({ action: "proceed" });
@@ -12120,6 +12203,9 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
   // the banner comes back with the reads. A thread with provider-retry's
   // retry queued is judged by nothing else meanwhile.
   describe("a refresh that fails still asks the banners (Sol B2-R5-001)", () => {
+    // No project listed: a refresh would also move the projects off an
+    // account out of usage (rescueStranded, tested on its own).
+    const host = hostListing([]);
     const refreshed = (h: Awaited<ReturnType<typeof host>>) =>
       h.harness.behavior.callRpc("accounts_refresh", null);
     /** provider-retry's retry of thread-1's turn, for main's session reset. */
@@ -12183,7 +12269,7 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
       const failEnvRead: string[] = [];
       const h = await host(
         { ...NO_FABLE, spare: () => spare() },
-        { settings: { preferredModel: "Fable", maximumWaitHours: 1 }, failEnvRead },
+        { settings: { preferredModel: "Fable", maximumWaitHours: 1 }, failEnvRead, listed: ["proj-1"] },
       );
       dispose = () => h.harness.dispose();
       await h.harness.behavior.emitThreadEvent("turn.failed", failure());
@@ -13427,5 +13513,1273 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     await h.harness.behavior.emitThreadEvent("turn.failed", failure());
     expect(h.retries.map((r) => r.reason)).toEqual(["Waiting for Fable on main"]);
     expect(await history(h)).toEqual([]);
+  });
+});
+
+describe("seats per account: threads wait for a free one", () => {
+  /** bb asks before a thread's turn starts: what the plugin answers. */
+  const ask = (h: Awaited<ReturnType<typeof host>>, id: string, projectId = "proj-1") =>
+    sent(h, id, projectId) as Promise<{ action: string; reason?: string; sendAt?: number }>;
+  const seatsOf = async (h: Awaited<ReturnType<typeof host>>) =>
+    ((await h.harness.behavior.callRpc("accounts_list", null)) as State).seats;
+  const OFF = { autoSwitch: false };
+
+  it("with 3 seats and 5 threads, 2 wait, each saying its place in the queue", async () => {
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 3 } });
+    dispose = () => h.harness.dispose();
+    for (const id of ["t1", "t2", "t3"])
+      expect(await ask(h, id)).toEqual({ action: "proceed" });
+    expect(await ask(h, "t4")).toEqual({
+      action: "wait",
+      reason: "Waiting for a seat on main: 3/3 threads running, 0 ahead in the queue",
+      sendAt: NOW + SEAT_RECHECK_MS,
+    });
+    expect(await ask(h, "t5")).toMatchObject({
+      action: "wait",
+      reason: "Waiting for a seat on main: 3/3 threads running, 1 ahead in the queue",
+    });
+    expect((await seatsOf(h))?.main).toMatchObject({
+      capacity: 3,
+      reserved: 3,
+      queued: [{ threadId: "t4" }, { threadId: "t5" }],
+    });
+  });
+
+  it("a turn that ends frees its seat for the first in line, and bb is asked again at once", async () => {
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    await ask(h, "t1");
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "t1", projectId: "proj-1" }),
+    });
+    expect((await ask(h, "t2")).action).toBe("wait");
+    expect((await ask(h, "t3")).action).toBe("wait");
+    const before = h.harness.recheckCount;
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "t1", projectId: "proj-1" }),
+    });
+    await vi.waitFor(() => expect(h.harness.recheckCount).toBe(before + 1));
+    // t3 asks first, but t2 was first in line.
+    expect((await ask(h, "t3")).action).toBe("wait");
+    expect(await ask(h, "t2")).toEqual({ action: "proceed" });
+  });
+
+  it("a waiting thread archived leaves the queue", async () => {
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    await ask(h, "t1");
+    await ask(h, "t2");
+    await ask(h, "t3");
+    await h.harness.behavior.emitThreadEvent("thread.archived", {
+      thread: thread({ id: "t2", projectId: "proj-1" }),
+    });
+    expect((await seatsOf(h))?.main?.queued).toEqual([
+      { threadId: "t3", title: null },
+    ]);
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "t1", projectId: "proj-1" }),
+    });
+    expect(await ask(h, "t3")).toEqual({ action: "proceed" });
+  });
+
+  it("a reload counts the threads bb says are running, on their project's account", async () => {
+    const h = await host(ALL_FREE, {
+      settings: { ...OFF, seatsMax: 2 },
+      threads: {
+        r1: { status: "active" },
+        r2: { status: "starting" },
+        r3: { status: "idle" },
+        r4: { status: "active", providerId: "codex" },
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await vi.waitFor(async () =>
+      expect((await seatsOf(h))?.main).toMatchObject({ running: 2 }),
+    );
+    expect((await ask(h, "t9")).action).toBe("wait");
+  });
+
+  it("an account's kind comes from its organizationType; unknown, from its windows", async () => {
+    const h = await host(
+      { ...ALL_FREE, main: () => Response.json(payload(10, 40)) },
+      { settings: { ...OFF, seatsMax: 5, seatsTeam: 1 } },
+    );
+    dispose = () => h.harness.dispose();
+    // No organizationType, a weekly window: Max, 5 seats.
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect((await seatsOf(h))?.main?.capacity).toBe(5);
+    h.files[`${HOME}/.claude.json`] = JSON.stringify({
+      oauthAccount: {
+        accountUuid: "uuid-main",
+        emailAddress: "main@example.com",
+        organizationType: "claude_team",
+      },
+    });
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect((await seatsOf(h))?.main?.capacity).toBe(1);
+    expect((await ask(h, "t1")).action).toBe("proceed");
+    expect((await ask(h, "t2")).action).toBe("wait");
+  });
+
+  it("an unknown kind without a weekly window is a Team seat", async () => {
+    const h = await host(
+      { ...ALL_FREE, main: () => Response.json(teamPayload(10, 10)) },
+      { settings: { ...OFF, seatsMax: 5, seatsTeam: 1 } },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect((await seatsOf(h))?.main?.capacity).toBe(1);
+  });
+
+  it("a project picked by hand onto a full account waits there; it is not moved for a seat", async () => {
+    const h = await host(ALL_FREE, { settings: { seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-1",
+      account: "spare",
+    });
+    const opus = (id: string) =>
+      h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id, projectId: "proj-1" }),
+          requestedExecution: { providerId: "claude-code", model: "claude-opus-5-5" },
+          attempt: "start-turn",
+        }),
+      );
+    expect(await opus("t1")).toEqual({ action: "proceed" });
+    expect(await opus("t2")).toMatchObject({
+      action: "wait",
+      reason: "Waiting for a seat on spare: 1/1 threads running, 0 ahead in the queue",
+    });
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+  });
+
+  it("a new project is placed on the best account with a free seat", async () => {
+    const h = await host(ALL_FREE, { settings: { seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // work, the best by quota, already runs a thread.
+    await h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-2",
+      account: "work",
+    });
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thr-2", projectId: "proj-2" }),
+    });
+    await vi.waitFor(async () =>
+      expect((await seatsOf(h))?.work?.running).toBe(1),
+    );
+    await h.harness.behavior.emitThreadEvent("thread.created", {
+      thread: thread({ id: "thr-new", projectId: "proj-3" }),
+    });
+    expect(h.envSet.at(-1)).toMatchObject({
+      projectId: "proj-3",
+      value: `${ACCOUNTS}/spare`,
+    });
+  });
+
+  it("a turn started without a reservation still takes a seat", async () => {
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "sneaky", projectId: "proj-1" }),
+    });
+    await vi.waitFor(async () =>
+      expect((await seatsOf(h))?.main?.running).toBe(1),
+    );
+    expect((await ask(h, "t1")).action).toBe("wait");
+  });
+
+  it("the list shows each account's seats and who waits", async () => {
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    await ask(h, "t1");
+    await ask(h, "t2");
+    const { stdout } = await h.harness.behavior.runCli(["list"]);
+    expect(stdout).toContain("seats 1/1");
+    expect(stdout).toMatch(/Waiting for a seat:\nmain  #1  t2/);
+  });
+});
+
+describe("seats hold through every way a turn starts (Astra SEATS-R01..R09)", () => {
+  type Answer = { action: string; reason?: string; sendAt?: number };
+  const ask = (h: Awaited<ReturnType<typeof host>>, id: string, projectId = "proj-1") =>
+    sent(h, id, projectId) as Promise<Answer>;
+  const seatsOf = async (h: Awaited<ReturnType<typeof host>>) =>
+    ((await h.harness.behavior.callRpc("accounts_list", null)) as State).seats;
+  const OFF = { autoSwitch: false };
+  /** bb asking again about the message it holds (queued on the plugin's wait). */
+  const again = (h: Awaited<ReturnType<typeof host>>, id: string, projectId = "proj-1") =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id, projectId }),
+        requestedExecution: { providerId: "claude-code", model: null },
+        attempt: "start-turn",
+        queuedMessages: [{ id: `queued_${id}` }] as never,
+      }),
+    ) as Promise<Answer>;
+  const counted = (h: Awaited<ReturnType<typeof host>>) =>
+    vi.waitFor(() =>
+      expect(
+        h.harness.logEntries.some((e) => e.message.startsWith("seats counted after loading")),
+      ).toBe(true),
+    );
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("R01: with the automatic choice on and no model named, a full account makes the thread wait", async () => {
+    const h = await host(ALL_FREE, { settings: { seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect(await ask(h, "t1")).toEqual({ action: "proceed" });
+    expect(await ask(h, "t2")).toEqual({
+      action: "wait",
+      reason: "Waiting for a seat on main: 1/1 threads running, 0 ahead in the queue",
+      sendAt: NOW + SEAT_RECHECK_MS,
+    });
+  });
+
+  it("R01: the project's account unreadable for the seat: waits three times, then proceeds with a warning", async () => {
+    const h = await host(ALL_FREE, { settings: { seatsMax: 1 }, failEnvRead: ["proj-1"] });
+    dispose = () => h.harness.dispose();
+    for (let i = 0; i < 3; i++)
+      expect(await (i === 0 ? ask : again)(h, "t1")).toEqual({
+        action: "wait",
+        reason: "Claude Switcher: the project's account could not be read for its seat; trying again",
+        sendAt: NOW + SEAT_RECHECK_MS,
+      });
+    expect(await again(h, "t1")).toEqual({ action: "proceed" });
+    expect(
+      h.harness.logEntries.some(
+        (e) => e.level === "warn" && e.message.includes("t1: proceeds without a seat"),
+      ),
+    ).toBe(true);
+  });
+
+  it("R2-005: the waits for an unread account are the message's: a new message after a cancelled one waits again", async () => {
+    const h = await host(ALL_FREE, { settings: { seatsMax: 1 }, failEnvRead: ["proj-1"] });
+    dispose = () => h.harness.dispose();
+    const unread = "Claude Switcher: the project's account could not be read for its seat; trying again";
+    expect((await ask(h, "t1")).reason).toBe(unread);
+    expect((await again(h, "t1")).reason).toBe(unread);
+    expect((await again(h, "t1")).reason).toBe(unread);
+    // The user cancels the held message.
+    await h.harness.behavior.emitThreadEvent("message.cancelled", {
+      entry: { id: "queued_t1", threadId: "t1", sendAt: NOW + SEAT_RECHECK_MS, payload: { kind: "inline" } } as never,
+    });
+    // A new message, the account still unread: it waits.
+    expect((await again(h, "t1")).reason).toBe(unread);
+  });
+
+  it("R2-005: a message sent anew (none queued) starts its own waits", async () => {
+    const h = await host(ALL_FREE, { settings: { seatsMax: 1 }, failEnvRead: ["proj-1"] });
+    dispose = () => h.harness.dispose();
+    const unread = "Claude Switcher: the project's account could not be read for its seat; trying again";
+    expect((await ask(h, "t1")).reason).toBe(unread);
+    expect((await again(h, "t1")).reason).toBe(unread);
+    expect((await again(h, "t1")).reason).toBe(unread);
+    expect((await ask(h, "t1")).reason).toBe(unread);
+  });
+
+  it("R02: a dispatch while the seats are counted after a reload waits; once counted, the threads bb said run fill the account", async () => {
+    const gate = envGate();
+    let held = true;
+    const h = await host(ALL_FREE, {
+      settings: { ...OFF, seatsMax: 1 },
+      threads: { r1: { status: "active" } },
+      beforeEnvRead: async (projectId) => {
+        if (projectId !== "proj-1" || !held) return;
+        gate.captured();
+        await gate.held;
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await gate.reached;
+    vi.useFakeTimers();
+    const asked = ask(h, "t9", "proj-2");
+    await vi.advanceTimersByTimeAsync(DISPATCH_LIMIT_MS);
+    expect(await asked).toEqual({
+      action: "wait",
+      reason: "Claude Switcher: seats are being counted after a reload",
+      sendAt: NOW + 5_000,
+    });
+    vi.useRealTimers();
+    held = false;
+    gate.release();
+    await counted(h);
+    expect((await seatsOf(h))?.main).toMatchObject({ running: 1 });
+    expect((await ask(h, "t9", "proj-2")).reason).toBe(
+      "Waiting for a seat on main: 1/1 threads running, 0 ahead in the queue",
+    );
+  });
+
+  it("R02: a read that fails while counting is tried again; the thread is counted", async () => {
+    vi.useFakeTimers();
+    let failures = 2;
+    const h = await host(ALL_FREE, {
+      settings: { ...OFF, seatsMax: 1 },
+      threads: { r1: { status: "active" } },
+      beforeEnvRead: async (projectId) => {
+        if (projectId === "proj-1" && failures-- > 0) throw new Error("HTTP 503");
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    vi.useRealTimers();
+    await counted(h);
+    expect((await seatsOf(h))?.main).toMatchObject({ running: 1 });
+  });
+
+  it("R2-001: threads.list never answers while counting: after its tries the seats count as none and a turn goes", async () => {
+    vi.useFakeTimers();
+    const h = await host(ALL_FREE, {
+      settings: { ...OFF, seatsMax: 1 },
+      threads: { r1: { status: "active" } },
+      beforeThreadsList: () => new Promise(() => {}),
+    });
+    dispose = () => h.harness.dispose();
+    await vi.advanceTimersByTimeAsync(3 * DISPATCH_LIMIT_MS + 2 * 2_000);
+    vi.useRealTimers();
+    await counted(h);
+    expect(await ask(h, "t9")).toEqual({ action: "proceed" });
+  });
+
+  it("R2-001: threads.get never answers for a thread read late: after its tries it is not counted and a turn goes", async () => {
+    vi.useFakeTimers();
+    let clock = NOW;
+    const h = await host(ALL_FREE, {
+      settings: { ...OFF, seatsMax: 1 },
+      clock: () => clock,
+      threads: { r1: { status: "active" } },
+      // The project's account read late: the thread is looked at again.
+      beforeEnvRead: async () => {
+        clock += 2_000;
+      },
+      beforeThreadGet: () => new Promise(() => {}),
+    });
+    dispose = () => h.harness.dispose();
+    await vi.advanceTimersByTimeAsync(3 * DISPATCH_LIMIT_MS + 2 * 2_000);
+    vi.useRealTimers();
+    await counted(h);
+    expect((await seatsOf(h))?.main?.running ?? 0).toBe(0);
+    expect((await ask(h, "t9")).action).toBe("proceed");
+  });
+
+  for (const [what, end] of [
+    ["idle", (h: Awaited<ReturnType<typeof host>>) =>
+      h.harness.behavior.emitThreadEvent("thread.idle", { thread: thread({ id: "r1", projectId: "proj-1" }) })],
+    ["failed", (h: Awaited<ReturnType<typeof host>>) =>
+      h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "r1" }))],
+    ["deleted", (h: Awaited<ReturnType<typeof host>>) =>
+      h.harness.behavior.emitThreadEvent("thread.deleted", { thread: thread({ id: "r1", projectId: "proj-1" }) })],
+  ] as const)
+    it(`R03: a thread ${what} while its account is read for the count holds no seat after it`, async () => {
+      const gate = envGate();
+      let held = true;
+      const h = await host(ALL_FREE, {
+        settings: { ...OFF, seatsMax: 1 },
+        threads: { r1: { status: "active" } },
+        beforeEnvRead: async (projectId) => {
+          if (projectId !== "proj-1" || !held) return;
+          gate.captured();
+          await gate.held;
+        },
+      });
+      dispose = () => h.harness.dispose();
+      await gate.reached;
+      await end(h);
+      held = false;
+      gate.release();
+      await counted(h);
+      expect((await seatsOf(h))?.main?.running ?? 0).toBe(0);
+      expect(await ask(h, "t9")).toEqual({ action: "proceed" });
+    });
+
+  it("R04: reserved on main, the project moved to spare before bb announces the turn: the seat stays on main", async () => {
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect(await ask(h, "t1")).toEqual({ action: "proceed" });
+    await h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-1",
+      account: "spare",
+    });
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "t1", projectId: "proj-1" }),
+    });
+    await vi.waitFor(async () =>
+      expect((await seatsOf(h))?.main).toMatchObject({ running: 1, reserved: 0 }),
+    );
+    expect((await seatsOf(h))?.spare).toMatchObject({ running: 0, reserved: 0 });
+  });
+
+  it("R2-002: a reserved turn announced just before its reservation expires keeps its seat while its account is read", async () => {
+    let clock = NOW;
+    const gate = envGate();
+    let hold = false;
+    const h = await host(ALL_FREE, {
+      settings: { ...OFF, seatsMax: 1 },
+      clock: () => clock,
+      beforeEnvRead: async (projectId) => {
+        if (!hold || projectId !== "proj-1") return;
+        hold = false;
+        gate.captured();
+        await gate.held;
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await counted(h);
+    expect(await ask(h, "t1")).toEqual({ action: "proceed" });
+    // Announced at 89 s; its account is read for 2 s.
+    clock = NOW + 89_000;
+    hold = true;
+    const active = h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "t1", projectId: "proj-1" }),
+    });
+    await gate.reached;
+    clock = NOW + 90_000;
+    expect((await ask(h, "t2", "proj-2")).action).toBe("wait");
+    clock = NOW + 91_000;
+    gate.release();
+    await active;
+    expect((await seatsOf(h))?.main).toMatchObject({
+      running: 1,
+      reserved: 0,
+      queued: [{ threadId: "t2" }],
+    });
+    expect(
+      h.harness.logEntries.some((e) => e.message.includes("over capacity")),
+    ).toBe(false);
+  });
+
+  it("R08: two directories logged into the same account share its seats", async () => {
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    h.files[`${ACCOUNTS}/work/.claude.json`] = claudeJson("spare@example.com", "uuid-spare");
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "spare" });
+    await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-2", account: "work" });
+    expect(await ask(h, "t1", "proj-1")).toEqual({ action: "proceed" });
+    expect((await ask(h, "t2", "proj-2")).reason).toBe(
+      "Waiting for a seat on work: 1/1 threads running, 0 ahead in the queue",
+    );
+    expect((await seatsOf(h))?.spare).toMatchObject({ reserved: 1 });
+    expect((await seatsOf(h))?.work).toMatchObject({ reserved: 1 });
+  });
+
+  it("R08: renaming the default account keeps the seats it has taken", async () => {
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect(await ask(h, "t1")).toEqual({ action: "proceed" });
+    await h.harness.behavior.setSettings({ defaultAccountName: "home" });
+    expect((await ask(h, "t2")).reason).toBe(
+      "Waiting for a seat on home: 1/1 threads running, 0 ahead in the queue",
+    );
+  });
+
+  it("R2-003: the default renamed with the automatic choice off: a project on a full spare waits on spare, never on the default", async () => {
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "spare" });
+    expect(await ask(h, "t1")).toEqual({ action: "proceed" });
+    await h.harness.behavior.setSettings({ defaultAccountName: "home" });
+    expect((await ask(h, "t2")).reason).toBe(
+      "Waiting for a seat on spare: 1/1 threads running, 0 ahead in the queue",
+    );
+    expect((await seatsOf(h))?.home).toMatchObject({ running: 0, reserved: 0 });
+  });
+
+  it("R2-003: a project on an account no longer found waits as an unread one; it never takes the default's seat", async () => {
+    let dirs = ["spare", "work"];
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 }, dirs: () => dirs });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "spare" });
+    dirs = ["work"];
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    for (let i = 0; i < 3; i++)
+      expect(await (i === 0 ? ask : again)(h, "t1")).toEqual({
+        action: "wait",
+        reason: "Claude Switcher: the project's account could not be read for its seat; trying again",
+        sendAt: NOW + SEAT_RECHECK_MS,
+      });
+    expect(await again(h, "t1")).toEqual({ action: "proceed" });
+    expect((await seatsOf(h))?.main).toMatchObject({ running: 0, reserved: 0 });
+  });
+
+  it("R09: a reservation announces accounts-changed; ten changes in a row, once", async () => {
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 3 } });
+    dispose = () => h.harness.dispose();
+    await counted(h);
+    const changes = () =>
+      h.harness.realtimeSignals.filter((s) => s.channel === "accounts-changed").length;
+    vi.useFakeTimers();
+    const before = changes();
+    await ask(h, "t1");
+    await vi.advanceTimersByTimeAsync(250);
+    expect(changes()).toBe(before + 1);
+    for (let i = 2; i <= 11; i++) await ask(h, `t${i}`);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(changes()).toBe(before + 2);
+  });
+});
+
+describe("seats: the cases the third inspection found (Astra SEATS-R3)", () => {
+  type Answer = { action: string; reason?: string; sendAt?: number };
+  const ask = (h: Awaited<ReturnType<typeof host>>, id: string, projectId = "proj-1") =>
+    sent(h, id, projectId) as Promise<Answer>;
+  const opus = (h: Awaited<ReturnType<typeof host>>, id: string, projectId = "proj-1") =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id, projectId }),
+        requestedExecution: { providerId: "claude-code", model: "claude-opus-5-5" },
+        attempt: "start-turn",
+      }),
+    ) as Promise<Answer>;
+  const again = (h: Awaited<ReturnType<typeof host>>, id: string, projectId = "proj-1") =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id, projectId }),
+        requestedExecution: { providerId: "claude-code", model: null },
+        attempt: "start-turn",
+        queuedMessages: [{ id: `queued_${id}` }] as never,
+      }),
+    ) as Promise<Answer>;
+  const seatsOf = async (h: Awaited<ReturnType<typeof host>>) =>
+    ((await h.harness.behavior.callRpc("accounts_list", null)) as State).seats;
+  const counted = (h: Awaited<ReturnType<typeof host>>) =>
+    vi.waitFor(() =>
+      expect(
+        h.harness.logEntries.some((e) => e.message.startsWith("seats counted after loading")),
+      ).toBe(true),
+    );
+  const UNREAD = "Claude Switcher: the project's account could not be read for its seat; trying again";
+  /** proj-1 on spare, an account the accounts directory no longer holds. */
+  const ON_GONE_SPARE = {
+    "proj-1": [{ name: ENV_VAR, note: ownNote("spare"), secret: true, value: null }],
+  };
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("R3-001: automatic choice on, a model named, the project on an account no longer found: no seat of the default is reserved", async () => {
+    const h = await host(ALL_FREE, {
+      settings: { seatsMax: 1 },
+      dirs: () => ["work"],
+      presetEnv: ON_GONE_SPARE,
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect(await opus(h, "t1")).toEqual({
+      action: "wait",
+      reason: UNREAD,
+      sendAt: NOW + SEAT_RECHECK_MS,
+    });
+    expect((await seatsOf(h))?.main).toMatchObject({ running: 0, reserved: 0 });
+    // The default's seat is still free for a thread of a project on it.
+    expect(await opus(h, "t2", "proj-2")).toEqual({ action: "proceed" });
+  });
+
+  it("R3-001: a reload does not count a running thread of a project on an account no longer found as the default's", async () => {
+    const h = await host(ALL_FREE, {
+      settings: { autoSwitch: false, seatsMax: 1 },
+      dirs: () => ["work"],
+      presetEnv: ON_GONE_SPARE,
+      threads: { r1: { status: "active" } },
+    });
+    dispose = () => h.harness.dispose();
+    await counted(h);
+    expect((await seatsOf(h))?.main?.running ?? 0).toBe(0);
+    expect(await ask(h, "t9", "proj-2")).toEqual({ action: "proceed" });
+  });
+
+  it("R3-001: a turn announced without a reservation, its project on an account no longer found, takes no seat of the default", async () => {
+    const h = await host(ALL_FREE, {
+      settings: { autoSwitch: false, seatsMax: 1 },
+      dirs: () => ["work"],
+      presetEnv: ON_GONE_SPARE,
+    });
+    dispose = () => h.harness.dispose();
+    await counted(h);
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "sneaky", projectId: "proj-1" }),
+    });
+    expect((await seatsOf(h))?.main?.running ?? 0).toBe(0);
+    expect(await ask(h, "t9", "proj-2")).toEqual({ action: "proceed" });
+  });
+
+  it("R3-002: the project picked onto a full account while its placement is still being recorded: the seat is not reserved on the account it left", async () => {
+    let hold = false;
+    const gate = envGate();
+    const h = await host(
+      { ...ALL_FREE, main: () => Response.json(payload(100, 100)) },
+      {
+        settings: { seatsMax: 1 },
+        presetEnv: {
+          "proj-2": [{ name: ENV_VAR, note: ownNote("spare"), secret: true, value: null }],
+        },
+      },
+    );
+    dispose = () => h.harness.dispose();
+    await counted(h);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // thr-2 takes spare's only seat.
+    expect(await opus(h, "thr-2", "proj-2")).toEqual({ action: "proceed" });
+    const set = h.bb.storage.kv.set.bind(h.bb.storage.kv);
+    h.bb.storage.kv.set = async (key: string, value: unknown) => {
+      if (hold) {
+        hold = false;
+        gate.captured();
+        await gate.held;
+      }
+      return set(key, value);
+    };
+    hold = true;
+    // main cannot run: t1's placement moves proj-1 to work, and records it.
+    const answer = opus(h, "t1");
+    await gate.reached;
+    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", value: `${ACCOUNTS}/work` });
+    // Meanwhile the user picks spare, which is full.
+    const pick = h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-1",
+      account: "spare",
+    });
+    await vi.waitFor(() =>
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", value: `${ACCOUNTS}/spare` }),
+    );
+    gate.release();
+    const got = await answer;
+    await pick;
+    expect(got.action).toBe("wait");
+    expect((await seatsOf(h))?.work).toMatchObject({ running: 0, reserved: 0 });
+  });
+
+  it("R3-003: a turn announced without a reservation whose account read hangs is counted on the next refresh", async () => {
+    const gate = envGate();
+    let hold = false;
+    const h = await host(ALL_FREE, {
+      settings: { autoSwitch: false, seatsMax: 1 },
+      beforeEnvRead: async (projectId) => {
+        if (!hold || projectId !== "proj-1") return;
+        gate.captured();
+        await gate.held;
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await counted(h);
+    hold = true;
+    vi.useFakeTimers();
+    const active = h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "sneaky", projectId: "proj-1" }),
+    });
+    await gate.reached;
+    await vi.advanceTimersByTimeAsync(DISPATCH_LIMIT_MS);
+    await active;
+    vi.useRealTimers();
+    hold = false;
+    gate.release();
+    // Not counted yet (the late answer is not waited for): its seat is not
+    // shown taken by a guess.
+    expect((await seatsOf(h))?.main?.running ?? 0).toBe(0);
+    const before = h.usageCalls.length;
+    const run = h.harness.behavior.runService("usage-refresh");
+    await vi.waitFor(() => expect(h.usageCalls).toHaveLength(before + 3));
+    run.controller.abort();
+    await run.done;
+    expect((await seatsOf(h))?.main).toMatchObject({ running: 1 });
+    expect((await ask(h, "t9", "proj-2")).action).toBe("wait");
+  });
+
+  it("R3-004: the only message of a waiting thread cancelled: the next in line gets the seat as the running turn ends", async () => {
+    const h = await host(ALL_FREE, { settings: { autoSwitch: false, seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    await counted(h);
+    expect(await ask(h, "t1")).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "t1", projectId: "proj-1" }),
+    });
+    expect((await ask(h, "q1")).action).toBe("wait");
+    expect((await ask(h, "q2")).action).toBe("wait");
+    await h.harness.behavior.emitThreadEvent("message.cancelled", {
+      entry: { id: "queued_q1", threadId: "q1", sendAt: NOW + SEAT_RECHECK_MS, payload: { kind: "inline" } } as never,
+    });
+    expect((await seatsOf(h))?.main?.queued).toEqual([{ threadId: "q2", title: null }]);
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "t1", projectId: "proj-1" }),
+    });
+    expect(await again(h, "q2")).toEqual({ action: "proceed" });
+  });
+
+  it("R3-004: a cancelled message of a thread with another still queued keeps its place; a running seat is never freed", async () => {
+    const h = await host(ALL_FREE, { settings: { autoSwitch: false, seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    await counted(h);
+    expect(await ask(h, "t1")).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "t1", projectId: "proj-1" }),
+    });
+    expect((await ask(h, "q1")).action).toBe("wait");
+    h.queued.push({
+      id: "queued_q1b",
+      threadId: "q1",
+      payload: { kind: "inline" },
+      sendAt: null,
+      waitingOn: { kind: "time" },
+      createdAt: NOW,
+    } as never);
+    await h.harness.behavior.emitThreadEvent("message.cancelled", {
+      entry: { id: "queued_q1", threadId: "q1", sendAt: NOW + SEAT_RECHECK_MS, payload: { kind: "inline" } } as never,
+    });
+    await h.harness.behavior.emitThreadEvent("message.cancelled", {
+      entry: { id: "queued_t1", threadId: "t1", sendAt: NOW, payload: { kind: "inline" } } as never,
+    });
+    expect((await seatsOf(h))?.main).toMatchObject({
+      running: 1,
+      queued: [{ threadId: "q1" }],
+    });
+  });
+});
+
+describe("seats: the cases the fourth inspection found (Astra SEATS-R4)", () => {
+  type Answer = { action: string; reason?: string; sendAt?: number };
+  const ask = (h: Awaited<ReturnType<typeof host>>, id: string, projectId = "proj-1") =>
+    sent(h, id, projectId) as Promise<Answer>;
+  const opus = (h: Awaited<ReturnType<typeof host>>, id: string, projectId = "proj-1") =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id, projectId }),
+        requestedExecution: { providerId: "claude-code", model: "claude-opus-5-5" },
+        attempt: "start-turn",
+      }),
+    ) as Promise<Answer>;
+  const again = (h: Awaited<ReturnType<typeof host>>, id: string, projectId = "proj-1") =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id, projectId }),
+        requestedExecution: { providerId: "claude-code", model: null },
+        attempt: "start-turn",
+        queuedMessages: [{ id: `queued_${id}` }] as never,
+      }),
+    ) as Promise<Answer>;
+  const seatsOf = async (h: Awaited<ReturnType<typeof host>>) =>
+    ((await h.harness.behavior.callRpc("accounts_list", null)) as State).seats;
+  const counted = (h: Awaited<ReturnType<typeof host>>) =>
+    vi.waitFor(() =>
+      expect(
+        h.harness.logEntries.some((e) => e.message.startsWith("seats counted after loading")),
+      ).toBe(true),
+    );
+  /** Each slow read of bb takes this long, on the fake clock. */
+  const SLOW_MS = 2_900;
+  const slow = () => new Promise((resolve) => setTimeout(resolve, SLOW_MS));
+  /** The plugin's clock, NOW until `follow()`, then the fake timers' time since. */
+  function fakeClock() {
+    let t0: number | null = null;
+    return {
+      now: () => (t0 === null ? NOW : NOW + Date.now() - t0),
+      follow: () => {
+        vi.useFakeTimers();
+        t0 = Date.now();
+      },
+    };
+  }
+  /** The answer, and how long it took on the fake clock (advanced 50 ms at a time). */
+  async function timed<T>(work: Promise<T>): Promise<{ value: T; ms: number }> {
+    const start = Date.now();
+    let done = false;
+    let value!: T;
+    void work.then((v) => {
+      value = v;
+      done = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    while (!done && Date.now() - start < 20_000) await vi.advanceTimersByTimeAsync(50);
+    return { value, ms: Date.now() - start };
+  }
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("R4-002: while the seats are counted after a reload the message waits at once; bb is asked again once they are counted", async () => {
+    const clock = fakeClock();
+    clock.follow();
+    const h = await host(ALL_FREE, {
+      settings: { seatsMax: 1 },
+      clock: clock.now,
+      threads: { r1: { status: "active" } },
+      beforeEnvRead: slow,
+    });
+    dispose = () => h.harness.dispose();
+    const before = h.harness.recheckCount;
+    const { value, ms } = await timed(opus(h, "t9", "proj-2"));
+    expect(ms).toBeLessThan(100);
+    expect(value).toEqual({
+      action: "wait",
+      reason: "Claude Switcher: seats are being counted after a reload",
+      sendAt: NOW + 5_000,
+    });
+    await vi.advanceTimersByTimeAsync(3 * SLOW_MS);
+    expect(
+      h.harness.logEntries.some((e) => e.message.startsWith("seats counted after loading")),
+    ).toBe(true);
+    expect(h.harness.recheckCount).toBe(before + 1);
+  });
+
+  it("R4-002: every read of bb slow, the dispatch answers within DISPATCH_BUDGET_MS, and waits rather than going late", async () => {
+    const clock = fakeClock();
+    let slowNow = false;
+    const h = await host(ALL_FREE, {
+      settings: { seatsMax: 1 },
+      clock: clock.now,
+      beforeProjectGet: () => (slowNow ? slow() : Promise.resolve()),
+      beforeEnvRead: () => (slowNow ? slow() : Promise.resolve()),
+      beforeSet: () => (slowNow ? slow() : Promise.resolve()),
+    });
+    dispose = () => h.harness.dispose();
+    await counted(h);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock.follow();
+    slowNow = true;
+    // main is out (100 %): the turn's placement moves proj-1, and its write is slow.
+    const { value, ms } = await timed(opus(h, "t1"));
+    expect(ms).toBeLessThanOrEqual(DISPATCH_BUDGET_MS);
+    expect(value.action).toBe("wait");
+    // Asked again soon, not after SEAT_RECHECK_MS.
+    expect(value.sendAt).toBe(NOW + ms + 5_000);
+    // Left to finish before the test ends.
+    slowNow = false;
+    await vi.advanceTimersByTimeAsync(4 * SLOW_MS);
+  });
+
+  it("R4-001: the account confirmed by hand lands after the turn's placement wrote another: the seat is not reserved where the placement left it", async () => {
+    const pickGate = envGate();
+    const placeGate = envGate();
+    let holdPick = false;
+    let holdPlace = false;
+    const h = await host(
+      { ...ALL_FREE, spare: () => Response.json(payload(100, 100)) },
+      {
+        settings: { seatsMax: 1 },
+        presetEnv: {
+          "proj-1": [{ name: ENV_VAR, note: ownNote("spare"), secret: true, value: null }],
+        },
+        // The confirmation's write is slow to start.
+        beforeSet: async () => {
+          if (!holdPick) return;
+          holdPick = false;
+          pickGate.captured();
+          await pickGate.held;
+        },
+        // The placement's write has landed; bb's answer is slow.
+        afterSet: async () => {
+          if (!holdPlace) return;
+          holdPlace = false;
+          placeGate.captured();
+          await placeGate.held;
+        },
+      },
+    );
+    dispose = () => h.harness.dispose();
+    await counted(h);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // The user confirms spare.
+    holdPick = true;
+    const pick = h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-1",
+      account: "spare",
+    });
+    await pickGate.reached;
+    // spare cannot run: t1's placement moves proj-1 to work.
+    holdPlace = true;
+    const answer = opus(h, "t1");
+    await placeGate.reached;
+    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", value: `${ACCOUNTS}/work` });
+    // Then the confirmation of spare lands: the project is on spare.
+    pickGate.release();
+    await pick;
+    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", value: `${ACCOUNTS}/spare` });
+    placeGate.release();
+    const got = await answer;
+    expect((await seatsOf(h))?.work).toMatchObject({ running: 0, reserved: 0 });
+    // Read again: on spare, where the project is.
+    expect(got).toEqual({ action: "proceed" });
+    expect((await seatsOf(h))?.spare).toMatchObject({ reserved: 1 });
+  });
+
+  it("R4-003: a message of the thread sent while its cancellation reads the queue keeps the seat it reserved", async () => {
+    const gate = envGate();
+    let hold = false;
+    const h = await host(ALL_FREE, {
+      settings: { autoSwitch: false, seatsMax: 1 },
+      beforeQueuedList: async (threadId) => {
+        if (!hold || threadId !== "q1") return;
+        hold = false;
+        gate.captured();
+        await gate.held;
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await counted(h);
+    expect(await ask(h, "q1")).toEqual({ action: "proceed" });
+    expect((await ask(h, "q2")).action).toBe("wait");
+    // q1's message is cancelled; the look at its queue is slow.
+    hold = true;
+    const cancelled = h.harness.behavior.emitThreadEvent("message.cancelled", {
+      entry: { id: "queued_q1", threadId: "q1", sendAt: NOW, payload: { kind: "inline" } } as never,
+    });
+    await gate.reached;
+    // Meanwhile the user sends q1 a new message: it takes the seat.
+    expect(await ask(h, "q1")).toEqual({ action: "proceed" });
+    gate.release();
+    await cancelled;
+    expect((await seatsOf(h))?.main).toMatchObject({
+      reserved: 1,
+      queued: [{ threadId: "q2" }],
+    });
+    expect((await again(h, "q2")).action).toBe("wait");
+  });
+});
+
+describe("bb claude-switcher seats", () => {
+  it("prints each account's seats and every usage sample with the seats taken then", async () => {
+    const h = await host(ALL_FREE, { settings: { autoSwitch: false, seatsMax: 2 } });
+    dispose = () => h.harness.dispose();
+    await sent(h, "t1", "proj-1");
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const { stdout } = await h.harness.behavior.runCli(["seats"]);
+    expect(stdout).toContain("main\tseats 1/2 (0 running, 1 reserved)\t0 waiting");
+    expect(stdout).toContain(
+      `${new Date(NOW).toISOString()}\tmain\t0\t1\t100\t40\t${new Date(NOW + 2 * HOUR).toISOString()}\t${new Date(NOW + 3 * 24 * HOUR).toISOString()}\t—`,
+    );
+  });
+
+  it("R06: three samples in a row keep the three, each with its usage, and the spend per hour and seat", async () => {
+    let clock = NOW;
+    let session = 10;
+    const h = await host(
+      { ...ALL_FREE, main: () => Response.json(payload(session, 40)) },
+      { settings: { autoSwitch: false, seatsMax: 2 }, clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await sent(h, "t1", "proj-1");
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "t1", projectId: "proj-1" }),
+    });
+    for (const [at, used] of [[NOW, 10], [NOW + HOUR / 2, 20], [NOW + HOUR, 30]] as const) {
+      clock = at;
+      session = used;
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+    }
+    const { stdout } = await h.harness.behavior.runCli(["seats", "--json"]);
+    const reset = NOW + 2 * HOUR;
+    const weeklyReset = NOW + 3 * 24 * HOUR;
+    expect(JSON.parse(stdout).samples.main).toEqual([
+      [NOW, 1, 0, 10, 40, reset, weeklyReset],
+      [NOW + HOUR / 2, 1, 0, 20, 40, reset, weeklyReset],
+      [NOW + HOUR, 1, 0, 30, 40, reset, weeklyReset],
+    ]);
+    // 10 points each half hour with one seat: 20 % an hour per seat.
+    const text = (await h.harness.behavior.runCli(["seats"])).stdout;
+    expect(text).toContain("main\t20.0 % of the 5-hour window per hour and seat");
+  });
+
+  it("R2-006: samples older than a week go as they load, as they are stored and as they are listed, measured again or not", async () => {
+    const DAY = 24 * HOUR;
+    const sample = (at: number) => [at, 0, 0, 10, 40, null, null];
+    let clock = NOW;
+    let workDown = false;
+    const h = await host(
+      {
+        ...ALL_FREE,
+        work: () =>
+          workDown ? new Response("down", { status: 500 }) : Response.json(payload(5, 20)),
+      },
+      {
+        settings: { autoSwitch: false },
+        clock: () => clock,
+        kvPreset: {
+          "seat-samples": {
+            main: [sample(NOW - 8 * DAY), sample(NOW - 2 * DAY)],
+            spare: [sample(NOW - 8 * DAY)],
+            work: [sample(NOW - 6 * DAY)],
+          },
+        },
+      },
+    );
+    dispose = () => h.harness.dispose();
+    const listed = async () =>
+      JSON.parse((await h.harness.behavior.runCli(["seats", "--json"])).stdout).samples;
+    // On load: the ones of 8 days ago are gone, and spare with them.
+    expect(await listed()).toEqual({
+      main: [sample(NOW - 2 * DAY)],
+      work: [sample(NOW - 6 * DAY)],
+    });
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // Two days later work's query fails: it is not measured again, and its
+    // sample of then, now 8 days old, is not stored.
+    workDown = true;
+    clock = NOW + 2 * DAY;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const stored = (await h.bb.storage.kv.get("seat-samples")) as Record<string, unknown[]>;
+    expect(stored.work).toHaveLength(1);
+    expect(stored.work).not.toContainEqual(sample(NOW - 6 * DAY));
+    // Listed six days on, nothing measured: main's of 2 days before load is gone.
+    clock = NOW + 6 * DAY + 1;
+    expect((await listed()).main).not.toContainEqual(sample(NOW - 2 * DAY));
+  });
+
+  it("R07: measuring only one account leaves another's sample as it was measured", async () => {
+    let clock = NOW;
+    const h = await host(ALL_FREE, {
+      settings: { seatsMax: 2, switchAheadPercent: 95 },
+      clock: () => clock,
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // main measured with t1's seat reserved, at t.
+    const t = NOW + 60_000;
+    clock = t;
+    await sent(h, "t1", "proj-1");
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "t1", projectId: "proj-1" }),
+    });
+    // Its seat freed, only spare is measured.
+    clock = t + 10 * 60_000;
+    await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-2", account: "spare" });
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "thr-2", projectId: "proj-2" }),
+    });
+    const samples = JSON.parse((await h.harness.behavior.runCli(["seats", "--json"])).stdout).samples;
+    expect(samples.spare.map((s: number[]) => s[0])).toEqual([NOW, t, clock]);
+    expect(samples.main.map((s: number[]) => s.slice(0, 3))).toEqual([
+      [NOW, 0, 0],
+      [t, 0, 1],
+    ]);
+  });
+});
+
+// Aitor 2026-10-30, Añadido 2: bb greys out the composer of a project whose
+// account is at its limit (Mariscal · Web on ganaresenas, Fable at 100 %),
+// so no turn reaches the checkpoint that would move it. Every refresh moves
+// such a project, and one on an account without a login, to the best
+// account with a free seat, whatever switchAheadPercent says.
+describe("no project is left on an account out of the preferred model or without a login", () => {
+  /** main (where every project starts) is out of Fable until 14:00; work ranks first, spare second. */
+  const MAIN_OUT_OF_FABLE = {
+    main: () => Response.json(payload(10, 40, 100)),
+    spare: () => Response.json(payload(10, 60, 20)),
+    work: () => Response.json(payload(5, 20, 30)),
+  };
+  /** Only proj-1 is listed: the projects of the seat holders do not move. */
+  const OPTIONS = {
+    listed: ["proj-1"],
+    settings: { preferredModel: "Fable", seatsMax: 1 },
+  };
+  const onWork = {
+    "proj-2": [
+      { name: ENV_VAR, note: ownNote("work"), secret: true, value: null },
+    ],
+  };
+  async function onePass(h: Awaited<ReturnType<typeof host>>) {
+    const before = h.usageCalls.length;
+    const run = h.harness.behavior.runService("usage-refresh");
+    await vi.waitFor(() => {
+      expect(h.usageCalls).toHaveLength(before + 3);
+    });
+    run.controller.abort();
+    await run.done;
+  }
+  const logged = (h: Awaited<ReturnType<typeof host>>, level: string) =>
+    h.harness.logEntries
+      .filter((e) => e.level === level)
+      .map((e) => e.message);
+
+  it("moves a project off an account out of Fable to the best account, with switchAheadPercent at 0", async () => {
+    const h = await host(MAIN_OUT_OF_FABLE, OPTIONS);
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-1", `${ACCOUNTS}/work`],
+    ]);
+    expect(logged(h, "info")).toContain(
+      "project Website: moved from main (exhausted for Fable until 2026-09-29 14:00) to work (seats 0/1)",
+    );
+    const state = (await h.harness.behavior.callRpc(
+      "accounts_list",
+      null,
+    )) as State;
+    expect(state.history[0]).toMatchObject({
+      projectId: "proj-1",
+      from: "main",
+      to: "work",
+      reason: "Moved to account work: main exhausted for Fable until 2026-09-29 14:00",
+    });
+    // Done: the next refresh finds it on an account that can run.
+    await onePass(h);
+    expect(h.envSet).toHaveLength(1);
+  });
+
+  it("only to an account with a free seat: the best one full, the next one", async () => {
+    const h = await host(MAIN_OUT_OF_FABLE, { ...OPTIONS, presetEnv: onWork });
+    dispose = () => h.harness.dispose();
+    // proj-2's thread takes work's only seat.
+    expect(await sent(h, "thr-2", "proj-2")).toEqual({ action: "proceed" });
+    await onePass(h);
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-1", `${ACCOUNTS}/spare`],
+    ]);
+  });
+
+  it("stays when no other account with a free seat can run Fable, and says so", async () => {
+    const h = await host(MAIN_OUT_OF_FABLE, {
+      ...OPTIONS,
+      presetEnv: {
+        ...onWork,
+        personal: [
+          { name: ENV_VAR, note: ownNote("spare"), secret: true, value: null },
+        ],
+      },
+    });
+    dispose = () => h.harness.dispose();
+    expect(await sent(h, "thr-2", "proj-2")).toEqual({ action: "proceed" });
+    expect(await sent(h, "thr-3", "personal")).toEqual({ action: "proceed" });
+    await onePass(h);
+    expect(h.envSet).toEqual([]);
+    expect(logged(h, "debug")).toContain(
+      "project Website: left on main (exhausted for Fable until 2026-09-29 14:00): no other account with a free seat can run Fable",
+    );
+  });
+
+  it("moves a project off an account without a login, and the log says why it has none", async () => {
+    const h = await host(
+      { ...MAIN_OUT_OF_FABLE, main: () => new Response("{}", { status: 401 }) },
+      OPTIONS,
+    );
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-1", `${ACCOUNTS}/work`],
+    ]);
+    expect(logged(h, "info")).toContain(
+      "project Website: moved from main (not logged in) to work (seats 0/1)",
+    );
+    expect(logged(h, "warn")).toContainEqual(
+      expect.stringMatching(
+        /^account main: not logged in: usage endpoint answered 401 \(token …[0-9a-f]{8}, expires in \d+ min, refreshed: no\): \{\}$/,
+      ),
+    );
+  });
+
+  it("one project that cannot be moved does not keep the others where they are", async () => {
+    const h = await host(MAIN_OUT_OF_FABLE, {
+      ...OPTIONS,
+      listed: ["proj-1", "proj-2"],
+      failSet: ["proj-1"],
+    });
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-2", `${ACCOUNTS}/work`],
+    ]);
+    expect(logged(h, "warn")).toContainEqual(
+      expect.stringMatching(/^project Website: not moved off its account: /),
+    );
+  });
+
+  it("one project whose account cannot be read does not keep the others where they are (Astra SEATS-R3-005)", async () => {
+    const h = await host(MAIN_OUT_OF_FABLE, {
+      ...OPTIONS,
+      listed: ["proj-1", "proj-2"],
+      failEnvRead: ["proj-1"],
+    });
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-2", `${ACCOUNTS}/work`],
+    ]);
+    expect(logged(h, "warn")).toContainEqual(
+      expect.stringMatching(/^project Website: its account not read to rescue it: /),
+    );
+  });
+
+  it("a read in the rescue that never answers leaves that project; the others are moved and the refresh goes on (Astra SEATS-R4-004)", async () => {
+    let armed = false;
+    let reads = 0;
+    const h = await host(MAIN_OUT_OF_FABLE, {
+      ...OPTIONS,
+      listed: ["proj-1", "proj-2"],
+      // proj-1's second read of the pass (the rescue's own) never answers.
+      beforeEnvRead: async (projectId) => {
+        if (!armed || projectId !== "proj-1") return;
+        reads += 1;
+        if (reads === 2) await new Promise(() => {});
+      },
+    });
+    dispose = () => h.harness.dispose();
+    armed = true;
+    vi.useFakeTimers();
+    const before = h.usageCalls.length;
+    const run = h.harness.behavior.runService("usage-refresh");
+    // Till the next refresh has measured the accounts and moved proj-1.
+    for (let i = 0; i < 200 && (h.usageCalls.length < before + 6 || h.envSet.length < 2); i++)
+      await vi.advanceTimersByTimeAsync(5_000);
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-2", `${ACCOUNTS}/work`],
+      ["proj-1", `${ACCOUNTS}/work`],
+    ]);
+    expect(logged(h, "warn")).toContain(
+      "project Website: its account not read again to rescue it: no answer in time",
+    );
+    run.controller.abort();
+    await vi.advanceTimersByTimeAsync(5_000);
+    vi.useRealTimers();
+    await run.done;
+  });
+
+  it("never moves a project whose account variable was set outside the plugin, nor any with automatic switching off", async () => {
+    const byHand = await host(MAIN_OUT_OF_FABLE, {
+      ...OPTIONS,
+      presetEnv: {
+        "proj-1": [
+          { name: ENV_VAR, note: "set by hand", secret: true, value: null },
+        ],
+      },
+    });
+    dispose = () => byHand.harness.dispose();
+    await onePass(byHand);
+    expect(byHand.envSet).toEqual([]);
+    byHand.harness.dispose();
+    const off = await host(MAIN_OUT_OF_FABLE, {
+      ...OPTIONS,
+      settings: { ...OPTIONS.settings, autoSwitch: false },
+    });
+    dispose = () => off.harness.dispose();
+    await onePass(off);
+    expect(off.envSet).toEqual([]);
+  });
+
+  it("a turn of a project on an account out of Fable goes out on another account with a free seat at the checkpoint, with switchAheadPercent at 0", async () => {
+    const h = await host(MAIN_OUT_OF_FABLE, { ...OPTIONS, presetEnv: onWork });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect(await sent(h, "thr-2", "proj-2")).toEqual({ action: "proceed" });
+    // As bb asks it: the message names its model.
+    const fable = await h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: "thr-1", projectId: "proj-1" }),
+        requestedExecution: { providerId: "claude-code", model: "claude-fable-5-1" },
+        attempt: "start-turn",
+      }),
+    );
+    expect(fable).toEqual({ action: "proceed" });
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-1", `${ACCOUNTS}/spare`],
+    ]);
   });
 });
