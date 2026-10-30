@@ -93,6 +93,13 @@ export function parseUsage(payload: unknown): ParsedUsage {
   // weekly_all is still an incomplete answer.
   if (weekly === null && session !== null && parsed.data.seven_day === null)
     weekly = { usedPercent: 0, resetsAt: null, absent: true };
+  // An Ultra account freed of the 5-hour window (observed 2026-10-30:
+  // five_hour null, no session limit, weekly_all there) has no session at
+  // all: a session at 0 % that never binds. Only with five_hour explicitly
+  // null and a weekly_all: any other answer without a session is still
+  // incomplete.
+  if (session === null && weekly !== null && parsed.data.five_hour === null)
+    session = { usedPercent: 0, resetsAt: null, absent: true };
   return {
     blocked: locked || session === null || weekly === null,
     // A reported lock is proof on its own; a missing window alone is not.
