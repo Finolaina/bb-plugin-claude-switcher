@@ -1745,3 +1745,117 @@ describe("placedOn: where the placement before a turn runs it", () => {
     expect(placedOn({ ...opus("max1", [max]), preferredModel: "Fable" })).toBe("max1");
   });
 });
+
+describe("seats steer where a project goes, and never move one by themselves", () => {
+  const free: Record<string, number> = { main: 0, work: 0, spare: 2 };
+  const freeSeats = (name: string) => free[name] ?? 0;
+
+  it("a new project goes to the best account with a free seat; with none free anywhere, to the best by quota", () => {
+    const accounts = [
+      account("main"),
+      account("work", { session: { usedPercent: 1, resetsAt: NOW + HOUR } }),
+      account("spare", { session: { usedPercent: 40, resetsAt: NOW + HOUR } }),
+    ];
+    const placement = {
+      currentAccount: "main",
+      isNew: true,
+      accounts,
+      preferredModel: "",
+      now: NOW,
+    };
+    expect(decidePlacement(placement)).toEqual({
+      kind: "move",
+      account: "work",
+      why: "new-project",
+    });
+    expect(decidePlacement({ ...placement, freeSeats })).toEqual({
+      kind: "move",
+      account: "spare",
+      why: "new-project",
+    });
+    expect(decidePlacement({ ...placement, freeSeats: () => 0 })).toEqual({
+      kind: "move",
+      account: "work",
+      why: "new-project",
+    });
+  });
+
+  it("a known project that can run stays on its account with no free seat (its thread waits there)", () => {
+    expect(
+      decidePlacement({
+        currentAccount: "main",
+        isNew: false,
+        accounts: [account("main"), account("spare")],
+        preferredModel: "",
+        now: NOW,
+        freeSeats,
+      }),
+    ).toEqual({ kind: "keep" });
+  });
+
+  it("a project moved off a blocked account goes where a seat is free", () => {
+    const accounts = [
+      account("main", { session: { usedPercent: 100, resetsAt: NOW + HOUR } }),
+      account("work", { session: { usedPercent: 1, resetsAt: NOW + HOUR } }),
+      account("spare", { session: { usedPercent: 40, resetsAt: NOW + HOUR } }),
+    ];
+    expect(
+      decidePlacement({
+        currentAccount: "main",
+        isNew: false,
+        accounts,
+        preferredModel: "",
+        now: NOW,
+        freeSeats,
+      }),
+    ).toEqual({ kind: "move", account: "spare", why: "current-blocked" });
+  });
+
+  it("a switch on a limit picks a target with a free seat, and falls back to quota alone when none has one", () => {
+    const accounts = [
+      account("main", { session: { usedPercent: 100, resetsAt: NOW + 2 * HOUR } }),
+      account("work", { session: { usedPercent: 1, resetsAt: NOW + HOUR } }),
+      account("spare", { session: { usedPercent: 40, resetsAt: NOW + HOUR } }),
+    ];
+    expect(decideSwitch(input({ accounts, freeSeats }))).toMatchObject({
+      kind: "switch",
+      account: "spare",
+    });
+    expect(
+      decideSwitch(input({ accounts, freeSeats: () => 0 })),
+    ).toMatchObject({ kind: "switch", account: "work" });
+  });
+
+  it("a thread left in error is retried on its own account even with no free seat there", () => {
+    expect(
+      decideSwitch(
+        input({
+          stuck: true,
+          accounts: [account("main"), account("spare")],
+          freeSeats,
+        }),
+      ),
+    ).toMatchObject({ kind: "retry", account: "main" });
+  });
+
+  it("ahead of the limit, moves only to an account with a free seat, or not at all", () => {
+    const ahead = {
+      currentAccount: "main",
+      preferredModel: "",
+      threshold: 90,
+      now: NOW,
+      accounts: [
+        account("main", { session: { usedPercent: 95, resetsAt: NOW + HOUR } }),
+        account("work", { session: { usedPercent: 1, resetsAt: NOW + HOUR } }),
+        account("spare", { session: { usedPercent: 40, resetsAt: NOW + HOUR } }),
+      ],
+    };
+    expect(decideAhead({ ...ahead, freeSeats })).toMatchObject({
+      kind: "move",
+      account: "spare",
+    });
+    expect(decideAhead({ ...ahead, freeSeats: () => 0 })).toEqual({
+      kind: "keep",
+    });
+  });
+});
