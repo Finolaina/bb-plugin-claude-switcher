@@ -4813,6 +4813,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       }
       const content = JSON.stringify(original.content);
       const lowered = modelFamily(LOWERED_MODEL_ID);
+      // bb logs an agent's message with a header around its text (formatAgentThreadInput),
+      // so what ran is compared by the text it holds; without text, as it is.
+      const textOf = (input: unknown): string =>
+        Array.isArray(input)
+          ? input.flatMap((i: { type?: string; text?: string }) => (i?.type === "text" && typeof i.text === "string" ? [i.text] : [])).join("\n")
+          : typeof input === "string"
+            ? input
+            : "";
+      const text = textOf(original.content);
+      const sameInput = (logged: unknown) =>
+        text === "" ? JSON.stringify(logged) === content : textOf(logged).includes(text);
       const copy = queue.find(
         (r) =>
           r.id !== rowId &&
@@ -4832,7 +4843,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           r.type === "client/turn/requested" &&
           r.createdAt >= mark.at &&
           modelFamily(r.data.execution?.model ?? null) === lowered &&
-          JSON.stringify(r.data.input) === content,
+          sameInput(r.data.input),
       );
       if (copy !== undefined || ran) {
         loweredRows[rowId] = { at: deps.now(), copy: copy?.id ?? null, sending: false };
@@ -4901,6 +4912,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         queue = await bb.sdk.threads.queuedMessages.list({ threadId });
       }
       const rows = queue.filter(held);
+      // Read before the copy: an explicit model on threads.send becomes the thread's
+      // own in bb (recoverThreadModelOverride), over what a person chose meanwhile.
+      const chosen = await bb.sdk.threads.defaultExecutionOptions({ threadId }).catch(() => null);
       let moved = 0;
       for (const row of rows) {
         const known = loweredRows[row.id];
@@ -4909,30 +4923,24 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         if (known === undefined) {
           loweredRows[row.id] = { at: deps.now(), copy: null, sending: true };
           await saveLowered();
-          let sent: Awaited<ReturnType<typeof bb.sdk.threads.send>>;
-          try {
-            sent = await bb.sdk.threads.send({
-              threadId,
-              input: row.content,
-              model: LOWERED_MODEL_ID,
-              mode: "queue-if-active",
-              ...(row.permissionMode == null ? {} : { permissionMode: row.permissionMode }),
-              ...(row.reasoningLevel == null ? {} : { reasoningLevel: row.reasoningLevel }),
-              ...(row.serviceTier == null ? {} : { serviceTier: row.serviceTier }),
-              executionInputSources: {
-                model: "explicit",
-                ...(row.permissionMode == null ? {} : { permissionMode: "explicit" as const }),
-                ...(row.reasoningLevel == null ? {} : { reasoningLevel: "explicit" as const }),
-                ...(row.serviceTier == null ? {} : { serviceTier: "explicit" as const }),
-              },
-              ...(row.senderThreadId === null ? {} : { senderThreadId: row.senderThreadId }),
-            });
-          } catch (error) {
-            // A failure of the call does not say bb did not take it: see settleUncertain.
-            loweredRows[row.id] = { at: deps.now(), copy: null, sending: true };
-            await saveLowered();
-            throw error;
-          }
+          // A failure of the call does not say bb did not take it: the mark above stays, with the
+          // time from before the send, which a copy taken is newer than (see settleUncertain).
+          const sent = await bb.sdk.threads.send({
+            threadId,
+            input: row.content,
+            model: LOWERED_MODEL_ID,
+            mode: "queue-if-active",
+            ...(row.permissionMode == null ? {} : { permissionMode: row.permissionMode }),
+            ...(row.reasoningLevel == null ? {} : { reasoningLevel: row.reasoningLevel }),
+            ...(row.serviceTier == null ? {} : { serviceTier: row.serviceTier }),
+            executionInputSources: {
+              model: "explicit",
+              ...(row.permissionMode == null ? {} : { permissionMode: "explicit" as const }),
+              ...(row.reasoningLevel == null ? {} : { reasoningLevel: "explicit" as const }),
+              ...(row.serviceTier == null ? {} : { serviceTier: "explicit" as const }),
+            },
+            ...(row.senderThreadId === null ? {} : { senderThreadId: row.senderThreadId }),
+          });
           const copy = sent.delivery === "queued" ? sent.queuedMessage.id : null;
           loweredRows[row.id] = { at: deps.now(), copy, sending: false };
           await saveLowered();
@@ -4960,10 +4968,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         moved += 1;
       }
       if (moved === 0) return;
-      const chosen = await bb.sdk.threads.defaultExecutionOptions({ threadId }).catch(() => null);
       const family = modelFamily(chosen?.model ?? null);
-      if (family === null || family.toLowerCase() === model.toLowerCase())
-        await bb.sdk.threads.update({ threadId, model: LOWERED_MODEL_ID });
+      await bb.sdk.threads.update({
+        threadId,
+        model: family === null || family.toLowerCase() === model.toLowerCase() ? LOWERED_MODEL_ID : chosen!.model,
+      });
       bb.log.info(`thread ${threadId}: Fable braked: ${moved} message(s) go on in Opus`);
       await recordLowered(threadId);
     } catch (error) {
@@ -5224,6 +5233,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const model =
       logged.model ?? threadModel.get(event.threadId) ?? current.preferredModel;
     const turn = { requestId: event.requestId, chain: logged.chain };
+    // Its turn ran on `started`: where the project sits now does not let it go on
+    // in Fable (ROT-R4-003). The retries below go through the checkpoint, which reads this.
+    if (background && typeof started === "string" && paceFilter(true, model).savedForUser !== undefined && savedForUser(started))
+      noteBrakeHold(event.threadId, started);
     const recent = recentSwitches.get(projectId);
     // Where the project is now: a leftover follows the recorded move only
     // while the project still sits where that move put it and no move is
