@@ -484,7 +484,7 @@ export interface PlacementInput {
   savedForUser?: (account: string) => boolean;
   /**
    * The thread's first turn, on an account not picked by hand: it may go to
-   * the least spent account when that is LEAST_SPENT_MARGIN points ahead.
+   * the least spent account.
    * A later turn stays: the conversation is on this account.
    */
   firstTurn?: boolean;
@@ -503,9 +503,6 @@ export interface PlacementInput {
    */
   currentLoggedOut?: boolean;
 }
-
-/** Points of the week an account must be ahead for a first turn to leave its project's account. */
-export const LEAST_SPENT_MARGIN = 15;
 
 /** The fuller of the model's window and the general week. */
 function spentOf(account: AccountUsage, model: string): number {
@@ -602,13 +599,11 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
       if (
         other !== undefined &&
         other.name !== current.name &&
-        // A first turn has no conversation to keep: on a full account, the
-        // margin does not hold it there (Fable's measurement of 2026-10-31:
-        // 4/4 and 16 waiting on the least spent, seats idle elsewhere).
+        // A first turn has no conversation to keep, and a full account holds
+        // it no better (Fable's measurement of 2026-10-31: 4/4 and 16 waiting
+        // on the least spent, seats idle elsewhere).
         ((input.freeSeats !== undefined && input.freeSeats(current.name) <= 0) ||
-          spentOf(current, input.preferredModel) -
-            spentOf(other, input.preferredModel) >=
-            LEAST_SPENT_MARGIN)
+          spentOf(current, input.preferredModel) > spentOf(other, input.preferredModel))
       )
         return { kind: "move", account: other.name, why: "least-spent" };
     }

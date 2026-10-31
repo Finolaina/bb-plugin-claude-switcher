@@ -2074,13 +2074,13 @@ describe("decidePlacement and Fable's brake (Aitor, 2026-10-31)", () => {
     ).toEqual({ kind: "keep", why: "current-saved" });
   });
 
-  it("a first turn goes to the least spent when it is 15 points ahead, not at 14", () => {
+  it("a first turn goes to the least spent, by a point too, and stays on a tie", () => {
     const first = { ...base, currentAccount: "aitor", firstTurn: true };
     expect(
-      decidePlacement({ ...first, accounts: [ultra("aitor", 40), ultra("siloeads", 25)] }),
+      decidePlacement({ ...first, accounts: [ultra("aitor", 26), ultra("siloeads", 25)] }),
     ).toEqual({ kind: "move", account: "siloeads", why: "least-spent" });
     expect(
-      decidePlacement({ ...first, accounts: [ultra("aitor", 39), ultra("siloeads", 25)] }),
+      decidePlacement({ ...first, accounts: [ultra("aitor", 25), ultra("siloeads", 25)] }),
     ).toEqual({ kind: "keep" });
   });
 

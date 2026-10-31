@@ -183,7 +183,10 @@ const SEATS_COUNTING_WAIT_MS = 5_000;
  */
 const RESERVE_COUNT_WAIT_MS = 5_000;
 /** A message held at Fable's brake is asked about again within this, at most. */
+const PLUGIN_NAME = "claude-switcher";
 const BRAKE_LONGEST_WAIT_MS = 24 * 3_600_000;
+/** Background Opus with nowhere that spares Fable's week looks again this often. */
+const OPUS_ROOM_RECHECK_MS = 15 * 60_000;
 /** sysexits' EX_TEMPFAIL: `reserve` may be asked again in a moment. */
 const EXIT_TEMPFAIL = 75;
 /** Tries of each read that counts the seats after a load, this long apart (Astra SEATS-R02). */
@@ -499,6 +502,8 @@ export const rpcContract = defineRpcContract({
       account: z.string().nullable(),
       /** Pin it even if the account cannot run the project's model. */
       anyway: z.boolean().optional(),
+      /** `account: null` is a choice of the default account, not a pin taken off. */
+      picked: z.boolean().optional(),
     }),
     output: stateSchema,
   },
@@ -1136,18 +1141,33 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   function pinRefusal(projectId: string, account: string): string | null {
     const model = projectModels.get(projectId) ?? current.preferredModel;
-    const usage = collector.get(account)?.usage;
-    if (model === "" || usage === null || usage === undefined) return null;
+    const measure = collector.get(account);
+    if (measure?.problem?.kind === "unauthenticated")
+      return `${account} no tiene la sesión iniciada: un turno ahí falla.`;
+    const usage = measure?.usage;
+    if (usage === null || usage === undefined) return null;
     const settled = settle({ ...usage, name: account }, deps.now());
-    if (canRunModel(settled, model)) return null;
-    const window = modelWindow(settled, model);
-    const used = Math.round(window?.usedPercent ?? 100);
-    const back = window?.resetsAt == null ? "" : ` Vuelve el ${isoInZone(window.resetsAt)}.`;
+    const stops: { what: string; used: number; resetsAt: number | null }[] = [];
+    const window = model === "" ? undefined : modelWindow(settled, model);
+    if (window !== undefined && window.usedPercent >= 100)
+      stops.push({ what: model, used: window.usedPercent, resetsAt: window.resetsAt });
+    if (settled.weekly.absent !== true && settled.weekly.usedPercent >= 100)
+      stops.push({ what: "la semana", used: settled.weekly.usedPercent, resetsAt: settled.weekly.resetsAt });
+    if (settled.session.absent !== true && settled.session.usedPercent >= 100)
+      stops.push({ what: "la sesión de 5 h", used: settled.session.usedPercent, resetsAt: settled.session.resetsAt });
+    if (stops.length === 0) return null;
+    const resets = stops.map((w) => w.resetsAt);
+    const back = resets.some((r) => r === null)
+      ? ""
+      : ` Vuelve el ${isoInZone(Math.max(...(resets as number[])))}.`;
     const session =
-      settled.session.absent === true
+      settled.session.absent === true || settled.session.usedPercent >= 100 || stops[0]?.what !== model
         ? ""
         : ` Su sesión de 5 h lleva el ${Math.round(settled.session.usedPercent)} %, pero una sesión libre no da ${model}.`;
-    return `${account} no puede correr ${model}: ${model} consumido ${used} %, queda ${100 - used} %.${back}${session}`;
+    const said = stops
+      .map((w) => `${w.what} consumido ${Math.round(w.used)} %, queda ${100 - Math.round(w.used)} %`)
+      .join("; ");
+    return `${account} no puede correr ${model === "" ? "turnos" : model}: ${said}.${back}${session}`;
   }
   /** Picked by hand, recently enough: see KV_HAND_PICKS. */
   const handPicks = new Map<string, number>();
@@ -2668,6 +2688,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   async function pickAccount(
     projectId: string,
     choose: (find: (name: string) => Account) => Account | null,
+    /** The default account chosen by hand: it stays, as any other picked. */
+    defaultPicked = false,
   ): Promise<void> {
     // applyAccount announces the change before the pick has written all it
     // writes (its history row, a new measure): the views read again once the
@@ -2687,7 +2709,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         // automatic move whose answer is still pending (see noteMove).
         excursions.delete(projectId);
         movesOf(projectId).picks += 1;
-        await notePin(projectId, to !== null);
+        await notePin(projectId, to !== null || defaultPicked);
         await markHandled(projectId);
         const fromName = from.account ?? current.defaultAccountName;
         const toName = to?.name ?? current.defaultAccountName;
@@ -2763,14 +2785,21 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       await refreshByHand();
       return state();
     },
-    async project_set_account({ projectId, account, anyway }) {
-      const refused = account === null ? null : pinRefusal(projectId, account);
+    async project_set_account({ projectId, account, anyway, picked }) {
+      const refused =
+        account === null
+          ? picked === true
+            ? pinRefusal(projectId, current.defaultAccountName)
+            : null
+          : pinRefusal(projectId, account);
       if (refused !== null && anyway !== true)
         throw new Error(
           `${refused} Para fijarla igualmente: bb claude-switcher use ${projectId} ${account} --anyway`,
         );
-      await pickAccount(projectId, (discovered) =>
-        account === null ? null : discovered(account),
+      await pickAccount(
+        projectId,
+        (discovered) => (account === null ? null : discovered(account)),
+        picked === true,
       );
       return state();
     },
@@ -4573,46 +4602,141 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return { action: "wait", reason: text, sendAt: nextAt };
   }
   /**
-   * The held message sent again in Opus, and the thread's later messages with
-   * it. Created before the old one goes, so nothing is lost; a row that cannot
-   * be moved waits as it is (see brakeFable). A retry goes too: its row runs
-   * the model the failed turn had, whatever the thread says now (Fable,
-   * 2026-10-31), and carries what core would send: «Please continue.» or the
-   * input the provider never took. bb stores the row after the hook answers,
-   * so it is looked for a few times.
+   * The account the turn really starts on, once placed: a brake open because
+   * another account has room is no use if the placement could not take the
+   * turn there (no seat), and Opus in the background does not spend the week
+   * of an account that still has Fable: «Opus en Team o espera» (Aitor,
+   * 2026-10-31).
+   */
+  function brakeOnAccount(
+    ctx: MessageDispatchHookContext,
+    model: string,
+    account: string,
+  ): MessageDispatchHookDecision | null {
+    const { thread } = ctx;
+    if (heldBackground(ctx, model)) {
+      if (!savedForUser(account)) return null;
+      const room = fableRoomFor(account);
+      const sendAt = Math.min(room?.nextAt ?? Number.POSITIVE_INFINITY, deps.now() + BRAKE_LONGEST_WAIT_MS);
+      const text = `Fable frenado en ${account} y sin plaza en otra con margen: este hilo de fondo sigue en Opus; si no puede, espera hasta ${isoInZone(sendAt)}`;
+      bb.log.info(`thread ${thread.id}: ${text}`);
+      setTimeout(() => void lowerHeldTurn(thread.id, model), 0);
+      return { action: "wait", reason: text, sendAt };
+    }
+    if (
+      !current.autoSwitch ||
+      current.paceHoldsBackground !== true ||
+      current.preferredModel === "" ||
+      model.toLowerCase() === current.preferredModel.toLowerCase() ||
+      !isBackground(thread) ||
+      (ctx.initiator === "user" && ctx.senderThreadId === null && ctx.origin !== "cli")
+    )
+      return null;
+    const usage = collector.get(account)?.usage;
+    if (
+      usage === null ||
+      usage === undefined ||
+      !spendsReservedWeekly(settle({ ...usage, name: account }, deps.now()), {
+        preferredModel: model,
+        reserveModel: current.preferredModel,
+      })
+    )
+      return null;
+    const text = `Sin sitio para ${model} en Team ni en una cuenta sin Fable: este hilo de fondo espera y no gasta la semana de ${account}`;
+    bb.log.info(`thread ${thread.id}: ${text}`);
+    return { action: "wait", reason: text, sendAt: deps.now() + OPUS_ROOM_RECHECK_MS };
+  }
+  /** Lowerings under way, by thread: one at a time, or two would copy the same row. */
+  const lowering = new Set<string>();
+  /**
+   * The held message sent again in Opus. Only what the brake holds moves: a
+   * retry, whose row runs the model the failed turn had, whatever the thread
+   * says now (Fable, 2026-10-31), and carries what core would send («Please
+   * continue.» or the input the provider never took); and a row waiting on
+   * this plugin. A message scheduled by someone keeps its time, and one queued
+   * behind is judged when its turn comes. It keeps its place and how it was to
+   * run (permissions, effort, tier): only the model changes.
+   *
+   * Created before the old one goes, so nothing is lost; a copy already there
+   * (a removal that failed, a reload) is not made again: its original just
+   * goes. In a thread left in error nothing sends a queued row, so it is sent
+   * here. bb stores the row after the hook answers, so it is looked for a few
+   * times.
    */
   async function lowerHeldTurn(threadId: string, model: string): Promise<void> {
+    if (lowering.has(threadId)) return;
+    lowering.add(threadId);
     try {
-      let rows: Awaited<
-        ReturnType<typeof bb.sdk.threads.queuedMessages.list>
-      > = [];
-      for (let tries = 0; tries < 5 && rows.length === 0; tries += 1) {
+      type Row = Awaited<ReturnType<typeof bb.sdk.threads.queuedMessages.list>>[number];
+      const held = (r: Row) =>
+        (r.payload.kind === "retry" ||
+          (r.waitingOn?.kind === "plugin" &&
+            (r.waitingOn.pluginId === PLUGIN_NAME ||
+              r.waitingOn.reason.includes(PLUGIN_NAME)))) &&
+        (r.state === "waiting" || r.state === "scheduled") &&
+        modelFamily(r.model)?.toLowerCase() === model.toLowerCase();
+      let queue: Row[] = [];
+      for (let tries = 0; tries < 5 && !queue.some(held); tries += 1) {
         if (tries > 0) await new Promise((done) => setTimeout(done, 200));
-        rows = (await bb.sdk.threads.queuedMessages.list({ threadId })).filter(
-          (r) =>
-            (r.payload.kind === "inline" || r.payload.kind === "retry") &&
-            (r.state === "waiting" || r.state === "scheduled") &&
-            modelFamily(r.model)?.toLowerCase() === model.toLowerCase(),
-        );
+        queue = await bb.sdk.threads.queuedMessages.list({ threadId });
       }
+      const rows = queue.filter(held);
       if (rows.length === 0) return;
       await bb.sdk.threads.update({ threadId, model: LOWERED_MODEL_ID });
+      let head: string | null = null;
       for (const row of rows) {
-        await bb.sdk.threads.queuedMessages.create({
-          threadId,
-          input: row.content,
-          model: LOWERED_MODEL_ID,
-          executionInputSources: { model: "explicit" },
-          ...(row.senderThreadId === null ? {} : { senderThreadId: row.senderThreadId }),
-        });
+        const same = JSON.stringify(row.content);
+        const copy = queue.find(
+          (r) =>
+            r.id !== row.id &&
+            modelFamily(r.model) === FALLBACK_MODEL &&
+            JSON.stringify(r.content) === same,
+        );
+        let id = copy?.id ?? null;
+        if (id === null) {
+          const made = await bb.sdk.threads.queuedMessages.create({
+            threadId,
+            input: row.content,
+            model: LOWERED_MODEL_ID,
+            ...(row.permissionMode == null ? {} : { permissionMode: row.permissionMode }),
+            ...(row.reasoningLevel == null ? {} : { reasoningLevel: row.reasoningLevel }),
+            ...(row.serviceTier == null ? {} : { serviceTier: row.serviceTier }),
+            executionInputSources: {
+              model: "explicit",
+              ...(row.permissionMode == null ? {} : { permissionMode: "explicit" as const }),
+              ...(row.reasoningLevel == null ? {} : { reasoningLevel: "explicit" as const }),
+              ...(row.serviceTier == null ? {} : { serviceTier: "explicit" as const }),
+            },
+            ...(row.senderThreadId === null ? {} : { senderThreadId: row.senderThreadId }),
+          });
+          id = made.id;
+          const at = queue.findIndex((r) => r.id === row.id);
+          await bb.sdk.threads.queuedMessages
+            .reorder({
+              threadId,
+              queuedMessageId: id,
+              previousQueuedMessageId: row.id,
+              nextQueuedMessageId: queue[at + 1]?.id ?? null,
+            })
+            .catch((error: unknown) =>
+              bb.log.warn(
+                `thread ${threadId}: its message went to Opus at the end of the queue (${error instanceof Error ? error.message : String(error)})`,
+              ),
+            );
+        }
         await deleteOwn(threadId, row.id);
+        if (queue[0]?.id === row.id) head = id;
       }
       bb.log.info(`thread ${threadId}: Fable braked: ${rows.length} message(s) go on in Opus`);
       await recordLowered(threadId);
+      if (head !== null && (await bb.sdk.threads.get({ threadId })).status === "error")
+        await bb.sdk.threads.queuedMessages.send({ threadId, queuedMessageId: head, mode: "auto" });
     } catch (error) {
       bb.log.warn(
         `thread ${threadId}: not moved to Opus at Fable's brake; it waits (${error instanceof Error ? error.message : String(error)})`,
       );
+    } finally {
+      lowering.delete(threadId);
     }
   }
   /** The history row of a thread gone down to Opus at the brake: where the panel and `history` tell it. */
@@ -4772,6 +4896,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         );
       }
       seatReadWaits.delete(thread.id);
+      if (at !== null && at.account !== null && model !== null) {
+        const stopped = brakeOnAccount(ctx, model, at.account);
+        if (stopped !== null) return stopped;
+      }
       if (at !== null && at.account !== null) {
         // A cancellation of an earlier message that is still looking at the
         // queue leaves this one's place alone (Astra SEATS-R4-003).
@@ -5956,7 +6084,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
   bb.cli.register(
     defineCli({
-      name: "claude-switcher",
+      name: PLUGIN_NAME,
       summary:
         "Claude Code accounts: usage windows and which account each project uses",
       commands: {
@@ -6295,13 +6423,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             }
             const project = matches[0]!;
             const name = positionals.account;
-            const refused = pinRefusal(project.id, name);
+            const refused = name === "default" ? null : pinRefusal(project.id, name);
             if (refused !== null && options.anyway !== true)
               throw new PluginCliError(
                 `${refused} No fijada. Para fijarla igualmente: bb claude-switcher use ${project.id} ${name} --anyway`,
                 { code: "model_used_up" },
               );
-            await pickAccount(project.id, () => accountOrDefault(name));
+            // `default` takes the pin off; the default account by its name is a pick.
+            await pickAccount(project.id, () => accountOrDefault(name), name !== "default");
             return {
               exitCode: 0,
               stdout: `${project.name} → ${name}\n${refused === null ? "" : `AVISO: ${refused}\n`}`,
