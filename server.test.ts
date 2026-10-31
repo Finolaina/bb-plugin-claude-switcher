@@ -15151,6 +15151,33 @@ describe("the brake on background work, off by default (paceHoldsBackground; Ait
     }
   });
 
+  it("tells an open view at once when the brake or the day's start hour changes (Codex PACE-R1-001)", async () => {
+    const h = await host(usage, opts({ paceHoldsBackground: true }));
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const changes = () =>
+      h.harness.realtimeSignals.filter((s) => s.channel === "accounts-changed").length;
+    const list = async () => (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect((await list()).paceHoldsBackground).toBe(true);
+
+    let before = changes();
+    await h.harness.behavior.setSettings({ paceHoldsBackground: false });
+    expect(changes()).toBe(before + 1);
+    expect((await list()).paceHoldsBackground).toBe(false);
+
+    // The day from 11:00 began an hour ago: the day's first reading at
+    // 10:00 is no longer today's, so the pace starts again from now.
+    before = changes();
+    await h.harness.behavior.setSettings({ dayStartHour: 11 });
+    expect(changes()).toBe(before + 1);
+    expect((await list()).accounts.find((a) => a.name === "work")?.pace).toMatchObject({ spent: 0 });
+
+    // A setting that changes neither: no signal for them.
+    before = changes();
+    await h.harness.behavior.setSettings({ maximumWaitHours: 3 });
+    expect(changes()).toBe(before);
+  });
+
   for (const [label, settings, to] of cases) {
     describe(`brake ${label}`, () => {
       it(`choose: a new project of a thread another thread opened goes to ${to}; the user's own to work`, async () => {
