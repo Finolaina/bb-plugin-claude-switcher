@@ -321,6 +321,8 @@ interface HostOptions {
   queueCreateFails?: boolean;
   reorderFails?: boolean;
   threadChosenModel?: string;
+  /** threads.send takes the message, and the answer is lost on the way: called as it is. */
+  sendAnswerLost?: () => void;
   settings?: Record<string, string | number | boolean>;
   /**
    * The projects bb lists, by id (default: proj-1, proj-2 and, on request,
@@ -514,8 +516,15 @@ async function host(
           )) as { action: string; reason?: string; sendAt?: number };
           sendDecisions.push(decision);
           if (decision.action === "proceed") return { ok: true, delivery: "sent" };
-          const row = { id, threadId: args.threadId, payload: { kind: "inline" }, sendAt: decision.sendAt ?? null, model: args.model, state: "waiting", waitingOn: { kind: "plugin", pluginId: "claude-switcher", reason: decision.reason ?? "" }, origin: "plugin", originPluginId: "claude-switcher", content: args.input, senderThreadId: args.senderThreadId ?? null, permissionMode: null, reasoningLevel: null, serviceTier: null };
+          // Like bb (recoverThreadModelOverride): an explicit model becomes the thread's own.
+          if (args.senderThreadId === undefined && args.model !== undefined && options.threadChosenModel !== undefined)
+            options.threadChosenModel = args.model;
+          const row = { id, threadId: args.threadId, payload: { kind: "inline" }, createdAt: (options.clock ?? (() => NOW))(), sendAt: decision.sendAt ?? null, model: args.model, state: "waiting", waitingOn: { kind: "plugin", pluginId: "claude-switcher", reason: decision.reason ?? "" }, origin: "plugin", originPluginId: "claude-switcher", content: args.input, senderThreadId: args.senderThreadId ?? null, permissionMode: null, reasoningLevel: null, serviceTier: null };
           queued.push(row as never);
+          if (options.sendAnswerLost !== undefined) {
+            options.sendAnswerLost();
+            throw new Error("socket hang up");
+          }
           return { ok: true, delivery: "queued", queuedMessage: row };
         },
         // Like bb: every thread, as threads.get answers for it.
@@ -15898,7 +15907,8 @@ describe("Fable's brake at a message's checkpoint (Aitor, 2026-10-31)", () => {
     rowsOf(chose, FABLE_MODEL);
     await send(chose, BG);
     await vi.waitFor(() => expect(chose.deleted).toContain("row-1"));
-    expect(chose.threadUpdates).toEqual([]);
+    // Its own choice again, which the copy's explicit model had replaced in bb (ROT-R4-005).
+    await vi.waitFor(() => expect(chose.threadUpdates).toEqual([{ threadId: "thread-1", model: "claude-sonnet-5-5" }]));
     chose.harness.dispose();
   });
 
@@ -16078,6 +16088,47 @@ describe("Fable's brake at a message's checkpoint (Aitor, 2026-10-31)", () => {
       expect(await h.bb.storage.kv.get("lowered-rows")).toMatchObject({ "row-1": { sending: true } });
     });
 
+    it("the copy bb took before its answer was lost is found, and the original goes (ROT-R4-001)", async () => {
+      let clock = NOW;
+      const h = await host(atPace.usage, { kvPreset: atPace.kvPreset, settings: ON, threads: { "thread-1": BG }, sendAnswerLost: () => { clock = NOW + 5_000; }, clock: () => clock });
+      await settled(h);
+      h.queued.push(original as never);
+      await send(h, BG);
+      await vi.waitFor(() => expect(h.created).toHaveLength(1));
+      await new Promise((done) => setTimeout(done, 20));
+      clock = NOW + 60_000;
+      await send(h, BG, { queuedMessages: [{ id: "row-1" }] });
+      await vi.waitFor(async () => expect(await h.bb.storage.kv.get("lowered-rows")).toMatchObject({ "row-1": { copy: "created-1", sending: false } }));
+      expect(h.created).toHaveLength(1);
+    });
+
+    it("an agent's message that ran is found through the header bb logs around it (ROT-R4-002)", async () => {
+      const text = [{ type: "text", text: "sigue con esto", mentions: [] }];
+      const h = await host(roomAgain, {
+        kvPreset: uncertain(),
+        settings: ON,
+        threads: { "thread-1": BG },
+        threadEvents: { "thread-1": [{ seq: 9, type: "client/turn/requested", createdAt: NOW - 50_000, data: { input: [{ type: "text", text: "[bb message from thread:thr-parent]\n\nsigue con esto", mentions: [] }], execution: { model: "claude-opus-5-5" } } }] } as never,
+      });
+      await settled(h);
+      h.queued.push({ ...original, content: text, senderThreadId: "thr-parent" } as never);
+      await send(h, BG, { queuedMessages: [{ id: "row-1" }] });
+      await vi.waitFor(async () => expect(await h.bb.storage.kv.get("lowered-rows")).toMatchObject({ "row-1": { copy: null, sending: false } }));
+    });
+
+    it("another message that ran in Opus is not the copy: the original is judged afresh (ROT-R4-002)", async () => {
+      const h = await host(roomAgain, {
+        kvPreset: uncertain(),
+        settings: ON,
+        threads: { "thread-1": BG },
+        threadEvents: { "thread-1": [{ seq: 9, type: "client/turn/requested", createdAt: NOW - 50_000, data: { input: [{ type: "text", text: "[bb message from thread:thr-parent]\n\notra cosa", mentions: [] }], execution: { model: "claude-opus-5-5" } } }] } as never,
+      });
+      await settled(h);
+      h.queued.push({ ...original, content: [{ type: "text", text: "sigue con esto", mentions: [] }] } as never);
+      await send(h, BG, { queuedMessages: [{ id: "row-1" }] });
+      await vi.waitFor(async () => expect(await h.bb.storage.kv.get("lowered-rows")).toEqual({}));
+    });
+
     it("a send that throws leaves the mark, not a second copy at the next look", async () => {
       const h = await host(atPace.usage, { kvPreset: atPace.kvPreset, settings: ON, threads: { "thread-1": BG }, queueCreateFails: true });
       await settled(h);
@@ -16087,6 +16138,29 @@ describe("Fable's brake at a message's checkpoint (Aitor, 2026-10-31)", () => {
       expect(await send(h, BG, { queuedMessages: [{ id: "row-1" }] })).toMatchObject({ action: "wait", reason: expect.stringMatching(/confirming/) });
       expect(h.deleted).toEqual([]);
     });
+  });
+
+  it("a background turn failed on a braked account while the project moved: its retry does not run Fable on the new one (ROT-R4-003)", async () => {
+    const h = await host(
+      { main: () => Response.json(outOfFable), spare: () => Response.json(ultra(30)), work: () => Response.json(ultra(60)) },
+      {
+        kvPreset: { "fable-pace-day": { main: start(90), work: start(20), spare: start(30) } },
+        settings: ON,
+        threads: { "thread-1": { ...BG, status: "active" } },
+        threadEvents: { "thread-1": [{ seq: 1, type: "client/turn/requested", data: { requestId: "creq_1", execution: { model: FABLE_MODEL } } }] },
+      } as never,
+    );
+    await settled(h);
+    // A message in Opus went through the checkpoint and set where the turn starts; what ran is what its log says.
+    await send(h, BG, {}, "claude-opus-5-5");
+    await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "thread-1", projectId: "proj-1", ...BG, status: "active" }) } as never);
+    await new Promise((done) => setTimeout(done, 10));
+    await h.harness.behavior.callRpc("project_set_account", { anyway: true, projectId: "proj-1", account: "spare" });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    await vi.waitFor(async () => expect(await h.bb.storage.kv.get("brake-holds")).toEqual({ "thread-1": "main" }));
+    const again = (await send(h, BG)) as { action: string; reason: string };
+    expect(again.action).toBe("wait");
+    expect(again.reason).toMatch(/Fable frenado en main/);
   });
 
   it("a pin reads the model the thread's next turn runs, and the page is told what could not be checked (ROT-REV-004, -005)", async () => {
