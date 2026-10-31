@@ -57,6 +57,7 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
     const report = healthReport({
       measured: NOW,
       dayStartHour: 9,
+      holdsBackground: true,
       accounts: [
         account({
           name: "aitor",
@@ -74,6 +75,7 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
       version: 1,
       medido: "2026-10-30T21:55:58+01:00",
       inicioDia: 9,
+      freno: true,
       cuentas: [
         {
           nombre: "aitor",
@@ -96,6 +98,7 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
     const [team] = healthReport({
       measured: NOW,
       dayStartHour: 9,
+      holdsBackground: true,
       accounts: [
         account({
           name: "team1",
@@ -121,6 +124,7 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
     const [ultra] = healthReport({
       measured: NOW,
       dayStartHour: 9,
+      holdsBackground: true,
       accounts: [account({ name: "work", usage: usage("ultra-con-5h-b") })],
     }).cuentas;
     expect(ultra).toMatchObject({
@@ -135,6 +139,7 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
     const report = healthReport({
       measured: NOW,
       dayStartHour: 9,
+      holdsBackground: true,
       accounts: [
         account({
           name: "nologin",
@@ -175,6 +180,7 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
     const [x] = healthReport({
       measured: NOW,
       dayStartHour: 9,
+      holdsBackground: true,
       accounts: [
         account({
           name: "x",
@@ -196,6 +202,7 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
     const [x] = healthReport({
       measured: NOW,
       dayStartHour: 9,
+      holdsBackground: true,
       accounts: [
         account({
           name: "x",
@@ -215,6 +222,7 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
     const [a] = healthReport({
       measured: NOW,
       dayStartHour: 9,
+      holdsBackground: true,
       accounts: [
         account({
           name: "a",
@@ -227,12 +235,52 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
   });
 });
 
+describe("the brake on background work (paceHoldsBackground; off by default, Aitor 2026-10-31)", () => {
+  // aitor at 200 % of its day: the pace says no more background work.
+  const spentDay = {
+    budget: 32,
+    spent: 64,
+    dayPercent: 200,
+    background: false,
+  };
+  const report = (holdsBackground: boolean) =>
+    healthReport({
+      measured: NOW,
+      dayStartHour: 9,
+      holdsBackground,
+      accounts: [
+        account({ name: "aitor", usage: usage("ultra-sin-5h"), pace: spentDay }),
+      ],
+    });
+
+  it("off: freno false, and fondo true whatever the pace (nothing holds background work back)", () => {
+    const r = report(false);
+    expect(r.freno).toBe(false);
+    expect(r.cuentas[0]!.ritmo).toEqual({
+      presupuesto: 32,
+      gastado: 64,
+      pctDia: 200,
+      fondo: true,
+    });
+    expect(healthText(r)).toContain("· freno de fondo apagado\n");
+    expect(healthText(r)).toContain("ritmo 200% (fondo sí)");
+  });
+
+  it("on: freno true, and fondo false past 90 % of the day", () => {
+    const r = report(true);
+    expect(r.freno).toBe(true);
+    expect(r.cuentas[0]!.ritmo).toMatchObject({ pctDia: 200, fondo: false });
+    expect(healthText(r)).toContain("ritmo 200% (fondo no)");
+  });
+});
+
 describe("healthText", () => {
   it("gives one line per account with its plan, windows, pace and seats", () => {
     const text = healthText(
       healthReport({
         measured: NOW,
         dayStartHour: 9,
+        holdsBackground: true,
         accounts: [
           account({
             name: "aitor",
@@ -255,7 +303,7 @@ describe("healthText", () => {
     );
     expect(text).toBe(
       [
-        "medido 2026-10-30T21:55:58+01:00 · el día empieza a las 9:00",
+        "medido 2026-10-30T21:55:58+01:00 · el día empieza a las 9:00 · freno de fondo encendido",
         "aitor  Ultra · sin tope de 5 h · sem 98% · Fable 100% · ritmo 33% (fondo sí) · plazas 1/4 · usable",
         "team1  Team · ses 0% · Fable 76% · plazas 0/2 · usable",
         "",

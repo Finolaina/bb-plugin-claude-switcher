@@ -192,6 +192,8 @@ export function realReading(): State {
     defaultAccountName: "mariscal",
     preferredModel: "Fable",
     autoSwitch: true,
+    // Read with the brake of 0.2.32 on.
+    paceHoldsBackground: true,
     lastSwitch: null,
     bestAccount: "agency",
     history: [],
