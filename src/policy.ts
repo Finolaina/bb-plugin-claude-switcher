@@ -49,11 +49,12 @@ export interface ChoiceOptions {
    */
   freeSeats?: (account: string) => number;
   /**
-   * Set for background work only (a thread another thread, an automation or
-   * a plugin opened): the accounts saved for the user, their day's pace at
-   * 90 % (see src/pace.ts), go behind every other usable one. Never left
-   * out: with no other account, background work still runs there. Unset =
-   * the pace does not count (the user's own threads).
+   * Set for background work in the reserved model only (a thread another
+   * thread, an automation or a plugin opened): the accounts saved for the
+   * user (see src/pace.ts, fableRoom) are left out. No other account: the
+   * work goes down to Opus or waits, it never runs there (Aitor, 2026-10-31:
+   * "nunca sigue en Fable en otra Ultra porque hay"). Unset = the user's own
+   * threads, which may spend all of it.
    */
   savedForUser?: (account: string) => boolean;
 }
@@ -160,11 +161,29 @@ function sessionQuarter(account: AccountUsage): number {
   return Math.floor(account.session.usedPercent / 25);
 }
 
+/**
+ * Least spent first (Aitor, 2026-10-31): for a turn in the reserved model,
+ * how much of the week is gone: the fuller of the model's window and the
+ * general weekly, as either stops it. 0 for any other turn, which keeps the
+ * session quarter and deadline order. Measured that day: the deadline order
+ * kept Fable going on an account at 99 % with another at 0 %, and changing
+ * only the resets reversed the choice. Past every percentage on a Team seat.
+ */
+function weekSpent(account: AccountUsage, options: ChoiceOptions): number {
+  if (options.preferredModel === "" || reserving(options)) return 0;
+  // A Team seat is for Opus: after every account with a week of its own,
+  // and among seats the order of before.
+  if (account.weekly.absent === true) return 101;
+  return Math.max(
+    account.weekly.usedPercent,
+    modelWindow(account, options.preferredModel)?.usedPercent ?? 0,
+  );
+}
+
 function rank(
   account: AccountUsage,
   options: ChoiceOptions,
 ): [number, number, number, number, number, number] {
-  const saved = options.savedForUser?.(account.name) === true ? 1 : 0;
   const keepsReserve =
     reserving(options) && canRunModel(account, options.reserveModel!) ? 1 : 0;
   // Among the accounts that keep the reserved model, a turn with another
@@ -178,9 +197,9 @@ function rank(
       ? 1
       : 0;
   return [
-    saved,
     keepsReserve,
     spendsWeekly,
+    weekSpent(account, options),
     sessionQuarter(account),
     deadline(account, options.preferredModel),
     account.session.usedPercent,
@@ -188,9 +207,9 @@ function rank(
 }
 
 /**
- * For background work, the accounts saved for the user last (see
- * savedForUser). Then accounts out of the reserved model first (when reserving), then those
- * that spend no weekly window for the model (Team seats), then the lowest
+ * Accounts out of the reserved model first (when reserving), then those
+ * that spend no weekly window for the model (Team seats), then, for a turn
+ * in the reserved model, the least spent of the week, then the lowest
  * session quarter, then the closest deadline for the model, then lowest
  * session use, then name: never the order measured. Within a quarter what
  * runs out first is spent first; the quarter keeps new sessions from piling
@@ -203,11 +222,11 @@ function sortedByRank(
   options: ChoiceOptions,
 ): AccountUsage[] {
   return [...accounts].sort((a, b) => {
-    const [va, ka, wa, ta, da, sa] = rank(a, options);
-    const [vb, kb, wb, tb, db, sb] = rank(b, options);
-    if (va !== vb) return va - vb;
+    const [ka, wa, xa, ta, da, sa] = rank(a, options);
+    const [kb, wb, xb, tb, db, sb] = rank(b, options);
     if (ka !== kb) return ka - kb;
     if (wa !== wb) return wa - wb;
+    if (xa !== xb) return xa - xb;
     if (ta !== tb) return ta - tb;
     if (da !== db) return da - db;
     if (sa !== sb) return sa - sb;
@@ -224,6 +243,7 @@ export function chooseAccount(
       .filter(isUsable)
       .filter((a) => canRunModel(a, options.preferredModel))
       .filter((a) => !spendsReservedWeekly(a, options))
+      .filter((a) => options.savedForUser?.(a.name) !== true)
       .filter(
         (a) => options.freeSeats === undefined || options.freeSeats(a.name) > 0,
       ),

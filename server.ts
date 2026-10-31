@@ -22,6 +22,7 @@ import {
   defineCli,
   defineRpcContract,
   type BbPluginApi,
+  type MessageDispatchHookContext,
   type MessageDispatchHookDecision,
   type PluginThreadEventPayloads,
   type PluginTurnFailedEvent,
@@ -34,7 +35,15 @@ import {
   type Account,
   type AccountsIo,
 } from "./src/accounts.js";
-import { nextDayStart, paceOf, type DayStart, type Pace } from "./src/pace.js";
+import {
+  DEFAULT_FABLE_RESERVE_PERCENT,
+  fableRoom,
+  nextDayStart,
+  paceOf,
+  type DayStart,
+  type FableRoom,
+  type Pace,
+} from "./src/pace.js";
 import {
   healthReport,
   healthText,
@@ -91,6 +100,8 @@ import {
   modelWindow,
   reserving,
   spendsReservedWeekly,
+  chooseAccount,
+  type AccountUsage,
 } from "./src/policy.js";
 import {
   usageFetchMethod,
@@ -170,6 +181,8 @@ const SEATS_COUNTING_WAIT_MS = 5_000;
  * it fails, temporarily, granting nothing (Codex ULTRA-R02).
  */
 const RESERVE_COUNT_WAIT_MS = 5_000;
+/** A message held at Fable's brake is asked about again within this, at most. */
+const BRAKE_LONGEST_WAIT_MS = 24 * 3_600_000;
 /** sysexits' EX_TEMPFAIL: `reserve` may be asked again in a moment. */
 const EXIT_TEMPFAIL = 75;
 /** Tries of each read that counts the seats after a load, this long apart (Astra SEATS-R02). */
@@ -223,6 +236,18 @@ const KV_CANCELLED = "cancelled-retries";
 const KV_SERIES = "usage-series";
 /** The day's first reading of each account's weekly window, for the day's pace (see src/pace.ts). */
 const KV_PACE = "pace-day";
+/** The day's first reading of each account's Fable window (see fableRoom). */
+const KV_FABLE_DAY = "fable-pace-day";
+/** Threads known as background work or as an exception to Fable's brake (see fableRole). */
+const KV_FABLE_ROLES = "fable-roles";
+/** The model a thread goes down to at the brake (bb's model id). */
+const LOWERED_MODEL_ID = "claude-opus-5-5";
+/**
+ * The exceptions to "Fable only where it belongs", as a message declares them.
+ * The one catalogue is ~/.claude-cuentas/catalogo-fable.json, with these same
+ * marks; Optimizador's check.sh compares them (Aitor, 2026-10-31).
+ */
+const FABLE_EXCEPTIONS = ["fable, hazlo tú", "[orquestador]"];
 /** Seats held from outside bb (`reserve`): a reload must not lose them. */
 const KV_EXTERNAL = "external-seats";
 const externalHoldSchema = z.object({
@@ -581,13 +606,28 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         "Each day from this hour gets an even share of what is left of an account's weekly window; the panel and `health` show how much of it is spent. With the setting below on, at 90 % of it the account takes no more background work.",
       default: 9,
     },
-    // Off by default (Aitor, 2026-10-31): the pace is measured and shown,
-    // and holds nothing back until this is switched on.
+    // On by Aitor's order of 2026-10-31 ~14:05 ("freno real"), which replaces
+    // his 03:10 one that turned it off: it now weighs Fable's own week, keeps
+    // his reserve and lowers the work to Opus instead of holding it blind.
     paceHoldsBackground: {
       type: "boolean",
-      label: "Keep accounts that spent today's share for your own threads",
+      label: "Brake Fable for background work",
       description:
-        "An Ultra or Max account at 90 % of its share of the day takes no more background work (threads another thread, an automation or a plugin opens) unless no other account can run it; your own threads are never held back by it. Off: the day's share is only shown.",
+        "Background work (threads another thread, an automation or a plugin opens) runs Fable on an Ultra or Max account only below 90 % of its share of the day and above your reserve. Past that it goes down to Opus, or waits; it never moves on to another account just because that one has some left. Your own threads are never held back. Off: the day's share is only shown.",
+      default: true,
+    },
+    fableReservePercent: {
+      type: "number",
+      label: "Fable kept for you on each account (% of the week)",
+      description:
+        "Background work leaves this much of Fable's week on every Ultra or Max account. Your own threads can spend it.",
+      default: DEFAULT_FABLE_RESERVE_PERCENT,
+    },
+    teamRunsFable: {
+      type: "boolean",
+      label: "Let Team seats run Fable",
+      description:
+        "Off: a Team seat is for Opus, and no Fable thread is sent to one automatically (a thread already on a seat moves off it when an Ultra or Max account has Fable).",
       default: false,
     },
     loginPrivateWindow: {
@@ -736,6 +776,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // user, and the day it counts (Codex PACE-R1-001).
     const paceShown =
       next.paceHoldsBackground !== current.paceHoldsBackground ||
+      next.fableReservePercent !== current.fableReservePercent ||
       next.dayStartHour !== current.dayStartHour;
     // The default is `~/.claude` whatever it is called: renamed, it keeps
     // the seats it has taken (Astra SEATS-R08).
@@ -1330,6 +1371,24 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       `could not read what the banners are asked on; they come back with the next judgments: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  /** The day's first reading of each account's Fable window; a store of its own: `pace-day` holds the general week's. */
+  let fableDay: Record<string, DayStart> = {};
+  /** Threads known by what started them: background work the thread itself does not show, or an exception. */
+  let fableRoles: Record<string, "fondo" | "excepcion"> = {};
+  try {
+    const day = z
+      .record(z.string(), dayStartSchema)
+      .safeParse(await bb.storage.kv.get<unknown>(KV_FABLE_DAY));
+    if (day.success) fableDay = day.data;
+    const roles = z
+      .record(z.string(), z.enum(["fondo", "excepcion"]))
+      .safeParse(await bb.storage.kv.get<unknown>(KV_FABLE_ROLES));
+    if (roles.success) fableRoles = roles.data;
+  } catch (error) {
+    bb.log.warn(
+      `could not read Fable's first readings and roles; they start again: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   /** The hour the day starts in Madrid (the setting, a whole hour 0-23; 9 when unreadable). */
   function dayHour(): number {
     const h = Math.floor(current.dayStartHour);
@@ -1343,41 +1402,70 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return paceOf(settle({ ...usage, name }, now).weekly, paceDay[name], now, dayHour());
   }
   /**
-   * The account is saved for the user (SPEC 2026-10-30 §2): its day's pace
-   * at 90 %, or not known for a weekly window it has (no reset: nothing is
-   * spent blind). A Team seat has no general weekly: no pace holds it back.
-   */
-  /**
    * Background work: a thread another thread, an automation or a plugin
-   * opened (the user opens the rest). Every choice of another account for
-   * it puts the accounts saved for the user last (Codex ULTRA-R01).
+   * opened, or one started from the command line (see noteFableRole; the user
+   * opens the rest in the app). An exception to the brake is not. Every choice
+   * of another account for it leaves the accounts saved for the user out
+   * (Codex ULTRA-R01; Aitor, 2026-10-31).
    */
   function isBackground(
-    thread: Pick<ThreadResponse, "parentThreadId" | "originPluginId">,
+    thread: Pick<ThreadResponse, "id" | "parentThreadId" | "originPluginId">,
   ): boolean {
+    const role = fableRoles[thread.id];
+    if (role === "excepcion") return false;
     return (
+      role === "fondo" ||
       typeof thread.parentThreadId === "string" ||
       typeof thread.originPluginId === "string"
     );
   }
+  /** What the account may still give background work of its Fable; null on a Team seat, unmeasured or with no reserved model. */
+  function fableRoomFor(name: string): FableRoom | null {
+    const usage = collector.get(name)?.usage;
+    const model = current.preferredModel;
+    if (usage === null || usage === undefined || model === "") return null;
+    const now = deps.now();
+    const settled = settle({ ...usage, name }, now);
+    if (settled.weekly.absent === true) return null;
+    return fableRoom({
+      fable: modelWindow(settled, model) ?? settled.weekly,
+      weekly: settled.weekly,
+      start: fableDay[name],
+      now,
+      hour: dayHour(),
+      reservePercent: reservePercent(),
+    });
+  }
+  function reservePercent(): number {
+    const r = current.fableReservePercent;
+    return Number.isFinite(r) && r >= 0 && r <= 100
+      ? r
+      : DEFAULT_FABLE_RESERVE_PERCENT;
+  }
   /**
-   * savedForUser for background work while the brake is on
-   * (paceHoldsBackground); nothing otherwise: the user's own threads, and
-   * every thread with the brake off (the default), are placed as if no
-   * account were saved. Every choice that weighs the pace asks here.
+   * savedForUser for background work in the reserved model while the brake
+   * is on (paceHoldsBackground); nothing otherwise: the user's own threads,
+   * and a turn in another model, which does not spend Fable (see
+   * spendsReservedWeekly), are placed as if no account were saved. Every
+   * choice that weighs the pace asks here.
    */
-  function paceFilter(background: boolean): {
+  function paceFilter(
+    background: boolean,
+    model: string,
+  ): {
     savedForUser?: (name: string) => boolean;
   } {
-    return background && current.paceHoldsBackground === true
+    return background &&
+      current.paceHoldsBackground === true &&
+      current.preferredModel !== "" &&
+      model.toLowerCase() === current.preferredModel.toLowerCase()
       ? { savedForUser }
       : {};
   }
+  /** The account is closed to background Fable (see fableRoom): measured and without room. A Team seat has no week: not saved. */
   function savedForUser(name: string): boolean {
-    const usage = collector.get(name)?.usage;
-    if (usage === null || usage === undefined) return false;
-    if (usage.weekly.absent === true) return false;
-    return paceFor(name)?.background !== true;
+    const room = fableRoomFor(name);
+    return room !== null && !room.open;
   }
   let seriesWrites: Promise<void> = Promise.resolve();
   /**
@@ -1481,11 +1569,45 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             },
             dayHour(),
           );
+    if (day !== kept) {
+      if (day === undefined) delete paceDay[name];
+      else paceDay[name] = day;
+      const snapshot = { ...paceDay };
+      seriesWrites = seriesWrites.then(() => storePaceDay(snapshot));
+    }
+    noteFableDay(name, m);
+  }
+  /** As notePaceDay, for the account's window of the reserved model. */
+  function noteFableDay(name: string, m: Measurement): void {
+    if (!freshReading(m)) return;
+    const fable =
+      modelWindow({ ...m.usage, name }, current.preferredModel) ?? m.usage.weekly;
+    const kept = fableDay[name];
+    const day =
+      m.usage.weekly.absent === true
+        ? undefined
+        : nextDayStart(
+            kept,
+            {
+              at: m.observedAt,
+              usedPercent: fable.usedPercent,
+              resetsAt: fable.resetsAt,
+            },
+            dayHour(),
+          );
     if (day === kept) return;
-    if (day === undefined) delete paceDay[name];
-    else paceDay[name] = day;
-    const snapshot = { ...paceDay };
-    seriesWrites = seriesWrites.then(() => storePaceDay(snapshot));
+    if (day === undefined) delete fableDay[name];
+    else fableDay[name] = day;
+    const snapshot = { ...fableDay };
+    seriesWrites = seriesWrites.then(async () => {
+      try {
+        await bb.storage.kv.set(KV_FABLE_DAY, snapshot);
+      } catch (error) {
+        bb.log.warn(
+          `could not store Fable's first readings: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    });
   }
   /**
    * The account was measured: a sample of its seats as they are now, with
@@ -2183,9 +2305,31 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
 
   /** Measurements recent enough to decide on (see maxReadAgeMs). */
+  /**
+   * A Team seat is for Opus (Aitor, 2026-10-31; teamRunsFable): to every
+   * choice of an account for a turn in the reserved model it reads as having
+   * none left, with no reset to wait for. Measured that day: Team seats at
+   * 75-100 % of Fable, the auto-continue landing there.
+   */
+  function offTeamSeat<A extends AccountUsage>(a: A, model: string): A {
+    if (
+      current.teamRunsFable === true ||
+      a.weekly.absent !== true ||
+      model === "" ||
+      model.toLowerCase() !== current.preferredModel.toLowerCase()
+    )
+      return a;
+    const name =
+      Object.keys(a.models).find((m) => m.toLowerCase() === model.toLowerCase()) ?? model;
+    return {
+      ...a,
+      models: { ...a.models, [name]: { usedPercent: 100, resetsAt: null } },
+    };
+  }
   function measuredAccounts(model = current.preferredModel) {
     // A refusing account is out, whatever its numbers say.
-    return collector.usable(maxReadAgeMs(), model).map((a) => {
+    return collector.usable(maxReadAgeMs(), model).map((measured) => {
+      const a = offTeamSeat(measured, model);
       if (!refusing(a.name)) return a;
       const { unknown: _, ...known } = a;
       return { ...known, blocked: true };
@@ -3188,9 +3332,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       preferredModel: current.preferredModel,
       excursionFrom: wayHome(projectId, current.preferredModel, measured, now),
       freeSeats,
-      // Background work behind the accounts saved for the user (SPEC
+      // Background work off the accounts saved for the user (SPEC
       // 2026-10-30 §2).
-      ...paceFilter(isBackground(thread)),
+      ...paceFilter(isBackground(thread), current.preferredModel),
       now,
       currentLoggedOut: unconfirmed(fromName),
     });
@@ -3408,7 +3552,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       reserveModel: current.preferredModel,
       threshold,
       freeSeats,
-      ...paceFilter(isBackground(thread)),
+      ...paceFilter(isBackground(thread), model),
       now,
     });
     if (decision.kind === "keep") return;
@@ -3841,7 +3985,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       reserveModel: current.preferredModel,
       excursionFrom: wayHome(projectId, model, measured, now),
       freeSeats,
-      ...paceFilter(background),
+      ...paceFilter(background, model),
       now,
     };
   }
@@ -3881,6 +4025,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       ...placementOf(projectId, model, now, isBackground(thread)),
       currentAccount: fromName,
       currentLoggedOut: unconfirmed(fromName),
+      // A choice by hand since this plugin loaded stays (see markPick).
+      firstTurn: thread.status === "pending" && movesOf(projectId).picks === 0,
     });
     if (decision.kind === "keep") {
       // The turn runs where the project is (refused at the checkpoint only
@@ -4152,6 +4298,129 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     };
   }
 
+  /**
+   * What the message says of its thread: an exception declared in it (see
+   * FABLE_EXCEPTIONS), for the thread's later turns too; or background work
+   * when it started from the command line with no parent (the dispatcher's
+   * own threads and any agent's: the user opens his in the app). Stored once.
+   */
+  function noteFableRole(ctx: MessageDispatchHookContext): void {
+    const id = ctx.thread.id;
+    const text = ctx.input.text.toLowerCase();
+    const role = FABLE_EXCEPTIONS.some((mark) => text.includes(mark))
+      ? "excepcion"
+      : ctx.origin === "cli" && fableRoles[id] === undefined
+        ? "fondo"
+        : null;
+    if (role === null || fableRoles[id] === role) return;
+    fableRoles[id] = role;
+    const snapshot = { ...fableRoles };
+    seriesWrites = seriesWrites.then(async () => {
+      try {
+        await bb.storage.kv.set(KV_FABLE_ROLES, snapshot);
+      } catch (error) {
+        bb.log.warn(
+          `could not store the Fable roles: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    });
+  }
+  /**
+   * The brake (Aitor, 2026-10-31): a turn of background work in the reserved
+   * model with no account that has room for it does not run. The thread goes
+   * down to Opus (see lowerHeldTurn) and its message waits meanwhile, so if
+   * that fails it runs when the brake opens, judged again then. Null: go on;
+   * the placement takes it to an account with room if its own has none.
+   * Typed by the user in the app, it is his: never held.
+   */
+  function brakeFable(
+    ctx: MessageDispatchHookContext,
+    model: string,
+  ): MessageDispatchHookDecision | null {
+    const { thread } = ctx;
+    if (!current.autoSwitch || paceFilter(isBackground(thread), model).savedForUser === undefined)
+      return null;
+    if (ctx.initiator === "user" && ctx.senderThreadId === null && ctx.origin !== "cli")
+      return null;
+    const now = deps.now();
+    const measured = measuredAccounts(model).map((a) => settle(a, now));
+    if (measured.length === 0) return null;
+    const open = chooseAccount(measured, {
+      preferredModel: model,
+      reserveModel: current.preferredModel,
+      savedForUser,
+    });
+    if (open !== null) return null;
+    const rooms = measured
+      .map((a) => fableRoomFor(a.name))
+      .filter((r): r is FableRoom => r !== null);
+    const nextAt = Math.min(
+      ...rooms.map((r) => r.nextAt ?? Number.POSITIVE_INFINITY),
+      now + BRAKE_LONGEST_WAIT_MS,
+    );
+    const text = `Fable frenado en todas las cuentas (ritmo del día y reserva): este hilo de fondo sigue en Opus; si no puede, espera hasta ${isoInZone(nextAt)}`;
+    bb.log.info(`thread ${thread.id}: ${text}`);
+    setTimeout(() => void lowerHeldTurn(thread.id, model), 0);
+    return { action: "wait", reason: text, sendAt: nextAt };
+  }
+  /**
+   * The held message sent again in Opus, and the thread's later messages with
+   * it. Created before the old one goes, so nothing is lost; a row that cannot
+   * be moved waits as it is (see brakeFable). Only plain messages: a retry of
+   * a failed turn belongs to its turn. bb stores the row after the hook
+   * answers, so it is looked for a few times.
+   */
+  async function lowerHeldTurn(threadId: string, model: string): Promise<void> {
+    try {
+      let rows: Awaited<
+        ReturnType<typeof bb.sdk.threads.queuedMessages.list>
+      > = [];
+      for (let tries = 0; tries < 5 && rows.length === 0; tries += 1) {
+        if (tries > 0) await new Promise((done) => setTimeout(done, 200));
+        rows = (await bb.sdk.threads.queuedMessages.list({ threadId })).filter(
+          (r) =>
+            r.payload.kind === "inline" &&
+            (r.state === "waiting" || r.state === "scheduled") &&
+            modelFamily(r.model)?.toLowerCase() === model.toLowerCase(),
+        );
+      }
+      if (rows.length === 0) return;
+      await bb.sdk.threads.update({ threadId, model: LOWERED_MODEL_ID });
+      for (const row of rows) {
+        await bb.sdk.threads.queuedMessages.create({
+          threadId,
+          input: row.content,
+          model: LOWERED_MODEL_ID,
+          executionInputSources: { model: "explicit" },
+          ...(row.senderThreadId === null ? {} : { senderThreadId: row.senderThreadId }),
+        });
+        await deleteOwn(threadId, row.id);
+      }
+      bb.log.info(`thread ${threadId}: Fable braked: ${rows.length} message(s) go on in Opus`);
+      await recordLowered(threadId);
+    } catch (error) {
+      bb.log.warn(
+        `thread ${threadId}: not moved to Opus at Fable's brake; it waits (${error instanceof Error ? error.message : String(error)})`,
+      );
+    }
+  }
+  /** The history row of a thread gone down to Opus at the brake: where the panel and `history` tell it. */
+  async function recordLowered(threadId: string): Promise<void> {
+    const thread = await bb.sdk.threads.get({ threadId });
+    const at = await projectAccount(thread.projectId);
+    const account = at.account ?? current.defaultAccountName;
+    await recordMove(
+      {
+        at: deps.now(),
+        threadId,
+        projectId: thread.projectId,
+        from: account,
+        to: account,
+        reason: "Fable frenado: este hilo de fondo sigue en Opus",
+      },
+      null,
+    );
+  }
   bb.experimental_hooks.on("message.dispatch", async (ctx) => {
     const { thread } = ctx;
     if (
@@ -4176,6 +4445,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     const model = modelFamily(ctx.requestedExecution.model);
     if (model !== null) threadModel.set(thread.id, model);
+    noteFableRole(ctx);
+    if (ctx.attempt === "start-turn" && model !== null) {
+      const braked = brakeFable(ctx, model);
+      if (braked !== null) return braked;
+    }
     const placed: { at?: TurnPlace } = {};
     if (current.autoSwitch && ctx.attempt === "start-turn") {
       // A message sent now, not a queued one asked again: its own waits
@@ -4654,7 +4928,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       random: deps.random(),
       stuck,
       freeSeats,
-      ...paceFilter(background),
+      ...paceFilter(background, model),
     };
     const decision = decideSwitch(input);
     // No Fable on any account, and an account with Opus: the thread is told
@@ -5209,7 +5483,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       now,
       current.preferredModel,
       freeSeats,
-      paceFilter(isBackground(thread)).savedForUser,
+      paceFilter(isBackground(thread), model).savedForUser,
     );
     if (to === null) {
       // Nothing to release it on; the wait fires on its own at sendAt and
@@ -5407,6 +5681,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           usage,
           problem: m?.problem ?? null,
           pace: paceFor(account.name),
+          fable: fableRoomFor(account.name),
           seats:
             taken[account.name] === undefined
               ? undefined
