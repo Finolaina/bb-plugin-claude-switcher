@@ -194,6 +194,12 @@ export interface PanelContext {
   /** The zone the days are counted in; Madrid's when undefined. */
   timeZone?: string;
   preferredModel: string;
+  /**
+   * The plugin's paceHoldsBackground: only then is an account past its
+   * day's share kept for the user (state "kept"). Off or unsaid, no row is
+   * kept: the panel never says it saves what nothing saves.
+   */
+  paceHoldsBackground?: boolean;
 }
 
 /** Agotada > Guardada > Trabajando > Libre; «Sin datos» when the read says nothing (DISENO.md §Estados). */
@@ -374,7 +380,9 @@ export function accountRow(
       ? "nodata"
       : out
         ? "out"
-        : !team && (pace === null || pace?.background === false)
+        : ctx.paceHoldsBackground === true &&
+            !team &&
+            (pace === null || pace?.background === false)
           ? "kept"
           : seatsUsed(seats) > 0
             ? "working"
