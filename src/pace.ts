@@ -151,3 +151,59 @@ export function nextDayStart(
       }
     : kept;
 }
+
+/** The share of the week kept for the user by default (Inbox #150, 2026-10-31: proposed, provisional). */
+export const DEFAULT_FABLE_RESERVE_PERCENT = 20;
+
+export interface FableRoom {
+  /** Background work may still run Fable here. */
+  open: boolean;
+  /** Why not: the day's share is spent, the user's reserve reached, or the week's reset unknown. */
+  why: "pace" | "reserve" | "unknown" | null;
+  /** Percent of the week that can still run Fable (the fuller of its window and the general week). */
+  left: number;
+  /** The percent kept for the user. */
+  reserve: number;
+  /** The day's pace of the Fable window; null when its reset is unknown. */
+  pace: Pace | null;
+  /** When it may open again: the next day's start or the reset, whichever comes first; null when unknown. */
+  nextAt: number | null;
+  /** When the Fable week resets. */
+  resetsAt: number | null;
+}
+
+/**
+ * Whether background work may run Fable on an account with a week of its own
+ * (Aitor, 2026-10-31): not past the day's pace of the Fable window (what is
+ * left over the days to the reset, as paceOf counts it) nor down to the
+ * reserve kept for the user. Equal to the reserve is closed: one more turn
+ * would go under it. Unknown is closed too. Pure, as paceOf; the caller
+ * keeps the day's first reading of the Fable window.
+ */
+export function fableRoom(input: {
+  fable: UsageWindow;
+  weekly: UsageWindow;
+  start: DayStart | undefined;
+  now: number;
+  hour: number;
+  reservePercent: number;
+}): FableRoom {
+  const { fable, weekly, start, now, hour, reservePercent } = input;
+  const left = Math.max(
+    0,
+    100 - Math.max(fable.usedPercent, weekly.absent === true ? 0 : weekly.usedPercent),
+  );
+  const pace = paceOf(fable, start, now, hour);
+  const resetsAt = fable.resetsAt ?? weekly.resetsAt;
+  const nextDay = dayStart(now, hour) + DAY;
+  const nextAt = resetsAt === null ? null : Math.min(nextDay, resetsAt);
+  const why: FableRoom["why"] =
+    pace === null
+      ? "unknown"
+      : left <= reservePercent
+        ? "reserve"
+        : pace.background
+          ? null
+          : "pace";
+  return { open: why === null, why, left, reserve: reservePercent, pace, nextAt, resetsAt };
+}

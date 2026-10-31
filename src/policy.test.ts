@@ -27,14 +27,14 @@ function account(
 }
 
 describe("chooseAccount", () => {
-  it("picks the account whose weekly window resets soonest", () => {
+  it("among accounts as spent, picks the account whose weekly window resets soonest", () => {
     const chosen = chooseAccount(
       [
         account("late", {
-          weekly: { usedPercent: 10, resetsAt: NOW + 72 * HOUR },
+          weekly: { usedPercent: 40, resetsAt: NOW + 72 * HOUR },
         }),
         account("soon", {
-          weekly: { usedPercent: 90, resetsAt: NOW + 6 * HOUR },
+          weekly: { usedPercent: 40, resetsAt: NOW + 6 * HOUR },
         }),
       ],
       { preferredModel: "Fable" },
@@ -276,7 +276,7 @@ describe("chooseAccount: limits", () => {
     expect(chosen?.account).toBe("teamNoFable");
   });
 
-  it("for the preferred model, a Team seat and a Max account are still ordered by deadline (the seat preference is for other models)", () => {
+  it("for the preferred model, a Max account goes before a Team seat whatever their deadlines (Aitor, 2026-10-31)", () => {
     const seat = (fableResetsAt: number) =>
       account("team", {
         weekly: { usedPercent: 0, resetsAt: null, absent: true },
@@ -291,7 +291,7 @@ describe("chooseAccount: limits", () => {
       "max",
     );
     expect(chooseAccount([seat(NOW + 24 * HOUR), max], options)?.account).toBe(
-      "team",
+      "max",
     );
   });
 
@@ -671,13 +671,13 @@ describe("chooseAccount for background work (SPEC 2026-10-30 §2)", () => {
     ).toBe("late");
   });
 
-  it("still chooses a saved account when it is the only one: never work left without one", () => {
+  it("leaves a saved account out even when it is the only one: the work goes down to Opus or waits", () => {
     expect(
       chooseAccount([soon, account("out", { weekly: { usedPercent: 100, resetsAt: NOW + HOUR } })], {
         preferredModel: "",
         savedForUser: saved,
-      })?.account,
-    ).toBe("soon");
+      }),
+    ).toBeNull();
   });
 
   it("takes an account without a session (Ultra) as one at 0 % of it", () => {
@@ -690,5 +690,61 @@ describe("chooseAccount for background work (SPEC 2026-10-30 §2)", () => {
       weekly: { usedPercent: 60, resetsAt: NOW + 5 * HOUR },
     });
     expect(chooseAccount([busy, ultra], { preferredModel: "" })?.account).toBe("ultra");
+  });
+});
+
+describe("Fable: least spent first, and a brake that holds (Aitor, 2026-10-31)", () => {
+  const NOW = Date.parse("2026-10-31T12:00:00Z");
+  const DAY = 86_400_000;
+  const ultra = (name: string, fable: number, days: number): AccountUsage => ({
+    name,
+    blocked: false,
+    session: { usedPercent: 0, resetsAt: null, absent: true },
+    weekly: { usedPercent: fable, resetsAt: NOW + days * DAY },
+    models: { Fable: { usedPercent: fable, resetsAt: NOW + days * DAY } },
+  });
+
+  it("goes to the Ultra with the most Fable left, however close the other's reset is", () => {
+    expect(
+      chooseAccount([ultra("aitor", 99, 1), ultra("siloeads", 0, 6)], {
+        preferredModel: "Fable",
+      })?.account,
+    ).toBe("siloeads");
+  });
+
+  it("compares the fuller of the Fable and the general week", () => {
+    const opusHeavy: AccountUsage = {
+      ...ultra("opusheavy", 10, 3),
+      weekly: { usedPercent: 90, resetsAt: NOW + 3 * DAY },
+    };
+    expect(
+      chooseAccount([opusHeavy, ultra("even", 40, 3)], { preferredModel: "Fable" })
+        ?.account,
+    ).toBe("even");
+  });
+
+  it("never gives background work an account saved for the user, not even as the last one", () => {
+    expect(
+      chooseAccount([ultra("aitor", 50, 1)], {
+        preferredModel: "Fable",
+        savedForUser: () => true,
+      }),
+    ).toBeNull();
+  });
+
+  it("sends another model to the Ultra with no Fable left before a Team seat, as before: its general week is of no other use", () => {
+    const seat: AccountUsage = {
+      name: "team1",
+      blocked: false,
+      session: { usedPercent: 60, resetsAt: NOW + DAY / 8 },
+      weekly: { usedPercent: 0, resetsAt: null, absent: true },
+      models: { Opus: { usedPercent: 10, resetsAt: NOW + 3 * DAY } },
+    };
+    expect(
+      chooseAccount([{ ...ultra("siloeads", 100, 6), weekly: { usedPercent: 60, resetsAt: NOW + 6 * DAY } }, seat], {
+        preferredModel: "Opus",
+        reserveModel: "Fable",
+      })?.account,
+    ).toBe("siloeads");
   });
 });

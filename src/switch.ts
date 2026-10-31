@@ -433,7 +433,7 @@ export function opusInsteadText(model: string, account: string): string {
 
 export type PlacementDecision =
   /** `why`: kept although its account spends the reserve, because no account spares it. */
-  | { kind: "keep"; why?: "current-reserved" }
+  | { kind: "keep"; why?: "current-reserved" | "current-saved" }
   | {
       kind: "move";
       account: string;
@@ -442,6 +442,10 @@ export type PlacementDecision =
         | "current-blocked"
         /** A turn in another model: its account spends the reserved model's weekly. */
         | "current-reserved"
+        /** Background work: its account is saved for the user. */
+        | "current-saved"
+        /** A thread's first turn: another account has far more of the week left. */
+        | "least-spent"
         /** A turn in the reserved model: back to the account the project left for another model. */
         | "back-from-excursion";
     };
@@ -472,11 +476,17 @@ export interface PlacementInput {
   /**
    * The thread is background work (see ChoiceOptions.savedForUser): every
    * choice of another account (a new project, a move off an account that
-   * cannot run, the way home) goes behind the accounts saved for the user
-   * (Codex ULTRA-R01). A project whose account can run is never moved for
-   * the pace.
+   * cannot run, the way home) leaves the accounts saved for the user out
+   * (Codex ULTRA-R01), and a project on one of them moves off it (Aitor,
+   * 2026-10-31). With nowhere to go, the caller lowers or holds the turn.
    */
   savedForUser?: (account: string) => boolean;
+  /**
+   * The thread's first turn, on an account not picked by hand: it may go to
+   * the least spent account when that is LEAST_SPENT_MARGIN points ahead.
+   * A later turn stays: the conversation is on this account.
+   */
+  firstTurn?: boolean;
   now: number;
   /**
    * The current account has no login (its usage answered unauthenticated),
@@ -485,6 +495,17 @@ export interface PlacementInput {
    * (E44: the default `~/.claude` of a machine nobody logged in on).
    */
   currentLoggedOut?: boolean;
+}
+
+/** Points of the week an account must be ahead for a first turn to leave its project's account. */
+export const LEAST_SPENT_MARGIN = 15;
+
+/** The fuller of the model's window and the general week. */
+function spentOf(account: AccountUsage, model: string): number {
+  return Math.max(
+    account.weekly.absent === true ? 0 : account.weekly.usedPercent,
+    modelWindow(account, model)?.usedPercent ?? 0,
+  );
 }
 
 /** The account a project would best run on now, for the thread header. */
@@ -566,7 +587,22 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     current !== undefined &&
     isUsable(current) &&
     canRunModel(current, input.preferredModel);
-  if (runs && !spendsReservedWeekly(current, options)) return { kind: "keep" };
+  const saved = runs && input.savedForUser?.(current.name) === true;
+  if (runs && !saved && !spendsReservedWeekly(current, options)) {
+    if (input.firstTurn === true && !reserving(options) && input.preferredModel !== "") {
+      const best = chooseSeated(accounts, options, input.freeSeats);
+      const other = accounts.find((a) => a.name === best?.account);
+      if (
+        other !== undefined &&
+        other.name !== current.name &&
+        spentOf(current, input.preferredModel) -
+          spentOf(other, input.preferredModel) >=
+          LEAST_SPENT_MARGIN
+      )
+        return { kind: "move", account: other.name, why: "least-spent" };
+    }
+    return { kind: "keep" };
+  }
   const others = accounts.filter((a) => a.name !== input.currentAccount);
   const choice =
     chooseSeated(others, options, input.freeSeats) ??
@@ -582,11 +618,15 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
         )
       : null);
   if (choice === null)
-    return runs ? { kind: "keep", why: "current-reserved" } : { kind: "keep" };
+    return saved
+      ? { kind: "keep", why: "current-saved" }
+      : runs
+        ? { kind: "keep", why: "current-reserved" }
+        : { kind: "keep" };
   return {
     kind: "move",
     account: choice.account,
-    why: runs ? "current-reserved" : "current-blocked",
+    why: saved ? "current-saved" : runs ? "current-reserved" : "current-blocked",
   };
 }
 

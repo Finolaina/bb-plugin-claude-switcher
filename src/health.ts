@@ -5,7 +5,7 @@
 // New fields may be added; the meaning of one never changes without a new
 // version.
 import type { PlanInfo } from "./accounts.js";
-import { DAY_ZONE, zoneOffsetMs, type Pace } from "./pace.js";
+import { DAY_ZONE, zoneOffsetMs, type FableRoom, type Pace } from "./pace.js";
 import type { AccountUsage, UsageWindow } from "./policy.js";
 
 export const HEALTH_VERSION = 1;
@@ -18,6 +18,8 @@ export interface HealthAccount {
   problem:
     { kind: "unauthenticated" } | { kind: "error"; message: string } | null;
   pace: Pace | null;
+  /** What background work may still take of its Fable; null on a Team seat or unmeasured. */
+  fable?: FableRoom | null;
   /** Undefined when the plugin keeps none for the account. capacity 0 = no limit. */
   seats:
     | {
@@ -61,8 +63,25 @@ export interface HealthReport {
       presupuesto: number;
       gastado: number;
       pctDia: number;
-      /** It may take background work: always with the brake off. */
+      /** It may take background work in Fable: always with the brake off. */
       fondo: boolean;
+    } | null;
+    /** Fable's week as the brake reads it (Aitor, 2026-10-31). Null: a Team seat, unmeasured. */
+    fable: {
+      /** Percent of the week that can still run Fable: what is LEFT, unlike every other pct here, which is spent. */
+      queda: number;
+      /** Percent kept for the user. */
+      reserva: number;
+      /** Points of the week for today, spent and their share, of Fable's own window. */
+      ritmo: { presupuesto: number; gastado: number; pctDia: number } | null;
+      /** Background work may run Fable here now. */
+      fondo: boolean;
+      /** Why not: "ritmo", "reserva" or "desconocido". */
+      motivo: "ritmo" | "reserva" | "desconocido" | null;
+      /** When the week resets. */
+      vuelve: string | null;
+      /** When it may open again: the next day's start or the reset. */
+      abre: string | null;
     } | null;
     plazas: {
       usadas: number;
@@ -117,6 +136,31 @@ function problemText(a: HealthAccount): string | null {
 
 const round1 = (n: number) => Math.round(n * 10) / 10;
 
+const MOTIVO = { pace: "ritmo", reserve: "reserva", unknown: "desconocido" } as const;
+
+function fableOf(
+  room: FableRoom | null,
+  holds: boolean,
+): HealthReport["cuentas"][number]["fable"] {
+  if (room === null) return null;
+  return {
+    queda: Math.round(room.left),
+    reserva: room.reserve,
+    ritmo:
+      room.pace === null
+        ? null
+        : {
+            presupuesto: round1(room.pace.budget),
+            gastado: round1(room.pace.spent),
+            pctDia: Math.round(room.pace.dayPercent),
+          },
+    fondo: !holds || room.open,
+    motivo: room.why === null ? null : MOTIVO[room.why],
+    vuelve: room.resetsAt === null ? null : isoInZone(room.resetsAt),
+    abre: room.nextAt === null ? null : isoInZone(room.nextAt),
+  };
+}
+
 export function healthReport(input: {
   /** When the latest measurement was taken (or the report, without one). */
   measured: number;
@@ -151,8 +195,10 @@ export function healthReport(input: {
                 presupuesto: round1(a.pace.budget),
                 gastado: round1(a.pace.spent),
                 pctDia: Math.round(a.pace.dayPercent),
-                fondo: !input.holdsBackground || a.pace.background,
+                fondo:
+                  !input.holdsBackground || (a.fable?.open ?? a.pace.background),
               },
+        fable: fableOf(a.fable ?? null, input.holdsBackground),
         plazas:
           a.seats === undefined
             ? null
@@ -186,6 +232,9 @@ export function healthText(report: HealthReport): string {
       ...(c.ritmo === null
         ? []
         : [`ritmo ${c.ritmo.pctDia}% (fondo ${c.ritmo.fondo ? "sí" : "no"})`]),
+      ...(c.fable === null
+        ? []
+        : [`Fable queda ${c.fable.queda}% (reserva ${c.fable.reserva}%, fondo ${c.fable.fondo ? "sí" : `no: ${c.fable.motivo}`})`]),
       ...(c.plazas === null
         ? []
         : [`plazas ${c.plazas.usadas}/${c.plazas.total ?? "sin límite"}`]),

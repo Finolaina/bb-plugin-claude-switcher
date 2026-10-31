@@ -317,6 +317,8 @@ interface QueuedRow {
 }
 
 interface HostOptions {
+  /** queuedMessages.create throws. */
+  queueCreateFails?: boolean;
   settings?: Record<string, string | number | boolean>;
   /**
    * The projects bb lists, by id (default: proj-1, proj-2 and, on request,
@@ -439,6 +441,8 @@ async function host(
   const sent: string[] = [];
   const deleted: string[] = [];
   const queued: QueuedRow[] = [...(options.queued ?? [])];
+  const threadUpdates: { threadId: string; model?: string }[] = [];
+  const created: { threadId: string; model?: string; input: unknown }[] = [];
   let nextId = 1;
   let retryFailures = 0;
   const { credentialIo, accountsIo, usageCalls, files } = fakes(
@@ -460,6 +464,10 @@ async function host(
     settings: {
       accountsDir: ACCOUNTS,
       defaultAccountName: "main",
+      // The suites of before Fable's brake and the seats for Opus test the
+      // rest with them out of the way; "defaults" below tests the defaults.
+      paceHoldsBackground: false,
+      teamRunsFable: true,
       ...options.settings,
     },
     sdk: {
@@ -472,6 +480,10 @@ async function host(
             ...options.threads?.[threadId],
             ...options.threadsLive?.[threadId],
           });
+        },
+        update: async (args: { threadId: string; model?: string }) => {
+          threadUpdates.push(args);
+          return thread({ id: args.threadId });
         },
         // Like bb: every thread, as threads.get answers for it.
         list: async () => {
@@ -613,6 +625,11 @@ async function host(
           list: async () => [...queued],
         },
         queuedMessages: {
+          create: async (args: { threadId: string; model?: string; input: unknown }) => {
+            if (options.queueCreateFails === true) throw new Error("the queue refused it");
+            created.push(args);
+            return { id: `created-${created.length}` };
+          },
           list: async ({ threadId }: { threadId: string }) => {
             await options.beforeQueuedList?.(threadId);
             return queued.filter((row) => row.threadId === threadId);
@@ -760,6 +777,8 @@ async function host(
     sent,
     deleted,
     queued,
+    threadUpdates,
+    created,
     usageCalls,
     files,
     logins,
@@ -848,6 +867,7 @@ describe("claude accounts plugin", () => {
       "claudeCommand",
       "dayStartHour",
       "defaultAccountName",
+      "fableReservePercent",
       "loginPrivateWindow",
       "maximumWaitHours",
       "paceHoldsBackground",
@@ -857,6 +877,7 @@ describe("claude accounts plugin", () => {
       "seatsTeam",
       "switchAheadOtherPercent",
       "switchAheadPercent",
+      "teamRunsFable",
     ]);
     expect(h.harness.registrations.rpcMethods.sort()).toEqual(
       [
@@ -4617,7 +4638,7 @@ describe("placement: the cases the first review found", () => {
     const failSet = ["proj-3"];
     const failing = await host(
       {
-        main: () => Response.json(payload(1, 10, 0)),
+        main: () => Response.json(payload(1, 30, 0)),
         spare: () => Response.json(payload(10, 60, 20)),
         work: () => Response.json(payload(0, 20, 30)),
       },
@@ -4637,7 +4658,7 @@ describe("placement: the cases the first review found", () => {
     let down = true;
     const h = await host(
       {
-        main: () => (down ? new Response("down", { status: 503 }) : Response.json(payload(1, 10, 0))),
+        main: () => (down ? new Response("down", { status: 503 }) : Response.json(payload(1, 30, 0))),
         spare: () => (down ? new Response("down", { status: 503 }) : Response.json(payload(10, 60, 20))),
         work: () => (down ? new Response("down", { status: 503 }) : Response.json(payload(0, 20, 30))),
       },
@@ -14843,16 +14864,16 @@ describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
   // resets in 3 days: 3.125 days left, 32 points for today from 0 %.
   const dayStart = { at: NOW - 2 * HOUR, usedPercent: 0, resetsAt: NOW + 3 * 24 * HOUR };
   const usage = {
-    main: () => Response.json(payload(30, 40)),
-    spare: () => Response.json(payload(10, 20)),
+    main: () => Response.json(payload(30, 50)),
+    spare: () => Response.json(payload(10, 40)),
     // 30 of 32 points of the day spent: saved for the user.
     work: () => Response.json(payload(5, 30)),
   };
   // The brake as 0.2.32 shipped it; off by default since 0.2.33.
-  const ON = { paceHoldsBackground: true };
+  const ON = { paceHoldsBackground: true, preferredModel: "Fable" };
 
   it("puts a new project of a thread another thread opened behind the account saved for the user", async () => {
-    const h = await host(usage, { kvPreset: { "pace-day": { work: dayStart } }, settings: ON });
+    const h = await host(usage, { kvPreset: { "pace-day": { work: dayStart }, "fable-pace-day": { work: dayStart } }, settings: ON });
     dispose = () => h.harness.dispose();
     await h.harness.behavior.callRpc("accounts_refresh", null);
     const s = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
@@ -14866,7 +14887,7 @@ describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
   });
 
   it("leaves the user's own new project on the best account whatever its pace", async () => {
-    const h = await host(usage, { kvPreset: { "pace-day": { work: dayStart } }, settings: ON });
+    const h = await host(usage, { kvPreset: { "pace-day": { work: dayStart }, "fable-pace-day": { work: dayStart } }, settings: ON });
     dispose = () => h.harness.dispose();
     await h.harness.behavior.callRpc("accounts_refresh", null);
     await h.harness.behavior.emitThreadEvent("thread.created", {
@@ -14880,9 +14901,9 @@ describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
   describe("a project already placed (Codex ULTRA-R01)", () => {
     // main (where proj-1 is) out of session; work the best by quota but
     // saved for the user; spare free for background work.
-    const blocked = { ...usage, main: () => Response.json(payload(100, 40)), spare: () => Response.json(payload(30, 20)) };
+    const blocked = { ...usage, main: () => Response.json(payload(100, 40)), spare: () => Response.json(payload(30, 40)) };
     const opts = (threads: Record<string, Partial<ThreadResponse>> = {}) => ({
-      kvPreset: { "pace-day": { work: dayStart } },
+      kvPreset: { "pace-day": { work: dayStart }, "fable-pace-day": { work: dayStart } },
       settings: ON,
       threads,
     });
@@ -14908,7 +14929,7 @@ describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
       h.harness.registrations.hooks["message.dispatch"]!(
         makeMessageDispatchHookContext({
           thread: thread({ id: "thread-1", projectId: "proj-1", ...t }),
-          requestedExecution: { providerId: "claude-code", model: "claude-opus-5-5" },
+          requestedExecution: { providerId: "claude-code", model: "claude-fable-5-1" },
           attempt: "start-turn",
         }),
       );
@@ -14938,7 +14959,7 @@ describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
         sendAt: NOW + 2 * HOUR + BUFFER,
         waitingOn: { kind: "time" },
         createdAt: NOW - HOUR,
-        model: "claude-opus-5-5",
+        model: "claude-fable-5-1",
       };
       const waiting = (t: Partial<ThreadResponse>) => ({
         ...opts({ "thread-1": { status: "error", ...t } as Partial<ThreadResponse> }),
@@ -14952,7 +14973,7 @@ describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
               seq: 1,
               createdAt: NOW - HOUR,
               type: "client/turn/requested",
-              data: { requestId: "creq_r1", execution: { model: "claude-opus-5-5" } },
+              data: { requestId: "creq_r1", execution: { model: "claude-fable-5-1" } },
             },
           ],
         },
@@ -14976,7 +14997,7 @@ describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
     it("moves background work ahead of the limit behind the account saved for the user", async () => {
       let clock = NOW;
       const h = await host(
-        { ...usage, main: () => Response.json(payload(95, 40)), spare: () => Response.json(payload(30, 20)) },
+        { ...usage, main: () => Response.json(payload(95, 40)), spare: () => Response.json(payload(30, 40)) },
         { ...opts(), settings: { ...ON, switchAheadPercent: 90 }, clock: () => clock },
       );
       dispose = () => h.harness.dispose();
@@ -15105,7 +15126,7 @@ describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
   });
 });
 
-describe("the brake on background work, off by default (paceHoldsBackground; Aitor 2026-10-31)", () => {
+describe("the brake on background work, by its setting (paceHoldsBackground)", () => {
   // work is aitor's case: an Ultra without the 5-hour window at 200 % of
   // its day (64 points spent of a 32-point day: NOW is 12:00 in Madrid, the
   // day began at 09:00 at 0 %, the week resets in 3 days). Without the pace
@@ -15119,23 +15140,23 @@ describe("the brake on background work, off by default (paceHoldsBackground; Ait
   });
   const dayStart = { at: NOW - 2 * HOUR, usedPercent: 0, resetsAt: NOW + 3 * 24 * HOUR };
   const usage = {
-    main: () => Response.json(payload(30, 40)),
-    spare: () => Response.json(payload(10, 20)),
-    work: () => Response.json(ultraNo5h(64)),
+    main: () => Response.json(payload(30, 50)),
+    spare: () => Response.json(payload(10, 40)),
+    work: () => Response.json(ultraNo5h(30)),
   };
   // main (where proj-1 is) out of its session.
   const blocked = { ...usage, main: () => Response.json(payload(100, 40)) };
   const bg = { parentThreadId: "thr-parent" };
-  // Off: background work lands where 0.2.31 put it, as the user's own
-  // does (work). On: as 0.2.32, behind the account saved for the user.
+  // Off: background work lands as the user's own does (work). On: off the
+  // account saved for the user. On is the default (Aitor, 2026-10-31).
   const cases = [
-    ["off (the default)", {}, "work"],
-    ["on", { paceHoldsBackground: true }, "spare"],
+    ["off", {}, "work"],
+    ["on", { paceHoldsBackground: true, preferredModel: "Fable" }, "spare"],
   ] as const;
   const opts = (
     settings: Record<string, string | number | boolean>,
     threads: Record<string, Partial<ThreadResponse>> = {},
-  ) => ({ kvPreset: { "pace-day": { work: dayStart } }, settings, threads });
+  ) => ({ kvPreset: { "pace-day": { work: dayStart }, "fable-pace-day": { work: dayStart } }, settings, threads });
 
   it("still measures and keeps the pace with the brake off, and says the brake in the state", async () => {
     for (const [, settings] of cases) {
@@ -15144,7 +15165,7 @@ describe("the brake on background work, off by default (paceHoldsBackground; Ait
       const s = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
       const work = s.accounts.find((a) => a.name === "work")!;
       expect(work.usage?.session.absent).toBe(true);
-      expect(work.pace).toMatchObject({ spent: 64, dayPercent: 200, background: false });
+      expect(work.pace).toMatchObject({ spent: 30, background: false });
       expect(s.paceHoldsBackground).toBe(settings === cases[1][1]);
       expect(await h.bb.storage.kv.get("pace-day")).toMatchObject({ work: { usedPercent: 0 } });
       await h.harness.dispose();
@@ -15213,7 +15234,7 @@ describe("the brake on background work, off by default (paceHoldsBackground; Ait
           await h.harness.registrations.hooks["message.dispatch"]!(
             makeMessageDispatchHookContext({
               thread: thread({ id: "thread-1", projectId: "proj-1", originPluginId: "some-automation" }),
-              requestedExecution: { providerId: "claude-code", model: "claude-opus-5-5" },
+              requestedExecution: { providerId: "claude-code", model: "claude-fable-5-1" },
               attempt: "start-turn",
             }),
           ),
@@ -15245,7 +15266,7 @@ describe("the brake on background work, off by default (paceHoldsBackground; Ait
           sendAt: NOW + 2 * HOUR + BUFFER,
           waitingOn: { kind: "time" },
           createdAt: NOW - HOUR,
-          model: "claude-opus-5-5",
+          model: "claude-fable-5-1",
         };
         const h = await hostListing([])(blocked, {
           ...opts(settings, { "thread-1": { status: "error", ...bg } as Partial<ThreadResponse> }),
@@ -15259,7 +15280,7 @@ describe("the brake on background work, off by default (paceHoldsBackground; Ait
                 seq: 1,
                 createdAt: NOW - HOUR,
                 type: "client/turn/requested",
-                data: { requestId: "creq_r1", execution: { model: "claude-opus-5-5" } },
+                data: { requestId: "creq_r1", execution: { model: "claude-fable-5-1" } },
               },
             ],
           },
@@ -15273,7 +15294,7 @@ describe("the brake on background work, off by default (paceHoldsBackground; Ait
         await vi.waitFor(() => expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/${to}`]));
       });
 
-      it(`health: freno ${settings === cases[1][1]}, and fondo ${to === "spare" ? "false" : "true"} for work at 200 %`, async () => {
+      it(`health: freno ${settings === cases[1][1]}, and fondo ${to === "spare" ? "false" : "true"} for work past its day`, async () => {
         const h = await host(usage, opts(settings));
         dispose = () => h.harness.dispose();
         await h.harness.behavior.callRpc("accounts_refresh", null);
@@ -15281,7 +15302,7 @@ describe("the brake on background work, off by default (paceHoldsBackground; Ait
         expect(report.version).toBe(1);
         expect(report.freno).toBe(to === "spare");
         const work = report.cuentas.find((c: { nombre: string }) => c.nombre === "work");
-        expect(work.ritmo).toMatchObject({ pctDia: 200, fondo: to !== "spare" });
+        expect(work.ritmo).toMatchObject({ pctDia: 94, fondo: to !== "spare" });
       });
     });
   }
@@ -15574,5 +15595,180 @@ describe("bb claude-switcher reserve / unreserve: a seat held from outside bb", 
     expect((await ask(h, "t1")).action).toBe("wait");
     clock = NOW + HOUR;
     expect((await ask(h, "t1")).action).toBe("proceed");
+  });
+});
+
+describe("Fable's brake at a message's checkpoint (Aitor, 2026-10-31)", () => {
+  // NOW is 12:00 in Madrid; the day from 09:00; the week resets in 3 days.
+  const ultra = (fable: number): Payload => ({
+    five_hour: null,
+    seven_day: { utilization: fable, resets_at: new Date(NOW + 3 * 24 * HOUR).toISOString(), locked_reason: null },
+    limits: [
+      { kind: "weekly_all", percent: fable, resets_at: new Date(NOW + 3 * 24 * HOUR).toISOString() },
+      {
+        kind: "weekly_scoped",
+        percent: fable,
+        resets_at: new Date(NOW + 3 * 24 * HOUR).toISOString(),
+        scope: { model: { display_name: "Fable" } },
+      },
+    ],
+  } as unknown as Payload);
+  const start = (used: number) => ({ at: NOW - 2 * HOUR, usedPercent: used, resetsAt: NOW + 3 * 24 * HOUR });
+  const FABLE_MODEL = "claude-fable-5-1";
+  const send = (
+    h: Awaited<ReturnType<typeof host>>,
+    t: Partial<ThreadResponse>,
+    overrides: Record<string, unknown> = {},
+    model = FABLE_MODEL,
+  ) =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: "thread-1", projectId: "proj-1", status: "idle", ...t }),
+        requestedExecution: { providerId: "claude-code", model },
+        attempt: "start-turn",
+        initiator: "agent",
+        senderThreadId: "thr-parent",
+        ...overrides,
+      }),
+    );
+  const BG = { parentThreadId: "thr-parent" };
+  const ON = { paceHoldsBackground: true, preferredModel: "Fable", teamRunsFable: false };
+  const rowsOf = (h: Awaited<ReturnType<typeof host>>, model: string) =>
+    h.queued.push({ id: "row-1", threadId: "thread-1", payload: { kind: "inline" }, sendAt: NOW + HOUR, model, state: "waiting", content: [{ type: "text", text: "haz esto" }] } as never);
+
+  async function settled(h: Awaited<ReturnType<typeof host>>) {
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+  }
+
+  // Canary a: at the day's pace (40 of the 19.2 points of today's budget).
+  const atPace = {
+    usage: { main: () => Response.json(ultra(60)), spare: () => Response.json(ultra(60)), work: () => Response.json(ultra(60)) },
+    kvPreset: { "fable-pace-day": { main: start(20), spare: start(20), work: start(20) } },
+  };
+
+  it("canary a: at the day's pace no background thread runs Fable: it waits, and goes on in Opus saying so", async () => {
+    const h = await host(atPace.usage, { kvPreset: atPace.kvPreset, settings: ON, threads: { "thread-1": BG } });
+    await settled(h);
+    // Usable accounts: held by the brake, not for want of an account.
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    expect(report.cuentas.map((c: { usable: boolean }) => c.usable)).toEqual([true, true, true]);
+    expect(report.cuentas[0].fable).toMatchObject({ queda: 40, fondo: false, motivo: "ritmo" });
+    const decision = (await send(h, BG)) as { action: string; reason: string; sendAt: number };
+    expect(decision.action).toBe("wait");
+    expect(decision.reason).toMatch(/sigue en Opus/);
+    // Tomorrow's day start, 09:00 in Madrid, before the week's reset.
+    expect(decision.sendAt).toBeLessThanOrEqual(NOW + 24 * HOUR);
+    rowsOf(h, FABLE_MODEL);
+    await vi.waitFor(() => expect(h.created).toHaveLength(1));
+    expect(h.created[0]).toMatchObject({ threadId: "thread-1", model: "claude-opus-5-5" });
+    expect(h.threadUpdates).toContainEqual({ threadId: "thread-1", model: "claude-opus-5-5" });
+    await vi.waitFor(() => expect(h.deleted).toContain("row-1"));
+  });
+
+  it("canary a, the way down: the same thread's Opus turn runs at the brake", async () => {
+    const h = await host(atPace.usage, { kvPreset: atPace.kvPreset, settings: ON, threads: { "thread-1": BG } });
+    await settled(h);
+    expect(await send(h, BG, {}, "claude-opus-5-5")).toMatchObject({ action: "proceed" });
+  });
+
+  it("canary d: under the reserve with day's share to spare, no background Fable either", async () => {
+    const h = await host(
+      { main: () => Response.json(ultra(85)), spare: () => Response.json(ultra(90)), work: () => Response.json(ultra(95)) },
+      { settings: ON, threads: { "thread-1": BG } },
+    );
+    await settled(h);
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    const main = report.cuentas.find((c: { nombre: string }) => c.nombre === "main");
+    expect(main.fable).toMatchObject({ queda: 15, reserva: 20, fondo: false, motivo: "reserva" });
+    expect(main.ritmo).toMatchObject({ gastado: 0 });
+    expect(await send(h, BG)).toMatchObject({ action: "wait" });
+  });
+
+  it("goes on in Fable, to the account with room, when one has it", async () => {
+    const h = await host(
+      { main: () => Response.json(ultra(60)), spare: () => Response.json(ultra(70)), work: () => Response.json(ultra(60)) },
+      { kvPreset: { "fable-pace-day": { main: start(20), work: start(20) } }, settings: ON, threads: { "thread-1": BG } },
+    );
+    await settled(h);
+    expect(await send(h, BG)).toMatchObject({ action: "proceed" });
+    expect(h.envSet.at(-1)).toEqual(expect.objectContaining({ projectId: "proj-1", value: `${ACCOUNTS}/spare` }));
+  });
+
+  it("never holds what the user typed, nor the user's own thread", async () => {
+    const h = await host(atPace.usage, { kvPreset: atPace.kvPreset, settings: ON, threads: { "thread-1": BG } });
+    await settled(h);
+    expect(await send(h, BG, { initiator: "user", senderThreadId: null, origin: "app" })).toMatchObject({ action: "proceed" });
+    expect(await send(h, {})).toMatchObject({ action: "proceed" });
+  });
+
+  it("an exception declared in the message runs Fable, and its later turns too", async () => {
+    const h = await host(atPace.usage, { kvPreset: atPace.kvPreset, settings: ON, threads: { "thread-1": BG } });
+    await settled(h);
+    expect(
+      await send(h, BG, { input: { blocks: [], text: "Fable, hazlo tú: revisa esto" } }),
+    ).toMatchObject({ action: "proceed" });
+    expect(await send(h, BG)).toMatchObject({ action: "proceed" });
+    expect(h.created).toEqual([]);
+  });
+
+  it("a thread started from the command line with no parent is background work, also at its next turn", async () => {
+    const h = await host(atPace.usage, { kvPreset: atPace.kvPreset, settings: ON });
+    await settled(h);
+    expect(await send(h, {}, { initiator: "user", senderThreadId: null, origin: "cli" })).toMatchObject({ action: "wait" });
+    expect(await send(h, {})).toMatchObject({ action: "wait" });
+  });
+
+  it("with the brake off nothing is held", async () => {
+    const h = await host(atPace.usage, { kvPreset: atPace.kvPreset, settings: { ...ON, paceHoldsBackground: false } });
+    await settled(h);
+    expect(await send(h, BG)).toMatchObject({ action: "proceed" });
+  });
+
+  it("a row it cannot move waits as it is, and nothing is lost", async () => {
+    const h = await host(atPace.usage, { kvPreset: atPace.kvPreset, settings: ON, threads: { "thread-1": BG }, queueCreateFails: true });
+    await settled(h);
+    rowsOf(h, FABLE_MODEL);
+    expect(await send(h, BG)).toMatchObject({ action: "wait" });
+    await new Promise((done) => setTimeout(done, 20));
+    expect(h.deleted).toEqual([]);
+    expect(h.queued.map((r) => r.id)).toEqual(["row-1"]);
+  });
+
+  it("the real defaults: brake on, 20 %, no Fable on a Team seat", async () => {
+    const h = await host(ALL_FREE);
+    dispose = () => h.harness.dispose();
+    const d = h.harness.registrations.settingsDescriptors;
+    expect(d.paceHoldsBackground?.default).toBe(true);
+    expect(d.fableReservePercent?.default).toBe(20);
+    expect(d.teamRunsFable?.default).toBe(false);
+  });
+
+  it("a Fable turn leaves a Team seat for an Ultra; with it allowed, it stays", async () => {
+    const seat = () =>
+      Response.json({
+        limits: [
+          { kind: "session", percent: 5, resets_at: new Date(NOW + 2 * HOUR).toISOString() },
+          { kind: "weekly_scoped", percent: 10, resets_at: new Date(NOW + 3 * 24 * HOUR).toISOString(), scope: { model: { display_name: "Fable" } } },
+        ],
+        five_hour: { locked_reason: null },
+        seven_day: null,
+      });
+    const on = (settings: Record<string, boolean | string>) =>
+      host(
+        { main: seat, spare: () => Response.json(ultra(50)), work: () => Response.json(ultra(50)) },
+        { settings: { preferredModel: "Fable", ...settings } },
+      );
+    const app = { initiator: "user", senderThreadId: null, origin: "app" };
+    const off = await on({ teamRunsFable: false });
+    await settled(off);
+    expect(await send(off, {}, app)).toMatchObject({ action: "proceed" });
+    expect(off.envSet.at(-1)).toEqual(expect.objectContaining({ projectId: "proj-1", value: `${ACCOUNTS}/spare` }));
+    off.harness.dispose();
+    const allowed = await on({ teamRunsFable: true });
+    await settled(allowed);
+    expect(await send(allowed, {}, app)).toMatchObject({ action: "proceed" });
+    expect(allowed.envSet).toEqual([]);
+    allowed.harness.dispose();
   });
 });

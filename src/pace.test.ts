@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dayStart, nextDayStart, paceOf, type DayStart } from "./pace.js";
+import { fableRoom, dayStart, nextDayStart, paceOf, type DayStart } from "./pace.js";
 
 const H = 3_600_000;
 const D = 24 * H;
@@ -155,5 +155,72 @@ describe("nextDayStart (what is kept as the day's first reading)", () => {
     expect(nextDayStart(first, { at, usedPercent: 40, resetsAt: week + 5 * 60_000 }, 9)).toBe(first);
     const moved = { at, usedPercent: 40, resetsAt: week + 5 * 60_000 + 1 };
     expect(nextDayStart(first, moved, 9)).toEqual(moved);
+  });
+});
+
+describe("fableRoom: what background work may still take of an Ultra's Fable", () => {
+  // Saturday 31 Oct 2026, 13:00 in Madrid (12:00Z, winter time); day from 9:00.
+  const NOW = Date.parse("2026-10-31T12:00:00Z");
+  const DAY_MS = 86_400_000;
+  const reset = NOW + 3 * DAY_MS;
+  const week = (used: number) => ({ usedPercent: used, resetsAt: reset });
+  const room = (fable: number, start: number, general = fable, reservePercent = 20) =>
+    fableRoom({
+      fable: week(fable),
+      weekly: week(general),
+      start: { at: NOW - 60_000, usedPercent: start, resetsAt: reset },
+      now: NOW,
+      hour: 9,
+      reservePercent,
+    });
+
+  it("stays open with room under the day's share and above the reserve", () => {
+    const r = room(30, 30);
+    expect(r).toMatchObject({ open: true, why: null, left: 70, reserve: 20 });
+  });
+
+  it("closes at 90 % of the day's share, and not one point before", () => {
+    // 70 left over 3.1 days (from 9:00 to the reset, in hours 3 days + 4 h = 3.1667): budget 22.1.
+    const budget = 70 / ((reset - Date.parse("2026-10-31T08:00:00Z")) / DAY_MS);
+    const stop = budget * 0.9;
+    expect(room(30 + stop - 0.01, 30).open).toBe(true);
+    expect(room(30 + stop + 0.01, 30)).toMatchObject({ open: false, why: "pace" });
+  });
+
+  it("closes at the reserve with day's share to spare: 21 left open, 20 left closed", () => {
+    expect(room(79, 79).open).toBe(true);
+    expect(room(80, 80)).toMatchObject({ open: false, why: "reserve" });
+  });
+
+  it("counts the general week when it is the fuller: that is what stops Fable", () => {
+    expect(room(30, 30, 85)).toMatchObject({ open: false, why: "reserve", left: 15 });
+  });
+
+  it("is closed when the week's reset is not known: nothing is spent blind", () => {
+    expect(
+      fableRoom({
+        fable: { usedPercent: 30, resetsAt: null },
+        weekly: { usedPercent: 30, resetsAt: null },
+        start: undefined,
+        now: NOW,
+        hour: 9,
+        reservePercent: 20,
+      }),
+    ).toMatchObject({ open: false, why: "unknown" });
+  });
+
+  it("opens again at the next day's start, or at the reset when that comes first", () => {
+    expect(room(80, 80).nextAt).toBe(Date.parse("2026-11-01T08:00:00Z"));
+    const soon = NOW + 3_600_000;
+    expect(
+      fableRoom({
+        fable: { usedPercent: 80, resetsAt: soon },
+        weekly: { usedPercent: 80, resetsAt: soon },
+        start: undefined,
+        now: NOW,
+        hour: 9,
+        reservePercent: 20,
+      }).nextAt,
+    ).toBe(soon);
   });
 });

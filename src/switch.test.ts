@@ -1914,7 +1914,7 @@ describe("decidePlacement of background work (SPEC 2026-10-30 §2)", () => {
     ).toEqual({ kind: "move", account: "work", why: "new-project" });
   });
 
-  it("never moves a project already placed because of the pace", () => {
+  it("moves a project already placed off an account saved for the user (Aitor, 2026-10-31)", () => {
     expect(
       decidePlacement({
         currentAccount: "work",
@@ -1924,7 +1924,7 @@ describe("decidePlacement of background work (SPEC 2026-10-30 §2)", () => {
         now: NOW,
         savedForUser: saved,
       }),
-    ).toEqual({ kind: "keep" });
+    ).toEqual({ kind: "move", account: "main", why: "current-saved" });
   });
 });
 
@@ -1947,10 +1947,10 @@ describe("background work in every choice of another account (Codex ULTRA-R01)",
     });
     // The user's own thread: as before, the best by quota.
     expect(decidePlacement(placed)).toEqual({ kind: "move", account: "work", why: "current-blocked" });
-    // Only a saved account left: background work still runs there.
+    // Only a saved account left: background work does not run there.
     expect(
       decidePlacement({ ...placed, accounts: accounts.slice(0, 2), savedForUser: saved }),
-    ).toEqual({ kind: "move", account: "work", why: "current-blocked" });
+    ).toEqual({ kind: "keep" });
   });
 
   it("puts a project without a login behind the saved accounts too", () => {
@@ -2040,5 +2040,57 @@ describe("background work in every choice of another account (Codex ULTRA-R01)",
   it("names the account not saved for the user as the best for background work", () => {
     expect(bestAccount(accounts.slice(1), "", NOW, undefined, undefined, saved)).toBe("spare");
     expect(bestAccount(accounts.slice(1), "", NOW)).toBe("work");
+  });
+});
+
+describe("decidePlacement and Fable's brake (Aitor, 2026-10-31)", () => {
+  const ultra = (name: string, fable: number) =>
+    account(name, {
+      session: { usedPercent: 0, resetsAt: null, absent: true },
+      weekly: { usedPercent: fable, resetsAt: NOW + 72 * HOUR },
+      models: { Fable: { usedPercent: fable, resetsAt: NOW + 72 * HOUR } },
+    });
+  const base = { isNew: false, preferredModel: "Fable", reserveModel: "Fable", now: NOW };
+
+  it("moves background work off an account saved for the user to one with room", () => {
+    expect(
+      decidePlacement({
+        ...base,
+        currentAccount: "aitor",
+        accounts: [ultra("aitor", 50), ultra("joytorm", 60)],
+        savedForUser: (n) => n === "aitor",
+      }),
+    ).toEqual({ kind: "move", account: "joytorm", why: "current-saved" });
+  });
+
+  it("says so when no other account has room, and moves nothing", () => {
+    expect(
+      decidePlacement({
+        ...base,
+        currentAccount: "aitor",
+        accounts: [ultra("aitor", 50), ultra("joytorm", 60)],
+        savedForUser: () => true,
+      }),
+    ).toEqual({ kind: "keep", why: "current-saved" });
+  });
+
+  it("a first turn goes to the least spent when it is 15 points ahead, not at 14", () => {
+    const first = { ...base, currentAccount: "aitor", firstTurn: true };
+    expect(
+      decidePlacement({ ...first, accounts: [ultra("aitor", 40), ultra("siloeads", 25)] }),
+    ).toEqual({ kind: "move", account: "siloeads", why: "least-spent" });
+    expect(
+      decidePlacement({ ...first, accounts: [ultra("aitor", 39), ultra("siloeads", 25)] }),
+    ).toEqual({ kind: "keep" });
+  });
+
+  it("a later turn stays where it is, however spent", () => {
+    expect(
+      decidePlacement({
+        ...base,
+        currentAccount: "aitor",
+        accounts: [ultra("aitor", 90), ultra("siloeads", 0)],
+      }),
+    ).toEqual({ kind: "keep" });
   });
 });
