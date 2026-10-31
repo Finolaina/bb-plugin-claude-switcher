@@ -78,7 +78,8 @@ describe("the new-thread account control", () => {
     // The ticket is taken before the change is sent, not after it answers.
     expect(source).toContain(`      const ticket = answers.start();
       try {
-        keep(ticket, await work());`);
+        const next = await work();
+        keep(ticket, next);`);
     expect(source).toContain("const shown = keep(ticket, next);");
     expect(source).toContain("return projectRead(next, shown, project);");
     expect(source).toContain("const shown = answers.accept(ticket, next);");
