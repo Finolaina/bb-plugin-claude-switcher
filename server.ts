@@ -1140,12 +1140,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (model === "" || usage === null || usage === undefined) return null;
     const settled = settle({ ...usage, name: account }, deps.now());
     if (canRunModel(settled, model)) return null;
-    const used = Math.round(modelWindow(settled, model)?.usedPercent ?? 100);
+    const window = modelWindow(settled, model);
+    const used = Math.round(window?.usedPercent ?? 100);
+    const back = window?.resetsAt == null ? "" : ` Vuelve el ${isoInZone(window.resetsAt)}.`;
     const session =
       settled.session.absent === true
         ? ""
         : ` Su sesión de 5 h lleva el ${Math.round(settled.session.usedPercent)} %, pero una sesión libre no da ${model}.`;
-    return `${account} no puede correr ${model}: ${model} consumido ${used} %, queda ${100 - used} %.${session}`;
+    return `${account} no puede correr ${model}: ${model} consumido ${used} %, queda ${100 - used} %.${back}${session}`;
   }
   /** Picked by hand, recently enough: see KV_HAND_PICKS. */
   const handPicks = new Map<string, number>();

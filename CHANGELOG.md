@@ -4,6 +4,50 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.34] - 2026-10-31
+
+Fable's week, by Aitor's order of 2026-10-31, and what Fable measured that
+afternoon: 4/4 and 16 threads waiting on one account, seats idle elsewhere.
+
+### Changed
+
+- **The panel shows what is spent.** Figure and bar go 0 to 100, green, amber
+  and red, for the session, the week and Fable, and never go backwards: a new
+  window starts from 0 with its date, and a reading that comes down inside its
+  window is told as a correction by Anthropic, never hidden.
+- **The brake is on.** Background work in Fable keeps to the day's pace and a
+  reserve of the week (`fableReservePercent`, 20 %, not yet proved enough), and
+  goes on in Opus when it cannot. `paceHoldsBackground` is on by default.
+- **The least spent first** among the accounts for a turn in Fable, with a seat.
+- **Team seats run your own Fable** (`teamRunsFable`, on) while they have
+  session, Fable and a seat. Background work never runs Fable there.
+
+### Added
+
+- **A full account is no target**: seats owed to a queue do not count as free,
+  and a first turn leaves a full account for one with a seat.
+- **`moveAfterWaitMinutes`** (10): past that in a queue, a project moves to
+  another usable account with a seat. A project picked by hand stays, across
+  reloads too, and turns under way keep their account and seat.
+- **The real retry goes to Opus**: background Fable out of room has the row bb
+  queued (which runs the failed turn's model, whatever the thread says) moved to
+  Opus, once. Background Fable waiting past that time with nowhere to go, too.
+  A model the person named in the app is not lowered.
+- **A pin refuses an account that cannot run the project's model**, naming what
+  is used up and when it is back, however much session is left; `use --anyway`
+  pins it all the same and warns.
+- **The queue follows a move**: messages waiting on the old account are judged
+  again and keep their place in time.
+- `health` says `Fable 100% consumido (queda 0%)`; `plazas` gains `esperando` and
+  `esperaMin`.
+
+### Known limits
+
+- Native subagents inherit their parent's account: the plugin cannot move them.
+- bb does not tell a plugin about a model set with `thread update`, nor a person
+  from an agent on the command line: only a model named in the app counts as fixed.
+- Queue clocks and corrections are kept in memory: a reload starts them again.
+
 ## [0.2.33] - 2026-10-31
 
 ### Changed
