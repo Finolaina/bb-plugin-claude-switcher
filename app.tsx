@@ -409,7 +409,13 @@ export function AccountsOverview({
   onLogin?: (name: string) => void;
   onRefresh?: () => void;
 }) {
-  const list = panelList(state, { now, lang, timeZone, preferredModel: state.preferredModel });
+  const list = panelList(state, {
+    now,
+    lang,
+    timeZone,
+    preferredModel: state.preferredModel,
+    paceHoldsBackground: state.paceHoldsBackground,
+  });
   const words = panelWords(lang);
   const byName = new Map(state.accounts.map((a) => [a.name, a]));
   return (
@@ -820,6 +826,7 @@ function rowOf(state: State, account: AccountState, lang: Lang, now = Date.now()
     now,
     lang,
     preferredModel: state.preferredModel,
+    paceHoldsBackground: state.paceHoldsBackground,
   });
 }
 

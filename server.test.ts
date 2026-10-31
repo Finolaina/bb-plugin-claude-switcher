@@ -850,6 +850,7 @@ describe("claude accounts plugin", () => {
       "defaultAccountName",
       "loginPrivateWindow",
       "maximumWaitHours",
+      "paceHoldsBackground",
       "preferredModel",
       "refreshMinutes",
       "seatsMax",
@@ -14847,9 +14848,11 @@ describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
     // 30 of 32 points of the day spent: saved for the user.
     work: () => Response.json(payload(5, 30)),
   };
+  // The brake as 0.2.32 shipped it; off by default since 0.2.33.
+  const ON = { paceHoldsBackground: true };
 
   it("puts a new project of a thread another thread opened behind the account saved for the user", async () => {
-    const h = await host(usage, { kvPreset: { "pace-day": { work: dayStart } } });
+    const h = await host(usage, { kvPreset: { "pace-day": { work: dayStart } }, settings: ON });
     dispose = () => h.harness.dispose();
     await h.harness.behavior.callRpc("accounts_refresh", null);
     const s = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
@@ -14863,7 +14866,7 @@ describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
   });
 
   it("leaves the user's own new project on the best account whatever its pace", async () => {
-    const h = await host(usage, { kvPreset: { "pace-day": { work: dayStart } } });
+    const h = await host(usage, { kvPreset: { "pace-day": { work: dayStart } }, settings: ON });
     dispose = () => h.harness.dispose();
     await h.harness.behavior.callRpc("accounts_refresh", null);
     await h.harness.behavior.emitThreadEvent("thread.created", {
@@ -14880,6 +14883,7 @@ describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
     const blocked = { ...usage, main: () => Response.json(payload(100, 40)), spare: () => Response.json(payload(30, 20)) };
     const opts = (threads: Record<string, Partial<ThreadResponse>> = {}) => ({
       kvPreset: { "pace-day": { work: dayStart } },
+      settings: ON,
       threads,
     });
     const bg = { parentThreadId: "thr-parent" };
@@ -14973,7 +14977,7 @@ describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
       let clock = NOW;
       const h = await host(
         { ...usage, main: () => Response.json(payload(95, 40)), spare: () => Response.json(payload(30, 20)) },
-        { ...opts(), settings: { switchAheadPercent: 90 }, clock: () => clock },
+        { ...opts(), settings: { ...ON, switchAheadPercent: 90 }, clock: () => clock },
       );
       dispose = () => h.harness.dispose();
       await h.harness.behavior.callRpc("accounts_refresh", null);
@@ -15099,6 +15103,188 @@ describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
       expect(stored?.work?.usedPercent).toBe(30);
     });
   });
+});
+
+describe("the brake on background work, off by default (paceHoldsBackground; Aitor 2026-10-31)", () => {
+  // work is aitor's case: an Ultra without the 5-hour window at 200 % of
+  // its day (64 points spent of a 32-point day: NOW is 12:00 in Madrid, the
+  // day began at 09:00 at 0 %, the week resets in 3 days). Without the pace
+  // (0.2.31) it is the best account: a session quarter as low as spare's
+  // and no session spent (0 % against 10 %); main comes after both.
+  const resets = new Date(NOW + 3 * 24 * HOUR).toISOString();
+  const ultraNo5h = (weekly: number): Payload => ({
+    limits: [{ kind: "weekly_all", percent: weekly, resets_at: resets }],
+    five_hour: null,
+    seven_day: { utilization: weekly, resets_at: resets, locked_reason: null },
+  });
+  const dayStart = { at: NOW - 2 * HOUR, usedPercent: 0, resetsAt: NOW + 3 * 24 * HOUR };
+  const usage = {
+    main: () => Response.json(payload(30, 40)),
+    spare: () => Response.json(payload(10, 20)),
+    work: () => Response.json(ultraNo5h(64)),
+  };
+  // main (where proj-1 is) out of its session.
+  const blocked = { ...usage, main: () => Response.json(payload(100, 40)) };
+  const bg = { parentThreadId: "thr-parent" };
+  // Off: background work lands where 0.2.31 put it, as the user's own
+  // does (work). On: as 0.2.32, behind the account saved for the user.
+  const cases = [
+    ["off (the default)", {}, "work"],
+    ["on", { paceHoldsBackground: true }, "spare"],
+  ] as const;
+  const opts = (
+    settings: Record<string, string | number | boolean>,
+    threads: Record<string, Partial<ThreadResponse>> = {},
+  ) => ({ kvPreset: { "pace-day": { work: dayStart } }, settings, threads });
+
+  it("still measures and keeps the pace with the brake off, and says the brake in the state", async () => {
+    for (const [, settings] of cases) {
+      const h = await host(usage, opts(settings));
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      const s = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+      const work = s.accounts.find((a) => a.name === "work")!;
+      expect(work.usage?.session.absent).toBe(true);
+      expect(work.pace).toMatchObject({ spent: 64, dayPercent: 200, background: false });
+      expect(s.paceHoldsBackground).toBe(settings === cases[1][1]);
+      expect(await h.bb.storage.kv.get("pace-day")).toMatchObject({ work: { usedPercent: 0 } });
+      await h.harness.dispose();
+    }
+  });
+
+  it("tells an open view at once when the brake or the day's start hour changes (Codex PACE-R1-001)", async () => {
+    const h = await host(usage, opts({ paceHoldsBackground: true }));
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const changes = () =>
+      h.harness.realtimeSignals.filter((s) => s.channel === "accounts-changed").length;
+    const list = async () => (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect((await list()).paceHoldsBackground).toBe(true);
+
+    let before = changes();
+    await h.harness.behavior.setSettings({ paceHoldsBackground: false });
+    expect(changes()).toBe(before + 1);
+    expect((await list()).paceHoldsBackground).toBe(false);
+
+    // The day from 11:00 began an hour ago: the day's first reading at
+    // 10:00 is no longer today's, so the pace starts again from now.
+    before = changes();
+    await h.harness.behavior.setSettings({ dayStartHour: 11 });
+    expect(changes()).toBe(before + 1);
+    expect((await list()).accounts.find((a) => a.name === "work")?.pace).toMatchObject({ spent: 0 });
+
+    // A setting that changes neither: no signal for them.
+    before = changes();
+    await h.harness.behavior.setSettings({ maximumWaitHours: 3 });
+    expect(changes()).toBe(before);
+  });
+
+  for (const [label, settings, to] of cases) {
+    describe(`brake ${label}`, () => {
+      it(`choose: a new project of a thread another thread opened goes to ${to}; the user's own to work`, async () => {
+        for (const [t, want] of [
+          [bg, to],
+          [{}, "work"],
+        ] as const) {
+          const h = await host(usage, opts(settings));
+          await h.harness.behavior.callRpc("accounts_refresh", null);
+          await h.harness.behavior.emitThreadEvent("thread.created", {
+            thread: thread({ id: "thr-x", projectId: "proj-3", ...t }),
+          });
+          expect(h.envSet.at(-1)).toEqual(
+            expect.objectContaining({ projectId: "proj-3", value: `${ACCOUNTS}/${want}` }),
+          );
+          await h.harness.dispose();
+        }
+      });
+
+      it(`switch after a failure: a failed turn of background work goes to ${to}`, async () => {
+        const h = await host(blocked, opts(settings, { "thread-1": bg }));
+        dispose = () => h.harness.dispose();
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+        expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/${to}`]);
+      });
+
+      it(`place before a turn: a background turn sent on a blocked account goes to ${to}`, async () => {
+        const h = await host(blocked, opts(settings));
+        dispose = () => h.harness.dispose();
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        expect(
+          await h.harness.registrations.hooks["message.dispatch"]!(
+            makeMessageDispatchHookContext({
+              thread: thread({ id: "thread-1", projectId: "proj-1", originPluginId: "some-automation" }),
+              requestedExecution: { providerId: "claude-code", model: "claude-opus-5-5" },
+              attempt: "start-turn",
+            }),
+          ),
+        ).toEqual({ action: "proceed" });
+        expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/${to}`]);
+      });
+
+      it(`move ahead of the limit: background work goes to ${to}`, async () => {
+        let clock = NOW;
+        const h = await host(
+          { ...usage, main: () => Response.json(payload(95, 40)) },
+          { ...opts({ ...settings, switchAheadPercent: 90 }), clock: () => clock },
+        );
+        dispose = () => h.harness.dispose();
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        clock = NOW + 5 * 60_000;
+        await h.harness.behavior.emitThreadEvent("thread.idle", {
+          thread: thread({ id: "thread-1", projectId: "proj-1", ...bg }),
+          lastAssistantText: null,
+        });
+        expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/${to}`]);
+      });
+
+      it(`the queue: a waiting turn of background work is released on ${to}`, async () => {
+        const row: QueuedRow = {
+          id: "r1",
+          threadId: "thread-1",
+          payload: { kind: "retry", attempt: 2, reason: "Waiting for main", retryOfTurnRequestId: "creq_r1" },
+          sendAt: NOW + 2 * HOUR + BUFFER,
+          waitingOn: { kind: "time" },
+          createdAt: NOW - HOUR,
+          model: "claude-opus-5-5",
+        };
+        const h = await hostListing([])(blocked, {
+          ...opts(settings, { "thread-1": { status: "error", ...bg } as Partial<ThreadResponse> }),
+          queued: [row],
+          threadEvents: {
+            "thread-1": [
+              {
+                id: "evt_r1",
+                scope: { kind: "thread" },
+                threadId: "thread-1",
+                seq: 1,
+                createdAt: NOW - HOUR,
+                type: "client/turn/requested",
+                data: { requestId: "creq_r1", execution: { model: "claude-opus-5-5" } },
+              },
+            ],
+          },
+        } as HostOptions);
+        dispose = () => h.harness.dispose();
+        const before = h.usageCalls.length;
+        const run = h.harness.behavior.runService("usage-refresh");
+        await vi.waitFor(() => expect(h.usageCalls).toHaveLength(before + 3));
+        run.controller.abort();
+        await run.done;
+        await vi.waitFor(() => expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/${to}`]));
+      });
+
+      it(`health: freno ${settings === cases[1][1]}, and fondo ${to === "spare" ? "false" : "true"} for work at 200 %`, async () => {
+        const h = await host(usage, opts(settings));
+        dispose = () => h.harness.dispose();
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+        expect(report.version).toBe(1);
+        expect(report.freno).toBe(to === "spare");
+        const work = report.cuentas.find((c: { nombre: string }) => c.nombre === "work");
+        expect(work.ritmo).toMatchObject({ pctDia: 200, fondo: to !== "spare" });
+      });
+    });
+  }
 });
 
 describe("bb claude-switcher health (SPEC 2026-10-30 §4)", () => {

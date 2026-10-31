@@ -47,6 +47,8 @@ export interface HealthReport {
   version: typeof HEALTH_VERSION;
   medido: string;
   inicioDia: number;
+  /** The day's pace holds background work back (the plugin's paceHoldsBackground; off by default). */
+  freno: boolean;
   cuentas: Array<{
     nombre: string;
     plan: "ultra" | "max" | "team" | "desconocido";
@@ -59,6 +61,7 @@ export interface HealthReport {
       presupuesto: number;
       gastado: number;
       pctDia: number;
+      /** It may take background work: always with the brake off. */
       fondo: boolean;
     } | null;
     plazas: {
@@ -118,12 +121,15 @@ export function healthReport(input: {
   /** When the latest measurement was taken (or the report, without one). */
   measured: number;
   dayStartHour: number;
+  /** The brake is on: an account past 90 % of its day takes no background work. */
+  holdsBackground: boolean;
   accounts: HealthAccount[];
 }): HealthReport {
   return {
     version: HEALTH_VERSION,
     medido: isoInZone(input.measured),
     inicioDia: input.dayStartHour,
+    freno: input.holdsBackground,
     cuentas: input.accounts.map((a) => {
       const u = a.usage;
       const whole = u !== null && u.unknown !== true;
@@ -145,7 +151,7 @@ export function healthReport(input: {
                 presupuesto: round1(a.pace.budget),
                 gastado: round1(a.pace.spent),
                 pctDia: Math.round(a.pace.dayPercent),
-                fondo: a.pace.background,
+                fondo: !input.holdsBackground || a.pace.background,
               },
         plazas:
           a.seats === undefined
@@ -188,7 +194,7 @@ export function healthText(report: HealthReport): string {
     return `${c.nombre.padEnd(width)}  ${parts.join(" · ")}`;
   });
   return [
-    `medido ${report.medido} · el día empieza a las ${report.inicioDia}:00`,
+    `medido ${report.medido} · el día empieza a las ${report.inicioDia}:00 · freno de fondo ${report.freno ? "encendido" : "apagado"}`,
     ...lines,
     "",
   ].join("\n");

@@ -4,6 +4,30 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.33] - 2026-10-31
+
+### Changed
+
+- **The day's pace no longer holds background work back by default.** A
+  new setting, `paceHoldsBackground`, off by default by Aitor's decision
+  of 2026-10-31, turns on the brake 0.2.32 added. Off, no account is
+  saved for the user in any choice (a new project, a move off an account
+  that cannot run before a turn, the way back from an excursion, the
+  switch after a failed turn, a waiting turn moved to a free account, the
+  move ahead of the limit): background work is placed as in 0.2.31. The
+  pace is still measured and stored (`pace-day`) and shown: today's share
+  in the panel, `ritmo` in `health`. On, everything is as in 0.2.32.
+- **The panel only says «Guardada para ti» when something keeps it.**
+  With the brake off no row is «Kept for you» and the sentence on top
+  names none: an account past its day's share is Working, Free or Out,
+  and its line still says it spent today's share. The state the app
+  receives carries `paceHoldsBackground`.
+- **`health --json` says the brake.** A new top-level field, `freno`
+  (the setting), and `ritmo.fondo` keeps its meaning, «it may take
+  background work»: always `true` with the brake off. Still version 1:
+  a field added, none changed in meaning. The text form says «freno de
+  fondo encendido/apagado» after the day's start.
+
 ## [0.2.32] - 2026-10-30
 
 ### Fixed
