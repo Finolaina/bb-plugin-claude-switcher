@@ -649,6 +649,31 @@ describe("Fable's week in the panel (Aitor, 2026-10-31)", () => {
     expect(w.when).toMatch(/^se reinició /);
   });
 
+  it("the bar's own 0 is told from its own window: reset with its date, not started only when it never did", () => {
+    const passed = NOW - 3_600_000;
+    const seat = (session: { usedPercent: number; resetsAt: number | null }) =>
+      accountRow(
+        { name: "s", plan: "team", problem: null, usage: { blocked: false, session, weekly: { usedPercent: 0, resetsAt: null, absent: true }, models: {} } } as never,
+        undefined,
+        ctx,
+      );
+    const reset = seat({ usedPercent: 70, resetsAt: passed });
+    expect([reset.figure, reset.when]).toEqual(["0 %", expect.stringMatching(/^se reinició /)]);
+    expect(seat({ usedPercent: 0, resetsAt: null }).when).toBe("sin empezar");
+    // Fable's window over and the week's still running: the bar is Fable's, so is the date.
+    const a = ultra("a", 40);
+    const fableOver = accountRow(
+      {
+        ...a,
+        fable: { ...a.fable!, resetsAt: passed },
+        usage: { ...a.usage!, models: { Fable: { usedPercent: 60, resetsAt: passed } } },
+      },
+      undefined,
+      ctx,
+    );
+    expect([fableOver.figure, fableOver.when]).toEqual(["0 %", expect.stringMatching(/^se reinició /)]);
+  });
+
   it("a reading that falls with no reset is said as a correction, and the bar shows the reading", () => {
     const row = accountRow({ ...ultra("a", 60), dropped: { fable: 70 } }, undefined, ctx);
     expect(row.figure).toBe("60 %");

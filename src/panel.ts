@@ -506,9 +506,11 @@ export function accountRow(
     const resets = full.map((w) => w.resetsAt);
     if (resets.length > 0 && resets.every(ahead)) whenAt = Math.max(...resets);
   } else if (main !== null) {
-    if (team && usedOf(main, now) === 0) when = t.notStarted;
-    else if (ahead(fable?.resetsAt ?? null)) whenAt = fable!.resetsAt;
-    else if (ahead(main.resetsAt)) whenAt = main.resetsAt;
+    // The bar's own window: Fable's where it draws Fable, the rest are extras.
+    const reset = fable !== null ? (fableWindow?.resetsAt ?? fable.resetsAt) : main.resetsAt;
+    if (ahead(reset)) whenAt = reset;
+    else if (reset !== null) when = t.didReset(short(reset));
+    else if (team) when = t.notStarted;
   }
   if (whenAt !== null)
     when = out ? t.back(short(whenAt)) : t.resets(short(whenAt));
