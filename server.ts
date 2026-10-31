@@ -732,6 +732,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const moved =
       next.accountsDir !== current.accountsDir ||
       next.defaultAccountName !== current.defaultAccountName;
+    // What the views show of the pace: whether an account is kept for the
+    // user, and the day it counts (Codex PACE-R1-001).
+    const paceShown =
+      next.paceHoldsBackground !== current.paceHoldsBackground ||
+      next.dayStartHour !== current.dayStartHour;
     // The default is `~/.claude` whatever it is called: renamed, it keeps
     // the seats it has taken (Astra SEATS-R08).
     if (next.defaultAccountName !== current.defaultAccountName)
@@ -749,6 +754,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // Found again (and stale measurements pruned) on next use: an account of
     // the old directory must not be picked.
     if (moved) accounts = [];
+    // An open view asks again now, not at the next refresh.
+    if (paceShown) bb.realtime.publish(CHANGED, { at: deps.now() });
   });
 
   const collector = new UsageCollector({
