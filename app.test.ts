@@ -214,7 +214,7 @@ async function withIcon() {
 // these render app.tsx's views with the real reading of 2026-10-30 22:46
 // (src/panel-fixture.ts) and read what is on screen.
 describe("design B in Settings", () => {
-  async function shown(lang: "es" | "en") {
+  async function shown(lang: "es" | "en", paceHoldsBackground = true) {
     const { renderToStaticMarkup } = await import("react-dom/server");
     const { createElement } = await import("react");
     await withIcon();
@@ -222,7 +222,7 @@ describe("design B in Settings", () => {
     const { realReading, READING_AT } = await import("./src/panel-fixture");
     const html = renderToStaticMarkup(
       createElement(AccountsOverview, {
-        state: realReading(),
+        state: { ...realReading(), paceHoldsBackground },
         now: READING_AT,
         lang,
         timeZone: "Europe/Madrid",
@@ -255,6 +255,18 @@ describe("design B in Settings", () => {
     // No jargon on screen (DISENO.md §Textos).
     for (const word of ["ses ", "sem ", "LOCKED", "seats", "weekly", "Weekly"])
       expect(text).not.toContain(word);
+  });
+
+  it("keeps nobody for the user with the brake on background work off (the default; Aitor 2026-10-31)", async () => {
+    const { html, text } = await shown("es", false);
+    expect(text).toContain(
+      "Trabajan studio, ganaresenas, team2, team4. La que más semana tiene es agency (100 %).",
+    );
+    expect(text).not.toContain("Guardada");
+    expect(html).not.toContain("cs-s-kept");
+    // The day's share is still told.
+    expect(text).toContain("Libre · Ya ha gastado lo de hoy");
+    expect((await shown("en", false)).text).not.toContain("Kept for you");
   });
 
   it("speaks English to a browser that is not set to Spanish", async () => {

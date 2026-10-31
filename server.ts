@@ -393,6 +393,8 @@ const stateSchema = z.object({
   defaultAccountName: z.string(),
   preferredModel: z.string(),
   autoSwitch: z.boolean(),
+  /** The day's pace holds background work off the accounts saved for the user (the setting; off by default). */
+  paceHoldsBackground: z.boolean(),
   lastSwitch: switchRecordSchema.nullable(),
   /** The account the switch policy would pick now; null when none can run. */
   bestAccount: z.string().nullable(),
@@ -576,8 +578,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       type: "number",
       label: "Hour the day starts (Europe/Madrid)",
       description:
-        "Each day from this hour gets an even share of what is left of an account's weekly window. At 90 % of it the account takes no more background work (threads another thread, an automation or a plugin opens) unless no other account can run it; your own threads are never held back by it.",
+        "Each day from this hour gets an even share of what is left of an account's weekly window; the panel and `health` show how much of it is spent. With the setting below on, at 90 % of it the account takes no more background work.",
       default: 9,
+    },
+    // Off by default (Aitor, 2026-10-31): the pace is measured and shown,
+    // and holds nothing back until this is switched on.
+    paceHoldsBackground: {
+      type: "boolean",
+      label: "Keep accounts that spent today's share for your own threads",
+      description:
+        "An Ultra or Max account at 90 % of its share of the day takes no more background work (threads another thread, an automation or a plugin opens) unless no other account can run it; your own threads are never held back by it. Off: the day's share is only shown.",
+      default: false,
     },
     loginPrivateWindow: {
       type: "boolean",
@@ -1342,9 +1353,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       typeof thread.originPluginId === "string"
     );
   }
-  /** savedForUser for background work; nothing (the pace does not count) for the user's own. */
-  function paceFilter(background: boolean) {
-    return background ? { savedForUser } : {};
+  /**
+   * savedForUser for background work while the brake is on
+   * (paceHoldsBackground); nothing otherwise: the user's own threads, and
+   * every thread with the brake off (the default), are placed as if no
+   * account were saved. Every choice that weighs the pace asks here.
+   */
+  function paceFilter(background: boolean): {
+    savedForUser?: (name: string) => boolean;
+  } {
+    return background && current.paceHoldsBackground === true
+      ? { savedForUser }
+      : {};
   }
   function savedForUser(name: string): boolean {
     const usage = collector.get(name)?.usage;
@@ -2221,6 +2241,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       defaultAccountName: current.defaultAccountName,
       preferredModel: current.preferredModel,
       autoSwitch: current.autoSwitch,
+      paceHoldsBackground: current.paceHoldsBackground === true,
       lastSwitch:
         (await bb.storage.kv.get<SwitchRecord>(KV_LAST_SWITCH)) ?? null,
       bestAccount: bestAccount(
@@ -5181,7 +5202,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       now,
       current.preferredModel,
       freeSeats,
-      isBackground(thread) ? savedForUser : undefined,
+      paceFilter(isBackground(thread)).savedForUser,
     );
     if (to === null) {
       // Nothing to release it on; the wait fires on its own at sendAt and
@@ -5364,6 +5385,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return healthReport({
       measured: observed.length === 0 ? now : Math.max(...observed),
       dayStartHour: dayHour(),
+      holdsBackground: current.paceHoldsBackground === true,
       accounts: accounts.map((account) => {
         const m = collector.get(account.name);
         const usage =

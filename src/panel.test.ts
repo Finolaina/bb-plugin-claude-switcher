@@ -153,7 +153,14 @@ const seats = (running: number, capacity: number, queued = 0) => ({
     title: null,
   })),
 });
-const ES = { now: NOW, lang: "es" as const, timeZone: MADRID, preferredModel: "Fable" };
+// The brake on background work on, as 0.2.32 shipped it (paceHoldsBackground).
+const ES = {
+  now: NOW,
+  lang: "es" as const,
+  timeZone: MADRID,
+  preferredModel: "Fable",
+  paceHoldsBackground: true,
+};
 const EN = { ...ES, lang: "en" as const };
 
 describe("the panel's dates are Madrid's, whatever the browser's zone (Codex ULTRA-R2-005)", () => {
@@ -364,6 +371,41 @@ function realState() {
 }
 const said = (pieces: { text: string; bold: boolean }[]) =>
   pieces.map((p) => (p.bold ? `**${p.text}**` : p.text)).join("");
+
+describe("with the brake on background work off (paceHoldsBackground, the default; Aitor 2026-10-31)", () => {
+  const OFF_ES = { ...ES, paceHoldsBackground: false };
+  const OFF_EN = { ...EN, paceHoldsBackground: false };
+
+  it("never calls an account «Guardada para ti»: it is Trabajando, Libre or Agotada, and still says today's share", () => {
+    const spent = ultra("viaulab", 68, "2026-11-04T01:00:00+01:00", { budget: 11.1, spent: 20 });
+    expect(accountRow(spent, seats(0, 4), OFF_ES)).toMatchObject({
+      state: "free",
+      word: "Libre",
+      line: "Ya ha gastado lo de hoy",
+    });
+    expect(accountRow(spent, seats(1, 4), OFF_ES)).toMatchObject({ state: "working", word: "Trabajando" });
+    // No pace known (it would be saved with the brake on): free too.
+    expect(accountRow(ultra("aitor", 98, "2026-11-01T18:00:00+01:00", null, false), undefined, OFF_EN)).toMatchObject({
+      state: "free",
+      word: "Free",
+    });
+    const full = ultra("m", 100, "2026-10-31T11:00:00+01:00", { budget: 0, spent: 0 });
+    expect(accountRow(full, seats(0, 4), OFF_ES).state).toBe("out");
+    // A context that does not say: off, never a claim the plugin cannot keep.
+    const { paceHoldsBackground: _, ...unsaid } = ES;
+    expect(accountRow(spent, seats(0, 4), unsaid).state).toBe("free");
+  });
+
+  it("says nobody is kept for the user", () => {
+    const es = said(panelList(realState(), OFF_ES).sentence);
+    expect(es).not.toContain("Guardada");
+    expect(es).toBe("Trabajan **studio, ganaresenas, team2, team3**. La que más semana tiene es **agency** (100 %).");
+    expect(said(panelList(realState(), OFF_EN).sentence)).not.toContain("Kept");
+    expect(
+      panelList(realState(), OFF_ES).groups.flatMap((g) => g.rows).filter((r) => r.state === "kept"),
+    ).toEqual([]);
+  });
+});
 
 describe("panelList", () => {
   it("says who works, who is kept and which has most week, then the two groups in order", () => {
