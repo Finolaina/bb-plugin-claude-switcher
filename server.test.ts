@@ -319,6 +319,8 @@ interface QueuedRow {
 interface HostOptions {
   /** queuedMessages.create throws. */
   queueCreateFails?: boolean;
+  reorderFails?: boolean;
+  threadChosenModel?: string;
   settings?: Record<string, string | number | boolean>;
   /**
    * The projects bb lists, by id (default: proj-1, proj-2 and, on request,
@@ -439,6 +441,8 @@ async function host(
     reason?: string;
   }> = [];
   const sent: string[] = [];
+  const sendDecisions: { action: string; reason?: string; sendAt?: number }[] = [];
+  const hookOf: { current: ((ctx: never) => unknown) | null } = { current: null };
   const deleted: string[] = [];
   const queued: QueuedRow[] = [...(options.queued ?? [])];
   const threadUpdates: { threadId: string; model?: string }[] = [];
@@ -485,6 +489,34 @@ async function host(
         update: async (args: { threadId: string; model?: string }) => {
           threadUpdates.push(args);
           return thread({ id: args.threadId });
+        },
+        defaultExecutionOptions: async () => options.threadChosenModel === undefined ? null : { model: options.threadChosenModel },
+        // Like bb 0.48.1 (start-server: acceptThreadSendRequest → attemptDispatch):
+        // the message goes through message.dispatch, in any thread status, with
+        // origin "plugin" and no sender: the user's, says resolveDispatchAuthor.
+        // A wait leaves a row that keeps that origin; a proceed runs it.
+        send: async (args: { threadId: string; model?: string; input: unknown; senderThreadId?: string; permissionMode?: string; reasoningLevel?: string }) => {
+          if (options.queueCreateFails === true) throw new Error("the queue refused it");
+          created.push(args);
+          const id = `created-${created.length}`;
+          const decision = (await hookOf.current!(
+            makeMessageDispatchHookContext({
+              thread: thread({ id: args.threadId, projectId: args.threadId === "thr-2" ? "proj-2" : "proj-1", ...options.threads?.[args.threadId] }),
+              requestedExecution: { providerId: "claude-code", model: args.model ?? "claude-opus-5-5" },
+              attempt: "start-turn",
+              initiator: args.senderThreadId === undefined ? "user" : "agent",
+              senderThreadId: args.senderThreadId ?? null,
+              origin: "plugin",
+              originPluginId: "claude-switcher",
+              executionSources: { model: "explicit" },
+              queuedMessages: [],
+            } as never),
+          )) as { action: string; reason?: string; sendAt?: number };
+          sendDecisions.push(decision);
+          if (decision.action === "proceed") return { ok: true, delivery: "sent" };
+          const row = { id, threadId: args.threadId, payload: { kind: "inline" }, sendAt: decision.sendAt ?? null, model: args.model, state: "waiting", waitingOn: { kind: "plugin", pluginId: "claude-switcher", reason: decision.reason ?? "" }, origin: "plugin", originPluginId: "claude-switcher", content: args.input, senderThreadId: args.senderThreadId ?? null, permissionMode: null, reasoningLevel: null, serviceTier: null };
+          queued.push(row as never);
+          return { ok: true, delivery: "queued", queuedMessage: row };
         },
         // Like bb: every thread, as threads.get answers for it.
         list: async () => {
@@ -636,6 +668,7 @@ async function host(
             return queued.filter((row) => row.threadId === threadId);
           },
           reorder: async (args: { queuedMessageId: string; previousQueuedMessageId: string | null; nextQueuedMessageId: string | null }) => {
+            if (options.reorderFails === true) throw new Error("stale neighbour");
             reordered.push(args);
             return { ok: true };
           },
@@ -762,6 +795,7 @@ async function host(
       : { sessionsIo: options.sessionsIo }),
   });
   fake.bb.storage.kv.get = kvGet;
+  hookOf.current = (ctx) => fake.harness.registrations.hooks["message.dispatch"]!(ctx);
   // The seats counted after the load, as they are by the time a user sends
   // a message, unless the test holds the count: a message meanwhile waits
   // at once (Astra SEATS-R4-002).
@@ -780,6 +814,7 @@ async function host(
     envReads,
     retries,
     sent,
+    sendDecisions,
     deleted,
     queued,
     threadUpdates,
@@ -4136,7 +4171,8 @@ describe("placing a project before a new thread's first turn", () => {
         expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
           ["proj-3", `${ACCOUNTS}/work`],
         ]);
-        expect(h.harness.recheckCount).toBe(1);
+        // The placement's own and the one every move asks: asked again is what counts.
+        expect(h.harness.recheckCount).toBeGreaterThanOrEqual(1);
         // bb asks again: the turn goes, on the account just chosen.
         expect(
           await dispatched(h, "thr-new", "proj-3", "claude-haiku-5-5"),
@@ -14986,8 +15022,9 @@ describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
         },
       });
       // No project listed: the refresh does not move proj-1 off main itself.
+      // Background Fable is not released on another Ultra (requirement A): it fires there and goes down.
       for (const [t, to] of [
-        [bg, "spare"],
+        [bg, null],
         [{}, "work"],
       ] as const) {
         const h = await hostListing([])(blocked, waiting(t) as HostOptions);
@@ -14996,7 +15033,10 @@ describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
         await vi.waitFor(() => expect(h.usageCalls).toHaveLength(before + 3));
         run.controller.abort();
         await run.done;
-        await vi.waitFor(() => expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/${to}`]));
+        if (to === null) {
+          await new Promise((done) => setTimeout(done, 20));
+          expect(h.envSet.filter((e) => e.value === `${ACCOUNTS}/spare`)).toEqual([]);
+        } else await vi.waitFor(() => expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/${to}`]));
         await h.harness.dispose();
       }
     });
@@ -15015,6 +15055,22 @@ describe("background work and the day's pace (SPEC 2026-10-30 §2)", () => {
         lastAssistantText: null,
       });
       expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/spare`]);
+    });
+
+    it("background work at the brake is not moved ahead of the limit to another Ultra (requirement A)", async () => {
+      let clock = NOW;
+      const h = await host(
+        { ...usage, main: () => Response.json(payload(95, 85)), spare: () => Response.json(payload(30, 40)) },
+        { ...opts(), settings: { ...ON, switchAheadPercent: 90 }, clock: () => clock },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      clock = NOW + 5 * 60_000;
+      await h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: thread({ id: "thread-1", projectId: "proj-1", ...bg }),
+        lastAssistantText: null,
+      });
+      expect(h.envSet).toEqual([]);
     });
   });
 
@@ -15298,7 +15354,11 @@ describe("the brake on background work, by its setting (paceHoldsBackground)", (
         await vi.waitFor(() => expect(h.usageCalls).toHaveLength(before + 3));
         run.controller.abort();
         await run.done;
-        await vi.waitFor(() => expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/${to}`]));
+        // With the brake on, background Fable is not released on another Ultra (requirement A).
+        if (settings === cases[1][1]) {
+          await new Promise((done) => setTimeout(done, 20));
+          expect(h.envSet).toEqual([]);
+        } else await vi.waitFor(() => expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/${to}`]));
       });
 
       it(`health: freno ${settings === cases[1][1]}, and fondo ${to === "spare" ? "false" : "true"} for work past its day`, async () => {
@@ -15753,16 +15813,131 @@ describe("Fable's brake at a message's checkpoint (Aitor, 2026-10-31)", () => {
     expect(h.created).toHaveLength(1);
   });
 
-  it("in a thread left in error the lowered retry is sent: nothing else would send it", async () => {
+  it("in a thread left in error the lowered retry goes by the send that the hook judges, not the explicit one that skips it", async () => {
     const errored = { ...BG, status: "error" };
     const h = await host(atPace.usage, { kvPreset: atPace.kvPreset, settings: ON, threads: { "thread-1": errored } });
     await settled(h);
     rowsOf(h, FABLE_MODEL);
     Object.assign(h.queued[0]!, { payload: { kind: "retry", retryOfTurnRequestId: "req-1", attempt: 2, reason: "x" }, waitingOn: { kind: "time" } });
     await send(h, BG);
-    await vi.waitFor(() => expect(h.sent).toEqual(["created-1"]));
+    await vi.waitFor(() => expect(h.deleted).toContain("row-1"));
+    expect(h.sent).toEqual([]);
+    // Every account here still has Fable, no Team: the judged copy waits, it does not spend their week.
+    expect(h.sendDecisions).toEqual([expect.objectContaining({ action: "wait", reason: expect.stringMatching(/no gasta la semana/) })]);
   });
 
+  it("a copy of the plugin's stays background: it is not exempted as if typed by the user, and a Team seat takes it", async () => {
+    const seat = () =>
+      Response.json({
+        five_hour: { utilization: 10, resets_at: new Date(NOW + 2 * HOUR).toISOString(), locked_reason: null },
+        limits: [{ kind: "session", percent: 10, resets_at: new Date(NOW + 2 * HOUR).toISOString() }],
+        seven_day: null,
+      } as unknown as Payload);
+    const h = await host(
+      { main: () => Response.json(ultra(60)), spare: () => Response.json(ultra(60)), work: seat },
+      { kvPreset: { "fable-pace-day": { main: start(20), spare: start(20) } }, settings: ON, threads: { "thread-1": BG } },
+    );
+    await settled(h);
+    await send(h, BG);
+    rowsOf(h, FABLE_MODEL);
+    await vi.waitFor(() => expect(h.deleted).toContain("row-1"));
+    expect(h.sendDecisions).toEqual([expect.objectContaining({ action: "proceed" })]);
+    expect(h.envSet.at(-1)).toEqual(expect.objectContaining({ projectId: "proj-1", value: `${ACCOUNTS}/work` }));
+  });
+
+  it("a «Please continue.» in Opus that is someone else's is left alone: the copy goes by id, not by what it says", async () => {
+    const h = await host(atPace.usage, { kvPreset: atPace.kvPreset, settings: ON, threads: { "thread-1": BG } });
+    await settled(h);
+    const same = [{ type: "text", text: "Please continue." }];
+    rowsOf(h, FABLE_MODEL);
+    Object.assign(h.queued[0]!, { content: same });
+    h.queued.push({ id: "theirs", threadId: "thread-1", payload: { kind: "inline" }, sendAt: null, model: "claude-opus-5-5", state: "waiting", waitingOn: { kind: "thread-busy" }, content: same, senderThreadId: null, permissionMode: null, reasoningLevel: null, serviceTier: null } as never);
+    await send(h, BG);
+    await vi.waitFor(() => expect(h.deleted).toContain("row-1"));
+    expect(h.created).toHaveLength(1);
+    expect(h.deleted).not.toContain("theirs");
+    expect(h.queued.map((r: { id: string }) => r.id)).toContain("theirs");
+  });
+
+  it("the copy written down survives a reload: the original comes back, no second copy, and it does not run", async () => {
+    const preset = { ...atPace.kvPreset, "lowered-rows": { "row-1": { at: NOW - HOUR, copy: "made-before", sending: false } } };
+    const h = await host(atPace.usage, { kvPreset: preset, settings: ON, threads: { "thread-1": BG } });
+    await settled(h);
+    rowsOf(h, FABLE_MODEL);
+    await send(h, BG);
+    await vi.waitFor(() => expect(h.deleted).toContain("row-1"));
+    expect(h.created).toEqual([]);
+    h.deleted.length = 0;
+    // Asked again in bb's queue: with the brake open by now, it must not run beside its copy.
+    const d = await send(h, BG, { queuedMessages: [{ id: "row-1" }] });
+    expect(d).toMatchObject({ action: "wait" });
+    await vi.waitFor(() => expect(h.deleted).toContain("row-1"));
+  });
+
+  it("a send whose answer was never seen (a reload): the original stays, not to go twice", async () => {
+    const preset = { ...atPace.kvPreset, "lowered-rows": { "row-1": { at: NOW - 60_000, copy: null, sending: true } } };
+    const h = await host(atPace.usage, { kvPreset: preset, settings: ON, threads: { "thread-1": BG } });
+    await settled(h);
+    rowsOf(h, FABLE_MODEL);
+    await send(h, BG);
+    await new Promise((done) => setTimeout(done, 20));
+    expect(h.created).toEqual([]);
+    expect(h.deleted).toEqual([]);
+    expect(h.threadUpdates).toEqual([]);
+  });
+
+  it("the thread's model changes only once the copy stands, and not over one the person chose since", async () => {
+    const h = await host(atPace.usage, { kvPreset: atPace.kvPreset, settings: ON, threads: { "thread-1": BG }, queueCreateFails: true });
+    await settled(h);
+    rowsOf(h, FABLE_MODEL);
+    await send(h, BG);
+    await new Promise((done) => setTimeout(done, 20));
+    expect(h.threadUpdates).toEqual([]);
+    const chose = await host(atPace.usage, { kvPreset: atPace.kvPreset, settings: ON, threads: { "thread-1": BG }, threadChosenModel: "claude-sonnet-5-5" });
+    await settled(chose);
+    rowsOf(chose, FABLE_MODEL);
+    await send(chose, BG);
+    await vi.waitFor(() => expect(chose.deleted).toContain("row-1"));
+    expect(chose.threadUpdates).toEqual([]);
+    chose.harness.dispose();
+  });
+
+  it("a copy that cannot keep its place is taken back and the original stays", async () => {
+    const h = await host(atPace.usage, { kvPreset: atPace.kvPreset, settings: ON, threads: { "thread-1": BG }, reorderFails: true });
+    await settled(h);
+    rowsOf(h, FABLE_MODEL);
+    h.queued.push({ id: "behind", threadId: "thread-1", payload: { kind: "inline" }, sendAt: null, model: "claude-opus-5-5", state: "waiting", waitingOn: { kind: "thread-busy" }, content: [{ type: "text", text: "detrás" }], senderThreadId: null, permissionMode: null, reasoningLevel: null, serviceTier: null } as never);
+    await send(h, BG);
+    await vi.waitFor(() => expect(h.deleted).toContain("created-1"));
+    expect(h.deleted).not.toContain("row-1");
+    expect(h.threadUpdates).toEqual([]);
+  });
+
+  it("a turn of background Fable that fails on its limit does not go to another Ultra with room in Fable: its retry goes to Opus", async () => {
+    const seat = () =>
+      Response.json({
+        five_hour: { utilization: 10, resets_at: new Date(NOW + 2 * HOUR).toISOString(), locked_reason: null },
+        limits: [{ kind: "session", percent: 10, resets_at: new Date(NOW + 2 * HOUR).toISOString() }],
+        seven_day: null,
+      } as unknown as Payload);
+    const h = await host(
+      { main: () => Response.json(ultra(100)), spare: () => Response.json(ultra(10)), work: seat },
+      {
+        kvPreset: { "fable-pace-day": { main: start(100), spare: start(10) } },
+        settings: ON,
+        threads: { "thread-1": { ...BG, status: "error" } },
+        threadEvents: { "thread-1": [{ type: "client/turn/requested", data: { requestId: "creq_1", execution: { model: FABLE_MODEL } } }] },
+        queued: [{ id: "row-retry", threadId: "thread-1", payload: { kind: "retry", attempt: 1, reason: "x", retryOfTurnRequestId: "creq_1" }, sendAt: NOW + 2 * HOUR, model: FABLE_MODEL, state: "scheduled", senderThreadId: null, content: [{ type: "text", text: "Please continue." }] }],
+      } as never,
+    );
+    await settled(h);
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    await vi.waitFor(() => expect(h.created).toHaveLength(1));
+    expect(h.created[0]).toMatchObject({ model: "claude-opus-5-5" });
+    await vi.waitFor(() => expect(h.deleted).toContain("row-retry"));
+    expect(h.envSet.filter((e) => e.value === `${ACCOUNTS}/spare`)).toEqual([]);
+    expect(h.envSet.at(-1)).toEqual(expect.objectContaining({ value: `${ACCOUNTS}/work` }));
+  });
 
   it("canary d: under the reserve with day's share to spare, no background Fable either", async () => {
     const h = await host(
@@ -15777,14 +15952,37 @@ describe("Fable's brake at a message's checkpoint (Aitor, 2026-10-31)", () => {
     expect(await send(h, BG)).toMatchObject({ action: "wait" });
   });
 
-  it("goes on in Fable, to the account with room, when one has it", async () => {
+  it("requirement A: its account at the brake and another Ultra with seat and room: the Fable does not go there; down to Opus", async () => {
     const h = await host(
-      { main: () => Response.json(ultra(60)), spare: () => Response.json(ultra(70)), work: () => Response.json(ultra(60)) },
-      { kvPreset: { "fable-pace-day": { main: start(20), work: start(20) } }, settings: ON, threads: { "thread-1": BG } },
+      { main: () => Response.json(ultra(60)), spare: () => Response.json(ultra(30)), work: () => Response.json(ultra(60)) },
+      { kvPreset: { "fable-pace-day": { main: start(20), work: start(20), spare: start(30) } }, settings: ON, threads: { "thread-1": BG } },
+    );
+    await settled(h);
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    expect(report.cuentas.find((c: { nombre: string }) => c.nombre === "spare").fable.fondo).toBe(true);
+    const d = (await send(h, BG)) as { action: string; reason: string };
+    expect(d.action).toBe("wait");
+    expect(d.reason).toMatch(/sigue en Opus, no en otra Ultra/);
+    expect(h.envSet.filter((e) => e.value === `${ACCOUNTS}/spare`)).toEqual([]);
+  });
+
+  it("requirement A, the legitimate Fable before the brake: background on an account with room runs there", async () => {
+    const h = await host(
+      { main: () => Response.json(ultra(30)), spare: () => Response.json(ultra(10)) },
+      { kvPreset: { "fable-pace-day": { main: start(30), spare: start(10) } }, settings: ON, threads: { "thread-1": BG } },
     );
     await settled(h);
     expect(await send(h, BG)).toMatchObject({ action: "proceed" });
-    expect(h.envSet.at(-1)).toEqual(expect.objectContaining({ projectId: "proj-1", value: `${ACCOUNTS}/spare` }));
+  });
+
+  it("requirement A: a person's Fable may still go to the Ultra with room", async () => {
+    const h = await host(
+      { main: () => Response.json(ultra(100)), spare: () => Response.json(ultra(30)) },
+      { kvPreset: { "fable-pace-day": { main: start(100), spare: start(30) } }, settings: ON, threads: { "thread-1": {} } },
+    );
+    await settled(h);
+    expect(await send(h, {}, { initiator: "user", senderThreadId: null, origin: "app" })).toMatchObject({ action: "proceed" });
+    expect(h.envSet.at(-1)).toEqual(expect.objectContaining({ value: `${ACCOUNTS}/spare` }));
   });
 
   it("never holds what the user typed, nor the user's own thread", async () => {
@@ -16048,7 +16246,7 @@ describe("Seats count, as well as what is spent (Fable's measurement of 2026-10-
     h.queued.push({ id: "row-9", threadId: "t9", payload: { kind: "inline" }, sendAt: at + HOUR, model: FABLE_MODEL, state: "waiting" } as never);
     for (let minute = 10; minute <= 40; minute += 1) {
       at = NOW + minute * 60_000;
-      expect((await ask(h, "t9", "proj-1")).action).toBe("wait");
+      expect((await ask(h, "t9", "proj-2")).action).toBe("wait");
     }
     await new Promise((done) => setTimeout(done, 20));
     expect(h.created).toEqual([]);
@@ -16269,8 +16467,24 @@ describe("Seats count, as well as what is spent (Fable's measurement of 2026-10-
   describe("a pin and the model the project runs (Fable, 2026-10-31 16:05)", () => {
     const seats = { main: () => Response.json(ultra(20)), spare: () => Response.json(team(100, 30)), work: () => Response.json(team(40, 30)) };
 
-    it("refuses a seat with session free and no Fable, saying both, and pins it only with --anyway", async () => {
-      const h = await host(seats, { settings: { preferredModel: "Fable" } });
+    const ran = (threadId: string, model: string) => ({
+      [threadId]: [
+        {
+          id: `evt_${threadId}`,
+          scope: { kind: "thread" },
+          threadId,
+          seq: 1,
+          createdAt: NOW - HOUR,
+          type: "client/turn/requested",
+          data: { requestId: `creq_${threadId}`, execution: { model } },
+        },
+      ],
+    });
+    const live = { status: "idle", updatedAt: NOW - HOUR } as Partial<ThreadResponse>;
+    const onFable = { settings: { preferredModel: "Fable" }, threads: { t1: live }, threadEvents: ran("t1", FABLE_MODEL) };
+
+    it("refuses a seat with session free and no Fable, saying both, and pins it only with --anyway; no memory needed: what a thread ran is read from bb", async () => {
+      const h = await host(seats, onFable);
       await started(h);
       const refused = await h.harness.behavior.runCli(["use", "proj-1", "spare"]);
       expect(refused.exitCode).toBe(1);
@@ -16282,21 +16496,41 @@ describe("Seats count, as well as what is spent (Fable's measurement of 2026-10-
     });
 
     it("a seat with Fable left, and a seat without it for a project on Opus, pin at once", async () => {
-      const h = await host(seats, { settings: { preferredModel: "Fable" } });
+      const h = await host(seats, onFable);
       await started(h);
       expect((await h.harness.behavior.runCli(["use", "proj-1", "work"])).stdout).not.toMatch(/AVISO/);
-      await h.harness.registrations.hooks["message.dispatch"]!(
-        makeMessageDispatchHookContext({
-          thread: thread({ id: "t5", projectId: "proj-2", status: "idle" }),
-          requestedExecution: { providerId: "claude-code", model: "claude-opus-5-5" },
-          attempt: "start-turn",
-        }),
-      );
-      expect((await h.harness.behavior.runCli(["use", "proj-2", "spare"])).stdout).not.toMatch(/AVISO/);
+      const opus = await host(seats, { settings: { preferredModel: "Fable" }, threads: { t1: live }, threadEvents: ran("t1", "claude-opus-5-5") });
+      await started(opus);
+      expect((await opus.harness.behavior.runCli(["use", "proj-1", "spare"])).stdout).not.toMatch(/AVISO/);
+      opus.harness.dispose();
+    });
+
+    it("one thread on Opus does not hide another on Fable, nor a retry still in Fable", async () => {
+      const two = await host(seats, {
+        settings: { preferredModel: "Fable" },
+        threads: { t1: live, t2: live },
+        threadEvents: { ...ran("t1", "claude-opus-5-5"), ...ran("t2", FABLE_MODEL) },
+      });
+      await started(two);
+      expect((await two.harness.behavior.runCli(["use", "proj-1", "spare"])).exitCode).toBe(1);
+      two.harness.dispose();
+      const retry = await host(seats, { settings: { preferredModel: "Fable" }, threads: { t1: live }, threadEvents: ran("t1", "claude-opus-5-5") });
+      await started(retry);
+      retry.queued.push({ id: "r", threadId: "t1", payload: { kind: "retry" }, model: FABLE_MODEL, state: "waiting", sendAt: NOW + HOUR } as never);
+      expect((await retry.harness.behavior.runCli(["use", "proj-1", "spare"])).exitCode).toBe(1);
+      retry.harness.dispose();
+    });
+
+    it("not knowing what the project runs does not pass for fine: the pin goes on and says so", async () => {
+      const h = await host(seats, { settings: { preferredModel: "Fable" } });
+      await started(h);
+      const out = await h.harness.behavior.runCli(["use", "proj-1", "spare"]);
+      expect(out.exitCode).toBe(0);
+      expect(out.stdout).toMatch(/AVISO: No he podido leer qué modelo corren/);
     });
 
     it("the Settings pick refuses the same way", async () => {
-      const h = await host(seats, { settings: { preferredModel: "Fable" } });
+      const h = await host(seats, onFable);
       await started(h);
       await expect(
         h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "spare" }),

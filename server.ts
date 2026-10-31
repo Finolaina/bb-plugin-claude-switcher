@@ -251,10 +251,16 @@ const KV_PACE = "pace-day";
 const KV_FABLE_DAY = "fable-pace-day";
 /** Threads known as background work or as an exception to Fable's brake (see fableRole). */
 const KV_FABLE_ROLES = "fable-roles";
-/** projectId → when the user last picked its account by hand: a pin outlives a reload. */
+/** projectId → when the user picked its account by hand: a pin holds until `default` takes it off. */
+const KV_PINS = "pins";
+/** The earlier store of picks: they counted for 7 days, so only those still counting become pins. */
 const KV_HAND_PICKS = "hand-picks";
-/** How long a pick by hand holds against a wait for a seat. */
 const HAND_PICK_TTL_MS = 7 * 24 * 60 * 60_000;
+/** Held message id → its copy in Opus: which copies are of which message, whatever they say (see lowerHeldTurn). */
+const KV_LOWERED_ROWS = "lowered-rows";
+const LOWERED_ROW_KEPT_MS = 7 * 24 * 60 * 60_000;
+/** How far back a thread still counts as live when a pin looks at what its project runs. */
+const PIN_LOOKS_BACK_MS = 24 * 60 * 60_000;
 /** The model a thread goes down to at the brake (bb's model id). */
 const LOWERED_MODEL_ID = "claude-opus-5-5";
 /**
@@ -1131,58 +1137,111 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (!Number.isFinite(minutes)) return DEFAULT_MOVE_AFTER_WAIT_MINUTES * 60_000;
     return minutes > 0 ? minutes * 60_000 : undefined;
   }
-  /** The model last sent in each project: what a pin must be able to run. */
-  const projectModels = new Map<string, string>();
   /**
-   * Why a pin of the project to the account would fail: the model its threads
-   * run is used up there, however much session is left (Fable, 2026-10-31:
-   * pins to Team seats at 100 % of Fable, seven failures). Null: nothing known
-   * against it.
+   * The models the project's live threads run, read from bb: each one's last
+   * turn and what it has queued (a retry runs its own). Not the last model
+   * sent in the project: another thread may need another, and a reload forgets
+   * it (Codex ROT-005). Null: not known, and a pin says so.
    */
-  function pinRefusal(projectId: string, account: string): string | null {
-    const model = projectModels.get(projectId) ?? current.preferredModel;
+  async function liveModels(projectId: string): Promise<Set<string> | null> {
+    try {
+      const listed = await bb.sdk.threads.list({ projectId, archived: false, limit: 50 });
+      const live = listed
+        .filter(
+          (t) =>
+            t.projectId === projectId &&
+            t.providerId === CLAUDE_CODE_PROVIDER &&
+            (TURN_UNDER_WAY.has(t.status) || deps.now() - t.updatedAt < PIN_LOOKS_BACK_MS),
+        )
+        .slice(0, 20);
+      const models = new Set<string>();
+      let unread = 0;
+      for (const t of live) {
+        const [turn, queue] = await Promise.all([
+          loggedTurn(t.id),
+          bb.sdk.threads.queuedMessages.list({ threadId: t.id }),
+        ]);
+        const named = [turn.model, ...queue.map((r) => modelFamily(r.model))].filter(
+          (m): m is string => m !== null,
+        );
+        if (named.length === 0) unread += 1;
+        for (const m of named) models.add(m);
+      }
+      return models.size === 0 || unread > 0 ? null : models;
+    } catch (error) {
+      bb.log.warn(
+        `the models of project ${projectId} not read for a pin: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+  }
+  /**
+   * Why a pin of the project to the account would fail: a model its threads
+   * run is used up there, however much session is left (Fable, 2026-10-31:
+   * pins to Team seats at 100 % of Fable, seven failures). `note`: what could
+   * not be checked; the pin goes on, and says so.
+   */
+  async function pinCheck(
+    projectId: string,
+    account: string,
+  ): Promise<{ refused: string | null; note: string | null }> {
     const measure = collector.get(account);
     if (measure?.problem?.kind === "unauthenticated")
-      return `${account} no tiene la sesión iniciada: un turno ahí falla.`;
+      return { refused: `${account} no tiene la sesión iniciada: un turno ahí falla.`, note: null };
     const usage = measure?.usage;
-    if (usage === null || usage === undefined) return null;
+    if (usage === null || usage === undefined)
+      return { refused: null, note: `No he podido medir ${account}: no sé si puede correr los turnos de este proyecto.` };
+    const models = await liveModels(projectId);
+    const note =
+      models === null
+        ? `No he podido leer qué modelo corren los hilos de este proyecto: compruébalo si necesitan ${current.preferredModel === "" ? "uno concreto" : current.preferredModel}.`
+        : null;
     const settled = settle({ ...usage, name: account }, deps.now());
     const stops: { what: string; used: number; resetsAt: number | null }[] = [];
-    const window = model === "" ? undefined : modelWindow(settled, model);
-    if (window !== undefined && window.usedPercent >= 100)
-      stops.push({ what: model, used: window.usedPercent, resetsAt: window.resetsAt });
+    for (const model of models ?? []) {
+      const window = modelWindow(settled, model);
+      if (window !== undefined && window.usedPercent >= 100)
+        stops.push({ what: model, used: window.usedPercent, resetsAt: window.resetsAt });
+    }
     if (settled.weekly.absent !== true && settled.weekly.usedPercent >= 100)
       stops.push({ what: "la semana", used: settled.weekly.usedPercent, resetsAt: settled.weekly.resetsAt });
     if (settled.session.absent !== true && settled.session.usedPercent >= 100)
       stops.push({ what: "la sesión de 5 h", used: settled.session.usedPercent, resetsAt: settled.session.resetsAt });
-    if (stops.length === 0) return null;
+    if (stops.length === 0) return { refused: null, note };
     const resets = stops.map((w) => w.resetsAt);
     const back = resets.some((r) => r === null)
       ? ""
       : ` Vuelve el ${isoInZone(Math.max(...(resets as number[])))}.`;
     const session =
-      settled.session.absent === true || settled.session.usedPercent >= 100 || stops[0]?.what !== model
+      settled.session.absent === true || settled.session.usedPercent >= 100 || !models?.has(stops[0]?.what ?? "")
         ? ""
-        : ` Su sesión de 5 h lleva el ${Math.round(settled.session.usedPercent)} %, pero una sesión libre no da ${model}.`;
+        : ` Su sesión de 5 h lleva el ${Math.round(settled.session.usedPercent)} %, pero una sesión libre no da ${stops[0]!.what}.`;
     const said = stops
       .map((w) => `${w.what} consumido ${Math.round(w.used)} %, queda ${100 - Math.round(w.used)} %`)
       .join("; ");
-    return `${account} no puede correr ${model === "" ? "turnos" : model}: ${said}.${back}${session}`;
+    const running = stops.filter((w) => models?.has(w.what)).map((w) => w.what);
+    return {
+      refused: `${account} no puede correr ${running.length === 0 ? "turnos" : running.join(" ni ")}: ${said}.${back}${session}`,
+      note,
+    };
   }
-  /** Picked by hand, recently enough: see KV_HAND_PICKS. */
+  /** Picked by hand: see KV_PINS. */
   const handPicks = new Map<string, number>();
+  let loweredRows: Record<string, { at: number; copy: string | null; sending: boolean }> = {};
   function pinned(projectId: string): boolean {
-    const at = handPicks.get(projectId);
-    return at !== undefined && deps.now() - at < HAND_PICK_TTL_MS;
+    return handPicks.has(projectId);
   }
   async function notePin(projectId: string, on: boolean): Promise<void> {
     if (on) handPicks.set(projectId, deps.now());
     else handPicks.delete(projectId);
-    await bb.storage.kv.set(KV_HAND_PICKS, Object.fromEntries(handPicks));
+    await bb.storage.kv.set(KV_PINS, Object.fromEntries(handPicks));
   }
-  /** The project moved: its messages waiting on the old account are judged again, each keeping its place in time. */
+  /**
+   * The project moved: every message waiting on this plugin is judged again,
+   * whatever it waits for (a seat, the brake, the quota), and keeps its row.
+   * Asked from the one place every move writes (Codex ROT-007).
+   */
   function askQueueAgain(from: string): void {
-    if (seats.queue(seatKey(from)).length === 0) return;
     void bb.experimental_hooks
       .recheck("message.dispatch")
       .catch((error: unknown) =>
@@ -1505,12 +1564,23 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       .record(z.string(), z.enum(["fondo", "excepcion"]))
       .safeParse(await bb.storage.kv.get<unknown>(KV_FABLE_ROLES));
     if (roles.success) fableRoles = roles.data;
-    const picks = z
+    const pins = z
       .record(z.string(), z.number())
-      .safeParse(await bb.storage.kv.get<unknown>(KV_HAND_PICKS));
-    if (picks.success)
-      for (const [projectId, at] of Object.entries(picks.data))
-        handPicks.set(projectId, at);
+      .safeParse(await bb.storage.kv.get<unknown>(KV_PINS));
+    if (pins.success)
+      for (const [projectId, at] of Object.entries(pins.data)) handPicks.set(projectId, at);
+    else {
+      const picks = z
+        .record(z.string(), z.number())
+        .safeParse(await bb.storage.kv.get<unknown>(KV_HAND_PICKS));
+      if (picks.success)
+        for (const [projectId, at] of Object.entries(picks.data))
+          if (deps.now() - at < HAND_PICK_TTL_MS) handPicks.set(projectId, at);
+    }
+    const lowered = z
+      .record(z.string(), z.object({ at: z.number(), copy: z.string().nullable(), sending: z.boolean() }))
+      .safeParse(await bb.storage.kv.get<unknown>(KV_LOWERED_ROWS));
+    if (lowered.success) loweredRows = lowered.data;
   } catch (error) {
     bb.log.warn(
       `could not read Fable's first readings and roles; they start again: ${error instanceof Error ? error.message : String(error)}`,
@@ -2415,6 +2485,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         if (wrote) move.writes += 1;
         move.inFlight -= 1;
         move.epoch += 1;
+        if (wrote) askQueueAgain(from.account ?? current.defaultAccountName);
         // A banners' pass left the project unread for this move: it runs
         // again now, without being waited for (Sol B2-R6-002). With no pass
         // under way, its part up to its first read (the bases in memory, a
@@ -2714,7 +2785,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         const fromName = from.account ?? current.defaultAccountName;
         const toName = to?.name ?? current.defaultAccountName;
         if (toName === fromName) return;
-        askQueueAgain(fromName);
         bb.log.info(
           `project ${projectId}: picked by hand, ${fromName} → ${toName}`,
         );
@@ -2786,12 +2856,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return state();
     },
     async project_set_account({ projectId, account, anyway, picked }) {
-      const refused =
-        account === null
-          ? picked === true
-            ? pinRefusal(projectId, current.defaultAccountName)
-            : null
-          : pinRefusal(projectId, account);
+      const { refused } =
+        account === null && picked !== true
+          ? { refused: null }
+          : await pinCheck(projectId, account ?? current.defaultAccountName);
       if (refused !== null && anyway !== true)
         throw new Error(
           `${refused} Para fijarla igualmente: bb claude-switcher use ${projectId} ${account} --anyway`,
@@ -3759,6 +3827,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (from.external) return;
     const fromName = from.account ?? current.defaultAccountName;
     const now = deps.now();
+    // At the brake background work goes down, not ahead to another Ultra (requirement A).
+    if (paceFilter(isBackground(thread), model).savedForUser !== undefined && savedForUser(fromName)) return;
     const decision = decideAhead({
       currentAccount: fromName,
       accounts: aheadTargets(projectId, fromName, model, now),
@@ -4263,7 +4333,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     await applyAccount(projectId, to, from, { share: false });
     await markHandled(projectId);
     noteMove(projectId, fromName, decision.account, model, before);
-    askQueueAgain(fromName);
     const reason =
       decision.why === "back-from-excursion"
         ? `Moved back to account ${decision.account} before the turn: ${fromName} was an excursion for ${excursion?.model ?? "another model"}`
@@ -4527,6 +4596,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * when it started from the command line with no parent (the dispatcher's
    * own threads and any agent's: the user opens his in the app). Stored once.
    */
+  /**
+   * Typed by a person. Not the command line, which cannot tell them from an
+   * agent; not a plugin's message, which bb also calls the user's when it
+   * names no sender (start-server: resolveDispatchAuthor; origin "plugin" on
+   * every threads.send of a plugin). A copy of this plugin stays background.
+   */
+  function byPerson(ctx: MessageDispatchHookContext): boolean {
+    return (
+      ctx.initiator === "user" &&
+      ctx.senderThreadId === null &&
+      ctx.origin !== "cli" &&
+      ctx.origin !== "plugin"
+    );
+  }
   function noteFableRole(ctx: MessageDispatchHookContext): void {
     const id = ctx.thread.id;
     const text = ctx.input.text.toLowerCase();
@@ -4535,9 +4618,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // agent, and bb does not tell the plugin a model set with `thread update`.
     const fixedByHand =
       ctx.executionSources.model === "explicit" &&
-      ctx.initiator === "user" &&
-      ctx.senderThreadId === null &&
-      ctx.origin !== "cli" &&
+      byPerson(ctx) &&
       modelFamily(ctx.requestedExecution.model)?.toLowerCase() ===
         current.preferredModel.toLowerCase();
     const role = fixedByHand || FABLE_EXCEPTIONS.some((mark) => text.includes(mark))
@@ -4563,40 +4644,48 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return (
       current.autoSwitch &&
       paceFilter(isBackground(ctx.thread), model).savedForUser !== undefined &&
-      !(ctx.initiator === "user" && ctx.senderThreadId === null && ctx.origin !== "cli")
+      !byPerson(ctx)
     );
   }
   /**
-   * The brake (Aitor, 2026-10-31): a turn of background work in the reserved
-   * model with no account that has room for it does not run. The thread goes
-   * down to Opus (see lowerHeldTurn) and its message waits meanwhile, so if
-   * that fails it runs when the brake opens, judged again then. Null: go on;
-   * the placement takes it to an account with room if its own has none.
+   * The brake (Aitor, 2026-10-31): background work in the reserved model, on
+   * an account past its day's pace or its reserve, does not run. «Pasa a Opus
+   * en Team o espera; nunca sigue en Fable en otra Ultra porque hay»: another
+   * account with room is no way out. The thread goes down to Opus (see
+   * lowerHeldTurn) and its message waits meanwhile, so if that fails it runs
+   * when the brake opens, judged again then. Null: its account has room.
    * Typed by the user in the app, it is his: never held.
    */
-  function brakeFable(
+  async function brakeFable(
     ctx: MessageDispatchHookContext,
     model: string,
-  ): MessageDispatchHookDecision | null {
+    budget: { limit(): number },
+  ): Promise<MessageDispatchHookDecision | null> {
     const { thread } = ctx;
     if (!heldBackground(ctx, model)) return null;
-    const now = deps.now();
-    const measured = measuredAccounts(model).map((a) => settle(a, now));
-    if (measured.length === 0) return null;
-    const open = chooseAccount(measured, {
-      preferredModel: model,
-      reserveModel: current.preferredModel,
-      savedForUser,
-    });
-    if (open !== null) return null;
-    const rooms = measured
-      .map((a) => fableRoomFor(a.name))
-      .filter((r): r is FableRoom => r !== null);
-    const nextAt = Math.min(
-      ...rooms.map((r) => r.nextAt ?? Number.POSITIVE_INFINITY),
-      now + BRAKE_LONGEST_WAIT_MS,
+    const read = await within(
+      projectAccount(thread.projectId),
+      budget.limit(),
+      `thread ${thread.id}: the project's account not read for Fable's brake`,
     );
-    const text = `Fable frenado en todas las cuentas (ritmo del día y reserva): este hilo de fondo sigue en Opus; si no puede, espera hasta ${isoInZone(nextAt)}`;
+    if (typeof read !== "object") {
+      // Unknown where it stands: it waits a few times, then goes on, as every
+      // wait of this plugin does (see MAX_START_WAITS).
+      const waited = seatReadWaits.get(thread.id) ?? 0;
+      if (waited >= SEAT_READ_WAITS) return null;
+      seatReadWaits.set(thread.id, waited + 1);
+      return {
+        action: "wait",
+        reason: "Claude Switcher: the project's account could not be read for Fable's brake; trying again",
+        sendAt: deps.now() + SEAT_RECHECK_MS,
+      };
+    }
+    if (read.value.external) return null;
+    const account = read.value.account ?? current.defaultAccountName;
+    if (!savedForUser(account)) return null;
+    const room = fableRoomFor(account);
+    const nextAt = Math.min(room?.nextAt ?? Number.POSITIVE_INFINITY, deps.now() + BRAKE_LONGEST_WAIT_MS);
+    const text = `Fable frenado en ${account} (ritmo del día o reserva): este hilo de fondo sigue en Opus, no en otra Ultra; si no puede, espera hasta ${isoInZone(nextAt)}`;
     bb.log.info(`thread ${thread.id}: ${text}`);
     setTimeout(() => void lowerHeldTurn(thread.id, model), 0);
     return { action: "wait", reason: text, sendAt: nextAt };
@@ -4618,7 +4707,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       if (!savedForUser(account)) return null;
       const room = fableRoomFor(account);
       const sendAt = Math.min(room?.nextAt ?? Number.POSITIVE_INFINITY, deps.now() + BRAKE_LONGEST_WAIT_MS);
-      const text = `Fable frenado en ${account} y sin plaza en otra con margen: este hilo de fondo sigue en Opus; si no puede, espera hasta ${isoInZone(sendAt)}`;
+      const text = `Fable frenado en ${account}: este hilo de fondo sigue en Opus, no en otra Ultra; si no puede, espera hasta ${isoInZone(sendAt)}`;
       bb.log.info(`thread ${thread.id}: ${text}`);
       setTimeout(() => void lowerHeldTurn(thread.id, model), 0);
       return { action: "wait", reason: text, sendAt };
@@ -4629,7 +4718,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       current.preferredModel === "" ||
       model.toLowerCase() === current.preferredModel.toLowerCase() ||
       !isBackground(thread) ||
-      (ctx.initiator === "user" && ctx.senderThreadId === null && ctx.origin !== "cli")
+      byPerson(ctx)
     )
       return null;
     const usage = collector.get(account)?.usage;
@@ -4648,6 +4737,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
   /** Lowerings under way, by thread: one at a time, or two would copy the same row. */
   const lowering = new Set<string>();
+  /** See KV_LOWERED_ROWS. `sending`: the send was asked and its answer not seen (a reload in between). */
+  async function saveLowered(): Promise<void> {
+    const now = deps.now();
+    loweredRows = Object.fromEntries(
+      Object.entries(loweredRows).filter(([, r]) => now - r.at < LOWERED_ROW_KEPT_MS),
+    );
+    await bb.storage.kv.set(KV_LOWERED_ROWS, loweredRows);
+  }
   /**
    * The held message sent again in Opus. Only what the brake holds moves: a
    * retry, whose row runs the model the failed turn had, whatever the thread
@@ -4657,11 +4754,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * behind is judged when its turn comes. It keeps its place and how it was to
    * run (permissions, effort, tier): only the model changes.
    *
-   * Created before the old one goes, so nothing is lost; a copy already there
-   * (a removal that failed, a reload) is not made again: its original just
-   * goes. In a thread left in error nothing sends a queued row, so it is sent
-   * here. bb stores the row after the hook answers, so it is looked for a few
-   * times.
+   * By threads.send, what bb 0.48.1 goes through for a message of a plugin:
+   * attemptDispatch, so this hook judges it (account, brake, seat) in any
+   * thread status, an error too, and the row bb keeps says origin "plugin".
+   * Not queuedMessages.send, an explicit send that skips the hook, nor
+   * queuedMessages.create, whose row looks typed by the user and sits unsent
+   * in a thread in error (Codex ROT-001, ROT-002).
+   *
+   * Which copy is of which message is written down by id (KV_LOWERED_ROWS),
+   * never guessed from what they say: every «Please continue.» reads the same
+   * (ROT-003). Written before the send: an answer never seen (a reload) leaves
+   * the original waiting rather than risk it twice. The thread's model changes
+   * last, once the copies stand (ROT-004); a copy that cannot keep the place is
+   * taken back and the original stays (ROT-FABLE-004).
    */
   async function lowerHeldTurn(threadId: string, model: string): Promise<void> {
     if (lowering.has(threadId)) return;
@@ -4681,56 +4786,72 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         queue = await bb.sdk.threads.queuedMessages.list({ threadId });
       }
       const rows = queue.filter(held);
-      if (rows.length === 0) return;
-      await bb.sdk.threads.update({ threadId, model: LOWERED_MODEL_ID });
-      let head: string | null = null;
+      let moved = 0;
       for (const row of rows) {
-        const same = JSON.stringify(row.content);
-        const copy = queue.find(
-          (r) =>
-            r.id !== row.id &&
-            modelFamily(r.model) === FALLBACK_MODEL &&
-            JSON.stringify(r.content) === same,
-        );
-        let id = copy?.id ?? null;
-        if (id === null) {
-          const made = await bb.sdk.threads.queuedMessages.create({
-            threadId,
-            input: row.content,
-            model: LOWERED_MODEL_ID,
-            ...(row.permissionMode == null ? {} : { permissionMode: row.permissionMode }),
-            ...(row.reasoningLevel == null ? {} : { reasoningLevel: row.reasoningLevel }),
-            ...(row.serviceTier == null ? {} : { serviceTier: row.serviceTier }),
-            executionInputSources: {
-              model: "explicit",
-              ...(row.permissionMode == null ? {} : { permissionMode: "explicit" as const }),
-              ...(row.reasoningLevel == null ? {} : { reasoningLevel: "explicit" as const }),
-              ...(row.serviceTier == null ? {} : { serviceTier: "explicit" as const }),
-            },
-            ...(row.senderThreadId === null ? {} : { senderThreadId: row.senderThreadId }),
-          });
-          id = made.id;
-          const at = queue.findIndex((r) => r.id === row.id);
-          await bb.sdk.threads.queuedMessages
-            .reorder({
+        const known = loweredRows[row.id];
+        if (known?.sending === true) {
+          bb.log.warn(`thread ${threadId}: message ${row.id} was being sent in Opus when the plugin stopped: it stays as it is, not to go twice`);
+          continue;
+        }
+        if (known === undefined) {
+          loweredRows[row.id] = { at: deps.now(), copy: null, sending: true };
+          await saveLowered();
+          let sent: Awaited<ReturnType<typeof bb.sdk.threads.send>>;
+          try {
+            sent = await bb.sdk.threads.send({
               threadId,
-              queuedMessageId: id,
-              previousQueuedMessageId: row.id,
-              nextQueuedMessageId: queue[at + 1]?.id ?? null,
-            })
-            .catch((error: unknown) =>
+              input: row.content,
+              model: LOWERED_MODEL_ID,
+              mode: "queue-if-active",
+              ...(row.permissionMode == null ? {} : { permissionMode: row.permissionMode }),
+              ...(row.reasoningLevel == null ? {} : { reasoningLevel: row.reasoningLevel }),
+              ...(row.serviceTier == null ? {} : { serviceTier: row.serviceTier }),
+              executionInputSources: {
+                model: "explicit",
+                ...(row.permissionMode == null ? {} : { permissionMode: "explicit" as const }),
+                ...(row.reasoningLevel == null ? {} : { reasoningLevel: "explicit" as const }),
+                ...(row.serviceTier == null ? {} : { serviceTier: "explicit" as const }),
+              },
+              ...(row.senderThreadId === null ? {} : { senderThreadId: row.senderThreadId }),
+            });
+          } catch (error) {
+            delete loweredRows[row.id];
+            await saveLowered();
+            throw error;
+          }
+          const copy = sent.delivery === "queued" ? sent.queuedMessage.id : null;
+          loweredRows[row.id] = { at: deps.now(), copy, sending: false };
+          await saveLowered();
+          const next = queue[queue.findIndex((r) => r.id === row.id) + 1];
+          if (copy !== null && next !== undefined) {
+            try {
+              await bb.sdk.threads.queuedMessages.reorder({
+                threadId,
+                queuedMessageId: copy,
+                previousQueuedMessageId: row.id,
+                nextQueuedMessageId: next.id,
+              });
+            } catch (error) {
               bb.log.warn(
-                `thread ${threadId}: its message went to Opus at the end of the queue (${error instanceof Error ? error.message : String(error)})`,
-              ),
-            );
+                `thread ${threadId}: its message stays in Fable, for its copy in Opus could not keep its place (${error instanceof Error ? error.message : String(error)})`,
+              );
+              await deleteOwn(threadId, copy);
+              delete loweredRows[row.id];
+              await saveLowered();
+              continue;
+            }
+          }
         }
         await deleteOwn(threadId, row.id);
-        if (queue[0]?.id === row.id) head = id;
+        moved += 1;
       }
-      bb.log.info(`thread ${threadId}: Fable braked: ${rows.length} message(s) go on in Opus`);
+      if (moved === 0) return;
+      const chosen = await bb.sdk.threads.defaultExecutionOptions({ threadId }).catch(() => null);
+      const family = modelFamily(chosen?.model ?? null);
+      if (family === null || family.toLowerCase() === model.toLowerCase())
+        await bb.sdk.threads.update({ threadId, model: LOWERED_MODEL_ID });
+      bb.log.info(`thread ${threadId}: Fable braked: ${moved} message(s) go on in Opus`);
       await recordLowered(threadId);
-      if (head !== null && (await bb.sdk.threads.get({ threadId })).status === "error")
-        await bb.sdk.threads.queuedMessages.send({ threadId, queuedMessageId: head, mode: "auto" });
     } catch (error) {
       bb.log.warn(
         `thread ${threadId}: not moved to Opus at Fable's brake; it waits (${error instanceof Error ? error.message : String(error)})`,
@@ -4778,14 +4899,30 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         sendAt: deps.now() + SEATS_COUNTING_WAIT_MS,
       };
     }
-    const model = modelFamily(ctx.requestedExecution.model);
-    if (model !== null) {
-      threadModel.set(thread.id, model);
-      projectModels.set(thread.projectId, model);
+    // A message already copied to Opus whose removal failed: the copy is the
+    // message; this one goes, and does not run too.
+    const replaced = ctx.queuedMessages.find((r) => loweredRows[r.id]?.sending === false);
+    if (replaced !== undefined) {
+      setTimeout(
+        () =>
+          void deleteOwn(thread.id, replaced.id).catch((error: unknown) =>
+            bb.log.warn(
+              `thread ${thread.id}: message ${replaced.id}, already sent in Opus, not removed: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          ),
+        0,
+      );
+      return {
+        action: "wait",
+        reason: "Claude Switcher: this message already went on in Opus",
+        sendAt: deps.now() + SEAT_RECHECK_MS,
+      };
     }
+    const model = modelFamily(ctx.requestedExecution.model);
+    if (model !== null) threadModel.set(thread.id, model);
     noteFableRole(ctx);
     if (ctx.attempt === "start-turn" && model !== null) {
-      const braked = brakeFable(ctx, model);
+      const braked = await brakeFable(ctx, model, budget);
       if (braked !== null) return braked;
     }
     const placed: { at?: TurnPlace } = {};
@@ -5282,7 +5419,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       random: deps.random(),
       stuck,
       freeSeats,
-      ...paceFilter(background, model),
+      // Background work out of the reserved model goes down, not to another
+      // Ultra that has it: every account is saved from it here (requirement A).
+      ...(paceFilter(background, model).savedForUser === undefined ? {} : { savedForUser: () => true }),
     };
     const decision = decideSwitch(input);
     // No Fable on any account, and an account with Opus: the thread is told
@@ -5854,14 +5993,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         );
       return;
     }
-    const to = bestAccount(
-      measured.filter((a) => a.name !== fromName),
-      model,
-      now,
-      current.preferredModel,
-      freeSeats,
-      paceFilter(isBackground(thread), model).savedForUser,
-    );
+    // Background work out of the reserved model is not released on another
+    // Ultra that has it (requirement A): it fires where it is, and is judged.
+    const to =
+      paceFilter(isBackground(thread), model).savedForUser !== undefined
+        ? null
+        : bestAccount(
+            measured.filter((a) => a.name !== fromName),
+            model,
+            now,
+            current.preferredModel,
+            freeSeats,
+          );
     if (to === null) {
       // Nothing to release it on; the wait fires on its own at sendAt and
       // is placed then (code-reviewer r2, CR2-05).
@@ -6423,7 +6566,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             }
             const project = matches[0]!;
             const name = positionals.account;
-            const refused = name === "default" ? null : pinRefusal(project.id, name);
+            const { refused, note } =
+              name === "default" ? { refused: null, note: null } : await pinCheck(project.id, name);
             if (refused !== null && options.anyway !== true)
               throw new PluginCliError(
                 `${refused} No fijada. Para fijarla igualmente: bb claude-switcher use ${project.id} ${name} --anyway`,
@@ -6433,7 +6577,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             await pickAccount(project.id, () => accountOrDefault(name), name !== "default");
             return {
               exitCode: 0,
-              stdout: `${project.name} → ${name}\n${refused === null ? "" : `AVISO: ${refused}\n`}`,
+              stdout: `${project.name} → ${name}\n${refused === null ? "" : `AVISO: ${refused}\n`}${note === null ? "" : `AVISO: ${note}\n`}`,
             };
           },
         }),
