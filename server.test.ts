@@ -16116,7 +16116,7 @@ describe("Seats count, as well as what is spent (Fable's measurement of 2026-10-
       await started(h);
       const refused = await h.harness.behavior.runCli(["use", "proj-1", "spare"]);
       expect(refused.exitCode).toBe(1);
-      expect(refused.stderr).toMatch(/spare no puede correr Fable: Fable consumido 100 %, queda 0 %\..*sesión.*30 %/);
+      expect(refused.stderr).toMatch(/spare no puede correr Fable: Fable consumido 100 %, queda 0 %\. Vuelve el 2026-.*sesión.*30 %/);
       expect(h.envSet).toEqual([]);
       const forced = await h.harness.behavior.runCli(["use", "proj-1", "spare", "--anyway"]);
       expect(forced.stdout).toMatch(/AVISO: spare no puede correr Fable/);

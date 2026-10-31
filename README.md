@@ -790,7 +790,10 @@ named `default`; the default account's own name always works.
 | `seatsMax`           | `4`                  | Threads at once on a Max account: a thread whose turn is about to start waits when the project's account already runs this many. 0 = no limit. See [Seats per account](#seats-per-account). |
 | `seatsTeam`          | `2`                  | The same for a Team account. |
 | `dayStartHour`       | `9`                  | Hour the day starts in Europe/Madrid. Each day gets an even share of what is left of an account's weekly window; the panel and `health` show how much of it is spent. |
-| `paceHoldsBackground` | `false`             | On: an Ultra or Max account at 90 % of its share of the day takes no more background work (a thread another thread, an automation or a plugin opens) unless no other account can run it, and the panel shows it as kept for you. Your own threads are never held back by it. Off (the default since 0.2.33): the day's share is only shown. |
+| `paceHoldsBackground` | `true`              | On: an Ultra or Max account at 90 % of its share of the day takes no more background work (a thread another thread, an automation or a plugin opens) unless no other account can run it, and the panel shows it as kept for you. Your own threads are never held back by it. Off (the default since 0.2.33): the day's share is only shown. |
+| `fableReservePercent` | `20`                | Background work leaves this much of Fable's week on every Ultra or Max account. |
+| `teamRunsFable`      | `true`               | Your own Fable threads may run on a Team seat with session, Fable and a free seat left; background work never does. |
+| `moveAfterWaitMinutes` | `10`               | A project on a full account moves to another with a free seat after this wait; one you picked by hand stays. 0: never. |
 | `loginPrivateWindow` | `true`               | macOS: open logins in a private Chrome window, so they do not reuse the browser's Claude session. Off, without Chrome, or on Linux: the default browser.                                                            |
 
 The accounts are read again whenever you pick one (`use`, the picker) and

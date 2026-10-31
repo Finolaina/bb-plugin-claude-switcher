@@ -1232,8 +1232,9 @@ export default definePluginApp((app) => {
   });
   // Experimental in bb: a host without it (older, or once it is renamed)
   // keeps the Settings section instead of failing the whole frontend.
-  // SDK 0.6.105 no longer declares it; bb 0.48 still has it (read in its
-  // plugin chunk, 2026-10-31).
+  // SDK 0.6.105 retired it from its typings, and bb says existing plugins
+  // stay supported; the new way is experimental_threadAction with
+  // placement "header" (read in its plugin chunk, 2026-10-31).
   const headerSlots = app.slots as unknown as {
     experimental_threadHeaderAction?: (registration: {
       id: string;

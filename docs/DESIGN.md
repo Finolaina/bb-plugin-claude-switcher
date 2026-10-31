@@ -10,7 +10,8 @@ Claude Code has three usage limits per subscription: a 5-hour session
 window, a 7-day weekly window, and 7-day windows per model (for example
 Fable). They reset on their own clocks and are not interchangeable: an
 account with session room but no weekly room cannot run a turn, and an
-account with weekly room but no Fable room cannot run a Fable turn.
+account with weekly room but no Fable room cannot run a Fable turn. Every figure
+and bar shows what is spent, 0 to 100, in green, amber and red (Aitor, 2026-10-31).
 
 People who hold more than one subscription keep one login per Claude Code
 config directory (`CLAUDE_CONFIG_DIR`). bb runs every thread of a project
