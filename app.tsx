@@ -269,10 +269,10 @@ function StateWord({ row }: { row: PanelRow }) {
   );
 }
 
-/** What is left, with today's share striped at its end; read out as «Le queda el 90 % de la semana». */
-export function LeftBar({ bar }: { bar: PanelBar | null }) {
+/** What is spent, with today's share striped after it; read out as «Ha gastado el 10 % de la semana». */
+export function UsedBar({ bar }: { bar: PanelBar | null }) {
   if (bar === null) return <div className="cs-bar" aria-hidden />;
-  const start = bar.left - bar.today;
+  const end = bar.used + bar.today;
   return (
     <div className="cs-bar" role="img" aria-label={bar.label}>
       <div
@@ -280,14 +280,13 @@ export function LeftBar({ bar }: { bar: PanelBar | null }) {
           "cs-fill",
           bar.tone === "amber" && "cs-low",
           bar.tone === "red" && "cs-past",
-          bar.tone === "blue" && "cs-five",
         )}
-        style={{ transform: `scaleX(${bar.left / 100})` }}
+        style={{ transform: `scaleX(${bar.used / 100})` }}
       />
       {bar.today > 0 ? (
         <div
           className="cs-today"
-          style={{ clipPath: `inset(0 ${100 - bar.left}% 0 ${start}%)` }}
+          style={{ clipPath: `inset(0 ${100 - end}% 0 ${bar.used}%)` }}
         />
       ) : null}
       {bar.reserve === undefined ? null : (
@@ -349,7 +348,25 @@ export function AccountRowView({
         )}
       </div>
       <div className="col-span-2 row-start-2 min-w-0 @lg:col-span-1 @lg:col-start-2 @lg:row-start-1">
-        <LeftBar bar={row.bar} />
+        <UsedBar bar={row.bar} />
+        {row.extras.length === 0 ? null : (
+          <ul className="mt-1 space-y-0.5">
+            {row.extras.map((e) => (
+              <li key={e.figureOf} className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                <span className="w-16 shrink-0 truncate">{e.figureOf}</span>
+                <span className="min-w-0 flex-1">
+                  <div className="cs-thin">
+                    <UsedBar bar={e.bar} />
+                  </div>
+                </span>
+                <span className="whitespace-nowrap tabular-nums">
+                  {e.figure}
+                  {e.when === "" ? "" : ` · ${e.when}`}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
         <p className="mt-1.5 text-xs leading-snug text-pretty">
           <StateWord row={row} />
           {row.line === "" ? null : (
@@ -395,8 +412,8 @@ export function AccountRowView({
 
 /**
  * Design B: the sentence that says who works, who is kept for you and which
- * has most week left, then the Ultra/Max accounts by what is left of their
- * week and the Team seats by name.
+ * has spent least, then the Ultra/Max accounts by what they have spent of
+ * their week and the Team seats by name.
  */
 export function AccountsOverview({
   state,
@@ -905,7 +922,7 @@ function ThreadAccount({
 
 /**
  * The thread's own account at the top of its menu, as a small card with its
- * figure in large type (design B takes this from design A): what is left,
+ * figure in large type (design B takes this from design A): what is spent,
  * the bar, its state and today's line, and the one-line summary.
  */
 export function ThreadAccountCard({ row, forecast }: { row: PanelRow; forecast: string | null }) {
@@ -922,7 +939,7 @@ export function ThreadAccountCard({ row, forecast }: { row: PanelRow; forecast: 
         </p>
       )}
       <div className="mt-2">
-        <LeftBar bar={row.bar} />
+        <UsedBar bar={row.bar} />
       </div>
       <p className="mt-1.5 text-xs text-muted-foreground">{threadLine(row)}</p>
       {row.line === "" || row.state === "out" || row.state === "nodata" ? null : (

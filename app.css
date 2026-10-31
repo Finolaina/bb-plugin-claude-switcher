@@ -16,7 +16,6 @@
   --cs-week: #22c55e;
   --cs-week-low: #f59e0b;
   --cs-past: #dc2626;
-  --cs-five: #3b82f6;
   --cs-today: rgb(0 0 0 / 0.3);
   --cs-track: color-mix(in oklab, currentColor 12%, transparent);
   --cs-ease: cubic-bezier(0.23, 1, 0.32, 1);
@@ -27,7 +26,6 @@
   --cs-ok: #4ade80;
   --cs-keep: #fcd34d;
   --cs-out: #a8a29e;
-  --cs-five: #60a5fa;
   --cs-today: rgb(255 255 255 / 0.5);
   --cs-track: color-mix(in oklab, currentColor 16%, transparent);
 }
@@ -46,9 +44,9 @@
   color: var(--cs-out);
 }
 
-/* A bar of what is left: the fill grows from the left with scaleX; today's
-   share is a striped band over its end, cut with clip-path so its stripes
-   keep their size. */
+/* A bar of what is spent: the fill grows from the left with scaleX and goes
+   green, amber, red; today's share is a striped band right after it, cut with
+   clip-path so its stripes keep their size. */
 .cs-bar {
   position: relative;
   height: 8px;
@@ -80,8 +78,8 @@
   margin-left: -1px;
   background: currentColor;
 }
-.cs-fill.cs-five {
-  background: var(--cs-five);
+.cs-thin .cs-bar {
+  height: 4px;
 }
 .cs-today {
   background: repeating-linear-gradient(
