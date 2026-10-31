@@ -15,12 +15,14 @@
   /* the bars: what is left of the week, low (15 % or less), a Team seat's 5 hours */
   --cs-week: #22c55e;
   --cs-week-low: #f59e0b;
+  --cs-past: #dc2626;
   --cs-five: #3b82f6;
   --cs-today: rgb(0 0 0 / 0.3);
   --cs-track: color-mix(in oklab, currentColor 12%, transparent);
   --cs-ease: cubic-bezier(0.23, 1, 0.32, 1);
 }
 .dark .cs-tone {
+  --cs-past: #f87171;
   --cs-run: #93c5fd;
   --cs-ok: #4ade80;
   --cs-keep: #fcd34d;
@@ -65,6 +67,18 @@
 }
 .cs-fill.cs-low {
   background: var(--cs-week-low);
+}
+.cs-fill.cs-past {
+  background: var(--cs-past);
+}
+/* The reserve kept for the user: a mark across the bar. */
+.cs-reserve {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: currentColor;
 }
 .cs-fill.cs-five {
   background: var(--cs-five);

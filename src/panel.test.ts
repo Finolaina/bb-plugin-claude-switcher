@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  type PanelAccount,
   accountRow,
   forecastText,
   formatNumber,
@@ -326,14 +327,14 @@ describe("accountRow", () => {
       figure: "49 %",
       figureOf: "de las 5 h",
       when: "vuelve mañana 00:00",
-      line: "Fable al 89 % · 2 de 2 hilos · 1 esperando",
+      line: "ha gastado el 89 % de Fable · 2 de 2 hilos · 1 esperando",
       bar: { left: 49, today: 0, tone: "blue", label: "Le queda el 49 % de las 5 h" },
     });
     expect(accountRow(team("team1", 0, null, 76), seats(0, 2), EN)).toMatchObject({
       state: "free",
       word: "Free",
       when: "not started",
-      line: "Fable at 76 % · 0 of 2 threads",
+      line: "spent 76 % of Fable · 0 of 2 threads",
     });
   });
 });
@@ -448,10 +449,10 @@ describe("panelList", () => {
       seats: {},
     };
     expect(said(panelList(kept, ES).sentence)).toBe(
-      "Ahora no trabaja ninguna. Guardada para ti: **aitor**.",
+      "En este ordenador no trabaja ninguna. Guardada para ti: **aitor**.",
     );
     expect(said(panelList(kept, EN).sentence)).toBe(
-      "No account is working now. Kept for you: **aitor**.",
+      "No account is working on this computer now. Kept for you: **aitor**.",
     );
   });
 
@@ -548,5 +549,103 @@ describe("formatNumber", () => {
     const f = { a: { weekly: { kind: "lasts" as const, until: NOW + 76 * H, percentPerDay: 24.3 } } };
     expect(forecastText(f, "a", "", NOW, "es")).toBe("Semana: llega al reinicio a este ritmo (24,3 %/día)");
     expect(forecastText(f, "a", "", NOW, "en")).toBe("Week: lasts until the reset at this pace (24.3 %/day)");
+  });
+});
+
+describe("Fable's week in the panel (Aitor, 2026-10-31)", () => {
+  const NOW = Date.parse("2026-10-31T13:00:00+01:00");
+  const RESET = Date.parse("2026-11-02T10:00:00+01:00");
+  const week = (used: number) => ({ usedPercent: used, resetsAt: RESET });
+  const ultra = (name: string, spent: number, room: Partial<NonNullable<PanelAccount["fable"]>> = {}): PanelAccount => ({
+    name,
+    plan: "ultra",
+    fiveHour: false,
+    problem: null,
+    usage: {
+      blocked: false,
+      session: { usedPercent: 0, resetsAt: null, absent: true },
+      weekly: week(spent),
+      models: { Fable: week(spent) },
+    },
+    pace: { budget: 10, spent: 2, dayPercent: 20, background: true },
+    fable: {
+      left: 100 - spent,
+      reserve: 20,
+      open: true,
+      why: null,
+      pace: { budget: 10, spent: 2, dayPercent: 20, background: true },
+      nextAt: RESET,
+      resetsAt: RESET,
+      ...room,
+    },
+  });
+  const ctx = { now: NOW, lang: "es" as const, preferredModel: "Fable", paceHoldsBackground: true };
+
+  it.each([
+    [0, 100, "100 %"],
+    [35, 65, "65 %"],
+    [100, 0, "0 %"],
+  ])("gastado %i: bar, figure and words all say what is LEFT", (spent, left, figure) => {
+    const row = accountRow(ultra("a", spent), undefined, ctx);
+    expect(row.bar?.left).toBe(left);
+    expect(row.figure).toBe(figure);
+    expect(row.figureOf).toBe("de Fable");
+    expect(row.bar?.label).toBe(`Te queda el ${left} % de la semana de Fable`);
+  });
+
+  it("says it as Aitor asked, whatever the general week", () => {
+    const row = accountRow(ultra("a", 65, { open: false, why: "pace" }), undefined, ctx);
+    expect(threadLine(row)).toContain("te queda el 35 % de la semana de Fable");
+    expect(row.help).toContain("Fable: te queda el 35 % de la semana");
+    expect(row.help).toMatch(/se reinicia .*lun.*10:00/);
+    expect(row.help).toContain("el fondo ya no la usa");
+    expect(row.line).toContain("el fondo ya no la usa");
+  });
+
+  it("marks in red the one past the brake, draws the reserve and today's share", () => {
+    const passed = accountRow(ultra("a", 90, { open: false, why: "reserve" }), undefined, ctx);
+    expect(passed.bar?.tone).toBe("red");
+    expect(passed.bar?.reserve).toBe(20);
+    expect(passed.line).toContain("solo queda tu reserva");
+    const fine = accountRow(ultra("b", 40), undefined, ctx);
+    expect(fine.bar?.tone).toBe("green");
+    expect(fine.bar?.today).toBe(8);
+    expect(fine.state).toBe("free");
+  });
+
+  it("with the brake off it says nothing of what the background may not do", () => {
+    const row = accountRow(ultra("a", 90, { open: false, why: "reserve" }), undefined, { ...ctx, paceHoldsBackground: false });
+    expect(row.state).toBe("free");
+    expect(row.line).not.toContain("fondo");
+  });
+
+  it("an Ultra out of Fable reads as such, not as out of the week: Opus still runs", () => {
+    const row = accountRow(
+      { ...ultra("a", 100, { open: false, why: "reserve", left: 0 }), usage: { ...ultra("a", 100).usage!, weekly: week(68) } },
+      undefined,
+      ctx,
+    );
+    expect(row.state).toBe("free");
+    expect(row.bar?.tone).toBe("red");
+    expect(row.line).toContain("sin Fable hasta");
+  });
+
+  it("tells who spent it, from what the file measured, on this computer", () => {
+    const row = accountRow({ ...ultra("a", 50), who: { interactivo: 70, fondo: 30, hilos: 0 } }, undefined, ctx);
+    expect(row.who).toBe("La gastó en este ordenador: 70 % tú · 30 % fondo");
+    expect(row.help).toContain(row.who!);
+    expect(accountRow(ultra("b", 50), undefined, ctx).who).toBeNull();
+  });
+
+  it("orders by Fable left, with the general week fuller or not, and the sentence totals it", () => {
+    const list = panelList(
+      { accounts: [ultra("full", 80), ultra("empty", 10), { ...ultra("mid", 40), usage: { ...ultra("mid", 40).usage!, weekly: week(95) } }] },
+      ctx,
+    );
+    expect(list.groups[0]!.rows.map((r) => r.name)).toEqual(["empty", "mid", "full"]);
+    const text = list.sentence.map((p) => p.text).join("");
+    expect(text).toContain("En este ordenador no trabaja ninguna.");
+    expect(text).toContain("Entre todas queda el 57 % de Fable");
+    expect(text).toContain("La que más Fable tiene es empty (90 %)");
   });
 });
