@@ -447,7 +447,8 @@ export type PlacementDecision =
         /** A thread's first turn: another account has far more of the week left. */
         | "least-spent"
         /** A turn in the reserved model: back to the account the project left for another model. */
-        | "back-from-excursion";
+        | "back-from-excursion"
+        | "seat-wait";
     };
 
 export interface PlacementInput {
@@ -487,6 +488,12 @@ export interface PlacementInput {
    * A later turn stays: the conversation is on this account.
    */
   firstTurn?: boolean;
+  /** How long the thread's current message has waited for a seat. */
+  waitedMs?: number;
+  /** Past this wait, on a full account, the project moves to another with a free seat. Unset: it never does. */
+  moveAfterMs?: number;
+  /** Picked by hand: no wait moves it. */
+  pinned?: boolean;
   now: number;
   /**
    * The current account has no login (its usage answered unauthenticated),
@@ -595,11 +602,30 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
       if (
         other !== undefined &&
         other.name !== current.name &&
-        spentOf(current, input.preferredModel) -
-          spentOf(other, input.preferredModel) >=
-          LEAST_SPENT_MARGIN
+        // A first turn has no conversation to keep: on a full account, the
+        // margin does not hold it there (Fable's measurement of 2026-10-31:
+        // 4/4 and 16 waiting on the least spent, seats idle elsewhere).
+        ((input.freeSeats !== undefined && input.freeSeats(current.name) <= 0) ||
+          spentOf(current, input.preferredModel) -
+            spentOf(other, input.preferredModel) >=
+            LEAST_SPENT_MARGIN)
       )
         return { kind: "move", account: other.name, why: "least-spent" };
+    }
+    if (
+      input.pinned !== true &&
+      input.moveAfterMs !== undefined &&
+      (input.waitedMs ?? 0) >= input.moveAfterMs &&
+      input.freeSeats !== undefined &&
+      input.freeSeats(current.name) <= 0
+    ) {
+      const seated = chooseSeated(
+        accounts.filter((a) => a.name !== current.name),
+        options,
+        input.freeSeats,
+      );
+      if (seated !== null)
+        return { kind: "move", account: seated.account, why: "seat-wait" };
     }
     return { kind: "keep" };
   }

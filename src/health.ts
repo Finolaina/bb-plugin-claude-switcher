@@ -28,6 +28,9 @@ export interface HealthAccount {
         reserved: number;
         /** Seats held from outside bb (`reserve`), counted as taken. */
         external?: ReadonlyArray<{ id: string; until: number }>;
+        /** Threads waiting for a seat here, and the minutes the first has waited. */
+        queued?: readonly unknown[];
+        waitingMinutes?: number | null;
       }
     | undefined;
   /**
@@ -88,6 +91,9 @@ export interface HealthReport {
       total: number | null;
       /** Held from outside bb (`reserve`); counted in usadas. */
       externas: { id: string; hasta: string }[];
+      /** Threads waiting for a seat, and for how long the first has, in minutes. */
+      esperando: number;
+      esperaMin: number | null;
     } | null;
     usable: boolean;
     problema: string | null;
@@ -212,6 +218,8 @@ export function healthReport(input: {
                   id: e.id,
                   hasta: isoInZone(e.until),
                 })),
+                esperando: a.seats.queued?.length ?? 0,
+                esperaMin: a.seats.waitingMinutes ?? null,
               },
         usable: a.usable,
         problema: problemText(a),
@@ -228,13 +236,15 @@ export function healthText(report: HealthReport): string {
       c.planTexto,
       ...(c.sesion === null ? [] : [`ses ${c.sesion.pct}%`]),
       ...(c.semana === null ? [] : [`sem ${c.semana.pct}%`]),
-      ...Object.entries(c.modelos).map(([m, p]) => `${m} ${p.pct}%`),
+      ...Object.entries(c.modelos).map(
+        ([m, p]) => `${m} ${p.pct}% consumido (queda ${100 - p.pct}%)`,
+      ),
       ...(c.ritmo === null
         ? []
         : [`ritmo ${c.ritmo.pctDia}% (fondo ${c.ritmo.fondo ? "sí" : "no"})`]),
       ...(c.fable === null
         ? []
-        : [`Fable queda ${c.fable.queda}% (reserva ${c.fable.reserva}%, fondo ${c.fable.fondo ? "sí" : `no: ${c.fable.motivo}`})`]),
+        : [`reserva ${c.fable.reserva}%, fondo ${c.fable.fondo ? "sí" : `no: ${c.fable.motivo}`}`]),
       ...(c.plazas === null
         ? []
         : [`plazas ${c.plazas.usadas}/${c.plazas.total ?? "sin límite"}`]),

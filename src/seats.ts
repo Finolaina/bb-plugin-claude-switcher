@@ -328,6 +328,21 @@ export class Seats {
     return { account: waiting.account, position };
   }
 
+  /** How long the thread's message has waited for a seat; 0 when it is not waiting. */
+  waited(threadId: string, now: number): number {
+    const waiting = this.waiting.get(threadId);
+    return waiting === undefined ? 0 : Math.max(0, now - waiting.since);
+  }
+
+  /** When the account's longest wait began; null with no queue. */
+  waitingSince(account: string): number | null {
+    let since: number | null = null;
+    for (const w of this.waiting.values())
+      if (w.account === account && (since === null || w.since < since))
+        since = w.since;
+    return since;
+  }
+
   /** The thread's seat, or null. */
   seatOf(threadId: string): { account: string; state: SeatState } | null {
     const seat = this.seats.get(threadId);

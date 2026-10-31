@@ -16,6 +16,7 @@
 //      limit, move the project to an account with more room.
 //   6. Keep the history of moves and a forecast of each weekly window.
 //   7. Log an account in from Settings (`claude auth login` as a child).
+import { trackDrop } from "./src/panel.js";
 import {
   PluginCliError,
   cliCommand,
@@ -191,6 +192,13 @@ const SEAT_COUNT_RETRY_MS = 2_000;
 /** Changes of the seats within this long are announced once (Astra SEATS-R09). */
 const SEATS_CHANGED_MS = 250;
 const KV_SEATS = "seat-samples";
+/**
+ * [SUPUESTO, 2026-10-31] Fable's measurement that day had 16 threads queued on
+ * one account with seats idle elsewhere; ten minutes moves them well before
+ * the thirty of the Gloria warning. Not a measured optimum: the setting
+ * changes it.
+ */
+const DEFAULT_MOVE_AFTER_WAIT_MINUTES = 10;
 /** The seat samples kept: a week of them (see noteSeatSample). */
 const SEAT_SAMPLES_MS = 7 * 24 * 60 * 60_000;
 /**
@@ -240,6 +248,10 @@ const KV_PACE = "pace-day";
 const KV_FABLE_DAY = "fable-pace-day";
 /** Threads known as background work or as an exception to Fable's brake (see fableRole). */
 const KV_FABLE_ROLES = "fable-roles";
+/** projectId → when the user last picked its account by hand: a pin outlives a reload. */
+const KV_HAND_PICKS = "hand-picks";
+/** How long a pick by hand holds against a wait for a seat. */
+const HAND_PICK_TTL_MS = 7 * 24 * 60 * 60_000;
 /** The model a thread goes down to at the brake (bb's model id). */
 const LOWERED_MODEL_ID = "claude-opus-5-5";
 /**
@@ -379,6 +391,11 @@ const accountStateSchema = z.object({
     .object({ interactivo: z.number(), fondo: z.number(), hilos: z.number() })
     .nullable()
     .optional(),
+  /** A window whose reading came down with no reset: the highest it reached (see trackDrop). */
+  dropped: z
+    .object({ fable: z.number().optional(), week: z.number().optional(), five: z.number().optional() })
+    .nullable()
+    .optional(),
 });
 const projectStateSchema = z.object({
   id: z.string(),
@@ -477,7 +494,12 @@ export const rpcContract = defineRpcContract({
   },
   accounts_refresh: { input: z.null(), output: stateSchema },
   project_set_account: {
-    input: z.object({ projectId: z.string(), account: z.string().nullable() }),
+    input: z.object({
+      projectId: z.string(),
+      account: z.string().nullable(),
+      /** Pin it even if the account cannot run the project's model. */
+      anyway: z.boolean().optional(),
+    }),
     output: stateSchema,
   },
   /** Log an account in from bb: a new directory under the accounts dir, or a listed account without a login. */
@@ -643,10 +665,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     },
     teamRunsFable: {
       type: "boolean",
-      label: "Let Team seats run Fable",
+      label: "Let Team seats run your own Fable threads",
       description:
-        "Off: a Team seat is for Opus, and no Fable thread is sent to one automatically (a thread already on a seat moves off it when an Ultra or Max account has Fable).",
-      default: false,
+        "On: your own threads in Fable may run on a Team seat with session, Fable and a free seat left; background work never does, it goes on in Opus. Off: no Fable thread is sent to a Team seat automatically.",
+      default: true,
+    },
+    moveAfterWaitMinutes: {
+      type: "number",
+      label: "Minutes in a seat's queue before a project moves to another account",
+      description:
+        "A project on a full account moves to another with a free seat after this wait; one you picked by hand stays. Turns under way keep their account and seat. 0: never moves.",
+      default: DEFAULT_MOVE_AFTER_WAIT_MINUTES,
     },
     loginPrivateWindow: {
       type: "boolean",
@@ -939,7 +968,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * when no count is under way.
    */
   let endedWhileCounting: Set<string> | null = null;
-  const freeSeats = (name: string) => seats.free(seatKey(name));
+  /** Seats free on the account and not owed to the threads waiting there: a full account with a queue is no target. */
+  const freeSeats = (name: string) => {
+    const key = seatKey(name);
+    return seats.free(key) - seats.queue(key).length;
+  };
   /**
    * Whose seat a turn of a project on `at` takes (Astra SEATS-R3-001): its
    * account's (by name), the default's when it has no variable, none (null)
@@ -1088,6 +1121,54 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * Before a turn of the thread starts on `account`: null when it has a
    * seat there, else the wait bb holds its message on.
    */
+  function moveAfterMs(): number | undefined {
+    const minutes = current.moveAfterWaitMinutes;
+    if (!Number.isFinite(minutes)) return DEFAULT_MOVE_AFTER_WAIT_MINUTES * 60_000;
+    return minutes > 0 ? minutes * 60_000 : undefined;
+  }
+  /** The model last sent in each project: what a pin must be able to run. */
+  const projectModels = new Map<string, string>();
+  /**
+   * Why a pin of the project to the account would fail: the model its threads
+   * run is used up there, however much session is left (Fable, 2026-10-31:
+   * pins to Team seats at 100 % of Fable, seven failures). Null: nothing known
+   * against it.
+   */
+  function pinRefusal(projectId: string, account: string): string | null {
+    const model = projectModels.get(projectId) ?? current.preferredModel;
+    const usage = collector.get(account)?.usage;
+    if (model === "" || usage === null || usage === undefined) return null;
+    const settled = settle({ ...usage, name: account }, deps.now());
+    if (canRunModel(settled, model)) return null;
+    const used = Math.round(modelWindow(settled, model)?.usedPercent ?? 100);
+    const session =
+      settled.session.absent === true
+        ? ""
+        : ` Su sesión de 5 h lleva el ${Math.round(settled.session.usedPercent)} %, pero una sesión libre no da ${model}.`;
+    return `${account} no puede correr ${model}: ${model} consumido ${used} %, queda ${100 - used} %.${session}`;
+  }
+  /** Picked by hand, recently enough: see KV_HAND_PICKS. */
+  const handPicks = new Map<string, number>();
+  function pinned(projectId: string): boolean {
+    const at = handPicks.get(projectId);
+    return at !== undefined && deps.now() - at < HAND_PICK_TTL_MS;
+  }
+  async function notePin(projectId: string, on: boolean): Promise<void> {
+    if (on) handPicks.set(projectId, deps.now());
+    else handPicks.delete(projectId);
+    await bb.storage.kv.set(KV_HAND_PICKS, Object.fromEntries(handPicks));
+  }
+  /** The project moved: its messages waiting on the old account are judged again, each keeping its place in time. */
+  function askQueueAgain(from: string): void {
+    if (seats.queue(seatKey(from)).length === 0) return;
+    void bb.experimental_hooks
+      .recheck("message.dispatch")
+      .catch((error: unknown) =>
+        bb.log.warn(
+          `bb not asked again after a move off ${from}: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      );
+  }
   function seatWait(
     thread: ThreadResponse,
     account: string,
@@ -1402,6 +1483,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       .record(z.string(), z.enum(["fondo", "excepcion"]))
       .safeParse(await bb.storage.kv.get<unknown>(KV_FABLE_ROLES));
     if (roles.success) fableRoles = roles.data;
+    const picks = z
+      .record(z.string(), z.number())
+      .safeParse(await bb.storage.kv.get<unknown>(KV_HAND_PICKS));
+    if (picks.success)
+      for (const [projectId, at] of Object.entries(picks.data))
+        handPicks.set(projectId, at);
   } catch (error) {
     bb.log.warn(
       `could not read Fable's first readings and roles; they start again: ${error instanceof Error ? error.message : String(error)}`,
@@ -1512,8 +1599,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       ? { savedForUser }
       : {};
   }
-  /** The account is closed to background Fable (see fableRoom): measured and without room. A Team seat has no week: not saved. */
+  /**
+   * The account is closed to background Fable: a Team seat always (they run
+   * the user's Fable, not an executor's: Aitor, 2026-10-31, through Fable), an
+   * Ultra or Max account measured without room (see fableRoom).
+   */
   function savedForUser(name: string): boolean {
+    if (collector.get(name)?.usage?.weekly.absent === true) return true;
     const room = fableRoomFor(name);
     return room !== null && !room.open;
   }
@@ -1927,12 +2019,42 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     })();
   }
 
+  /**
+   * The highest reading of each window in this reset, and the windows whose
+   * reading came down without a reset: the panel says so, the bar shows what
+   * the provider says (see trackDrop). In memory: a reload starts again.
+   */
+  const dropSeen = new Map<string, { high: number; resetsAt: number | null }>();
+  const drops = new Map<string, { fable?: number; week?: number; five?: number }>();
+  function noteDrops(): void {
+    for (const account of accounts) {
+      const usage = collector.get(account.name)?.usage;
+      if (usage === null || usage === undefined) continue;
+      const windows = {
+        fable: modelWindow({ ...usage, name: account.name }, "Fable"),
+        week: usage.weekly.absent === true ? undefined : usage.weekly,
+        five: usage.session.absent === true ? undefined : usage.session,
+      };
+      const out: { fable?: number; week?: number; five?: number } = {};
+      for (const what of ["fable", "week", "five"] as const) {
+        const w = windows[what];
+        if (w === undefined) continue;
+        const key = `${account.name}|${what}`;
+        const { seen, dropped } = trackDrop(dropSeen.get(key), w.usedPercent, w.resetsAt);
+        dropSeen.set(key, seen);
+        if (dropped !== null) out[what] = dropped;
+      }
+      if (Object.keys(out).length > 0) drops.set(account.name, out);
+      else drops.delete(account.name);
+    }
+  }
   async function refreshAll(): Promise<void> {
     try {
       const found = await discover();
       await collector.collectAll(found);
       await recordSamples();
       await readFableWho();
+      noteDrops();
       bb.realtime.publish(CHANGED, { at: deps.now() });
     } finally {
       refreshes += 1;
@@ -2439,6 +2561,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           pace: paceFor(account.name),
           fable: fableRoomFor(account.name),
           who: fableWho?.[account.name] ?? null,
+          dropped: drops.get(account.name) ?? null,
         };
       }),
       projects,
@@ -2562,10 +2685,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         // automatic move whose answer is still pending (see noteMove).
         excursions.delete(projectId);
         movesOf(projectId).picks += 1;
+        await notePin(projectId, to !== null);
         await markHandled(projectId);
         const fromName = from.account ?? current.defaultAccountName;
         const toName = to?.name ?? current.defaultAccountName;
         if (toName === fromName) return;
+        askQueueAgain(fromName);
         bb.log.info(
           `project ${projectId}: picked by hand, ${fromName} → ${toName}`,
         );
@@ -2636,7 +2761,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       await refreshByHand();
       return state();
     },
-    async project_set_account({ projectId, account }) {
+    async project_set_account({ projectId, account, anyway }) {
+      const refused = account === null ? null : pinRefusal(projectId, account);
+      if (refused !== null && anyway !== true)
+        throw new Error(
+          `${refused} Para fijarla igualmente: bb claude-switcher use ${projectId} ${account} --anyway`,
+        );
       await pickAccount(projectId, (discovered) =>
         account === null ? null : discovered(account),
       );
@@ -4079,7 +4209,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       currentAccount: fromName,
       currentLoggedOut: unconfirmed(fromName),
       // A choice by hand since this plugin loaded stays (see markPick).
-      firstTurn: thread.status === "pending" && movesOf(projectId).picks === 0,
+      firstTurn:
+        thread.status === "pending" &&
+        movesOf(projectId).picks === 0 &&
+        !pinned(projectId),
+      waitedMs: seats.waited(thread.id, now),
+      moveAfterMs: moveAfterMs(),
+      pinned: pinned(projectId),
     });
     if (decision.kind === "keep") {
       // The turn runs where the project is (refused at the checkpoint only
@@ -4096,10 +4232,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     await applyAccount(projectId, to, from, { share: false });
     await markHandled(projectId);
     noteMove(projectId, fromName, decision.account, model, before);
+    askQueueAgain(fromName);
     const reason =
       decision.why === "back-from-excursion"
         ? `Moved back to account ${decision.account} before the turn: ${fromName} was an excursion for ${excursion?.model ?? "another model"}`
-        : `Moved to account ${decision.account} before the turn: ${fromName} ${whyOut(fromName, model)}`;
+        : decision.why === "seat-wait"
+          ? `Moved to account ${decision.account} before the turn: ${Math.round(seats.waited(thread.id, now) / 60_000)} min waiting for a seat on ${fromName}`
+          : `Moved to account ${decision.account} before the turn: ${fromName} ${whyOut(fromName, model)}`;
     bb.log.info(`thread ${thread.id}: ${reason}`);
     await recordMove(
       {
@@ -4360,7 +4499,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function noteFableRole(ctx: MessageDispatchHookContext): void {
     const id = ctx.thread.id;
     const text = ctx.input.text.toLowerCase();
-    const role = FABLE_EXCEPTIONS.some((mark) => text.includes(mark))
+    // The person named the model for this message in the app: not an inherited
+    // one, nor a retry's snapshot. The command line cannot tell them from an
+    // agent, and bb does not tell the plugin a model set with `thread update`.
+    const fixedByHand =
+      ctx.executionSources.model === "explicit" &&
+      ctx.initiator === "user" &&
+      ctx.senderThreadId === null &&
+      ctx.origin !== "cli" &&
+      modelFamily(ctx.requestedExecution.model)?.toLowerCase() ===
+        current.preferredModel.toLowerCase();
+    const role = fixedByHand || FABLE_EXCEPTIONS.some((mark) => text.includes(mark))
       ? "excepcion"
       : ctx.origin === "cli" && fableRoles[id] === undefined
         ? "fondo"
@@ -4378,6 +4527,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       }
     });
   }
+  /** Background work in the reserved model, with the brake on; typed by the user in the app, it is theirs. */
+  function heldBackground(ctx: MessageDispatchHookContext, model: string): boolean {
+    return (
+      current.autoSwitch &&
+      paceFilter(isBackground(ctx.thread), model).savedForUser !== undefined &&
+      !(ctx.initiator === "user" && ctx.senderThreadId === null && ctx.origin !== "cli")
+    );
+  }
   /**
    * The brake (Aitor, 2026-10-31): a turn of background work in the reserved
    * model with no account that has room for it does not run. The thread goes
@@ -4391,10 +4548,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     model: string,
   ): MessageDispatchHookDecision | null {
     const { thread } = ctx;
-    if (!current.autoSwitch || paceFilter(isBackground(thread), model).savedForUser === undefined)
-      return null;
-    if (ctx.initiator === "user" && ctx.senderThreadId === null && ctx.origin !== "cli")
-      return null;
+    if (!heldBackground(ctx, model)) return null;
     const now = deps.now();
     const measured = measuredAccounts(model).map((a) => settle(a, now));
     if (measured.length === 0) return null;
@@ -4419,9 +4573,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /**
    * The held message sent again in Opus, and the thread's later messages with
    * it. Created before the old one goes, so nothing is lost; a row that cannot
-   * be moved waits as it is (see brakeFable). Only plain messages: a retry of
-   * a failed turn belongs to its turn. bb stores the row after the hook
-   * answers, so it is looked for a few times.
+   * be moved waits as it is (see brakeFable). A retry goes too: its row runs
+   * the model the failed turn had, whatever the thread says now (Fable,
+   * 2026-10-31), and carries what core would send: «Please continue.» or the
+   * input the provider never took. bb stores the row after the hook answers,
+   * so it is looked for a few times.
    */
   async function lowerHeldTurn(threadId: string, model: string): Promise<void> {
     try {
@@ -4432,7 +4588,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         if (tries > 0) await new Promise((done) => setTimeout(done, 200));
         rows = (await bb.sdk.threads.queuedMessages.list({ threadId })).filter(
           (r) =>
-            r.payload.kind === "inline" &&
+            (r.payload.kind === "inline" || r.payload.kind === "retry") &&
             (r.state === "waiting" || r.state === "scheduled") &&
             modelFamily(r.model)?.toLowerCase() === model.toLowerCase(),
         );
@@ -4497,7 +4653,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       };
     }
     const model = modelFamily(ctx.requestedExecution.model);
-    if (model !== null) threadModel.set(thread.id, model);
+    if (model !== null) {
+      threadModel.set(thread.id, model);
+      projectModels.set(thread.projectId, model);
+    }
     noteFableRole(ctx);
     if (ctx.attempt === "start-turn" && model !== null) {
       const braked = brakeFable(ctx, model);
@@ -4616,7 +4775,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         // queue leaves this one's place alone (Astra SEATS-R4-003).
         seatGenerations.set(thread.id, (seatGenerations.get(thread.id) ?? 0) + 1);
         const wait = seatWait(thread, at.account);
-        if (wait !== null) return wait;
+        if (wait !== null) {
+          // Past the wait with no account to move to (the placement looked):
+          // background Fable goes down to Opus, the user's own keeps its place.
+          const after = moveAfterMs();
+          if (
+            model !== null &&
+            after !== undefined &&
+            seats.waited(thread.id, deps.now()) >= after &&
+            heldBackground(ctx, model)
+          )
+            setTimeout(() => void lowerHeldTurn(thread.id, model), 0);
+          return wait;
+        }
       }
     }
     // Where the project stands as the turn is sent, for `thread.active`.
@@ -4996,6 +5167,29 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const advice = opusOn === null ? null : opusInsteadText(model, opusOn);
     const carried = advice === null ? undefined : { model };
     const how = stuck ? "left in error: " : "";
+    // Background Fable out of room goes on in Opus now, on an account the
+    // placement finds for it, instead of waiting for Fable or being told to:
+    // the retry core queues is held and moved, as the brake's rows. A model
+    // named by the person made the thread no background work.
+    if (
+      current.autoSwitch &&
+      mayAdviseOpus(decision, model, current.preferredModel) &&
+      paceFilter(background, model).savedForUser !== undefined &&
+      chooseAccount(
+        measuredAccounts(FALLBACK_MODEL).map((a) => settle(a, now)),
+        { preferredModel: FALLBACK_MODEL, reserveModel: current.preferredModel },
+      ) !== null
+    ) {
+      judgedAdvice(event.threadId, null, judgedIn, null);
+      await retryTurn(
+        event,
+        "Fable sin margen: este hilo de fondo sigue en Opus",
+        decision.kind === "wait" ? decision.sendAt : now + BRAKE_LONGEST_WAIT_MS,
+        stuck,
+      );
+      await lowerHeldTurn(event.threadId, model);
+      return;
+    }
     // The thread shows the advice where nothing queued carries it: a
     // decline (Sol B2-004), asked again after every refresh (Sol
     // B2-R4-001). Any other judgment takes it away. Unless a turn of it
@@ -5741,6 +5935,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
               : {
                   ...taken[account.name]!,
                   external: taken[account.name]!.external ?? [],
+                  waitingMinutes: (() => {
+                    const since = seats.waitingSince(seatKey(account.name));
+                    return since === null ? null : Math.floor((now - since) / 60_000);
+                  })(),
                 },
           ...(unconfirmed ? { unconfirmedSince: m!.observedAt! } : {}),
           usable:
@@ -6067,7 +6265,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
               required: true,
             },
           ] as const,
-          async run({ positionals }) {
+          options: {
+            anyway: {
+              type: "boolean",
+              description:
+                "Pin it even if the account cannot run the project's model",
+            },
+          },
+          async run({ positionals, options }) {
             await discover();
             const s = await state();
             const matches = s.projects.filter(
@@ -6088,8 +6293,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             }
             const project = matches[0]!;
             const name = positionals.account;
+            const refused = pinRefusal(project.id, name);
+            if (refused !== null && options.anyway !== true)
+              throw new PluginCliError(
+                `${refused} No fijada. Para fijarla igualmente: bb claude-switcher use ${project.id} ${name} --anyway`,
+                { code: "model_used_up" },
+              );
             await pickAccount(project.id, () => accountOrDefault(name));
-            return { exitCode: 0, stdout: `${project.name} → ${name}\n` };
+            return {
+              exitCode: 0,
+              stdout: `${project.name} → ${name}\n${refused === null ? "" : `AVISO: ${refused}\n`}`,
+            };
           },
         }),
         release: cliCommand({
@@ -6113,6 +6327,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                     recentSwitches.delete(p.id);
                     excursions.delete(p.id);
                     movesOf(p.id).picks += 1;
+                    await notePin(p.id, false);
                   });
                   lines.push(
                     `${p.name}\treleased (was ${p.account ?? "a vanished account"})`,
@@ -6130,6 +6345,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                 // BM-INSPECT-005).
                 excursions.delete(p.id);
                 movesOf(p.id).picks += 1;
+                await notePin(p.id, false);
               }
             }
             return {

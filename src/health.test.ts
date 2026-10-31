@@ -87,7 +87,7 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
           modelos: { Fable: { pct: 100, vuelve: "2026-11-01T18:00:00+01:00" } },
           ritmo: { presupuesto: 1.2, gastado: 0.4, pctDia: 33, fondo: true },
           fable: null,
-          plazas: { usadas: 1, total: 4, externas: [] },
+          plazas: { usadas: 1, total: 4, externas: [], esperando: 0, esperaMin: null },
           usable: true,
           problema: null,
         },
@@ -167,9 +167,9 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
         "failing",
         "ultra",
         "consulta fallida: HTTP 429",
-        { usadas: 1, total: 4, externas: [] },
+        { usadas: 1, total: 4, externas: [], esperando: 0, esperaMin: null },
       ],
-      ["never", "ultra", "sin medir", { usadas: 1, total: 4, externas: [] }],
+      ["never", "ultra", "sin medir", { usadas: 1, total: 4, externas: [], esperando: 0, esperaMin: null }],
     ]);
     const { five_hour: _, ...incomplete } = JSON.parse(
       readFileSync(
@@ -232,7 +232,7 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
         }),
       ],
     }).cuentas;
-    expect(a!.plazas).toEqual({ usadas: 2, total: null, externas: [] });
+    expect(a!.plazas).toEqual({ usadas: 2, total: null, externas: [], esperando: 0, esperaMin: null });
   });
 });
 
@@ -305,8 +305,8 @@ describe("healthText", () => {
     expect(text).toBe(
       [
         "medido 2026-10-30T21:55:58+01:00 · el día empieza a las 9:00 · freno de fondo encendido",
-        "aitor  Ultra · sin tope de 5 h · sem 98% · Fable 100% · ritmo 33% (fondo sí) · plazas 1/4 · usable",
-        "team1  Team · ses 0% · Fable 76% · plazas 0/2 · usable",
+        "aitor  Ultra · sin tope de 5 h · sem 98% · Fable 100% consumido (queda 0%) · ritmo 33% (fondo sí) · plazas 1/4 · usable",
+        "team1  Team · ses 0% · Fable 76% consumido (queda 24%) · plazas 0/2 · usable",
         "",
       ].join("\n"),
     );
