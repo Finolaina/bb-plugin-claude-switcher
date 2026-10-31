@@ -442,7 +442,8 @@ async function host(
   const deleted: string[] = [];
   const queued: QueuedRow[] = [...(options.queued ?? [])];
   const threadUpdates: { threadId: string; model?: string }[] = [];
-  const created: { threadId: string; model?: string; input: unknown }[] = [];
+  const created: { threadId: string; model?: string; input: unknown; permissionMode?: string; reasoningLevel?: string }[] = [];
+  const reordered: { queuedMessageId: string; previousQueuedMessageId: string | null; nextQueuedMessageId: string | null }[] = [];
   let nextId = 1;
   let retryFailures = 0;
   const { credentialIo, accountsIo, usageCalls, files } = fakes(
@@ -634,6 +635,10 @@ async function host(
             await options.beforeQueuedList?.(threadId);
             return queued.filter((row) => row.threadId === threadId);
           },
+          reorder: async (args: { queuedMessageId: string; previousQueuedMessageId: string | null; nextQueuedMessageId: string | null }) => {
+            reordered.push(args);
+            return { ok: true };
+          },
           send: async ({ queuedMessageId }: { queuedMessageId: string }) => {
             sent.push(queuedMessageId);
             // Dispatched rows leave the queue, as in bb.
@@ -779,6 +784,7 @@ async function host(
     queued,
     threadUpdates,
     created,
+    reordered,
     usageCalls,
     files,
     logins,
@@ -15637,7 +15643,7 @@ describe("Fable's brake at a message's checkpoint (Aitor, 2026-10-31)", () => {
   const BG = { parentThreadId: "thr-parent" };
   const ON = { paceHoldsBackground: true, preferredModel: "Fable", teamRunsFable: false };
   const rowsOf = (h: Awaited<ReturnType<typeof host>>, model: string) =>
-    h.queued.push({ id: "row-1", threadId: "thread-1", payload: { kind: "inline" }, sendAt: NOW + HOUR, model, state: "waiting", content: [{ type: "text", text: "haz esto" }] } as never);
+    h.queued.push({ id: "row-1", threadId: "thread-1", payload: { kind: "inline" }, sendAt: NOW + HOUR, model, state: "waiting", waitingOn: { kind: "plugin", pluginId: "claude-switcher", reason: "Fable frenado" }, content: [{ type: "text", text: "haz esto" }] } as never);
 
   async function settled(h: Awaited<ReturnType<typeof host>>) {
     dispose = () => h.harness.dispose();
@@ -15669,11 +15675,94 @@ describe("Fable's brake at a message's checkpoint (Aitor, 2026-10-31)", () => {
     await vi.waitFor(() => expect(h.deleted).toContain("row-1"));
   });
 
-  it("canary a, the way down: the same thread's Opus turn runs at the brake", async () => {
-    const h = await host(atPace.usage, { kvPreset: atPace.kvPreset, settings: ON, threads: { "thread-1": BG } });
+  it("canary a, the way down: the same thread's Opus turn goes to a Team seat", async () => {
+    const h = await host(
+      {
+        main: () => Response.json(ultra(60)),
+        spare: () => Response.json(ultra(60)),
+        work: () =>
+          Response.json({
+            five_hour: { utilization: 10, resets_at: new Date(NOW + 2 * HOUR).toISOString(), locked_reason: null },
+            limits: [{ kind: "session", percent: 10, resets_at: new Date(NOW + 2 * HOUR).toISOString() }],
+            seven_day: null,
+          } as unknown as Payload),
+      },
+      { kvPreset: { "fable-pace-day": { main: start(20), spare: start(20) } }, settings: ON, threads: { "thread-1": BG } },
+    );
     await settled(h);
     expect(await send(h, BG, {}, "claude-opus-5-5")).toMatchObject({ action: "proceed" });
+    expect(h.envSet.at(-1)).toEqual(expect.objectContaining({ projectId: "proj-1", value: `${ACCOUNTS}/work` }));
   });
+
+  it("background Opus with no Team and only accounts that still have Fable waits: it does not spend their week", async () => {
+    const h = await host(atPace.usage, { kvPreset: atPace.kvPreset, settings: ON, threads: { "thread-1": BG } });
+    await settled(h);
+    const d = (await send(h, BG, {}, "claude-opus-5-5")) as { action: string; reason: string; sendAt: number };
+    expect(d.action).toBe("wait");
+    expect(d.reason).toMatch(/no gasta la semana/);
+    expect(d.sendAt).toBe(NOW + 15 * 60_000);
+  });
+
+  it("the person's Opus is never held by that, nor background Opus with the brake off", async () => {
+    const h = await host(atPace.usage, { kvPreset: atPace.kvPreset, settings: ON, threads: { "thread-1": { ...BG, parentThreadId: null } } });
+    await settled(h);
+    expect(await send(h, { ...BG, parentThreadId: null }, { initiator: "user", senderThreadId: null, origin: "ui" }, "claude-opus-5-5")).toMatchObject({ action: "proceed" });
+    const off = await host(atPace.usage, { kvPreset: atPace.kvPreset, settings: { ...ON, paceHoldsBackground: false }, threads: { "thread-1": BG } });
+    await settled(off);
+    expect(await send(off, BG, {}, "claude-opus-5-5")).toMatchObject({ action: "proceed" });
+    await off.harness.dispose();
+  });
+
+  it("the brake holds what it holds and nothing else: a message scheduled by someone keeps its time", async () => {
+    const h = await host(atPace.usage, { kvPreset: atPace.kvPreset, settings: ON, threads: { "thread-1": BG } });
+    await settled(h);
+    h.queued.push({ id: "tomorrow", threadId: "thread-1", payload: { kind: "inline" }, sendAt: NOW + 24 * HOUR, model: FABLE_MODEL, state: "scheduled", waitingOn: { kind: "time" }, content: [{ type: "text", text: "mañana" }], senderThreadId: null, permissionMode: null, reasoningLevel: null, serviceTier: null });
+    await send(h, BG);
+    rowsOf(h, FABLE_MODEL);
+    await vi.waitFor(() => expect(h.deleted).toContain("row-1"));
+    expect(h.created).toHaveLength(1);
+    expect(h.deleted).not.toContain("tomorrow");
+    expect(h.queued.map((r: { id: string }) => r.id)).toContain("tomorrow");
+  });
+
+  it("a lowered row keeps its place and how it was to run: only the model changes", async () => {
+    const h = await host(atPace.usage, { kvPreset: atPace.kvPreset, settings: ON, threads: { "thread-1": BG } });
+    await settled(h);
+    rowsOf(h, FABLE_MODEL);
+    Object.assign(h.queued[0]!, { permissionMode: "accept-edits", reasoningLevel: "high" });
+    h.queued.push({ id: "behind", threadId: "thread-1", payload: { kind: "inline" }, sendAt: null, model: "claude-opus-5-5", state: "waiting", waitingOn: { kind: "thread-busy" }, content: [{ type: "text", text: "detrás" }], senderThreadId: null, permissionMode: null, reasoningLevel: null, serviceTier: null });
+    await send(h, BG);
+    await vi.waitFor(() => expect(h.deleted).toContain("row-1"));
+    expect(h.created[0]).toMatchObject({ model: "claude-opus-5-5", permissionMode: "accept-edits", reasoningLevel: "high" });
+    expect(h.reordered).toEqual([{ threadId: "thread-1", queuedMessageId: "created-1", previousQueuedMessageId: "row-1", nextQueuedMessageId: "behind" }]);
+  });
+
+  it("two lowerings at once make one copy, and a copy whose original would not go is not made again", async () => {
+    const h = await host(atPace.usage, { kvPreset: atPace.kvPreset, settings: ON, threads: { "thread-1": BG } });
+    await settled(h);
+    rowsOf(h, FABLE_MODEL);
+    await Promise.all([send(h, BG), send(h, BG)]);
+    await vi.waitFor(() => expect(h.deleted).toContain("row-1"));
+    expect(h.created).toHaveLength(1);
+    // Later: the original is back beside its copy (a removal that failed): only the original goes.
+    rowsOf(h, FABLE_MODEL);
+    h.queued.push({ ...h.queued[0]!, id: "created-1", model: "claude-opus-5-5", waitingOn: { kind: "thread-busy" }, payload: { kind: "inline" } });
+    h.deleted.length = 0;
+    await send(h, BG);
+    await vi.waitFor(() => expect(h.deleted).toContain("row-1"));
+    expect(h.created).toHaveLength(1);
+  });
+
+  it("in a thread left in error the lowered retry is sent: nothing else would send it", async () => {
+    const errored = { ...BG, status: "error" };
+    const h = await host(atPace.usage, { kvPreset: atPace.kvPreset, settings: ON, threads: { "thread-1": errored } });
+    await settled(h);
+    rowsOf(h, FABLE_MODEL);
+    Object.assign(h.queued[0]!, { payload: { kind: "retry", retryOfTurnRequestId: "req-1", attempt: 2, reason: "x" }, waitingOn: { kind: "time" } });
+    await send(h, BG);
+    await vi.waitFor(() => expect(h.sent).toEqual(["created-1"]));
+  });
+
 
   it("canary d: under the reserve with day's share to spare, no background Fable either", async () => {
     const h = await host(
@@ -15912,6 +16001,23 @@ describe("Seats count, as well as what is spent (Fable's measurement of 2026-10-
     expect(again.envSet.filter((e) => e.value !== `${ACCOUNTS}/main`)).toEqual([]);
   });
 
+  it("a brake open elsewhere does not let the turn run where it is shut: no seat there, it goes on in Opus", async () => {
+    const h = await host(
+      { main: () => Response.json(ultra(85)), spare: () => Response.json(ultra(10)) },
+      {
+        settings: { ...SETTINGS, paceHoldsBackground: true, seatsMax: 1, teamRunsFable: false },
+        kvPreset: { "fable-pace-day": { spare: { at: NOW - 2 * HOUR, usedPercent: 10, resetsAt: NOW + 3 * 24 * HOUR } } },
+        threads: { t2: { parentThreadId: "thr-parent" } },
+      },
+    );
+    await started(h);
+    await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-2", account: "spare" });
+    await runs(h, "t1", "proj-2");
+    const d = await ask(h, "t2", "proj-1", { parentThreadId: "thr-parent" }, { initiator: "agent", senderThreadId: "thr-parent", origin: "plugin" });
+    expect(d).toMatchObject({ action: "wait", reason: expect.stringMatching(/sigue en Opus/) });
+    expect(h.envSet.filter((e) => e.projectId === "proj-1")).toEqual([]);
+  });
+
   it("background Fable with nowhere to go after N minutes goes down to Opus; the user's own thread waits", async () => {
     let at = NOW;
     const h = await host(
@@ -15933,7 +16039,7 @@ describe("Seats count, as well as what is spent (Fable's measurement of 2026-10-
     }
     expect(h.created).toEqual([]);
     at = NOW + 10 * 60_000;
-    h.queued.push({ id: "row-1", threadId: "t2", payload: { kind: "inline" }, sendAt: at + HOUR, model: FABLE_MODEL, state: "waiting" } as never);
+    h.queued.push({ id: "row-1", threadId: "t2", payload: { kind: "inline" }, sendAt: at + HOUR, model: FABLE_MODEL, state: "waiting", waitingOn: { kind: "plugin", pluginId: "claude-switcher", reason: "espera" } } as never);
     const later = await ask(h, "t2", "proj-1", bg, agent);
     expect(later.action).toBe("wait");
     await vi.waitFor(() => expect(h.created).toHaveLength(1));
@@ -15959,6 +16065,58 @@ describe("Seats count, as well as what is spent (Fable's measurement of 2026-10-
     expect(h.envSet.filter((e) => e.value === `${ACCOUNTS}/work`)).toEqual([]);
     const mine = await ask(h, "t2", "proj-2", { status: "pending" });
     expect(mine.action).toBe("proceed");
+  });
+
+  it("a pin looks at everything that stops a turn: the week, the 5 hours and the login", async () => {
+    const full = (session: number, weekly: number) =>
+      Response.json({
+        limits: [
+          { kind: "session", percent: session, resets_at: new Date(NOW + HOUR).toISOString() },
+          { kind: "weekly_all", percent: weekly, resets_at: new Date(NOW + 24 * HOUR).toISOString() },
+          { kind: "weekly_scoped", percent: 40, resets_at: new Date(NOW + 24 * HOUR).toISOString(), scope: { model: { display_name: "Fable" } } },
+        ],
+      } as unknown as Payload);
+    const h = await host(
+      { main: () => Response.json(ultra(20)), spare: () => full(10, 100), work: () => new Response("", { status: 401 }) },
+      { settings: { ...SETTINGS } },
+    );
+    await started(h);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const use = (name: string) => h.harness.behavior.runCli(["use", "proj-1", name]);
+    const week = await use("spare");
+    expect(week.exitCode).toBe(1);
+    expect(week.stderr).toMatch(/la semana consumido 100 %, queda 0 %\. Vuelve el/);
+    expect((await use("work")).stderr).toMatch(/no tiene la sesión iniciada/);
+    await h.harness.dispose();
+    const k = await host(
+      { main: () => Response.json(ultra(20)), spare: () => full(100, 10) },
+      { settings: { ...SETTINGS } },
+    );
+    dispose = () => k.harness.dispose();
+    await started(k);
+    await k.harness.behavior.callRpc("accounts_refresh", null);
+    const five = await k.harness.behavior.runCli(["use", "proj-1", "spare"]);
+    expect(five.stderr).toMatch(/la sesión de 5 h consumido 100 %/);
+  });
+
+  it("the default account chosen by hand stays, and `default` takes the pin off", async () => {
+    let at = NOW;
+    const h = await host(
+      { main: () => Response.json(ultra(20)), spare: () => Response.json(ultra(10)) },
+      { settings: { ...SETTINGS, seatsMax: 1 }, clock: () => at },
+    );
+    await started(h);
+    await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: null, picked: true });
+    await runs(h, "t1", "proj-1");
+    for (let minute = 0; minute <= 11; minute += 1) {
+      at = NOW + minute * 60_000;
+      expect((await ask(h, "t2", "proj-1")).action).toBe("wait");
+    }
+    expect(h.envSet.filter((e) => e.value === `${ACCOUNTS}/spare`)).toEqual([]);
+    expect((await h.harness.behavior.runCli(["use", "proj-1", "default"])).exitCode).toBe(0);
+    at += 60_000;
+    await ask(h, "t2", "proj-1");
+    await vi.waitFor(() => expect(h.envSet.filter((e) => e.value === `${ACCOUNTS}/spare`)).not.toEqual([]));
   });
 
   it("health says how long an account's queue has been waiting", async () => {

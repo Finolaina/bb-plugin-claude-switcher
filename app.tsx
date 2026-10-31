@@ -187,7 +187,13 @@ function useAccounts() {
     readProject,
     refresh: () => run(() => rpc.call("accounts_refresh", null)),
     setProjectAccount: (projectId: string, account: string | null) =>
-      run(() => rpc.call("project_set_account", { projectId, account })),
+      run(() =>
+        rpc.call("project_set_account", {
+          projectId,
+          account,
+          ...(account === null ? { picked: true } : {}),
+        }),
+      ),
     startLogin: (name: string) =>
       run(() => rpc.call("account_login_start", { name })),
     sendCode: (code: string) =>
