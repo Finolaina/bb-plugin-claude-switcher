@@ -279,6 +279,7 @@ export function LeftBar({ bar }: { bar: PanelBar | null }) {
         className={cn(
           "cs-fill",
           bar.tone === "amber" && "cs-low",
+          bar.tone === "red" && "cs-past",
           bar.tone === "blue" && "cs-five",
         )}
         style={{ transform: `scaleX(${bar.left / 100})` }}
@@ -289,6 +290,9 @@ export function LeftBar({ bar }: { bar: PanelBar | null }) {
           style={{ clipPath: `inset(0 ${100 - bar.left}% 0 ${start}%)` }}
         />
       ) : null}
+      {bar.reserve === undefined ? null : (
+        <div className="cs-reserve" style={{ left: `${bar.reserve}%` }} />
+      )}
     </div>
   );
 }
@@ -352,6 +356,9 @@ export function AccountRowView({
             <span className="text-muted-foreground"> · {row.line}</span>
           )}
         </p>
+        {row.who === null ? null : (
+          <p className="mt-0.5 text-xs text-muted-foreground">{row.who}</p>
+        )}
         {twin === null ? null : (
           <p className="mt-0.5 text-xs text-muted-foreground">{words.sameAs(twin)}</p>
         )}

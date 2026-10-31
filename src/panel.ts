@@ -178,6 +178,18 @@ export interface PanelAccount {
   planLabel?: string;
   fiveHour?: boolean | null;
   pace?: { budget: number; spent: number; dayPercent: number; background: boolean } | null;
+  /** Fable's week as the brake reads it (src/pace.ts, fableRoom); null on a Team seat. */
+  fable?: {
+    left: number;
+    reserve: number;
+    open: boolean;
+    why: "pace" | "reserve" | "unknown" | null;
+    pace: { budget: number; spent: number; dayPercent: number; background: boolean } | null;
+    nextAt: number | null;
+    resetsAt: number | null;
+  } | null;
+  /** Who spent its Fable on this computer: percentages from `fable-quien.json`. */
+  who?: { interactivo: number; fondo: number; hilos: number } | null;
 }
 
 export interface PanelSeats {
@@ -210,9 +222,11 @@ export interface PanelBar {
   left: number;
   /** Today's share not yet spent, at the end of what is left (points of the week). */
   today: number;
-  tone: "green" | "amber" | "empty" | "blue";
-  /** «Le queda el 90 % de la semana». */
+  tone: "green" | "amber" | "empty" | "blue" | "red";
+  /** «Le queda el 90 % de la semana», «Te queda el 35 % de la semana de Fable». */
   label: string;
+  /** The percent kept for the user, a mark on the bar; none where the brake does not apply. */
+  reserve?: number;
 }
 
 export interface PanelRow {
@@ -233,6 +247,8 @@ export interface PanelRow {
   when: string;
   /** After the state word under the bar: today's phrase, threads, why not. */
   line: string;
+  /** «La gastó en este ordenador: 70 % tú · 30 % fondo»; null when not measured. */
+  who: string | null;
   /** The long form, one fact a line: the tooltip and the screen reader. */
   help: string;
 }
@@ -248,6 +264,16 @@ const T = {
     },
     ofWeek: "de la semana",
     ofFive: "de las 5 h",
+    ofFable: "de Fable",
+    leftFable: (n: number) => `Te queda el ${formatNumber(n, "es")} % de la semana de Fable`,
+    fableSentence: (n: number, when: string, why: string) =>
+      `Fable: te queda el ${formatNumber(n, "es")} % de la semana${when === "" ? "" : ` · se reinicia ${when}`}${why === "" ? "" : ` · ${why}`}`,
+    resets: (when: string) => `se reinicia ${when}`,
+    noBackground: "el fondo ya no la usa",
+    noBackgroundReserve: "el fondo ya no la usa: solo queda tu reserva",
+    noBackgroundToday: "el fondo ya no la usa: ya gastó lo de hoy",
+    who: (mine: number, bg: number) =>
+      `La gastó en este ordenador: ${formatNumber(mine, "es")} % tú · ${formatNumber(bg, "es")} % fondo`,
     leftWeek: (n: number) => `Le queda el ${formatNumber(n, "es")} % de la semana`,
     leftFive: (n: number) => `Le queda el ${formatNumber(n, "es")} % de las 5 h`,
     back: (when: string) => `vuelve ${when}`,
@@ -255,7 +281,7 @@ const T = {
     notStarted: "sin empezar",
     todaySpent: "Ya ha gastado lo de hoy",
     todayShare: (n: number) => `Hoy ha gastado el ${formatNumber(n, "es")} % de su parte`,
-    modelAt: (model: string, n: number) => `${model} al ${formatNumber(n, "es")} %`,
+    modelAt: (model: string, n: number) => `ha gastado el ${formatNumber(n, "es")} % de ${model}`,
     modelOut: (model: string, when: string) =>
       when === "" ? `sin ${model}` : `sin ${model} hasta ${when}`,
     threads: (used: number, of: number) => `${used} de ${of} hilos`,
@@ -282,6 +308,16 @@ const T = {
     },
     ofWeek: "of the week",
     ofFive: "of the 5 hours",
+    ofFable: "of Fable",
+    leftFable: (n: number) => `${formatNumber(n, "en")} % of Fable's week left for you`,
+    fableSentence: (n: number, when: string, why: string) =>
+      `Fable: ${formatNumber(n, "en")} % of the week left${when === "" ? "" : ` · resets ${when}`}${why === "" ? "" : ` · ${why}`}`,
+    resets: (when: string) => `resets ${when}`,
+    noBackground: "background work no longer uses it",
+    noBackgroundReserve: "background work no longer uses it: only your reserve is left",
+    noBackgroundToday: "background work no longer uses it: today's share is spent",
+    who: (mine: number, bg: number) =>
+      `Spent on this computer: ${formatNumber(mine, "en")} % you · ${formatNumber(bg, "en")} % background`,
     leftWeek: (n: number) => `${formatNumber(n, "en")} % of the week left`,
     leftFive: (n: number) => `${formatNumber(n, "en")} % of the 5 hours left`,
     back: (when: string) => `back ${when}`,
@@ -289,7 +325,7 @@ const T = {
     notStarted: "not started",
     todaySpent: "Today's share is spent",
     todayShare: (n: number) => `Spent ${formatNumber(n, "en")} % of today's share`,
-    modelAt: (model: string, n: number) => `${model} at ${formatNumber(n, "en")} %`,
+    modelAt: (model: string, n: number) => `spent ${formatNumber(n, "en")} % of ${model}`,
     modelOut: (model: string, when: string) =>
       when === "" ? `no ${model}` : `no ${model} until ${when}`,
     threads: (used: number, of: number) => `${used} of ${of} threads`,
@@ -361,9 +397,16 @@ export function accountRow(
   const long = (at: number) => whenLong(at, now, lang, timeZone);
   const ahead = (at: number | null): at is number => at !== null && at > now;
 
-  // The window the bar draws: the week, or the 5 hours on a Team seat.
+  // The window the bar draws: Fable's week where the plugin reads it, else
+  // the week, or the 5 hours on a Team seat.
+  const fable = whole && !team ? (account.fable ?? null) : null;
   const main = !whole ? null : team ? usage.session : usage.weekly;
-  const left = main === null ? null : 100 - usedOf(main, now);
+  const left =
+    fable !== null
+      ? Math.round(fable.left)
+      : main === null
+        ? null
+        : 100 - usedOf(main, now);
   const limits = !whole
     ? []
     : [
@@ -373,16 +416,20 @@ export function accountRow(
   const full = limits.filter((w) => usedOf(w, now) >= 100);
   const locked = whole && usage.blocked;
   const out = noLogin || locked || full.length > 0;
-  const pace = account.pace;
+  const pace = fable === null ? account.pace : fable.pace;
+  const braked =
+    fable !== null && ctx.paceHoldsBackground === true && !fable.open;
   const state: PanelState = noLogin
     ? "out"
     : !whole
       ? "nodata"
       : out
         ? "out"
-        : ctx.paceHoldsBackground === true &&
-            !team &&
-            (pace === null || pace?.background === false)
+        : (fable === null
+              ? ctx.paceHoldsBackground === true &&
+                !team &&
+                (pace === null || pace?.background === false)
+              : braked && fable.left > 0)
           ? "kept"
           : seatsUsed(seats) > 0
             ? "working"
@@ -396,9 +443,11 @@ export function accountRow(
     if (resets.length > 0 && resets.every(ahead)) whenAt = Math.max(...resets);
   } else if (main !== null) {
     if (team && usedOf(main, now) === 0) when = t.notStarted;
+    else if (ahead(fable?.resetsAt ?? null)) whenAt = fable!.resetsAt;
     else if (ahead(main.resetsAt)) whenAt = main.resetsAt;
   }
-  if (whenAt !== null) when = t.back(short(whenAt));
+  if (whenAt !== null)
+    when = fable !== null && !out ? t.resets(short(whenAt)) : t.back(short(whenAt));
 
   const model = !whole
     ? undefined
@@ -425,14 +474,26 @@ export function accountRow(
     if (seats !== undefined && seats.capacity > 0)
       parts.push(t.threads(seatsUsed(seats), seats.capacity));
   }
+  // Whether background work runs here, in words (with the brake on).
+  const whyBraked = !braked
+    ? ""
+    : fable.why === "reserve" && fable.left > 0
+      ? t.noBackgroundReserve
+      : fable.why === "pace"
+        ? t.noBackgroundToday
+        : t.noBackground;
   if (whole && !team && !out) {
-    if (pace !== null && pace !== undefined)
+    if (whyBraked !== "" && fable!.left > 0) parts.push(whyBraked);
+    else if (pace !== null && pace !== undefined && fable?.left !== 0)
       parts.push(
         pace.dayPercent >= 90
           ? t.todaySpent
           : t.todayShare(Math.floor(Math.max(0, pace.dayPercent))),
       );
-    if (model !== undefined && usedOf(model[1], now) >= 100)
+    if (
+      (model !== undefined && usedOf(model[1], now) >= 100) ||
+      (model !== undefined && fable?.left === 0)
+    )
       parts.push(
         t.modelOut(model[0], ahead(model[1].resetsAt) ? short(model[1].resetsAt) : ""),
       );
@@ -442,6 +503,10 @@ export function accountRow(
   if (whole && account.problem?.kind === "error") parts.push(t.lastFailed);
   const line = parts.join(" · ");
 
+  const who =
+    account.who === null || account.who === undefined || team
+      ? null
+      : t.who(account.who.interactivo, account.who.fondo + account.who.hilos);
   const bar: PanelBar | null =
     left === null
       ? null
@@ -451,8 +516,23 @@ export function accountRow(
             team || left === 0 || pace === null || pace === undefined
               ? 0
               : Math.max(0, Math.min(left, pace.budget - pace.spent)),
-          tone: team ? "blue" : left === 0 ? "empty" : left <= 15 ? "amber" : "green",
-          label: team ? t.leftFive(left) : t.leftWeek(left),
+          tone: team
+            ? "blue"
+            : fable !== null && (braked || left === 0)
+              ? "red"
+              : left === 0
+                ? "empty"
+                : left <= 15
+                  ? "amber"
+                  : "green",
+          label: team
+            ? t.leftFive(left)
+            : fable !== null
+              ? t.leftFable(left)
+              : t.leftWeek(left),
+          ...(fable !== null && ctx.paceHoldsBackground === true
+            ? { reserve: fable.reserve }
+            : {}),
         };
   const rest =
     bar === null
@@ -467,30 +547,44 @@ export function accountRow(
     planLong: plan.long,
     bar,
     figure: left === null ? null : `${formatNumber(left, lang)} %`,
-    figureOf: team ? t.ofFive : t.ofWeek,
+    figureOf: team ? t.ofFive : fable !== null ? t.ofFable : t.ofWeek,
     when,
     line,
-    help: [plan.long, rest, line].filter((s) => s !== null && s !== "").join("\n"),
+    who,
+    help: [
+      plan.long,
+      fable !== null && left !== null
+        ? t.fableSentence(left, whenAt === null ? "" : long(whenAt), whyBraked)
+        : rest,
+      line,
+      who,
+    ]
+      .filter((s) => s !== null && s !== "")
+      .join("\n"),
   };
 }
 
 const LIST = {
   es: {
-    weekly: (onlyUltra: boolean) =>
-      `${onlyUltra ? "Ultra" : "Ultra y Max"} · lo que queda de la semana`,
+    weekly: (onlyUltra: boolean, ofFable: boolean) =>
+      `${onlyUltra ? "Ultra" : "Ultra y Max"} · lo que queda ${ofFable ? "de Fable esta semana" : "de la semana"}`,
     team: "Team · lo que queda de sus 5 h",
     work: (n: number) => (n === 1 ? "Trabaja " : "Trabajan "),
-    none: "Ahora no trabaja ninguna.",
+    none: "En este ordenador no trabaja ninguna.",
+    total: (n: number) => ` Entre todas queda el ${formatNumber(n, "es")} % de Fable.`,
+    mostFable: " La que más Fable tiene es ",
     kept: (n: number) => (n === 1 ? " Guardada para ti: " : " Guardadas para ti: "),
     most: " La que más semana tiene es ",
     and: " y ",
   },
   en: {
-    weekly: (onlyUltra: boolean) =>
-      `${onlyUltra ? "Ultra" : "Ultra and Max"} · what is left of the week`,
+    weekly: (onlyUltra: boolean, ofFable: boolean) =>
+      `${onlyUltra ? "Ultra" : "Ultra and Max"} · ${ofFable ? "Fable left this week" : "what is left of the week"}`,
     team: "Team · what is left of their 5 hours",
     work: () => "Working: ",
-    none: "No account is working now.",
+    none: "No account is working on this computer now.",
+    total: (n: number) => ` ${formatNumber(n, "en")} % of Fable is left among them.`,
+    mostFable: " Most Fable left: ",
     kept: () => " Kept for you: ",
     most: " Most of the week left: ",
     and: " and ",
@@ -546,7 +640,10 @@ export function panelList(
   const groups: PanelList["groups"] = [];
   if (weekly.length > 0)
     groups.push({
-      title: t.weekly(weekly.every((r) => r.account.plan === "ultra")),
+      title: t.weekly(
+        weekly.every((r) => r.account.plan === "ultra"),
+        weekly.some((r) => r.account.fable != null),
+      ),
       rows: weekly.map((r) => r.row),
     });
   if (teams.length > 0) groups.push({ title: t.team, rows: teams.map((r) => r.row) });
@@ -568,11 +665,21 @@ export function panelList(
       { text: enumerate(kept, t.and), bold: true },
       { text: ".", bold: false },
     );
-  // The free Ultra or Max with most week: the first free one of its group.
+  const withFable = weekly.filter((r) => r.account.fable != null && r.row.bar !== null);
+  if (withFable.length > 0)
+    sentence.push({
+      text: t.total(
+        Math.round(
+          withFable.reduce((sum, r) => sum + r.row.bar!.left, 0) / withFable.length,
+        ),
+      ),
+      bold: false,
+    });
+  // The free Ultra or Max with most left: the first free one of its group.
   const most = weekly.find((r) => r.row.state === "free")?.row;
   if (most?.bar)
     sentence.push(
-      { text: t.most, bold: false },
+      { text: withFable.length > 0 ? t.mostFable : t.most, bold: false },
       { text: most.name, bold: true },
       { text: ` (${formatNumber(most.bar.left, ctx.lang)} %).`, bold: false },
     );

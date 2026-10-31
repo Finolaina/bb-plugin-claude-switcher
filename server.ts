@@ -361,6 +361,24 @@ const accountStateSchema = z.object({
   fiveHour: z.boolean().nullable().optional(),
   /** The day's pace of its weekly window; null on a Team seat or without a reset. */
   pace: paceSchema.nullable().optional(),
+  /** Fable's week as the brake reads it; null on a Team seat or unmeasured. */
+  fable: z
+    .object({
+      left: z.number(),
+      reserve: z.number(),
+      open: z.boolean(),
+      why: z.enum(["pace", "reserve", "unknown"]).nullable(),
+      pace: paceSchema.nullable(),
+      nextAt: z.number().nullable(),
+      resetsAt: z.number().nullable(),
+    })
+    .nullable()
+    .optional(),
+  /** Who spent its Fable on this computer (`fable-quien.json`); null when not measured. */
+  who: z
+    .object({ interactivo: z.number(), fondo: z.number(), hilos: z.number() })
+    .nullable()
+    .optional(),
 });
 const projectStateSchema = z.object({
   id: z.string(),
@@ -1389,6 +1407,38 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       `could not read Fable's first readings and roles; they start again: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  /**
+   * Who spent each account's Fable on this computer, as the measuring script
+   * last wrote it (Optimizador scripts/fable-quien.py); read with every
+   * refresh. Not there, or not current: nothing is said.
+   */
+  let fableWho: Record<string, { interactivo: number; fondo: number; hilos: number }> | null = null;
+  const WHO_MAX_AGE_MS = 26 * 3_600_000;
+  async function readFableWho(): Promise<void> {
+    try {
+      const parsed = z
+        .object({
+          medido: z.string(),
+          cuentas: z.record(
+            z.string(),
+            z.object({ interactivo: z.number(), fondo: z.number(), hilos: z.number() }),
+          ),
+        })
+        .safeParse(
+          JSON.parse(
+            await deps.accountsIo.readFile(
+              `${expandHome(current.accountsDir, deps.accountsIo.home)}/fable-quien.json`,
+            ),
+          ),
+        );
+      fableWho =
+        parsed.success && deps.now() - Date.parse(parsed.data.medido) <= WHO_MAX_AGE_MS
+          ? parsed.data.cuentas
+          : null;
+    } catch {
+      fableWho = null;
+    }
+  }
   /** The hour the day starts in Madrid (the setting, a whole hour 0-23; 9 when unreadable). */
   function dayHour(): number {
     const h = Math.floor(current.dayStartHour);
@@ -1882,6 +1932,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       const found = await discover();
       await collector.collectAll(found);
       await recordSamples();
+      await readFableWho();
       bb.realtime.publish(CHANGED, { at: deps.now() });
     } finally {
       refreshes += 1;
@@ -2386,6 +2437,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           usage: m?.usage ?? null,
           ...planState(account, m?.usage ?? null),
           pace: paceFor(account.name),
+          fable: fableRoomFor(account.name),
+          who: fableWho?.[account.name] ?? null,
         };
       }),
       projects,

@@ -244,7 +244,7 @@ describe("design B in Settings", () => {
     expect(text).toContain("88 % de la semana");
     expect(text).toContain("vuelve lun 09:00");
     expect(text).toContain("Guardada para ti · Ya ha gastado lo de hoy");
-    expect(text).toContain("Fable al 89 % · 2 de 2 hilos · 4 esperando");
+    expect(text).toContain("ha gastado el 89 % de Fable · 2 de 2 hilos · 4 esperando");
     expect(text).toContain("sin Fable hasta dom 22:00");
     // mariscal has no login: out, and the button to log it in.
     expect(text).toContain("Agotada · sin sesión iniciada");

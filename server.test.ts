@@ -15735,6 +15735,20 @@ describe("Fable's brake at a message's checkpoint (Aitor, 2026-10-31)", () => {
     expect(h.queued.map((r) => r.id)).toEqual(["row-1"]);
   });
 
+  it("reads who spent it from the measuring script's file, and says nothing of an old one", async () => {
+    const file = (medido: string) => JSON.stringify({ medido, cuentas: { work: { interactivo: 70, fondo: 20, hilos: 10 } } });
+    const on = async (medido: string) => {
+      const h = await host(ALL_FREE, { settings: ON });
+      h.files[`${ACCOUNTS}/fable-quien.json`] = file(medido);
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      const s = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+      h.harness.dispose();
+      return s.accounts.find((a) => a.name === "work")?.who;
+    };
+    expect(await on(new Date(NOW - HOUR).toISOString())).toEqual({ interactivo: 70, fondo: 20, hilos: 10 });
+    expect(await on(new Date(NOW - 27 * HOUR).toISOString())).toBeNull();
+  });
+
   it("the real defaults: brake on, 20 %, no Fable on a Team seat", async () => {
     const h = await host(ALL_FREE);
     dispose = () => h.harness.dispose();
