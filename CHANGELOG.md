@@ -22,6 +22,16 @@ afternoon: 4/4 and 16 threads waiting on one account, seats idle elsewhere.
 - **Team seats run your own Fable** (`teamRunsFable`, on) while they have
   session, Fable and a seat. Background work never runs Fable there.
 
+- **At the brake, background Fable never moves to another Ultra.** No placement,
+  move or rescue takes it there, and a thread once held stays held by that
+  account's brake until its room comes back, wherever the project went since.
+  Its message goes on in Opus by `threads.send`, judged by this checkpoint, in
+  its place and with its permissions.
+- **A send whose answer was not seen holds its original.** `threads.send` has no
+  idempotency key, so after a reload or a lost reply the original does not run
+  until the copy is found, in the queue or already run; not found after 30 s, it
+  is judged afresh.
+
 ### Added
 
 - **A full account is no target**: seats owed to a queue do not count as free,

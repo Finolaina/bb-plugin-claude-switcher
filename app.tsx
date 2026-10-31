@@ -161,14 +161,17 @@ function useAccounts() {
     [rpc, report, keep],
   );
   const run = useCallback(
-    async (work: () => Promise<State>) => {
+    async (work: () => Promise<State & { pinNote?: string | null }>) => {
       setBusy(true);
       // Cleared first, so a repeated failure is announced again.
       setChangeError(null);
       const ticket = answers.start();
       try {
-        keep(ticket, await work());
+        const next = await work();
+        keep(ticket, next);
         setError(null);
+        // The pin went on, but something could not be checked: said where a refusal is.
+        if (next.pinNote) setChangeError(next.pinNote);
       } catch (cause) {
         report(cause);
         setChangeError(cause instanceof Error ? cause.message : String(cause));

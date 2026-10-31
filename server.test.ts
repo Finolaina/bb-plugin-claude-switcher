@@ -15966,6 +15966,145 @@ describe("Fable's brake at a message's checkpoint (Aitor, 2026-10-31)", () => {
     expect(h.envSet.filter((e) => e.value === `${ACCOUNTS}/spare`)).toEqual([]);
   });
 
+  async function servicePass(h: Awaited<ReturnType<typeof host>>) {
+    const before = h.usageCalls.length;
+    const run = h.harness.behavior.runService("usage-refresh");
+    await vi.waitFor(() => expect(h.usageCalls).toHaveLength(before + 3));
+    run.controller.abort();
+    await run.done;
+  }
+  const outOfFable: Payload = {
+    ...ultra(100),
+    seven_day: { utilization: 30, resets_at: new Date(NOW + 3 * 24 * HOUR).toISOString(), locked_reason: null },
+    limits: [{ kind: "weekly_all", percent: 30, resets_at: new Date(NOW + 3 * 24 * HOUR).toISOString() }, ...(ultra(100).limits ?? []).slice(1)],
+  } as Payload;
+  // Its account braked, another Ultra with seat and room (ROT-REV-001).
+  const braked = {
+    usage: { main: () => Response.json(ultra(60)), spare: () => Response.json(ultra(30)), work: () => Response.json(ultra(60)) },
+    kvPreset: { "fable-pace-day": { main: start(20), work: start(20), spare: start(30) } },
+  };
+
+  it("requirement A, every writer: a background thread created on a braked account does not take the project to another Ultra", async () => {
+    const h = await host(braked.usage, { kvPreset: braked.kvPreset, settings: ON, threads: { "thr-bg": BG } });
+    await settled(h);
+    await h.harness.behavior.emitThreadEvent("thread.created", { thread: thread({ id: "thr-bg", projectId: "proj-1", ...BG }) });
+    expect(h.envSet.filter((e) => e.projectId === "proj-1")).toEqual([]);
+  });
+
+  it("requirement A, every writer: a rescue off an account with no Fable left does not go to another Ultra with the brake on", async () => {
+    const usage = { main: () => Response.json(outOfFable), spare: () => Response.json(ultra(30)), work: () => Response.json(ultra(60)) };
+    const kvPreset = { "fable-pace-day": { main: start(90), work: start(20), spare: start(30) } };
+    const h = await host(usage, { kvPreset, settings: ON, listed: ["proj-1"] });
+    await settled(h);
+    await servicePass(h);
+    expect(h.envSet.filter((e) => e.value === `${ACCOUNTS}/spare`)).toEqual([]);
+    // The same accounts with the brake off: the rescue goes, so this asks what the brake changed.
+    const off = await host(usage, { kvPreset, settings: { ...ON, paceHoldsBackground: false }, listed: ["proj-1"] });
+    dispose = () => off.harness.dispose();
+    await servicePass(off);
+    expect(off.envSet.filter((e) => e.value === `${ACCOUNTS}/spare`)).toHaveLength(1);
+    await h.harness.dispose();
+  });
+
+  it("held once, a move of the project does not lift the brake off the thread; its account's room does", async () => {
+    let mainFable = 60;
+    const h = await host(
+      { main: () => Response.json(ultra(mainFable)), spare: () => Response.json(ultra(30)), work: () => Response.json(ultra(60)) },
+      { kvPreset: braked.kvPreset, settings: ON, threads: { "thread-1": BG } },
+    );
+    await settled(h);
+    expect(await send(h, BG)).toMatchObject({ action: "wait" });
+    await h.harness.behavior.callRpc("project_set_account", { anyway: true, projectId: "proj-1", account: "spare" });
+    const again = (await send(h, BG)) as { action: string; reason: string };
+    expect(again.action).toBe("wait");
+    expect(again.reason).toMatch(/Fable frenado en main/);
+    expect(await h.bb.storage.kv.get("brake-holds")).toEqual({ "thread-1": "main" });
+    mainFable = 20;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect(await send(h, BG)).toMatchObject({ action: "proceed" });
+  });
+
+  describe("a send whose answer was not seen (ROT-REV-002, ROT-REV-003)", () => {
+    const uncertain = (at = NOW - 60_000) => ({ ...atPace.kvPreset, "lowered-rows": { "row-1": { at, copy: null, sending: true } } });
+    const original = { id: "row-1", threadId: "thread-1", payload: { kind: "inline" }, content: "sigue", createdAt: NOW - HOUR, sendAt: NOW + HOUR, model: FABLE_MODEL, state: "waiting", waitingOn: { kind: "plugin", pluginId: "claude-switcher", reason: "Fable" } };
+    const roomAgain = { main: () => Response.json(ultra(20)), spare: () => Response.json(ultra(20)), work: () => Response.json(ultra(20)) };
+
+    it("with the brake open by then, the original still does not run", async () => {
+      const h = await host(roomAgain, { kvPreset: uncertain(), settings: ON, threads: { "thread-1": BG } });
+      await settled(h);
+      h.queued.push(original as never);
+      h.queued.push({ ...original, id: "copy", model: "claude-opus-5-5", originPluginId: "claude-switcher", createdAt: NOW - 50_000 } as never);
+      expect(await send(h, BG, { queuedMessages: [{ id: "row-1" }] })).toMatchObject({ action: "wait", reason: expect.stringMatching(/confirming/) });
+      await vi.waitFor(async () => expect(await h.bb.storage.kv.get("lowered-rows")).toMatchObject({ "row-1": { copy: "copy", sending: false } }));
+      expect(await send(h, BG, { queuedMessages: [{ id: "row-1" }] })).toMatchObject({ action: "wait" });
+      await vi.waitFor(() => expect(h.deleted).toContain("row-1"));
+      expect(h.created).toEqual([]);
+    });
+
+    it("a copy that already ran counts: the original goes and nothing is sent twice", async () => {
+      const h = await host(roomAgain, {
+        kvPreset: uncertain(),
+        settings: ON,
+        threads: { "thread-1": BG },
+        threadEvents: { "thread-1": [{ seq: 9, type: "client/turn/requested", createdAt: NOW - 50_000, data: { input: "sigue", execution: { model: "claude-opus-5-5" } } }] } as never,
+      });
+      await settled(h);
+      h.queued.push(original as never);
+      await send(h, BG, { queuedMessages: [{ id: "row-1" }] });
+      await vi.waitFor(async () => expect(await h.bb.storage.kv.get("lowered-rows")).toMatchObject({ "row-1": { copy: null, sending: false } }));
+      await send(h, BG, { queuedMessages: [{ id: "row-1" }] });
+      await vi.waitFor(() => expect(h.deleted).toContain("row-1"));
+    });
+
+    it("no copy anywhere: the mark goes and the original is judged afresh; with room, it runs", async () => {
+      const h = await host(roomAgain, { kvPreset: uncertain(), settings: ON, threads: { "thread-1": BG } });
+      await settled(h);
+      h.queued.push(original as never);
+      // Someone's own message in Opus, or the same words before the send: neither is the copy.
+      h.queued.push({ ...original, id: "theirs", model: "claude-opus-5-5", originPluginId: null, createdAt: NOW - 50_000 } as never);
+      h.queued.push({ ...original, id: "older", model: "claude-opus-5-5", originPluginId: "claude-switcher", createdAt: NOW - 70_000 } as never);
+      await send(h, BG, { queuedMessages: [{ id: "row-1" }] });
+      await vi.waitFor(async () => expect(await h.bb.storage.kv.get("lowered-rows")).toEqual({}));
+      expect(h.deleted).toEqual([]);
+      expect(await send(h, BG, { queuedMessages: [{ id: "row-1" }] })).toMatchObject({ action: "proceed" });
+    });
+
+    it("too soon to say: it stays held and nothing is decided", async () => {
+      const h = await host(roomAgain, { kvPreset: uncertain(NOW - 1_000), settings: ON, threads: { "thread-1": BG } });
+      await settled(h);
+      h.queued.push(original as never);
+      expect(await send(h, BG, { queuedMessages: [{ id: "row-1" }] })).toMatchObject({ action: "wait" });
+      await new Promise((done) => setTimeout(done, 20));
+      expect(await h.bb.storage.kv.get("lowered-rows")).toMatchObject({ "row-1": { sending: true } });
+    });
+
+    it("a send that throws leaves the mark, not a second copy at the next look", async () => {
+      const h = await host(atPace.usage, { kvPreset: atPace.kvPreset, settings: ON, threads: { "thread-1": BG }, queueCreateFails: true });
+      await settled(h);
+      h.queued.push(original as never);
+      await send(h, BG);
+      await vi.waitFor(async () => expect(await h.bb.storage.kv.get("lowered-rows")).toMatchObject({ "row-1": { sending: true } }));
+      expect(await send(h, BG, { queuedMessages: [{ id: "row-1" }] })).toMatchObject({ action: "wait", reason: expect.stringMatching(/confirming/) });
+      expect(h.deleted).toEqual([]);
+    });
+  });
+
+  it("a pin reads the model the thread's next turn runs, and the page is told what could not be checked (ROT-REV-004, -005)", async () => {
+    const usage = { main: () => Response.json(ultra(10)), spare: () => Response.json(outOfFable), work: () => Response.json(ultra(10)) };
+    const events = { "thread-1": [{ seq: 1, type: "client/turn/requested", data: { execution: { model: "claude-opus-5-5" } } }] } as never;
+    const h = await host(usage, { settings: ON, threads: { "thread-1": { status: "idle", updatedAt: NOW - HOUR } }, threadEvents: events, threadChosenModel: FABLE_MODEL });
+    await settled(h);
+    await expect(
+      h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "spare" }),
+    ).rejects.toThrow(/Fable/);
+    const unread = await host(usage, { settings: ON, threads: { "thread-1": { status: "idle", updatedAt: NOW - HOUR } } });
+    dispose = () => unread.harness.dispose();
+    await unread.harness.behavior.callRpc("accounts_refresh", null);
+    const state = (await unread.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "work" })) as { pinNote?: string };
+    expect(state.pinNote).toMatch(/No he podido leer/);
+    await h.harness.dispose();
+  });
+
   it("requirement A, the legitimate Fable before the brake: background on an account with room runs there", async () => {
     const h = await host(
       { main: () => Response.json(ultra(30)), spare: () => Response.json(ultra(10)) },

@@ -251,6 +251,14 @@ const KV_PACE = "pace-day";
 const KV_FABLE_DAY = "fable-pace-day";
 /** Threads known as background work or as an exception to Fable's brake (see fableRole). */
 const KV_FABLE_ROLES = "fable-roles";
+/**
+ * The account whose brake holds each background thread's Fable: a move of the
+ * project, by whoever, does not lift it; only that account's room does
+ * (Aitor, 2026-10-31: «nunca sigue en Fable en otra Ultra porque hay»).
+ */
+const KV_BRAKE_HOLDS = "brake-holds";
+/** What a send takes to land: before it, no copy found does not yet mean no copy. */
+const LOWERED_SEND_SETTLES_MS = 30_000;
 /** projectId → when the user picked its account by hand: a pin holds until `default` takes it off. */
 const KV_PINS = "pins";
 /** The earlier store of picks: they counted for 7 days, so only those still counting become pins. */
@@ -511,7 +519,8 @@ export const rpcContract = defineRpcContract({
       /** `account: null` is a choice of the default account, not a pin taken off. */
       picked: z.boolean().optional(),
     }),
-    output: stateSchema,
+    /** `pinNote`: what could not be checked; the pin went on, and the user is told. */
+    output: stateSchema.extend({ pinNote: z.string().nullable().optional() }),
   },
   /** Log an account in from bb: a new directory under the accounts dir, or a listed account without a login. */
   account_login_start: {
@@ -1157,11 +1166,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       const models = new Set<string>();
       let unread = 0;
       for (const t of live) {
-        const [turn, queue] = await Promise.all([
+        const [turn, queue, next] = await Promise.all([
           loggedTurn(t.id),
           bb.sdk.threads.queuedMessages.list({ threadId: t.id }),
+          // What its next turn runs: a model set since its last turn too (ROT-REV-004).
+          bb.sdk.threads.defaultExecutionOptions({ threadId: t.id }),
         ]);
-        const named = [turn.model, ...queue.map((r) => modelFamily(r.model))].filter(
+        const named = [turn.model, modelFamily(next?.model ?? null), ...queue.map((r) => modelFamily(r.model))].filter(
           (m): m is string => m !== null,
         );
         if (named.length === 0) unread += 1;
@@ -1228,6 +1239,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** Picked by hand: see KV_PINS. */
   const handPicks = new Map<string, number>();
   let loweredRows: Record<string, { at: number; copy: string | null; sending: boolean }> = {};
+  let brakeHolds: Record<string, string> = {};
   function pinned(projectId: string): boolean {
     return handPicks.has(projectId);
   }
@@ -1564,6 +1576,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       .record(z.string(), z.enum(["fondo", "excepcion"]))
       .safeParse(await bb.storage.kv.get<unknown>(KV_FABLE_ROLES));
     if (roles.success) fableRoles = roles.data;
+    const holds = z
+      .record(z.string(), z.string())
+      .safeParse(await bb.storage.kv.get<unknown>(KV_BRAKE_HOLDS));
+    if (holds.success) brakeHolds = holds.data;
     const pins = z
       .record(z.string(), z.number())
       .safeParse(await bb.storage.kv.get<unknown>(KV_PINS));
@@ -1700,6 +1716,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (collector.get(name)?.usage?.weekly.absent === true) return true;
     const room = fableRoomFor(name);
     return room !== null && !room.open;
+  }
+  /** The brake is on and this account closed to background Fable: no writer takes background work from it to another Ultra. */
+  function closedToBackground(name: string): boolean {
+    return (
+      current.paceHoldsBackground === true &&
+      current.preferredModel !== "" &&
+      savedForUser(name)
+    );
   }
   let seriesWrites: Promise<void> = Promise.resolve();
   /**
@@ -2856,9 +2880,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return state();
     },
     async project_set_account({ projectId, account, anyway, picked }) {
-      const { refused } =
+      const { refused, note } =
         account === null && picked !== true
-          ? { refused: null }
+          ? { refused: null, note: null }
           : await pinCheck(projectId, account ?? current.defaultAccountName);
       if (refused !== null && anyway !== true)
         throw new Error(
@@ -2869,7 +2893,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         (discovered) => (account === null ? null : discovered(account)),
         picked === true,
       );
-      return state();
+      return { ...(await state()), pinNote: note };
     },
     async account_login_start({ name }) {
       const target = await loginTarget(name);
@@ -3607,6 +3631,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const fromName = from.account ?? current.defaultAccountName;
     // Read before noteMove, which forgets it on the way home.
     const excursion = excursions.get(projectId);
+    if (!isNew && isBackground(thread) && closedToBackground(fromName) && !unconfirmed(fromName)) {
+      bb.log.info(
+        `thread ${thread.id}: project left on account ${fromName}: Fable braked there, and background work does not go on in another Ultra`,
+      );
+      await markHandled(projectId);
+      return;
+    }
     const decision = decidePlacement({
       currentAccount: fromName,
       isNew,
@@ -3985,7 +4016,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const decision = decidePlacement({
       currentAccount: fromName,
       isNew: false,
-      accounts: aheadTargets(projectId, fromName, model, now),
+      // A rescue moves the whole project: from a braked account, not to another
+      // Ultra with room. A person's own turn is placed when it is sent.
+      accounts: aheadTargets(projectId, fromName, model, now).filter(
+        (a) => !closedToBackground(fromName) || savedForUser(a.name),
+      ),
       preferredModel: model,
       freeSeats,
       now,
@@ -4647,6 +4682,21 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       !byPerson(ctx)
     );
   }
+  function noteBrakeHold(threadId: string, account: string | null): void {
+    if ((brakeHolds[threadId] ?? null) === account) return;
+    if (account === null) delete brakeHolds[threadId];
+    else brakeHolds[threadId] = account;
+    const snapshot = { ...brakeHolds };
+    seriesWrites = seriesWrites.then(async () => {
+      try {
+        await bb.storage.kv.set(KV_BRAKE_HOLDS, snapshot);
+      } catch (error) {
+        bb.log.warn(
+          `could not store the brake's holds: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    });
+  }
   /**
    * The brake (Aitor, 2026-10-31): background work in the reserved model, on
    * an account past its day's pace or its reserve, does not run. «Pasa a Opus
@@ -4681,8 +4731,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       };
     }
     if (read.value.external) return null;
-    const account = read.value.account ?? current.defaultAccountName;
-    if (!savedForUser(account)) return null;
+    // Held once, it stays held by that account, wherever the project went since.
+    const heldBy = brakeHolds[thread.id];
+    const account = heldBy !== undefined && savedForUser(heldBy) ? heldBy : (read.value.account ?? current.defaultAccountName);
+    if (!savedForUser(account)) {
+      noteBrakeHold(thread.id, null);
+      return null;
+    }
+    noteBrakeHold(thread.id, account);
     const room = fableRoomFor(account);
     const nextAt = Math.min(room?.nextAt ?? Number.POSITIVE_INFINITY, deps.now() + BRAKE_LONGEST_WAIT_MS);
     const text = `Fable frenado en ${account} (ritmo del día o reserva): este hilo de fondo sigue en Opus, no en otra Ultra; si no puede, espera hasta ${isoInZone(nextAt)}`;
@@ -4734,6 +4790,65 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const text = `Sin sitio para ${model} en Team ni en una cuenta sin Fable: este hilo de fondo espera y no gasta la semana de ${account}`;
     bb.log.info(`thread ${thread.id}: ${text}`);
     return { action: "wait", reason: text, sendAt: deps.now() + OPUS_ROOM_RECHECK_MS };
+  }
+  /**
+   * A send whose answer was not seen (a reload, a lost reply: bb may have taken
+   * it; threads.send has no idempotency key): its original stays held until this
+   * says what happened. The copy looked for is this plugin's, in Opus, with the
+   * very content, since the send: in the queue, or already run. Found, the copy
+   * is the message; not found once a send would have landed, the mark goes and
+   * the original is judged afresh (ROT-REV-002, ROT-REV-003).
+   */
+  async function settleUncertain(threadId: string, rowId: string): Promise<void> {
+    const mark = loweredRows[rowId];
+    if (mark?.sending !== true || lowering.has(threadId) || deps.now() - mark.at < LOWERED_SEND_SETTLES_MS) return;
+    lowering.add(threadId);
+    try {
+      const queue = await bb.sdk.threads.queuedMessages.list({ threadId });
+      const original = queue.find((r) => r.id === rowId);
+      if (original === undefined) {
+        delete loweredRows[rowId];
+        await saveLowered();
+        return;
+      }
+      const content = JSON.stringify(original.content);
+      const lowered = modelFamily(LOWERED_MODEL_ID);
+      const copy = queue.find(
+        (r) =>
+          r.id !== rowId &&
+          r.originPluginId === PLUGIN_NAME &&
+          modelFamily(r.model) === lowered &&
+          r.createdAt >= mark.at &&
+          JSON.stringify(r.content) === content,
+      );
+      const turns = copy !== undefined ? [] : await bb.sdk.threads.events.list({
+        threadId,
+        types: ["client/turn/requested"],
+        order: "desc",
+        limit: "20",
+      });
+      const ran = turns.some(
+        (r) =>
+          r.type === "client/turn/requested" &&
+          r.createdAt >= mark.at &&
+          modelFamily(r.data.execution?.model ?? null) === lowered &&
+          JSON.stringify(r.data.input) === content,
+      );
+      if (copy !== undefined || ran) {
+        loweredRows[rowId] = { at: deps.now(), copy: copy?.id ?? null, sending: false };
+        bb.log.info(`thread ${threadId}: message ${rowId} had gone on in Opus: the copy stands`);
+      } else {
+        delete loweredRows[rowId];
+        bb.log.info(`thread ${threadId}: message ${rowId} never went on in Opus: judged again`);
+      }
+      await saveLowered();
+    } catch (error) {
+      bb.log.warn(
+        `thread ${threadId}: message ${rowId} stays held, its copy in Opus not confirmed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      lowering.delete(threadId);
+    }
   }
   /** Lowerings under way, by thread: one at a time, or two would copy the same row. */
   const lowering = new Set<string>();
@@ -4789,10 +4904,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       let moved = 0;
       for (const row of rows) {
         const known = loweredRows[row.id];
-        if (known?.sending === true) {
-          bb.log.warn(`thread ${threadId}: message ${row.id} was being sent in Opus when the plugin stopped: it stays as it is, not to go twice`);
-          continue;
-        }
+        // Its answer not seen: the checkpoint holds it and settleUncertain says what happened.
+        if (known?.sending === true) continue;
         if (known === undefined) {
           loweredRows[row.id] = { at: deps.now(), copy: null, sending: true };
           await saveLowered();
@@ -4815,7 +4928,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
               ...(row.senderThreadId === null ? {} : { senderThreadId: row.senderThreadId }),
             });
           } catch (error) {
-            delete loweredRows[row.id];
+            // A failure of the call does not say bb did not take it: see settleUncertain.
+            loweredRows[row.id] = { at: deps.now(), copy: null, sending: true };
             await saveLowered();
             throw error;
           }
@@ -4915,6 +5029,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return {
         action: "wait",
         reason: "Claude Switcher: this message already went on in Opus",
+        sendAt: deps.now() + SEAT_RECHECK_MS,
+      };
+    }
+    const uncertain = ctx.queuedMessages.find((r) => loweredRows[r.id]?.sending === true);
+    if (uncertain !== undefined) {
+      setTimeout(() => void settleUncertain(thread.id, uncertain.id), 0);
+      return {
+        action: "wait",
+        reason: "Claude Switcher: confirming whether this message already went on in Opus",
         sendAt: deps.now() + SEAT_RECHECK_MS,
       };
     }

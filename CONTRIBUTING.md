@@ -23,6 +23,15 @@ bb plugin install .    # load it into the running bb
 bb plugin reload claude-switcher   # after each rebuild
 ```
 
+## Building on another machine
+
+A clean clone builds and tests on Linux with Node and `bb` alone, without any
+login: `npm ci`, `npx tsc --noEmit`, `npx vitest run`, `bb plugin build .`. If
+`bb plugin build` stops with `Cannot find module 'npm/package.json'` (`bb`
+installed apart from the `npm` it runs under), run it as
+`NODE_PATH="$(npm root -g)" bb plugin build .`. Keep the `bb` version CI pins:
+`dist/` carries it.
+
 ## Project layout
 
 | Path                 | What lives there                                                       |
