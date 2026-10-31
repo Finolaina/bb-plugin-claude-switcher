@@ -43,6 +43,7 @@ afternoon: 4/4 and 16 threads waiting on one account, seats idle elsewhere.
   queued (which runs the failed turn's model, whatever the thread says) moved to
   Opus, once. Background Fable waiting past that time with nowhere to go, too.
   A model the person named in the app is not lowered.
+  A model chosen on the thread while its message waited is put back after the copy.
 - **A pin refuses an account that cannot run the project's model**, naming what
   is used up and when it is back, however much session is left; `use --anyway`
   pins it all the same and warns.
@@ -57,6 +58,11 @@ afternoon: 4/4 and 16 threads waiting on one account, seats idle elsewhere.
 - bb does not tell a plugin about a model set with `thread update`, nor a person
   from an agent on the command line: only a model named in the app counts as fixed.
 - Queue clocks and corrections are kept in memory: a reload starts them again.
+- Background work already in Opus may run on an Ultra with its Fable spent: it
+  does not spend what the brake protects, and it counts against that account's
+  weekly window, not the Team's.
+- `threads.send` has no idempotency key: a copy is told from another message by
+  its text, its model and its time.
 
 ## [0.2.33] - 2026-10-31
 

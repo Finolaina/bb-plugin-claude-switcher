@@ -257,6 +257,8 @@ const KV_FABLE_ROLES = "fable-roles";
  * (Aitor, 2026-10-31: «nunca sigue en Fable en otra Ultra porque hay»).
  */
 const KV_BRAKE_HOLDS = "brake-holds";
+/** Turns read back to find a copy that ran, in a thread whose send was not answered. */
+const SETTLE_TURNS_READ = 200;
 /** What a send takes to land: before it, no copy found does not yet mean no copy. */
 const LOWERED_SEND_SETTLES_MS = 30_000;
 /** projectId → when the user picked its account by hand: a pin holds until `default` takes it off. */
@@ -1258,7 +1260,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       .recheck("message.dispatch")
       .catch((error: unknown) =>
         bb.log.warn(
-          `bb not asked again after a move off ${from}: ${error instanceof Error ? error.message : String(error)}`,
+          `bb not asked again (${from}): ${error instanceof Error ? error.message : String(error)}`,
         ),
       );
   }
@@ -4682,7 +4684,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       !byPerson(ctx)
     );
   }
-  function noteBrakeHold(threadId: string, account: string | null): void {
+  function noteBrakeHold(threadId: string, held: string | null): void {
+    // A Team seat is always closed to background Fable and would hold it for good: it is
+    // closed where it stands, not wherever the project goes (see savedForUser).
+    const account = held !== null && collector.get(held)?.usage?.weekly.absent === true ? null : held;
     if ((brakeHolds[threadId] ?? null) === account) return;
     if (account === null) delete brakeHolds[threadId];
     else brakeHolds[threadId] = account;
@@ -4813,17 +4818,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       }
       const content = JSON.stringify(original.content);
       const lowered = modelFamily(LOWERED_MODEL_ID);
-      // bb logs an agent's message with a header around its text (formatAgentThreadInput),
-      // so what ran is compared by the text it holds; without text, as it is.
-      const textOf = (input: unknown): string =>
+      // What bb logs of this very message: an agent's first text goes under a header and is
+      // trimmed (formatAgentThreadInput, bb 0.48.1). Compared whole: «revisa» is not «revisa el PR 12».
+      const textsOf = (input: unknown): string[] =>
         Array.isArray(input)
-          ? input.flatMap((i: { type?: string; text?: string }) => (i?.type === "text" && typeof i.text === "string" ? [i.text] : [])).join("\n")
+          ? input.flatMap((i: { type?: string; text?: string }) => (i?.type === "text" && typeof i.text === "string" ? [i.text] : []))
           : typeof input === "string"
-            ? input
-            : "";
-      const text = textOf(original.content);
-      const sameInput = (logged: unknown) =>
-        text === "" ? JSON.stringify(logged) === content : textOf(logged).includes(text);
+            ? [input]
+            : [];
+      const expected = textsOf(original.content);
+      if (original.senderThreadId != null)
+        expected[0] = `[bb message from thread:${original.senderThreadId}]\n\n${expected[0] ?? ""}`.trim();
+      const sameInput = (logged: unknown) => JSON.stringify(textsOf(logged)) === JSON.stringify(expected);
       const copy = queue.find(
         (r) =>
           r.id !== rowId &&
@@ -4836,7 +4842,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         threadId,
         types: ["client/turn/requested"],
         order: "desc",
-        limit: "20",
+        limit: String(SETTLE_TURNS_READ),
       });
       const ran = turns.some(
         (r) =>
@@ -4845,6 +4851,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           modelFamily(r.data.execution?.model ?? null) === lowered &&
           sameInput(r.data.input),
       );
+      // Every turn read is newer than the mark: the copy may be further back. Not proved, it stays held.
+      if (copy === undefined && !ran && turns.length >= SETTLE_TURNS_READ && turns.at(-1)!.createdAt >= mark.at) return;
       if (copy !== undefined || ran) {
         loweredRows[rowId] = { at: deps.now(), copy: copy?.id ?? null, sending: false };
         bb.log.info(`thread ${threadId}: message ${rowId} had gone on in Opus: the copy stands`);
@@ -4853,6 +4861,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         bb.log.info(`thread ${threadId}: message ${rowId} never went on in Opus: judged again`);
       }
       await saveLowered();
+      askQueueAgain("a send not answered, now settled");
     } catch (error) {
       bb.log.warn(
         `thread ${threadId}: message ${rowId} stays held, its copy in Opus not confirmed: ${error instanceof Error ? error.message : String(error)}`,
@@ -4916,6 +4925,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // own in bb (recoverThreadModelOverride), over what a person chose meanwhile.
       const chosen = await bb.sdk.threads.defaultExecutionOptions({ threadId }).catch(() => null);
       let moved = 0;
+      let asked = false;
+      try {
       for (const row of rows) {
         const known = loweredRows[row.id];
         // Its answer not seen: the checkpoint holds it and settleUncertain says what happened.
@@ -4923,6 +4934,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         if (known === undefined) {
           loweredRows[row.id] = { at: deps.now(), copy: null, sending: true };
           await saveLowered();
+          asked = true;
           // A failure of the call does not say bb did not take it: the mark above stays, with the
           // time from before the send, which a copy taken is newer than (see settleUncertain).
           const sent = await bb.sdk.threads.send({
@@ -4967,12 +4979,25 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         await deleteOwn(threadId, row.id);
         moved += 1;
       }
+      } finally {
+        // Whatever came of the copies: bb made the copy's model and effort the thread's own.
+        // Its model not read: it goes on as its copy does.
+        if (asked && (chosen !== null || moved > 0)) {
+          const family = modelFamily(chosen?.model ?? null);
+          await bb.sdk.threads
+            .update({
+              threadId,
+              model: chosen === null || (moved > 0 && (family === null || family.toLowerCase() === model.toLowerCase())) ? LOWERED_MODEL_ID : chosen.model,
+              ...(chosen?.reasoningLevel == null ? {} : { reasoningLevel: chosen.reasoningLevel }),
+            })
+            .catch((error: unknown) =>
+              bb.log.warn(
+                `thread ${threadId}: its model not put back after the copy in Opus: ${error instanceof Error ? error.message : String(error)}`,
+              ),
+            );
+        }
+      }
       if (moved === 0) return;
-      const family = modelFamily(chosen?.model ?? null);
-      await bb.sdk.threads.update({
-        threadId,
-        model: family === null || family.toLowerCase() === model.toLowerCase() ? LOWERED_MODEL_ID : chosen!.model,
-      });
       bb.log.info(`thread ${threadId}: Fable braked: ${moved} message(s) go on in Opus`);
       await recordLowered(threadId);
     } catch (error) {
@@ -6295,6 +6320,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             `the projects on an account that cannot run were not looked at: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
+        // Nothing else wakes a row whose send was not answered, up to its sendAt a day away,
+        // after a failure or a reload alike: the checkpoint settles it (see settleUncertain).
+        if (Object.values(loweredRows).some((m) => m.sending === true && deps.now() - m.at >= LOWERED_SEND_SETTLES_MS))
+          askQueueAgain("a send not answered");
         await sleep(Math.max(1, current.refreshMinutes) * 60_000, signal);
       }
     },
