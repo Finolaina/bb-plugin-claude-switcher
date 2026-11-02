@@ -19,8 +19,9 @@ project uses [Semantic Versioning](https://semver.org/).
   with what is spent, its short name on the left and the spent percent
   on the right; the colour follows the same rule on every bar: green,
   amber from 70 %, red from 90 % (full and red at 100 %). A window whose
-  reset has passed shows an empty bar at 0 %, never hidden. Today's
-  share still to spend sits lighter right after the week's fill. Bars
+  reset has passed shows an empty bar at 0 %, never hidden. A thin
+  mark on the week's bar shows where today's share ends (Aitor's choice
+  of 2026-11-02: a lighter band read as spending at 0 %). Bars
   are 4 px and the rows tighter. Each bar is read out as «Ha gastado el
   64 % de la semana» / «Used 64 % of the week», and each window's reset
   is in the row's tooltip.

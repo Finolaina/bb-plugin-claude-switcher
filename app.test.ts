@@ -258,9 +258,10 @@ describe("design B in Settings", () => {
     expect(html).toContain('class="cs-bar cs-green" role="img" aria-label="Ha gastado el 12 % de Fable"');
     // aitor has no 5-hour window: no bar for it.
     expect(text).toContain("aitorUltra · sin tope de 5 hSemana98 %Fable100 %");
-    // Today's share still to spend, right after what is spent on studio's week.
-    expect(html).toContain('style="clip-path:inset(0 66.7% 0 12%)"');
-    expect(html).toContain('style="clip-path:inset(0 6.1% 0 92%)"');
+    // A thin mark where today's share ends on the week (studio: 12 % spent + 21.3 today).
+    expect(html).toContain('<div class="cs-today" style="left:33.3%"></div>');
+    expect(html).toContain('<div class="cs-today" style="left:93.9%"></div>');
+    expect(html).not.toContain("clip-path");
     expect(html).toContain('class="whitespace-nowrap font-medium cs-s-kept"');
     // No jargon on screen (DISENO.md §Textos).
     for (const word of ["ses ", "sem ", "LOCKED", "seats", "weekly", "Weekly"])

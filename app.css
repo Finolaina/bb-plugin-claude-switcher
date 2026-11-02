@@ -47,12 +47,16 @@
 }
 
 /* A thin bar of what is spent: the fill grows from the left with scaleX in
-   the colour of how much; today's share still to spend is the same colour,
-   lighter, right after it, cut with clip-path. */
+   the colour of how much; where today's share ends, a thin mark of the same
+   colour that stands out of the track (Aitor, 2026-11-02). */
 .cs-bar {
   --cs-c: var(--cs-green);
   position: relative;
   height: 4px;
+}
+.cs-track {
+  position: absolute;
+  inset: 0;
   border-radius: 999px;
   overflow: hidden;
   background: var(--cs-track);
@@ -63,8 +67,7 @@
 .cs-bar.cs-red {
   --cs-c: var(--cs-red);
 }
-.cs-bar > .cs-fill,
-.cs-bar > .cs-today {
+.cs-track > .cs-fill {
   position: absolute;
   inset: 0;
 }
@@ -73,7 +76,13 @@
   background: var(--cs-c);
 }
 .cs-today {
-  background: color-mix(in oklab, var(--cs-c) 35%, transparent);
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--cs-c);
 }
 
 @keyframes cs-fade {
@@ -87,7 +96,7 @@
     transition: transform 300ms var(--cs-ease);
   }
   .cs-today {
-    transition: clip-path 300ms var(--cs-ease);
+    transition: left 300ms var(--cs-ease);
   }
   /* a row whose state changed: its icon and word fade in */
   .cs-fade {

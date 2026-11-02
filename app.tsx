@@ -272,7 +272,8 @@ function StateWord({ row }: { row: PanelRow }) {
 
 /**
  * What is spent of one window, filling left to right, green, amber or red;
- * on the week's bar, today's share still to spend lighter right after it.
+ * on the week's bar, a thin mark where today's share ends (Aitor, 2026-11-02:
+ * «una rayita fina»; a lighter band looked like spending at 0 %).
  * Read out as «Ha gastado el 64 % de la semana».
  */
 export function UsedBar({ bar }: { bar: PanelBar }) {
@@ -280,10 +281,10 @@ export function UsedBar({ bar }: { bar: PanelBar }) {
   const end = Math.round(Math.min(100, bar.used + bar.today) * 10) / 10;
   return (
     <div className={cn("cs-bar", `cs-${bar.tone}`)} role="img" aria-label={bar.label}>
-      {bar.today > 0 ? (
-        <div className="cs-today" style={{ clipPath: `inset(0 ${Math.round((100 - end) * 10) / 10}% 0 ${bar.used}%)` }} />
-      ) : null}
-      <div className="cs-fill" style={{ transform: `scaleX(${bar.used / 100})` }} />
+      <div className="cs-track">
+        <div className="cs-fill" style={{ transform: `scaleX(${bar.used / 100})` }} />
+      </div>
+      {bar.today > 0 ? <div className="cs-today" style={{ left: `${end}%` }} /> : null}
     </div>
   );
 }
