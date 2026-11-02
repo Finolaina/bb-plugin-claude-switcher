@@ -1,5 +1,6 @@
 /*
- * Claude Switcher: the four state colours of design B and its two motions
+ * Claude Switcher: the four state colours of design B, the three of its bars
+ * of what is spent, and its two motions
  * (Optimizador informes/2026-10-30/ultra/propuestas/DISENO.md). Everything
  * else comes from bb's tokens through Tailwind classes in app.tsx. bb marks
  * its dark mode with a `.dark` class (bb theming reference), which Tailwind's
@@ -12,11 +13,11 @@
   --cs-ok: #15803d;
   --cs-keep: #a16207;
   --cs-out: #57534e;
-  /* the bars: what is left of the week, low (15 % or less), a Team seat's 5 hours */
-  --cs-week: #22c55e;
-  --cs-week-low: #f59e0b;
-  --cs-five: #3b82f6;
-  --cs-today: rgb(0 0 0 / 0.3);
+  /* the bars of what is spent, the same rule on every window (Aitor,
+     2026-10-31): green, amber from 70 %, red from 90 % */
+  --cs-green: #16a34a;
+  --cs-amber: #f59e0b;
+  --cs-red: #dc2626;
   --cs-track: color-mix(in oklab, currentColor 12%, transparent);
   --cs-ease: cubic-bezier(0.23, 1, 0.32, 1);
 }
@@ -25,8 +26,9 @@
   --cs-ok: #4ade80;
   --cs-keep: #fcd34d;
   --cs-out: #a8a29e;
-  --cs-five: #60a5fa;
-  --cs-today: rgb(255 255 255 / 0.5);
+  --cs-green: #22c55e;
+  --cs-amber: #fbbf24;
+  --cs-red: #f87171;
   --cs-track: color-mix(in oklab, currentColor 16%, transparent);
 }
 
@@ -44,15 +46,22 @@
   color: var(--cs-out);
 }
 
-/* A bar of what is left: the fill grows from the left with scaleX; today's
-   share is a striped band over its end, cut with clip-path so its stripes
-   keep their size. */
+/* A thin bar of what is spent: the fill grows from the left with scaleX in
+   the colour of how much; today's share still to spend is the same colour,
+   lighter, right after it, cut with clip-path. */
 .cs-bar {
+  --cs-c: var(--cs-green);
   position: relative;
-  height: 8px;
+  height: 4px;
   border-radius: 999px;
   overflow: hidden;
   background: var(--cs-track);
+}
+.cs-bar.cs-amber {
+  --cs-c: var(--cs-amber);
+}
+.cs-bar.cs-red {
+  --cs-c: var(--cs-red);
 }
 .cs-bar > .cs-fill,
 .cs-bar > .cs-today {
@@ -61,20 +70,10 @@
 }
 .cs-fill {
   transform-origin: left center;
-  background: var(--cs-week);
-}
-.cs-fill.cs-low {
-  background: var(--cs-week-low);
-}
-.cs-fill.cs-five {
-  background: var(--cs-five);
+  background: var(--cs-c);
 }
 .cs-today {
-  background: repeating-linear-gradient(
-    135deg,
-    var(--cs-today) 0 3px,
-    transparent 3px 6px
-  );
+  background: color-mix(in oklab, var(--cs-c) 35%, transparent);
 }
 
 @keyframes cs-fade {
