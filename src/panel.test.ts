@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   accountRow,
+  cardLine,
   forecastText,
   formatNumber,
   menuLine,
@@ -8,6 +9,7 @@ import {
   panelList,
   panelWords,
   threadLine,
+  toneOf,
   uiLang,
   whenLong,
   whenShort,
@@ -201,7 +203,7 @@ describe("the panel's dates are Madrid's, whatever the browser's zone (Codex ULT
 });
 
 describe("accountRow", () => {
-  it("draws an Ultra account by what is left of its week, today's share striped at its end", () => {
+  it("draws an Ultra account as a bar of what is spent per window: 5 h, week with today's share after it, Fable", () => {
     const row = accountRow(
       ultra("studio", 10, "2026-11-02T09:00:00+01:00", { budget: 33.3, spent: 10 }),
       seats(1, 4),
@@ -212,17 +214,23 @@ describe("accountRow", () => {
       word: "Trabajando",
       planShort: "Ultra · con 5 h",
       planLong: "Ultra · 5 h hasta que Anthropic la verifique",
-      figure: "90 %",
-      figureOf: "de la semana",
       when: "vuelve lun 09:00",
       line: "Hoy ha gastado el 30 % de su parte",
-      bar: { left: 90, tone: "green", label: "Le queda el 90 % de la semana" },
+      bar: { kind: "week", used: 10, figure: "10 %", tone: "green", label: "Ha gastado el 10 % de la semana" },
     });
+    expect(row.bars.map((b) => [b.name, b.figure, b.tone, b.label])).toEqual([
+      ["5 h", "10 %", "green", "Ha gastado el 10 % de las 5 h"],
+      ["Semana", "10 %", "green", "Ha gastado el 10 % de la semana"],
+      ["Fable", "10 %", "green", "Ha gastado el 10 % de Fable"],
+    ]);
+    // Today's share still to spend sits right after what is spent, on the week only.
     expect(row.bar?.today).toBeCloseTo(23.3);
-    expect(row.help).toContain("Le queda el 90 % de la semana · se recupera el lunes 2, 09:00");
+    expect(row.bars.filter((b) => b.today > 0).map((b) => b.kind)).toEqual(["week"]);
+    expect(row.help).toContain("Ha gastado el 10 % de la semana · se reinicia el lunes 2, 09:00");
+    expect(row.help).toContain("Ha gastado el 10 % de las 5 h · se reinicia hoy 23:55");
   });
 
-  it("keeps for the user an account that spent today's share, and stripes nothing", () => {
+  it("keeps for the user an account that spent today's share, and adds no share after the week", () => {
     const row = accountRow(
       ultra("viaulab", 68, "2026-11-04T01:00:00+01:00", { budget: 11.1, spent: 20 }),
       seats(0, 4),
@@ -233,7 +241,7 @@ describe("accountRow", () => {
       word: "Guardada para ti",
       line: "Ya ha gastado lo de hoy",
       when: "vuelve mié 01:00",
-      bar: { left: 32, today: 0, tone: "green" },
+      bar: { used: 68, today: 0, tone: "green" },
     });
   });
 
@@ -254,7 +262,7 @@ describe("accountRow", () => {
     expect(at89.state).toBe("free");
   });
 
-  it("shows aitor, an Ultra freed of the 5-hour window, amber with 2 % left", () => {
+  it("shows aitor, an Ultra freed of the 5-hour window, with no 5 h bar and its week red at 98 %", () => {
     const row = accountRow(
       ultra("aitor", 98, "2026-11-01T18:00:00+01:00", { budget: 5.5, spent: 11 }, false),
       seats(0, 4),
@@ -264,18 +272,59 @@ describe("accountRow", () => {
       state: "kept",
       planShort: "Ultra · sin tope de 5 h",
       planLong: "Ultra · sin tope de 5 h",
-      figure: "2 %",
       when: "vuelve dom 18:00",
-      bar: { left: 2, tone: "amber" },
+      bar: { used: 98, figure: "98 %", tone: "red" },
     });
+    expect(row.bars.map((b) => b.kind)).toEqual(["week", "model"]);
     expect(accountRow(ultra("aitor", 98, "2026-11-01T18:00:00+01:00", null, false), undefined, EN)).toMatchObject({
       planShort: "Ultra · no 5-hour cap",
       word: "Kept for you",
-      figure: "2 %",
-      figureOf: "of the week",
       when: "back Sun 18:00",
-      bar: { label: "2 % of the week left" },
+      bar: { name: "Week", figure: "98 %", label: "Used 98 % of the week" },
     });
+  });
+
+  it("colours every bar by what is spent: green to 69 %, amber from 70 %, red from 90 % (Aitor, 2026-10-31)", () => {
+    expect([0, 69, 70, 89, 90, 99, 100].map(toneOf)).toEqual([
+      "green",
+      "green",
+      "amber",
+      "amber",
+      "red",
+      "red",
+      "red",
+    ]);
+    // The same rule on each window of a row, whichever it is.
+    const tones = (session: number, weekly: number, fable: number) => {
+      const a = ultra("a", weekly, "2026-11-02T09:00:00+01:00", null);
+      return accountRow(
+        {
+          ...a,
+          usage: {
+            ...a.usage,
+            session: win(session, NOW + 2 * H),
+            models: { Fable: win(fable, NOW + 72 * H) },
+          },
+        },
+        undefined,
+        EN,
+      ).bars.map((b) => b.tone);
+    };
+    expect(tones(69, 70, 89)).toEqual(["green", "amber", "amber"]);
+    expect(tones(90, 69.4, 100)).toEqual(["red", "green", "red"]);
+    // 89.6 % rounds to 90: what the figure says, the colour says.
+    expect(tones(89.6, 0, 0)).toEqual(["red", "green", "green"]);
+  });
+
+  it("shows a window whose reset has passed at 0 %, an empty bar, and says when it reset", () => {
+    const a = ultra("a", 40, "2026-11-02T09:00:00+01:00", null);
+    const row = accountRow(
+      { ...a, usage: { ...a.usage, session: win(95, NOW - 10 * 60_000) } },
+      undefined,
+      ES,
+    );
+    expect(row.bars[0]).toMatchObject({ kind: "five", used: 0, figure: "0 %", tone: "green" });
+    expect(row.bars[0].resets).toBe("se reinició hoy 21:45");
   });
 
   it("puts out before kept, kept before working, working before free", () => {
@@ -284,7 +333,7 @@ describe("accountRow", () => {
       state: "out",
       word: "Agotada",
       when: "vuelve mañana 11:00",
-      bar: { left: 0, today: 0, tone: "empty" },
+      bar: { used: 100, figure: "100 %", today: 0, tone: "red" },
       line: "",
     });
     const kept = ultra("k", 50, "2026-11-02T09:00:00+01:00", { budget: 10, spent: 9.5 });
@@ -298,43 +347,74 @@ describe("accountRow", () => {
     ).toBe("working");
   });
 
-  it("calls an account without a login out, and a failed or incomplete read «Sin datos»", () => {
+  it("calls an account without a login out, and a failed or incomplete read «Sin datos», with no bars", () => {
     expect(
       accountRow(
         { name: "mariscal", problem: { kind: "unauthenticated" }, usage: null, plan: "ultra", fiveHour: null, pace: null },
         undefined,
         ES,
       ),
-    ).toMatchObject({ state: "out", word: "Agotada", line: "sin sesión iniciada", bar: null, figure: null });
+    ).toMatchObject({ state: "out", word: "Agotada", line: "sin sesión iniciada", bar: null, bars: [] });
     expect(
       accountRow({ name: "x", problem: { kind: "error", message: "429" }, usage: null }, undefined, ES),
-    ).toMatchObject({ state: "nodata", word: "Sin datos", line: "la lectura falló: 429", bar: null });
+    ).toMatchObject({ state: "nodata", word: "Sin datos", line: "la lectura falló: 429", bar: null, bars: [] });
     const incomplete = ultra("y", 40, "2026-11-02T09:00:00+01:00", null);
     expect(
       accountRow({ ...incomplete, usage: { ...incomplete.usage, blocked: true, unknown: true } }, undefined, EN),
-    ).toMatchObject({ state: "nodata", word: "No data", line: "incomplete answer from the usage API" });
+    ).toMatchObject({ state: "nodata", word: "No data", line: "incomplete answer from the usage API", bars: [] });
     const locked = ultra("z", 40, "2026-11-02T09:00:00+01:00", null);
     expect(
       accountRow({ ...locked, usage: { ...locked.usage, blocked: true } }, undefined, ES),
     ).toMatchObject({ state: "out", line: "bloqueada por el proveedor" });
   });
 
-  it("draws a Team seat by what is left of its 5 hours, with its threads", () => {
-    expect(accountRow(team("team2", 51, "2026-10-31T00:00:00+01:00", 89), seats(2, 2, 1), ES)).toMatchObject({
+  it("draws a Team seat with its 5 hours and its Fable, never a week, with its threads", () => {
+    const row = accountRow(team("team2", 51, "2026-10-31T00:00:00+01:00", 89), seats(2, 2, 1), ES);
+    expect(row).toMatchObject({
       state: "working",
       planShort: "Team",
-      figure: "49 %",
-      figureOf: "de las 5 h",
       when: "vuelve mañana 00:00",
-      line: "Fable al 89 % · 2 de 2 hilos · 1 esperando",
-      bar: { left: 49, today: 0, tone: "blue", label: "Le queda el 49 % de las 5 h" },
+      line: "2 de 2 hilos · 1 esperando",
+      bar: { kind: "five", used: 51, today: 0, tone: "green", label: "Ha gastado el 51 % de las 5 h" },
     });
+    expect(row.bars.map((b) => [b.name, b.figure, b.tone])).toEqual([
+      ["5 h", "51 %", "green"],
+      ["Fable", "89 %", "amber"],
+    ]);
+    expect(row.help).not.toContain("semana");
     expect(accountRow(team("team1", 0, null, 76), seats(0, 2), EN)).toMatchObject({
       state: "free",
       word: "Free",
       when: "not started",
-      line: "Fable at 76 % · 0 of 2 threads",
+      line: "0 of 2 threads",
     });
+  });
+
+  it("never draws a week on a Team seat, even one the plan does not name (no general weekly)", () => {
+    const seat = team("t", 20, "2026-10-31T00:00:00+01:00", 30);
+    // Named Team, a weekly in the answer is still not drawn.
+    const withWeekly = { ...seat, usage: { ...seat.usage, weekly: win(55, NOW + 72 * H) } };
+    for (const account of [seat, { ...seat, plan: undefined }, withWeekly]) {
+      const row = accountRow(account, undefined, ES);
+      expect(row.team).toBe(true);
+      expect(row.bars.map((b) => b.kind)).toEqual(["five", "model"]);
+      expect(row.bars.map((b) => b.label).join(" ")).not.toMatch(/semana/);
+    }
+  });
+
+  it("draws the preferred model's bar only when the account's usage has that window", () => {
+    const a = ultra("a", 40, "2026-11-02T09:00:00+01:00", null);
+    const kinds = (models: Record<string, ReturnType<typeof win>>, preferredModel = "Fable") =>
+      accountRow({ ...a, usage: { ...a.usage, models } }, undefined, { ...ES, preferredModel }).bars.map(
+        (b) => b.name,
+      );
+    expect(kinds({ Fable: win(20, NOW + H) })).toEqual(["5 h", "Semana", "Fable"]);
+    expect(kinds({})).toEqual(["5 h", "Semana"]);
+    expect(kinds({ Opus: win(20, NOW + H) })).toEqual(["5 h", "Semana"]);
+    // No preferred model: no model bar at all.
+    expect(kinds({ Fable: win(20, NOW + H) }, "")).toEqual(["5 h", "Semana"]);
+    // The name as the usage writes it, matched without case.
+    expect(kinds({ fable: win(20, NOW + H) })).toEqual(["5 h", "Semana", "fable"]);
   });
 });
 
@@ -399,7 +479,7 @@ describe("with the brake on background work off (paceHoldsBackground, the defaul
   it("says nobody is kept for the user", () => {
     const es = said(panelList(realState(), OFF_ES).sentence);
     expect(es).not.toContain("Guardada");
-    expect(es).toBe("Trabajan **studio, ganaresenas, team2, team3**. La que más semana tiene es **agency** (100 %).");
+    expect(es).toBe("Trabajan **studio, ganaresenas, team2, team3**. La que menos semana ha gastado es **agency** (0 %).");
     expect(said(panelList(realState(), OFF_EN).sentence)).not.toContain("Kept");
     expect(
       panelList(realState(), OFF_ES).groups.flatMap((g) => g.rows).filter((r) => r.state === "kept"),
@@ -408,14 +488,14 @@ describe("with the brake on background work off (paceHoldsBackground, the defaul
 });
 
 describe("panelList", () => {
-  it("says who works, who is kept and which has most week, then the two groups in order", () => {
+  it("says who works, who is kept and which has spent least of its week, then the two groups in order", () => {
     const list = panelList(realState(), ES);
     expect(said(list.sentence)).toBe(
-      "Trabajan **studio, ganaresenas, team2, team3**. Guardadas para ti: **viaulab y aitor**. La que más semana tiene es **agency** (100 %).",
+      "Trabajan **studio, ganaresenas, team2, team3**. Guardadas para ti: **viaulab y aitor**. La que menos semana ha gastado es **agency** (0 %).",
     );
     expect(list.groups.map((g) => g.title)).toEqual([
-      "Ultra · lo que queda de la semana",
-      "Team · lo que queda de sus 5 h",
+      "Ultra · lo gastado",
+      "Team · lo gastado",
     ]);
     expect(list.groups[0].rows.map((r) => r.name)).toEqual([
       "agency",
@@ -433,7 +513,7 @@ describe("panelList", () => {
       "team5",
     ]);
     expect(said(panelList(realState(), EN).sentence)).toBe(
-      "Working: **studio, ganaresenas, team2, team3**. Kept for you: **viaulab and aitor**. Most of the week left: **agency** (100 %).",
+      "Working: **studio, ganaresenas, team2, team3**. Kept for you: **viaulab and aitor**. Least of the week spent: **agency** (0 %).",
     );
   });
 
@@ -463,8 +543,9 @@ describe("panelList", () => {
       ],
       seats: {},
     };
-    expect(panelList(mixed, ES).groups[0].title).toBe("Ultra y Max · lo que queda de la semana");
-    expect(panelList(mixed, EN).groups[0].title).toBe("Ultra and Max · what is left of the week");
+    expect(panelList(mixed, ES).groups[0].title).toBe("Ultra y Max · lo gastado");
+    expect(panelList(mixed, EN).groups[0].title).toBe("Ultra and Max · what is spent");
+    expect(panelList(realState(), EN).groups.map((g) => g.title)).toEqual(["Ultra · what is spent", "Team · what is spent"]);
   });
 });
 
@@ -476,17 +557,22 @@ describe("threadLine / menuLine", () => {
       ES,
     );
     expect(threadLine(aitor)).toBe(
-      "Ultra · sin tope de 5 h · le queda el 40 % de la semana · vuelve lun 09:00",
+      "Ultra · sin tope de 5 h · ha gastado el 60 % de la semana · vuelve lun 09:00",
     );
-    expect(menuLine(aitor)).toBe("40 % de la semana · vuelve lun 09:00");
+    expect(menuLine(aitor)).toBe("Semana 60 % · vuelve lun 09:00");
+    // The card's bars say what is spent: its line only the plan and when.
+    expect(cardLine(aitor)).toBe("Ultra · sin tope de 5 h · vuelve lun 09:00");
     const team2 = accountRow(team("team2", 51, "2026-10-31T00:00:00+01:00", 89), seats(2, 2, 1), EN);
-    expect(threadLine(team2)).toBe("Team · 49 % of the 5 hours left · back tomorrow 00:00");
+    expect(threadLine(team2)).toBe("Team · used 51 % of the 5 hours · back tomorrow 00:00");
+    // A Team seat's menu line is its 5 hours, never a week.
+    expect(menuLine(team2)).toBe("5 h 51 % · back tomorrow 00:00");
     const mariscal = accountRow(
       { name: "mariscal", problem: { kind: "unauthenticated" }, usage: null, plan: "ultra", fiveHour: null },
       undefined,
       ES,
     );
     expect(threadLine(mariscal)).toBe("Ultra · sin sesión iniciada");
+    expect(cardLine(mariscal)).toBe("Ultra · sin sesión iniciada");
     expect(menuLine(mariscal)).toBe("sin sesión iniciada");
   });
 });

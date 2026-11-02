@@ -81,7 +81,11 @@ export function toMeasurement(
       ...(session.absent === true
         ? []
         : [window("five-hour", "session", "Current session", session, null)]),
-      window("weekly", "weekly", "Weekly limit", weekly, null),
+      // None for a Team seat: it has no general weekly (Aitor, 2026-11-02),
+      // also when the reading lacks the absent mark (Codex BARS-001).
+      ...(info.plan === "team" || weekly.absent === true
+        ? []
+        : [window("weekly", "weekly", "Weekly limit", weekly, null)]),
       ...Object.entries(models).map(([model, w]) =>
         window("weekly", `weekly:${model}`, `Weekly · ${model}`, w, model),
       ),
