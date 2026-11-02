@@ -129,8 +129,8 @@ public SDK surfaces, and never touches a `CLAUDE_CONFIG_DIR` it did not set.
 
 ### 🔮 Today's share and a forecast
 
-Each Ultra or Max account's week bar shows today's share still to spend,
-lighter, right after what is spent, and says how much of it is spent
+Each Ultra or Max account's week bar has a thin mark where today's share
+ends, and the row says how much of that share is spent
 («Hoy ha gastado el 30 % de su parte»). The forecast of the window that matters (the preferred model's,
 else the weekly) says when it runs out at the pace you have used it since
 the plugin first measured the current window, or that it lasts until its
