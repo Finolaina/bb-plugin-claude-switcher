@@ -99,6 +99,28 @@ describe("provider-usage source mapping", () => {
     ).toEqual(["weekly"]);
   });
 
+  it("gives bb's panel no weekly window for a Team seat, only its 5 hours and its models (Aitor, 2026-11-02)", () => {
+    const measurement = toMeasurement(
+      { ...ACCOUNT, name: "team1", kind: "team" },
+      {
+        observedAt: NOW,
+        problem: null,
+        login: "yes",
+        usage: {
+          blocked: false,
+          session: { usedPercent: 40, resetsAt: NOW + 3_600_000 },
+          weekly: { usedPercent: 0, resetsAt: null, absent: true },
+          models: { Fable: { usedPercent: 76, resetsAt: NOW + 86_400_000 } },
+        },
+      },
+    );
+    expect(
+      measurement.usage.status === "ok"
+        ? measurement.usage.windows.map((w) => w.id)
+        : [],
+    ).toEqual(["session", "weekly:Fable"]);
+  });
+
   it("reports no login, a failed collection and a never-observed account as usage states", () => {
     const base = {
       accountEmail: "work@example.com",
