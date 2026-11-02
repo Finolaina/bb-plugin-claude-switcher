@@ -1,8 +1,9 @@
 // What the Settings section and the account menu say of each account
 // (Optimizador informes/2026-10-30/ultra/propuestas/DISENO.md, design B):
-// a sentence on top, then one row per account with what is LEFT of its
-// week (of its 5 hours on a Team seat), today's share striped at the end,
-// its state as an icon and a word, and when it is back. Pure, so every text
+// a sentence on top, then one row per account with a thin bar per window
+// it has (5 h, week, the preferred model), each filled with what is SPENT
+// (Aitor, 2026-11-02), today's share after the week's, its state as an
+// icon and a word, and when it is back. Pure, so every text
 // has a test; app.tsx only draws it. The words match the Mac menu-bar app
 // (cuentas-claude, Sources/CuentasCore/Lista.swift) so both say the same.
 
@@ -205,14 +206,28 @@ export interface PanelContext {
 /** Agotada > Guardada > Trabajando > Libre; «Sin datos» when the read says nothing (DISENO.md §Estados). */
 export type PanelState = "out" | "kept" | "working" | "free" | "nodata";
 
+/**
+ * One window as a bar of what is SPENT, 0 to 100, filling left to right
+ * (Aitor, 2026-11-02: «que salieran hacia completar»; 2026-10-31: «lo que
+ * llevo consumido... verde, ámbar, rojo»).
+ */
 export interface PanelBar {
-  /** What is left, 0-100: of the week, or of the 5 hours on a Team seat. */
-  left: number;
-  /** Today's share not yet spent, at the end of what is left (points of the week). */
+  /** The 5 hours, the week, or the preferred model's own week. */
+  kind: "five" | "week" | "model";
+  /** The short name on its left: «5 h», «Semana», «Fable». */
+  name: string;
+  /** What is spent, 0-100; 0 once its reset has passed. */
+  used: number;
+  /** «64 %»: what is spent. */
+  figure: string;
+  /** Today's share not yet spent, right after what is spent (points of the week; only the week's bar). */
   today: number;
-  tone: "green" | "amber" | "empty" | "blue";
-  /** «Le queda el 90 % de la semana». */
+  /** By what is spent, the same on every bar: green, amber from 70 %, red from 90 %. */
+  tone: "green" | "amber" | "red";
+  /** Read out: «Ha gastado el 64 % de la semana». */
   label: string;
+  /** «se reinicia lun 09:00», «se reinició hoy 10:00» or "": for the tooltip. */
+  resets: string;
 }
 
 export interface PanelRow {
@@ -224,11 +239,10 @@ export interface PanelRow {
   /** The plan's chip: «Ultra · con 5 h»; its long form goes in the tooltip. */
   planShort: string;
   planLong: string;
+  /** Every window it has, in order: 5 h (none without one), week (never on a Team seat), the preferred model. */
+  bars: PanelBar[];
+  /** The one that orders the list: the week, or the 5 hours on a Team seat; null without a reading. */
   bar: PanelBar | null;
-  /** «90 %»: what is left. */
-  figure: string | null;
-  /** «de la semana» / «de las 5 h». */
-  figureOf: string;
   /** «vuelve lun 09:00», «sin empezar» or "". */
   when: string;
   /** After the state word under the bar: today's phrase, threads, why not. */
@@ -246,16 +260,18 @@ const T = {
       out: "Agotada",
       nodata: "Sin datos",
     },
-    ofWeek: "de la semana",
-    ofFive: "de las 5 h",
-    leftWeek: (n: number) => `Le queda el ${formatNumber(n, "es")} % de la semana`,
-    leftFive: (n: number) => `Le queda el ${formatNumber(n, "es")} % de las 5 h`,
+    nameFive: "5 h",
+    nameWeek: "Semana",
+    usedWeek: (n: number) => `Ha gastado el ${formatNumber(n, "es")} % de la semana`,
+    usedFive: (n: number) => `Ha gastado el ${formatNumber(n, "es")} % de las 5 h`,
+    usedModel: (model: string, n: number) => `Ha gastado el ${formatNumber(n, "es")} % de ${model}`,
+    resets: (when: string) => `se reinicia ${when}`,
+    didReset: (when: string) => `se reinició ${when}`,
     back: (when: string) => `vuelve ${when}`,
     backLong: (when: string) => `se recupera ${when}`,
     notStarted: "sin empezar",
     todaySpent: "Ya ha gastado lo de hoy",
     todayShare: (n: number) => `Hoy ha gastado el ${formatNumber(n, "es")} % de su parte`,
-    modelAt: (model: string, n: number) => `${model} al ${formatNumber(n, "es")} %`,
     modelOut: (model: string, when: string) =>
       when === "" ? `sin ${model}` : `sin ${model} hasta ${when}`,
     threads: (used: number, of: number) => `${used} de ${of} hilos`,
@@ -280,16 +296,18 @@ const T = {
       out: "Out",
       nodata: "No data",
     },
-    ofWeek: "of the week",
-    ofFive: "of the 5 hours",
-    leftWeek: (n: number) => `${formatNumber(n, "en")} % of the week left`,
-    leftFive: (n: number) => `${formatNumber(n, "en")} % of the 5 hours left`,
+    nameFive: "5 h",
+    nameWeek: "Week",
+    usedWeek: (n: number) => `Used ${formatNumber(n, "en")} % of the week`,
+    usedFive: (n: number) => `Used ${formatNumber(n, "en")} % of the 5 hours`,
+    usedModel: (model: string, n: number) => `Used ${formatNumber(n, "en")} % of ${model}`,
+    resets: (when: string) => `resets ${when}`,
+    didReset: (when: string) => `reset ${when}`,
     back: (when: string) => `back ${when}`,
     backLong: (when: string) => `back ${when}`,
     notStarted: "not started",
     todaySpent: "Today's share is spent",
     todayShare: (n: number) => `Spent ${formatNumber(n, "en")} % of today's share`,
-    modelAt: (model: string, n: number) => `${model} at ${formatNumber(n, "en")} %`,
     modelOut: (model: string, when: string) =>
       when === "" ? `no ${model}` : `no ${model} until ${when}`,
     threads: (used: number, of: number) => `${used} of ${of} threads`,
@@ -312,6 +330,11 @@ const T = {
 function usedOf(w: Window, now: number): number {
   const used = w.resetsAt !== null && w.resetsAt <= now ? 0 : w.usedPercent;
   return used < 100 ? Math.max(0, Math.min(99, Math.round(used))) : 100;
+}
+
+/** The colour of what is spent, the same on every bar: green, amber from 70 %, red from 90 % (Aitor, 2026-10-31). */
+export function toneOf(used: number): PanelBar["tone"] {
+  return used >= 90 ? "red" : used >= 70 ? "amber" : "green";
 }
 
 function isTeam(a: PanelAccount): boolean {
@@ -361,9 +384,9 @@ export function accountRow(
   const long = (at: number) => whenLong(at, now, lang, timeZone);
   const ahead = (at: number | null): at is number => at !== null && at > now;
 
-  // The window the bar draws: the week, or the 5 hours on a Team seat.
+  // The window that orders the list and says when it is back: the week,
+  // or the 5 hours on a Team seat (it has no general week).
   const main = !whole ? null : team ? usage.session : usage.weekly;
-  const left = main === null ? null : 100 - usedOf(main, now);
   const limits = !whole
     ? []
     : [
@@ -421,7 +444,6 @@ export function accountRow(
     );
   else if (locked) parts.push(t.locked);
   if (whole && team) {
-    if (model !== undefined) parts.push(t.modelAt(model[0], usedOf(model[1], now)));
     if (seats !== undefined && seats.capacity > 0)
       parts.push(t.threads(seatsUsed(seats), seats.capacity));
   }
@@ -442,22 +464,57 @@ export function accountRow(
   if (whole && account.problem?.kind === "error") parts.push(t.lastFailed);
   const line = parts.join(" · ");
 
-  const bar: PanelBar | null =
-    left === null
-      ? null
-      : {
-          left,
-          today:
-            team || left === 0 || pace === null || pace === undefined
-              ? 0
-              : Math.max(0, Math.min(left, pace.budget - pace.spent)),
-          tone: team ? "blue" : left === 0 ? "empty" : left <= 15 ? "amber" : "green",
-          label: team ? t.leftFive(left) : t.leftWeek(left),
-        };
-  const rest =
-    bar === null
-      ? null
-      : `${bar.label}${whenAt === null ? "" : ` · ${t.backLong(long(whenAt))}`}`;
+  // One bar per window: a reset that has passed shows 0 %, never hidden.
+  const barOf = (
+    kind: PanelBar["kind"],
+    name: string,
+    w: Window,
+    label: (n: number) => string,
+    today = 0,
+  ): PanelBar => {
+    const used = usedOf(w, now);
+    return {
+      kind,
+      name,
+      used,
+      figure: `${formatNumber(used, lang)} %`,
+      today,
+      tone: toneOf(used),
+      label: label(used),
+      resets:
+        w.resetsAt === null
+          ? ""
+          : w.resetsAt > now
+            ? t.resets(long(w.resetsAt))
+            : t.didReset(long(w.resetsAt)),
+    };
+  };
+  const weekUsed = whole && !team ? usedOf(usage.weekly, now) : 100;
+  const bars: PanelBar[] = !whole
+    ? []
+    : [
+        ...(usage.session.absent === true
+          ? []
+          : [barOf("five", t.nameFive, usage.session, t.usedFive)]),
+        // Never on a Team seat: it has no general week (Aitor, 2026-11-02).
+        ...(team || usage.weekly.absent === true
+          ? []
+          : [
+              barOf(
+                "week",
+                t.nameWeek,
+                usage.weekly,
+                t.usedWeek,
+                weekUsed >= 100 || pace === null || pace === undefined
+                  ? 0
+                  : Math.max(0, Math.min(100 - weekUsed, pace.budget - pace.spent)),
+              ),
+            ]),
+        ...(model === undefined
+          ? []
+          : [barOf("model", model[0], model[1], (n) => t.usedModel(model[0], n))]),
+      ];
+  const bar = bars.find((b) => b.kind === (team ? "five" : "week")) ?? null;
   return {
     name: account.name,
     state,
@@ -465,34 +522,41 @@ export function accountRow(
     team,
     planShort: plan.short,
     planLong: plan.long,
+    bars,
     bar,
-    figure: left === null ? null : `${formatNumber(left, lang)} %`,
-    figureOf: team ? t.ofFive : t.ofWeek,
     when,
     line,
-    help: [plan.long, rest, line].filter((s) => s !== null && s !== "").join("\n"),
+    help: [
+      plan.long,
+      ...bars.map((b) => [b.label, b.resets].filter((s) => s !== "").join(" · ")),
+      // When it is out, when it is back (each bar's own reset is above).
+      out && whenAt !== null ? t.backLong(long(whenAt)) : "",
+      line,
+    ]
+      .filter((s) => s !== "")
+      .join("\n"),
   };
 }
 
 const LIST = {
   es: {
     weekly: (onlyUltra: boolean) =>
-      `${onlyUltra ? "Ultra" : "Ultra y Max"} · lo que queda de la semana`,
-    team: "Team · lo que queda de sus 5 h",
+      `${onlyUltra ? "Ultra" : "Ultra y Max"} · lo gastado`,
+    team: "Team · lo gastado",
     work: (n: number) => (n === 1 ? "Trabaja " : "Trabajan "),
     none: "Ahora no trabaja ninguna.",
     kept: (n: number) => (n === 1 ? " Guardada para ti: " : " Guardadas para ti: "),
-    most: " La que más semana tiene es ",
+    most: " La que menos semana ha gastado es ",
     and: " y ",
   },
   en: {
     weekly: (onlyUltra: boolean) =>
-      `${onlyUltra ? "Ultra" : "Ultra and Max"} · what is left of the week`,
-    team: "Team · what is left of their 5 hours",
+      `${onlyUltra ? "Ultra" : "Ultra and Max"} · what is spent`,
+    team: "Team · what is spent",
     work: () => "Working: ",
     none: "No account is working now.",
     kept: () => " Kept for you: ",
-    most: " Most of the week left: ",
+    most: " Least of the week spent: ",
     and: " and ",
   },
 } as const;
@@ -516,10 +580,10 @@ function enumerate(names: string[], and: string): string {
 }
 
 /**
- * The accounts as design B draws them: the Ultra and Max ones by what is
- * left of their week, most first (no reading last), then the Team seats by
- * name; and the sentence that says who works, who is kept for the user and
- * which free one has most week left.
+ * The accounts as design B draws them: the Ultra and Max ones by what they
+ * have spent of their week, least first (no reading last), then the Team
+ * seats by name; and the sentence that says who works, who is kept for the
+ * user and which free one has spent least of its week.
  */
 export function panelList(
   state: {
@@ -537,7 +601,7 @@ export function panelList(
     .filter((r) => !r.row.team)
     .sort(
       (a, b) =>
-        (b.row.bar?.left ?? -1) - (a.row.bar?.left ?? -1) ||
+        (a.row.bar?.used ?? 101) - (b.row.bar?.used ?? 101) ||
         a.row.name.localeCompare(b.row.name),
     );
   const teams = rows
@@ -568,13 +632,13 @@ export function panelList(
       { text: enumerate(kept, t.and), bold: true },
       { text: ".", bold: false },
     );
-  // The free Ultra or Max with most week: the first free one of its group.
+  // The free Ultra or Max that has spent least of its week: the first free one of its group.
   const most = weekly.find((r) => r.row.state === "free")?.row;
   if (most?.bar)
     sentence.push(
       { text: t.most, bold: false },
       { text: most.name, bold: true },
-      { text: ` (${formatNumber(most.bar.left, ctx.lang)} %).`, bold: false },
+      { text: ` (${most.bar.figure}).`, bold: false },
     );
   return { sentence, groups };
 }
@@ -586,20 +650,27 @@ function whyNot(row: PanelRow): string | null {
     : null;
 }
 
-/** The thread's account in one line: «Ultra · sin tope de 5 h · le queda el 40 % de la semana · vuelve lun 09:00». */
+/** The thread's account in one line: «Ultra · sin tope de 5 h · ha gastado el 40 % de la semana · vuelve lun 09:00». */
 export function threadLine(row: PanelRow): string {
-  const left =
+  const spent =
     row.bar === null
       ? null
       : row.bar.label.charAt(0).toLowerCase() + row.bar.label.slice(1);
-  return [row.planShort, whyNot(row) ?? left, row.when]
+  return [row.planShort, whyNot(row) ?? spent, row.when]
     .filter((s) => s !== null && s !== "")
     .join(" · ");
 }
 
-/** An account in the menu, after its state: «40 % de la semana · vuelve lun 09:00». */
+/** Under the bars of the thread's card: «Ultra · sin tope de 5 h · vuelve lun 09:00» (the bars say what is spent). */
+export function cardLine(row: PanelRow): string {
+  return [row.planShort, whyNot(row), row.when]
+    .filter((s) => s !== null && s !== "")
+    .join(" · ");
+}
+
+/** An account in the menu, after its state: «Semana 40 % · vuelve lun 09:00» (on a Team seat, «5 h 49 %»). */
 export function menuLine(row: PanelRow): string {
-  return [whyNot(row) ?? (row.figure === null ? null : `${row.figure} ${row.figureOf}`), row.when]
+  return [whyNot(row) ?? (row.bar === null ? null : `${row.bar.name} ${row.bar.figure}`), row.when]
     .filter((s) => s !== null && s !== "")
     .join(" · ");
 }

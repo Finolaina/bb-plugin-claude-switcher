@@ -234,23 +234,34 @@ describe("design B in Settings", () => {
     return { html, text: html.replace(/<[^>]*>/g, "").replace(/&#x27;/g, "'") };
   }
 
-  it("says who works, who is kept and which has most week, then one row per account", async () => {
+  it("says who works, who is kept and which has spent least of its week, then one row per account with a bar per window", async () => {
     const { html, text } = await shown("es");
     expect(text).toContain(
-      "Trabajan studio, ganaresenas, team2, team4. Guardadas para ti: viaulab y aitor. La que más semana tiene es agency (100 %).",
+      "Trabajan studio, ganaresenas, team2, team4. Guardadas para ti: viaulab y aitor. La que menos semana ha gastado es agency (0 %).",
     );
-    expect(text).toContain("Ultra · lo que queda de la semana");
-    expect(text).toContain("Team · lo que queda de sus 5 h");
-    expect(text).toContain("88 % de la semana");
+    expect(text).toContain("Ultra · lo gastado");
+    expect(text).toContain("Team · lo gastado");
+    // Each window its short name, its bar and what is spent.
+    expect(text).toContain("studioUltra · con 5 h5 h12 %Semana12 %Fable12 %");
     expect(text).toContain("vuelve lun 09:00");
     expect(text).toContain("Guardada para ti · Ya ha gastado lo de hoy");
-    expect(text).toContain("Fable al 89 % · 2 de 2 hilos · 4 esperando");
+    expect(text).toContain("2 de 2 hilos · 4 esperando");
+    // A Team seat: its 5 hours and its Fable, never a week.
+    expect(text).toContain("team2Team5 h74 %Fable89 %Trabajando");
     expect(text).toContain("sin Fable hasta dom 22:00");
     // mariscal has no login: out, and the button to log it in.
     expect(text).toContain("Agotada · sin sesión iniciada");
     expect(text).toContain("Iniciar sesión");
-    // Each bar is read out; the state is an icon and a word.
-    expect(html).toContain('role="img" aria-label="Le queda el 2 % de la semana"');
+    // Each bar is read out, coloured by what is spent; the state is an icon and a word.
+    expect(html).toContain('class="cs-bar cs-red" role="img" aria-label="Ha gastado el 98 % de la semana"');
+    expect(html).toContain('class="cs-bar cs-amber" role="img" aria-label="Ha gastado el 74 % de las 5 h"');
+    expect(html).toContain('class="cs-bar cs-green" role="img" aria-label="Ha gastado el 12 % de Fable"');
+    // aitor has no 5-hour window: no bar for it.
+    expect(text).toContain("aitorUltra · sin tope de 5 hSemana98 %Fable100 %");
+    // A thin mark where today's share ends on the week (studio: 12 % spent + 21.3 today).
+    expect(html).toContain('<div class="cs-today" style="left:33.3%"></div>');
+    expect(html).toContain('<div class="cs-today" style="left:93.9%"></div>');
+    expect(html).not.toContain("clip-path");
     expect(html).toContain('class="whitespace-nowrap font-medium cs-s-kept"');
     // No jargon on screen (DISENO.md §Textos).
     for (const word of ["ses ", "sem ", "LOCKED", "seats", "weekly", "Weekly"])
@@ -260,7 +271,7 @@ describe("design B in Settings", () => {
   it("keeps nobody for the user with the brake on background work off (the default; Aitor 2026-10-31)", async () => {
     const { html, text } = await shown("es", false);
     expect(text).toContain(
-      "Trabajan studio, ganaresenas, team2, team4. La que más semana tiene es agency (100 %).",
+      "Trabajan studio, ganaresenas, team2, team4. La que menos semana ha gastado es agency (0 %).",
     );
     expect(text).not.toContain("Guardada");
     expect(html).not.toContain("cs-s-kept");
@@ -272,9 +283,9 @@ describe("design B in Settings", () => {
   it("speaks English to a browser that is not set to Spanish", async () => {
     const { text } = await shown("en");
     expect(text).toContain(
-      "Working: studio, ganaresenas, team2, team4. Kept for you: viaulab and aitor. Most of the week left: agency (100 %).",
+      "Working: studio, ganaresenas, team2, team4. Kept for you: viaulab and aitor. Least of the week spent: agency (0 %).",
     );
-    expect(text).toContain("88 % of the week");
+    expect(text).toContain("Week12 %");
     expect(text).toContain("back Mon 09:00");
     expect(text).toContain("Log in");
     expect(text).not.toContain("Trabajando");
@@ -290,7 +301,7 @@ describe("design B in Settings", () => {
 });
 
 describe("the thread's account in its menu", () => {
-  it("shows the thread's account as a card with its figure, its line and the pace of its window", async () => {
+  it("shows the thread's account as a card with a bar per window, its line and the pace of its window", async () => {
     const { renderToStaticMarkup } = await import("react-dom/server");
     const { createElement } = await import("react");
     const { ThreadAccountCard } = await import("./app");
@@ -306,8 +317,12 @@ describe("the thread's account in its menu", () => {
         }),
       ).replace(/<[^>]*>/g, "");
     const aitor = text("aitor", null);
-    expect(aitor).toContain("2 %");
-    expect(aitor).toContain("Ultra · sin tope de 5 h · le queda el 2 % de la semana · vuelve dom 18:00");
+    expect(aitor).toContain("Semana98 %Fable100 %");
+    expect(aitor).not.toContain("5 h0");
+    expect(aitor).toContain("Ultra · sin tope de 5 h · vuelve dom 18:00");
+    // A Team seat's card: 5 hours and Fable, no week.
+    expect(text("team2", null)).toContain("5 h74 %Fable89 %Team · vuelve mañana 00:00");
+    expect(text("team2", null)).not.toContain("Semana");
     // The pace the card shows comes from the fixture's forecast, in Spanish.
     const { forecastText } = await import("./src/panel");
     const pace = forecastText(state.forecasts, "studio", "Fable", READING_AT, "es");

@@ -1,8 +1,8 @@
 // Claude Switcher — bb plugin frontend.
 //
 // A Settings section: every Claude Code account as design B draws it (a
-// sentence on top, one row per account with what is left of its week; see
-// src/panel.ts), a form to add an account and log it in, which account each
+// sentence on top, one row per account with a thin bar of what is spent per
+// window; see src/panel.ts), a form to add an account and log it in, which account each
 // project runs on (with a picker to change it), and the history of moves. The windows themselves are ALSO published to bb's
 // Provider usage panel through server.ts; this section is where you act.
 // And, in a Claude Code thread's header, the project's account with a menu
@@ -43,6 +43,7 @@ import {
 } from "./src/ui";
 import {
   accountRow,
+  cardLine,
   forecastText,
   type Lang,
   menuLine,
@@ -269,33 +270,46 @@ function StateWord({ row }: { row: PanelRow }) {
   );
 }
 
-/** What is left, with today's share striped at its end; read out as «Le queda el 90 % de la semana». */
-export function LeftBar({ bar }: { bar: PanelBar | null }) {
-  if (bar === null) return <div className="cs-bar" aria-hidden />;
-  const start = bar.left - bar.today;
+/**
+ * What is spent of one window, filling left to right, green, amber or red;
+ * on the week's bar, a thin mark where today's share ends (Aitor, 2026-11-02:
+ * «una rayita fina»; a lighter band looked like spending at 0 %).
+ * Read out as «Ha gastado el 64 % de la semana».
+ */
+export function UsedBar({ bar }: { bar: PanelBar }) {
+  // To a tenth of a point: no float tails in the style.
+  const end = Math.round(Math.min(100, bar.used + bar.today) * 10) / 10;
   return (
-    <div className="cs-bar" role="img" aria-label={bar.label}>
-      <div
-        className={cn(
-          "cs-fill",
-          bar.tone === "amber" && "cs-low",
-          bar.tone === "blue" && "cs-five",
-        )}
-        style={{ transform: `scaleX(${bar.left / 100})` }}
-      />
-      {bar.today > 0 ? (
-        <div
-          className="cs-today"
-          style={{ clipPath: `inset(0 ${100 - bar.left}% 0 ${start}%)` }}
-        />
-      ) : null}
+    <div className={cn("cs-bar", `cs-${bar.tone}`)} role="img" aria-label={bar.label}>
+      <div className="cs-track">
+        <div className="cs-fill" style={{ transform: `scaleX(${bar.used / 100})` }} />
+      </div>
+      {bar.today > 0 ? <div className="cs-today" style={{ left: `${end}%` }} /> : null}
     </div>
   );
 }
 
+/** An account's windows, one thin bar each, all at a glance: «5 h ▬▬── 12 %». */
+export function UsedBars({ bars, className }: { bars: PanelBar[]; className?: string }) {
+  if (bars.length === 0) return null;
+  return (
+    <ul className={cn("grid grid-cols-[3rem_minmax(0,1fr)_2.5rem] items-center gap-x-2 gap-y-1", className)}>
+      {bars.map((bar) => (
+        <li key={bar.kind} className="contents">
+          <span className="truncate text-[11px] leading-3.5 text-muted-foreground" title={bar.resets || undefined}>
+            {bar.name}
+          </span>
+          <UsedBar bar={bar} />
+          <span className="text-right text-[11px] leading-3.5 font-medium tabular-nums">{bar.figure}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 /**
- * One account of design B: name and plan, the bar with the state and
- * today's line under it, and what is left and when it is back. Two lines
+ * One account of design B: name and plan, its bars of what is spent with
+ * the state and today's line under them, and when it is back. Two lines
  * where the panel is narrow (a container query: the Settings column, a phone).
  */
 export function AccountRowView({
@@ -325,10 +339,10 @@ export function AccountRowView({
   const again = twin !== null && !isDefault;
   return (
     <li
-      className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-1.5 py-2.5 @lg:grid-cols-[9.5rem_minmax(0,1fr)_9rem]"
+      className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-4 gap-y-1 py-2 @lg:grid-cols-[9.5rem_minmax(0,1fr)_7.5rem]"
       title={forecast === null ? row.help : `${row.help}\n${forecast}`}
     >
-      <div className="col-start-1 row-start-1 flex min-w-0 flex-col items-start gap-1">
+      <div className="col-start-1 row-start-1 flex min-w-0 flex-col items-start gap-0.5">
         <span
           className="max-w-full truncate font-semibold leading-tight"
           title={[email, isDefault ? "~/.claude" : null].filter(Boolean).join(" · ") || undefined}
@@ -337,16 +351,16 @@ export function AccountRowView({
         </span>
         {row.planShort === "" ? null : (
           <span
-            className="max-w-full truncate rounded-full border border-border px-1.5 text-[11px] leading-[1.125rem] text-muted-foreground"
+            className="max-w-full truncate rounded-full border border-border px-1.5 text-[10px] leading-4 text-muted-foreground"
             title={row.planLong}
           >
             {row.planShort}
           </span>
         )}
       </div>
-      <div className="col-span-2 row-start-2 min-w-0 @lg:col-span-1 @lg:col-start-2 @lg:row-start-1">
-        <LeftBar bar={row.bar} />
-        <p className="mt-1.5 text-xs leading-snug text-pretty">
+      <div className="col-span-2 row-start-2 min-w-0 @lg:col-span-1 @lg:col-start-2 @lg:row-start-1 @lg:pt-0.5">
+        <UsedBars bars={row.bars} />
+        <p className={cn("text-xs leading-snug text-pretty", row.bars.length > 0 && "mt-1")}>
           <StateWord row={row} />
           {row.line === "" ? null : (
             <span className="text-muted-foreground"> · {row.line}</span>
@@ -357,13 +371,8 @@ export function AccountRowView({
         )}
       </div>
       <div className="col-start-2 row-start-1 flex flex-col items-end gap-0.5 text-right text-xs @lg:col-start-3">
-        {row.figure === null ? (
+        {row.bars.length > 0 ? null : (
           <span className="text-muted-foreground">{words.noFigure}</span>
-        ) : (
-          <span className="whitespace-nowrap">
-            <span className="text-[13px] font-semibold tabular-nums">{row.figure}</span>{" "}
-            <span className="text-muted-foreground">{row.figureOf}</span>
-          </span>
         )}
         {row.when === "" ? null : (
           <span className="whitespace-nowrap tabular-nums text-muted-foreground">{row.when}</span>
@@ -388,8 +397,8 @@ export function AccountRowView({
 
 /**
  * Design B: the sentence that says who works, who is kept for you and which
- * has most week left, then the Ultra/Max accounts by what is left of their
- * week and the Team seats by name.
+ * has spent least of its week, then the Ultra/Max accounts by what they have
+ * spent of their week and the Team seats by name.
  */
 export function AccountsOverview({
   state,
@@ -830,7 +839,7 @@ function rowOf(state: State, account: AccountState, lang: Lang, now = Date.now()
   });
 }
 
-/** «▶ Trabajando · 40 % de la semana · vuelve lun 09:00»: an account in one short line. */
+/** «▶ Trabajando · Semana 40 % · vuelve lun 09:00»: an account in one short line. */
 function AccountLine({ row, className }: { row: PanelRow; className?: string }) {
   const rest = menuLine(row);
   return (
@@ -897,9 +906,9 @@ function ThreadAccount({
 }
 
 /**
- * The thread's own account at the top of its menu, as a small card with its
- * figure in large type (design B takes this from design A): what is left,
- * the bar, its state and today's line, and the one-line summary.
+ * The thread's own account at the top of its menu, as a small card: its
+ * state, a thin bar of what is spent per window, its plan and when it is
+ * back, today's line and the pace of the window that matters.
  */
 export function ThreadAccountCard({ row, forecast }: { row: PanelRow; forecast: string | null }) {
   return (
@@ -908,16 +917,8 @@ export function ThreadAccountCard({ row, forecast }: { row: PanelRow; forecast: 
         <span className="truncate font-medium">{row.name}</span>
         <StateWord row={row} />
       </div>
-      {row.figure === null ? null : (
-        <p className="mt-1 leading-none">
-          <span className="text-xl font-semibold tabular-nums">{row.figure}</span>{" "}
-          <span className="text-xs text-muted-foreground">{row.figureOf}</span>
-        </p>
-      )}
-      <div className="mt-2">
-        <LeftBar bar={row.bar} />
-      </div>
-      <p className="mt-1.5 text-xs text-muted-foreground">{threadLine(row)}</p>
+      <UsedBars bars={row.bars} className="mt-2" />
+      <p className="mt-1.5 text-xs text-muted-foreground">{cardLine(row)}</p>
       {row.line === "" || row.state === "out" || row.state === "nodata" ? null : (
         <p className="text-xs text-muted-foreground">{row.line}</p>
       )}
