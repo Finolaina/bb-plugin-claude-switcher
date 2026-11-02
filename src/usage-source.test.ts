@@ -121,6 +121,28 @@ describe("provider-usage source mapping", () => {
     ).toEqual(["session", "weekly:Fable"]);
   });
 
+  it("gives no weekly window to a known Team seat whose reading lacks the absent mark (Codex BARS-001)", () => {
+    const measurement = toMeasurement(
+      { ...ACCOUNT, name: "team2", kind: "team" },
+      {
+        observedAt: NOW,
+        problem: null,
+        login: "yes",
+        usage: {
+          blocked: false,
+          session: { usedPercent: 40, resetsAt: NOW + 3_600_000 },
+          weekly: { usedPercent: 100, resetsAt: null },
+          models: {},
+        },
+      },
+    );
+    expect(
+      measurement.usage.status === "ok"
+        ? measurement.usage.windows.map((w) => w.id)
+        : [],
+    ).toEqual(["session"]);
+  });
+
   it("reports no login, a failed collection and a never-observed account as usage states", () => {
     const base = {
       accountEmail: "work@example.com",
