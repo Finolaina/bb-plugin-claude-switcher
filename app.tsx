@@ -276,11 +276,12 @@ function StateWord({ row }: { row: PanelRow }) {
  * Read out as «Ha gastado el 64 % de la semana».
  */
 export function UsedBar({ bar }: { bar: PanelBar }) {
-  const end = Math.min(100, bar.used + bar.today);
+  // To a tenth of a point: no float tails in the style.
+  const end = Math.round(Math.min(100, bar.used + bar.today) * 10) / 10;
   return (
     <div className={cn("cs-bar", `cs-${bar.tone}`)} role="img" aria-label={bar.label}>
       {bar.today > 0 ? (
-        <div className="cs-today" style={{ clipPath: `inset(0 ${100 - end}% 0 ${bar.used}%)` }} />
+        <div className="cs-today" style={{ clipPath: `inset(0 ${Math.round((100 - end) * 10) / 10}% 0 ${bar.used}%)` }} />
       ) : null}
       <div className="cs-fill" style={{ transform: `scaleX(${bar.used / 100})` }} />
     </div>
