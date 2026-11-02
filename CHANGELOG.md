@@ -4,6 +4,43 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.34] - 2026-11-02
+
+### Changed
+
+- **The panel's bars show what is spent, one thin bar per window.** By
+  Aitor's decision of 2026-11-02 (and his request of 2026-10-31: what is
+  spent, 0 to 100, green amber red, for the session, the week and
+  Fable). Each account row in Settings and the account card in a
+  thread's menu draw a bar per window the account has, all visible at
+  once: «5 h» (none on an Ultra without the 5-hour window), «Semana»
+  (never on a Team seat) and the preferred model's own window (e.g.
+  «Fable») when the account's usage has it. Each bar fills left to right
+  with what is spent, its short name on the left and the spent percent
+  on the right; the colour follows the same rule on every bar: green,
+  amber from 70 %, red from 90 % (full and red at 100 %). A window whose
+  reset has passed shows an empty bar at 0 %, never hidden. Today's
+  share still to spend sits lighter right after the week's fill. Bars
+  are 4 px and the rows tighter. Each bar is read out as «Ha gastado el
+  64 % de la semana» / «Used 64 % of the week», and each window's reset
+  is in the row's tooltip.
+- **The texts follow the new meaning.** The group headings say «Ultra ·
+  lo gastado» and «Team · lo gastado» (no longer «lo que queda»); the
+  sentence on top names the free account that has spent least of its
+  week («La que menos semana ha gastado es agency (0 %)»); the list is
+  ordered by week spent, least first. The account line in the menu says
+  «Semana 40 % · vuelve lun 09:00» («5 h 49 %» on a Team seat), the
+  header's line «ha gastado el 40 % de la semana», and the card under
+  its bars only the plan and when it is back. A Team row no longer says
+  «Fable al 89 %» in its line: Fable has its own bar.
+
+### Fixed
+
+- **A Team seat no longer shows a 7-day bar in bb's Provider usage
+  panel.** The plugin published a «Weekly limit» window at 0 % for every
+  Team seat, which has no general weekly; now a Team seat publishes its
+  5 hours and its per-model windows only.
+
 ## [0.2.33] - 2026-10-31
 
 ### Changed
