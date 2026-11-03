@@ -15120,6 +15120,33 @@ describe("a project whose account has its seats full moves to one with a free se
     expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
   });
 
+  it("a turn of another thread whose seat could not be counted still keeps the project where it is (Codex PLAZAS-002)", async () => {
+    const options: HostOptions = {
+      settings: { preferredModel: "Fable", seatsMax: 1 },
+      presetEnv: { "proj-1": on("main"), "proj-2": on("main") },
+    };
+    const h = await host(FABLE_EVERYWHERE, options);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // thr-1a's turn starts past the checkpoint and its account cannot be
+    // read: no seat is counted for it.
+    options.failEnvRead = ["proj-1"];
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thr-1a", projectId: "proj-1" }),
+    });
+    options.failEnvRead = [];
+    await running(h, "thr-2", "proj-2");
+    expect((await seatsOf(h))?.main).toMatchObject({ running: 1 });
+    expect(await fable(h, "thr-1b", "proj-1")).toMatchObject({ action: "wait" });
+    expect(h.envSet).toEqual([]);
+    // Its turn over, the next message moves the project.
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "thr-1a", projectId: "proj-1" }),
+    });
+    expect(await fable(h, "thr-1b", "proj-1")).toEqual({ action: "proceed" });
+    expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-1"]);
+  });
+
   it("with the automatic choice off nothing moves for a seat", async () => {
     const h = await host(FABLE_EVERYWHERE, {
       settings: { preferredModel: "Fable", seatsMax: 1, autoSwitch: false },
