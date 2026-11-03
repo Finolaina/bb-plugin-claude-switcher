@@ -243,6 +243,18 @@ describe("Seats: external holds (a `claude -p` run outside bb, 2026-10-30)", () 
     expect(s.holdExternal("night2", "team", T0 + H, T0)).toEqual({ ok: false, reason: "full" });
   });
 
+  it("T12 a seat just freed is owed to the thread waiting: a hold from outside does not take it", () => {
+    const { s } = clocked();
+    s.reserve("t1", "team", T0);
+    s.reserve("t2", "team", T0);
+    expect(s.reserve("t3", "team", T0)).toBe(false);
+    s.release("t1");
+    expect(s.free("team")).toBe(1);
+    expect(s.queue("team").map((q) => q.threadId)).toEqual(["t3"]);
+    expect(s.holdExternal("night", "team", T0 + H, T0)).toEqual({ ok: false, reason: "full" });
+    expect(s.snapshot().team?.external).toBeUndefined();
+  });
+
   it("counts until `until` and not at it", () => {
     const { s, at } = clocked();
     s.holdExternal("a", "team", T0 + H, T0);
