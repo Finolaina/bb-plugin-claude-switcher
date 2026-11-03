@@ -10280,6 +10280,35 @@ describe("an Opus turn on a Max account that keeps Fable", () => {
     expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
   });
 
+  it("keeps an Opus turn waiting past the read retries while its project's account cannot be read and a Max account keeps Fable (Codex OPUS-R5-001)", async () => {
+    const options: HostOptions = { settings: FABLE };
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, 10, 2)),
+        spare: () => Response.json(payload(10, 10, 5)),
+        work: () => Response.json(teamPayload(100, 42)),
+      },
+      options,
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    options.failEnvRead = ["proj-1"];
+    // bb asks again about the message it holds, past both retry caps
+    // (MAX_START_WAITS, then the seat read's): it never goes.
+    for (let i = 0; i < MAX_START_WAITS + 6; i++)
+      expect(
+        await h.harness.registrations.hooks["message.dispatch"]!(
+          makeMessageDispatchHookContext({
+            thread: thread({ id: "thread-1", projectId: "proj-1" }),
+            requestedExecution: { providerId: "claude-code", model: OPUS_ID },
+            attempt: "start-turn",
+            ...(i === 0 ? {} : { queuedMessages: [{ id: "queued_1" }] as never }),
+          }),
+        ),
+      ).toMatchObject({ action: "wait" });
+    expect(h.envSet).toEqual([]);
+  });
+
   it("a Fable turn on the Max account is not held", async () => {
     const h = await host(
       {
@@ -15362,6 +15391,35 @@ describe("no project is left on an account out of the preferred model or without
       // (back to main, the default account, would be a deletion).
       expect(h.envSet.map((e) => e.note)).toEqual([ownNote("work")]);
       expect(h.envDeleted).toEqual([]);
+    });
+
+    it("drops a rescue decided for Fable when an Opus message of the project comes while its sessions are shared (Codex OPUS-R5-002)", async () => {
+      const order: string[] = [];
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      const h = await host(
+        {
+          // A Team seat out of Fable, with room for Opus.
+          main: () => Response.json(teamPayload(10, 100)),
+          spare: () => Response.json(payload(10, 60, 20)),
+          work: () => Response.json(payload(5, 20, 30)),
+        },
+        { ...OPTIONS, sessionsIo: oneSessionIo(order, () => held), environments: SITE },
+      );
+      dispose = () => h.harness.dispose();
+      const before = h.usageCalls.length;
+      const run = h.harness.behavior.runService("usage-refresh");
+      await vi.waitFor(() => expect(h.usageCalls).toHaveLength(before + 3));
+      // The rescue (for Fable, the only model known) shares the sessions into work.
+      await vi.waitFor(() => expect(order).toEqual(["link"]));
+      expect(await opusTurn(h)).toEqual({ action: "proceed" });
+      release();
+      run.controller.abort();
+      await run.done;
+      expect(h.envSet).toEqual([]);
+      expect(logged(h, "info")).toContainEqual(
+        expect.stringMatching(/^project proj-1: not moved to work: picked by hand or moved meanwhile$/),
+      );
     });
 
     it("stays on a Team seat out of its session when only Max accounts that keep Fable could take it", async () => {

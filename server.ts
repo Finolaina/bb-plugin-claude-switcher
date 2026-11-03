@@ -2014,7 +2014,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     projectId: string,
     account: Account | null,
     from: ProjectAccount,
-    options: { byHand?: boolean; share?: boolean } = {},
+    options: {
+      byHand?: boolean;
+      share?: boolean;
+      /** Asked with the other checks after the sessions are shared: false drops the move (Codex OPUS-R5-002). */
+      stillValid?: () => boolean;
+    } = {},
   ): Promise<boolean> {
     if (from.external) {
       throw new Error(
@@ -2061,7 +2066,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           );
         if (
           options.byHand !== true &&
-          (move.writes !== mark.writes || move.picks !== mark.picks)
+          (move.writes !== mark.writes ||
+            move.picks !== mark.picks ||
+            options.stillValid?.() === false)
         ) {
           bb.log.info(
             `project ${projectId}: not moved to ${toName}: picked by hand or moved meanwhile`,
@@ -3688,8 +3695,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
       return;
     }
+    // Decided for the model of the project's latest turn as known now: a
+    // message or a turn of it while the sessions are shared may change
+    // that model, and this move is dropped (Codex OPUS-R5-002).
+    const seen = activity.get(projectId) ?? 0;
     if (
-      !(await applyAccount(projectId, accountOrDefault(decision.account), from))
+      !(await applyAccount(projectId, accountOrDefault(decision.account), from, {
+        stillValid: () => (activity.get(projectId) ?? 0) === seen,
+      }))
     )
       return;
     await markHandled(projectId);
@@ -4502,7 +4515,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         // is never left holding a message (see MAX_START_WAITS). Out of
         // the dispatch's time, soon (Astra SEATS-R4-002).
         const waited = seatReadWaits.get(thread.id) ?? 0;
-        if (waited < SEAT_READ_WAITS) {
+        // A turn held off the reserve keeps waiting while any account it
+        // could start on would spend the reserve: going on unread could
+        // start it on one (Codex OPUS-R5-001).
+        const mayBeHeld =
+          current.autoSwitch &&
+          model !== null &&
+          measuredAccounts(model).some((a) => heldOff(a.name, model));
+        if (waited < SEAT_READ_WAITS || mayBeHeld) {
           seatReadWaits.set(thread.id, waited + 1);
           return {
             action: "wait",
