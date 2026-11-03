@@ -11,6 +11,7 @@ import {
   familia,
   judge,
   puedeCorrer,
+  textoAviso,
 } from "./canario-cola.mjs";
 
 const NOW = 2_000_000_000_000;
@@ -39,7 +40,7 @@ const INCIDENTE = {
     cuenta("ultra1", { plan: "ultra", modelos: { Fable: { pct: 90, pctExacto: 90 } } }),
   ],
 };
-const juzga = (health: { cuentas: unknown[] }, filas: unknown[] = [fila()], desde = NOW - UMBRAL_MS) =>
+const juzga = (health: { cuentas: unknown[]; atascos?: unknown[] }, filas: unknown[] = [fila()], desde = NOW - UMBRAL_MS) =>
   judge({
     filas,
     health,
@@ -51,8 +52,17 @@ describe("judge", () => {
   it("el incidente del 23:10 reconstruido avisa", () => {
     const { avisos } = juzga(INCIDENTE);
     expect(avisos).toEqual([
-      { fila: "q1", hilo: "t1", modelo: "Opus", minutos: 10, libres: ["team2"] },
+      { fila: "q1", hilo: "t1", modelo: "Opus", minutos: 10, libres: ["team2"], ocupado: false },
     ]);
+  });
+
+  it("dice si el proyecto tiene otro hilo en marcha, sin que eso decida el aviso", () => {
+    const [a] = juzga({
+      ...INCIDENTE,
+      atascos: [{ hilo: "t1", proyectoOcupado: true }],
+    }).avisos;
+    expect(a?.ocupado).toBe(true);
+    expect(textoAviso(a!)).toContain("su proyecto tiene otro hilo en marcha");
   });
 
   it("9:59 no avisa; 10:00 sí", () => {
