@@ -35,6 +35,8 @@ export interface HealthAccount {
    * queries have failed for too long since. When that read was taken.
    */
   unconfirmedSince?: number;
+  /** The same for a model's window alone: the policy does not trust the account for these. */
+  unconfirmedModels?: readonly string[];
   /** It can run a turn now: logged in, measured whole, unlocked, session and weekly under 100 %, and a read the policy trusts. */
   usable: boolean;
 }
@@ -44,6 +46,8 @@ interface Point {
   /** Unrounded: 99.6 % is `pct` 100 and still runs a turn. */
   pctExacto: number;
   vuelve: string | null;
+  /** Its reset passed with the queries failing: only the clock says it is free, and the policy does not trust it. Only when so. */
+  sinConfirmar?: true;
 }
 
 export interface HealthReport {
@@ -151,7 +155,12 @@ export function healthReport(input: {
         semana: whole && u.weekly.absent !== true ? point(u.weekly) : null,
         // Only the windows the usage API reports: no model is made up.
         modelos: Object.fromEntries(
-          Object.entries(u?.models ?? {}).map(([m, w]) => [m, point(w)]),
+          Object.entries(u?.models ?? {}).map(([m, w]) => [
+            m,
+            a.unconfirmedModels?.includes(m) === true
+              ? { ...point(w), sinConfirmar: true as const }
+              : point(w),
+          ]),
         ),
         ritmo:
           a.pace === null

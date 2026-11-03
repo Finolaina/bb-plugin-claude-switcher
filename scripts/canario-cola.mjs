@@ -18,6 +18,8 @@ import { promisify } from "node:util";
 
 export const UMBRAL_MS = 10 * 60_000;
 export const REAVISO_MS = 60 * 60_000;
+/** Una fila que bb no enseña este rato se da por ida: mientras la reevalúa la oculta, y su antigüedad no se pierde por eso. */
+export const OLVIDO_MS = 20 * 60_000;
 const PLUGIN = "claude-switcher";
 const RESERVADO = "Fable";
 
@@ -33,17 +35,27 @@ export function familia(model) {
 
 const exacto = (punto) => punto?.pctExacto ?? punto?.pct ?? 0;
 
+/** La ventana del modelo, sin distinguir mayúsculas: la API conserva la grafía que le llega. */
+function ventana(cuenta, modelo) {
+  const clave = Object.keys(cuenta.modelos ?? {}).find(
+    (m) => m.toLowerCase() === modelo.toLowerCase(),
+  );
+  return clave === undefined ? undefined : cuenta.modelos[clave];
+}
+
 /** Si esta cuenta, tal como la enseña `health`, podría correr ahora un turno de `modelo`. */
 export function puedeCorrer(cuenta, modelo) {
   if (cuenta.usable !== true) return false;
   const plazas = cuenta.plazas;
   if (plazas !== null && plazas !== undefined && plazas.total !== null && plazas.usadas >= plazas.total)
     return false;
-  if (exacto(cuenta.modelos?.[modelo]) >= 100) return false;
+  const propia = ventana(cuenta, modelo);
+  // Solo el reloj dice que volvió, y las consultas fallan: el plugin no se fía.
+  if (propia?.sinConfirmar === true || exacto(propia) >= 100) return false;
   // «Esperar siempre» (Aitor, 2026-11-03): lo que no es Fable ni Haiku no
   // gasta la semanal de una cuenta que conserva Fable.
   if (modelo === RESERVADO || modelo === "Haiku") return true;
-  return cuenta.plan === "team" || exacto(cuenta.modelos?.[RESERVADO]) >= 100;
+  return cuenta.plan === "team" || exacto(ventana(cuenta, RESERVADO)) >= 100;
 }
 
 /**
@@ -59,10 +71,19 @@ export function judge({ filas, health, estado, ahora }) {
   );
   const primeraVez = {};
   const avisado = {};
+  const vista = {};
   const avisos = [];
+  // Las que bb no enseña en esta lectura, un rato: siguen con su antigüedad.
+  for (const [id, cuando] of Object.entries(estado.vista ?? {}))
+    if (ahora - cuando < OLVIDO_MS && estado.primeraVez?.[id] !== undefined) {
+      primeraVez[id] = estado.primeraVez[id];
+      vista[id] = cuando;
+      if (estado.avisado?.[id] !== undefined) avisado[id] = estado.avisado[id];
+    }
   for (const fila of vivas) {
     const desde = estado.primeraVez?.[fila.id] ?? ahora;
     primeraVez[fila.id] = desde;
+    vista[fila.id] = ahora;
     const antes = estado.avisado?.[fila.id];
     if (antes !== undefined) avisado[fila.id] = antes;
     if (ahora - desde < UMBRAL_MS) continue;
@@ -84,7 +105,7 @@ export function judge({ filas, health, estado, ahora }) {
         health.atascos?.some((a) => a.hilo === fila.threadId && a.proyectoOcupado) === true,
     });
   }
-  return { avisos, estado: { primeraVez, avisado }, retenidas: vivas.length };
+  return { avisos, estado: { primeraVez, avisado, vista }, retenidas: vivas.length };
 }
 
 export function textoAviso(a) {

@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import {
+  OLVIDO_MS,
   REAVISO_MS,
   UMBRAL_MS,
   familia,
@@ -131,15 +132,63 @@ describe("judge", () => {
     expect(paso(NOW - REAVISO_MS)).toHaveLength(1);
   });
 
-  it("recuerda la primera vez que ve cada fila y olvida las que se fueron", () => {
+  it("recuerda la primera vez que ve cada fila y olvida las que llevan 20 minutos sin verse", () => {
     const { estado, avisos } = judge({
       filas: [fila({ id: "q2" })],
       health: INCIDENTE,
-      estado: { primeraVez: { q1: NOW - UMBRAL_MS }, avisado: { q1: NOW } },
+      estado: {
+        primeraVez: { q1: NOW - UMBRAL_MS },
+        avisado: { q1: NOW },
+        vista: { q1: NOW - OLVIDO_MS },
+      },
       ahora: NOW,
     });
     expect(avisos).toEqual([]);
-    expect(estado).toEqual({ primeraVez: { q2: NOW }, avisado: {} });
+    expect(estado).toEqual({ primeraVez: { q2: NOW }, avisado: {}, vista: { q2: NOW } });
+  });
+
+  it("una fila que bb oculta un momento mientras la reevalúa no pierde su antigüedad", () => {
+    const hueco = judge({
+      filas: [],
+      health: INCIDENTE,
+      estado: {
+        primeraVez: { q1: NOW - 8 * 60_000 },
+        vista: { q1: NOW - 10_000 },
+      },
+      ahora: NOW,
+    });
+    expect(hueco.avisos).toEqual([]);
+    expect(hueco.estado.primeraVez.q1).toBe(NOW - 8 * 60_000);
+    const vuelve = judge({
+      filas: [fila()],
+      health: INCIDENTE,
+      estado: hueco.estado,
+      ahora: NOW + 2 * 60_000,
+    });
+    expect(vuelve.avisos).toHaveLength(1);
+  });
+
+  it("no se fía de una ventana cuyo reset solo dice el reloj, con las consultas fallando", () => {
+    expect(
+      juzga({
+        cuentas: [
+          cuenta("team2", { modelos: { Opus: { pct: 0, pctExacto: 0, sinConfirmar: true } } }),
+        ],
+      }).avisos,
+    ).toEqual([]);
+  });
+
+  it("lee las ventanas sin distinguir mayúsculas", () => {
+    expect(
+      juzga({ cuentas: [cuenta("team2", { modelos: { opus: { pct: 100, pctExacto: 100 } } })] }).avisos,
+    ).toEqual([]);
+    expect(
+      juzga({
+        cuentas: [
+          cuenta("ultra1", { plan: "ultra", modelos: { fable: { pct: 100, pctExacto: 100 } } }),
+        ],
+      }).avisos,
+    ).toHaveLength(1);
   });
 });
 
