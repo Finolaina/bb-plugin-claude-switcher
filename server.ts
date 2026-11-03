@@ -1171,6 +1171,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function seatWait(
     thread: ThreadResponse,
     account: string,
+    /** Why this account and not the project's, for a turn queued elsewhere: what the log and the thread say. */
+    why?: string,
   ): MessageDispatchHookDecision | null {
     admitWaiting();
     const now = deps.now();
@@ -1188,7 +1190,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     seatTitles.set(thread.id, thread.title ?? null);
     const s = seats.snapshot([key])[key]!;
     const ahead = (seats.position(thread.id)?.position ?? 1) - 1;
-    const reason = `Waiting for a seat on ${account}: ${s.running + s.reserved + (s.external?.length ?? 0)}/${s.capacity} threads running, ${ahead} ahead in the queue`;
+    const taken = `${s.running + s.reserved + (s.external?.length ?? 0)}/${s.capacity} threads running, ${ahead} ahead in the queue`;
+    const reason =
+      why === undefined
+        ? `Waiting for a seat on ${account}: ${taken}`
+        : `Waiting for a seat on ${account} for ${why}; ${taken}`;
     bb.log.info(`thread ${thread.id}: ${reason}`);
     return { action: "wait", reason, sendAt: now + SEAT_RECHECK_MS };
   }
@@ -4284,7 +4290,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     now: number,
     /** Why the turn does not run where the project is. */
     here: string,
-  ): { sendAt: number; reason: string; seatOn?: string } {
+  ): { sendAt: number; reason: string; seatOn?: string; seatWhy?: string } {
     const reserve = current.preferredModel;
     const free = reserveWait(input);
     if (free === null)
@@ -4297,6 +4303,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         sendAt: now + SEAT_RECHECK_MS,
         reason: `Waiting for a free seat for ${model} on ${free.account}: ${here}`,
         seatOn: free.account,
+        seatWhy: `${model}: ${here}`,
       };
     return {
       sendAt: Math.min(free.at + RESET_BUFFER_MS, now + RESERVE_RECHECK_MS),
@@ -4366,7 +4373,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     /** `held`: set when the turn must wait (see reserveWait). */
     turn: {
       abandoned: boolean;
-      held?: { sendAt: number; reason: string; seatOn?: string };
+      held?: { sendAt: number; reason: string; seatOn?: string; seatWhy?: string };
     },
     /** "after": placed as a turn of the thread ends, for its next one (see the thread.idle below). */
     when: "before" | "after" = "before",
@@ -4445,6 +4452,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             sendAt: now + SEAT_RECHECK_MS,
             reason: `Waiting for a free seat for ${model} on ${other}: ${fromName} ${whyOut(fromName, model)}`,
             seatOn: other,
+            seatWhy: `${model}: ${fromName} ${whyOut(fromName, model)}`,
           };
       }
       return { account: fromName, byDefault: !from.owned, writes };
@@ -4665,13 +4673,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     const done = turnPlaced === null ? null : await turnPlaced;
     if (turn.held !== undefined) {
-      const { seatOn, ...held } = turn.held;
+      const { seatOn, seatWhy, ...held } = turn.held;
       if (seatOn !== undefined) {
         // In that account's seat queue, first come first served, so later
         // arrivals there do not overtake it (Codex OPUS-R4-002); admitted,
         // its own seat lets the placement move the project there.
         seatGenerations.set(thread.id, (seatGenerations.get(thread.id) ?? 0) + 1);
-        const queued = seatWait(thread, seatOn);
+        const queued = seatWait(thread, seatOn, seatWhy);
         if (queued !== null) return queued;
         return {
           action: "wait",

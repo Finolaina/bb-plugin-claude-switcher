@@ -10296,7 +10296,8 @@ describe("an Opus turn on a Max account that keeps Fable", () => {
     // proj-1's Opus turn, on main, is held in work's queue.
     expect(await send("thread-1", "proj-1", OPUS_ID)).toMatchObject({
       action: "wait",
-      reason: "Waiting for a seat on work: 1/1 threads running, 0 ahead in the queue",
+      reason:
+        "Waiting for a seat on work for Opus: main keeps its weekly for Fable; 1/1 threads running, 0 ahead in the queue",
     });
     // A later message of proj-2, already on work, comes behind it.
     expect(await send("thread-8", "proj-2", OPUS_ID)).toMatchObject({
@@ -17204,6 +17205,10 @@ describe("caminos 2026-11-04", () => {
     expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("proceed");
     const r = await dispatch(h, "t2", "proj-3", OPUS);
     expect(r.action).toBe("wait");
+    // The wait says why it is on an account the project is not on.
+    expect(r.reason).toBe(
+      "Waiting for a seat on spare for Opus: main keeps its weekly for Fable; 1/1 threads running, 0 ahead in the queue",
+    );
     expect(h.envSet.filter((e) => e.projectId === "proj-3")).toEqual([]);
   });
 
@@ -17260,7 +17265,9 @@ describe("caminos 2026-11-04", () => {
       const h = await out();
       const r = await dispatch(h, "t1", "proj-1", FABLE_ID);
       expect(r.action).toBe("wait");
-      expect(r.reason).toContain("Waiting for a seat on work");
+      expect(r.reason).toBe(
+        "Waiting for a seat on work for Fable: spare cannot run Fable; 1/1 threads running, 0 ahead in the queue",
+      );
       expect(r.sendAt).toBe(NOW + SEAT_RECHECK_MS);
       const seats = await seatsNow(h);
       expect(seats.spare).toMatchObject({ reserved: 0, running: 0 });
