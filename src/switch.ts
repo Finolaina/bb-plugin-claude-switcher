@@ -9,6 +9,7 @@ import type { PluginTurnFailedEvent } from "@get-bb/plugin-sdk";
 import {
   canRunModel,
   chooseAccount,
+  holdsForReserve,
   isUsable,
   modelWindow,
   reserving,
@@ -570,8 +571,10 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   const others = accounts.filter((a) => a.name !== input.currentAccount);
   const choice =
     chooseSeated(others, options, input.freeSeats) ??
-    // Without a login a turn kept here fails for sure: the reserve gives way.
-    (loggedOut
+    // Without a login a turn kept here fails for sure: the reserve gives
+    // way, but not for a model held off it (Codex OPUS-001): that turn
+    // waits at the checkpoint, and the rescue leaves the project.
+    (loggedOut && !holdsForReserve(options)
       ? chooseSeated(
           others,
           {
@@ -588,6 +591,45 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     account: choice.account,
     why: runs ? "current-reserved" : "current-blocked",
   };
+}
+
+/**
+ * When a turn in `input.preferredModel` that decidePlacement keeps where
+ * it spends the reserved model's weekly (`current-reserved`) can run
+ * somewhere that spares it: the earliest other account that runs the
+ * model then and does not keep the reserve as the turn would be sent (a
+ * Team seat; a Max account out of the reserved model), with when; `at` is
+ * 0 when one can now (it lacks a free seat). Null when none will: every
+ * other account keeps the reserve, is locked, or has no known reset.
+ * Aitor 2026-11-03 («Esperar siempre»): such a turn waits for it, rather
+ * than spend a Max account's weekly the reserved model and the Opus work
+ * inside its threads need.
+ */
+export function reserveWait(
+  input: PlacementInput,
+): { account: string; at: number } | null {
+  const options = {
+    preferredModel: input.preferredModel,
+    reserveModel: input.reserveModel,
+  };
+  let earliest: { account: string; at: number } | null = null;
+  for (const raw of input.accounts) {
+    if (raw.name === input.currentAccount) continue;
+    const account = settle(raw, input.now);
+    const at = freeAt(account, input.preferredModel);
+    if (at === null) continue;
+    // As in decideSwitch: judged as the account will be when the turn is
+    // sent, a Max account whose reserved window resets keeps it again.
+    const sendBy = Math.max(at, input.now) + RESET_BUFFER_MS + RESET_JITTER_MS;
+    if (spendsReservedWeekly(settle(account, sendBy), options)) continue;
+    if (
+      earliest === null ||
+      at < earliest.at ||
+      (at === earliest.at && account.name < earliest.account)
+    )
+      earliest = { account: account.name, at };
+  }
+  return earliest;
 }
 
 /**
