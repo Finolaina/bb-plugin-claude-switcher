@@ -1,0 +1,13 @@
+# 2026-11-03 13:07:56 CET  bb claude-switcher seats (cabecera)
+mariscal	seats 0/4 (0 running, 0 reserved)	0 waiting
+aitor	seats 2/4 (2 running, 0 reserved)	0 waiting
+ganaresenas	seats 0/4 (0 running, 0 reserved)	0 waiting
+joytorm	seats 0/4 (0 running, 0 reserved)	0 waiting
+siloeads	seats 4/4 (4 running, 0 reserved)	1 waiting
+team1	seats 2/2 (1 running, 1 reserved)	0 waiting
+team2	seats 0/2 (0 running, 0 reserved)	0 waiting
+team3	seats 0/2 (0 running, 0 reserved)	0 waiting
+team4	seats 0/2 (0 running, 0 reserved)	0 waiting
+team5	seats 1/2 (1 running, 0 reserved)	0 waiting
+viaulab	seats 0/4 (0 running, 0 reserved)	0 waiting
+
