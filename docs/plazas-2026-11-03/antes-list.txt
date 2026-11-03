@@ -22,13 +22,13 @@ team5       ses  29% sem  19% Fable 100% agotada hasta 05/11
 viaulab              sem 100% Fable 100% agotada hasta 01:00
             Ultra · sin tope de 5 h · seats 0/4
 
-projects:
-aitor: Alfredo · Bolsa (backtest) · Apuestas Telegram · App · Apuestas Telegram · Web · Claudia Vera · Bot · CRZone · Web · Entrelanzados · Bot · Entrelanzados · Spam (outreach en frío) · Entrelanzados · Web · Estética Siloé · Bot · Estética Siloé · Reservas · Estética Siloé · Web nueva · Ganaresenas · App (gana, quita y contesta) · Huerta Romero · Web · Infra · ITV · Citas · Mariscal · Web · Optihost · CRM (prod) · Optihost · SMS (prod, ITV) · Personal · Presentados · App · Presentados · Docs · Presentados · Web · Primdental · Web · Sistema Claude · plugin despachador · SoldByChat · App · SoldByChat · Bot · Vídeos · Shorts Pasenpasen · Vídeos · Videoteca
-ganaresenas: Armel · Web · Bots · blueprint · Chefsucar · Web · Energy Pilates · diseño y documentos · Farm · móviles · Herramientas · Ads · ITV · Web · Lector WA (terminado por ahora) · Limpiezas Jiménez · Web · Nathaly · Web · Sistema Claude · objetivos · Vídeos · Shorts Entrelanzados
-joytorm: Claudia Vera · Web · Energy Pilates · Web · Gloria · SEO · LLC · Frontier Digital Creations · Sistema Claude · cuentas (app de barra) · Sistema Claude · guardrails · Sistema Claude · plugin quién hace qué · Vídeos · Shorts Apuestas Telegram · Vídeos · Shorts Still Typing
-siloeads: Claudia Vera · Atlas · Claudia Vera · Reservas · Conserjia · Web · Contestaresenas · Web · Domus · Web · Entrelanzados · App · Ganaresenas · Web · Herramientas · Scraping · LinkedIn · Captación · MIM Sistemas · Web · Minicoton · Bot · Optihost · Forms (prod, webs de clientes) · Optihost · Newsletter (prod) · Optimizador · Pasenpasen · Quitaresenas · Web · SEO transversal (pasa a Gloria SEO) · Siloeman · Web · Sistema Claude · bb-plugins · Sistema Claude · plugin calor · SoldByChat · Web · Spam · Motor · Still Typing · Subastas · Motor · Tiriti · Web · Vídeos · Motor · Vídeos · Shorts SoldByChat
-team1: Entrelanzados · Orquestador · Kitchenmania · Web y app
-team5: Sistema Claude · plugin cuentas (switcher)
+projects (names kept out of this public repo; counts as rebalance read them):
+aitor: 27 projects
+ganaresenas: 11 projects
+joytorm: 9 projects
+siloeads: 25 projects
+team1: (names kept out)
+team5: (names kept out)
 
 Waiting for a seat:
-siloeads  #1  thr_jwz544abwe  Pasenpasen · Check-in
+siloeads  #1  thr_jwz544abwe  (title kept out)

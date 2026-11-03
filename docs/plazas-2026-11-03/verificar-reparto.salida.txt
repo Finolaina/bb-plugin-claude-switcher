@@ -1,0 +1,2 @@
+{'aitor': 17, 'ganaresenas': 18, 'joytorm': 27, 'siloeads': 17} spread 10 moved 20 alive threads moved []
+rc=0
