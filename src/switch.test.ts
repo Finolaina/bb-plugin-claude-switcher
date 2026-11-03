@@ -1965,18 +1965,20 @@ describe("background work in every choice of another account (Codex ULTRA-R01)",
         savedForUser: saved,
       }),
     ).toEqual({ kind: "move", account: "spare", why: "current-blocked" });
-    // Every other account keeps the reserved model: the reserve gives way,
-    // the accounts saved for the user still last.
+    // Every other account keeps the reserved model: for Haiku the reserve
+    // gives way, the accounts saved for the user still last; an Opus turn
+    // is held instead (Aitor 2026-11-03, «Esperar siempre»; Codex OPUS-001).
     const keepsFable = { Fable: { usedPercent: 5, resetsAt: NOW + 30 * HOUR } };
     const reserved = {
       currentAccount: "main",
       isNew: false,
       accounts: accounts.map((a) => ({ ...a, models: keepsFable })),
-      preferredModel: "Opus",
+      preferredModel: "Haiku",
       reserveModel: "Fable",
       now: NOW,
       currentLoggedOut: true,
     };
+    expect(decidePlacement({ ...reserved, preferredModel: "Opus" })).toEqual({ kind: "keep" });
     expect(decidePlacement(reserved)).toEqual({ kind: "move", account: "work", why: "current-blocked" });
     expect(decidePlacement({ ...reserved, savedForUser: saved })).toEqual({
       kind: "move",

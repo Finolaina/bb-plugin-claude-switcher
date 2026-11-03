@@ -4,6 +4,39 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.35] - 2026-11-03
+
+### Changed
+
+- **An Opus turn waits instead of spending a Max account's weekly.** By
+  Aitor's decision of 2026-11-03 («Esperar siempre»): when no Team seat
+  (or Max account out of Fable) can take an Opus turn, it no longer runs
+  on the Max account that keeps Fable where its project sits. bb holds
+  the message, the user's own threads too, with the seat it waits for
+  and from when (`Waiting for Opus on team3, free from 2026-11-03 14:00:
+  aitor keeps its weekly for Fable`), and asks again within 5 minutes.
+  Fable, and the Opus subagents inside Fable threads, keep the Max
+  weekly. A Haiku turn is not held.
+
+### Fixed
+
+- **A project working in Opus is no longer rescued onto a Max account
+  that keeps Fable.** The refresh that moves projects off an account out
+  of the preferred model judged every project for Fable, so a project
+  whose threads run Opus left a Team seat (or a Max account out of
+  Fable) that still ran Opus for a Max account that keeps Fable
+  (measured 2026-11-02 18:23: viaulab → aitor). It now judges each
+  project for the model of its latest turn, and moves one in Opus only
+  where Opus spends no weekly Fable needs.
+- **After a turn in Opus that ran on a Max account that keeps Fable, the
+  project moves off it at once.** Turns that skip bb's dispatch check (a
+  message from a child thread, a Send now) run where the project sits:
+  this repository's own Opus thread ran on aitor that way from 21:04 on
+  2 Nov to 09:41 on 3 Nov, and aitor's weekly reached 48 % with Fable at
+  24 %. Now, when such a turn ends, the project goes to a Team seat with
+  room, as the check would have sent it (`Moved to account … after a turn
+  in Opus: … would spend Fable's weekly`).
+
 ## [0.2.34] - 2026-11-02
 
 ### Changed
