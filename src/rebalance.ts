@@ -33,23 +33,30 @@ function room(account: RebalanceAccount): number {
 
 /**
  * Projects per account: by the room in its weekly, no account more than
- * `spread` above the one with fewest. Solved in real numbers with a band
- * two narrower, then rounded (each by less than one), so the integers stay
- * within `spread`.
+ * `spread` above the one with fewest, and never fewer than the projects
+ * `fixed` there (Codex PLAZAS-003): those raise its floor, and the rest
+ * spread over the others. Solved in real numbers with a band two
+ * narrower, then rounded (each by less than one), so the integers stay
+ * within `spread` whenever the fixed projects allow it.
  */
 export function rebalanceTargets(
   accounts: readonly RebalanceAccount[],
   total: number,
   spread: number,
+  fixed: ReadonlyMap<string, number> = new Map(),
 ): Map<string, number> {
   const width = Math.max(0, spread - 2);
   const rooms = accounts.map(room);
   const sum = rooms.reduce((a, b) => a + b, 0);
   const ideal = rooms.map((r) => (total * r) / sum);
+  const floor = accounts.map((a) => fixed.get(a.name) ?? 0);
   const banded = (low: number) =>
-    ideal.map((x) => Math.min(Math.max(x, low), low + width));
-  // The band's floor such that the shares add up to the projects.
-  let lo = 0;
+    ideal.map((x, i) =>
+      Math.max(floor[i]!, Math.min(Math.max(x, low), low + width)),
+    );
+  // The band's floor such that the shares add up to the projects; from
+  // -width, where only the fixed projects count.
+  let lo = -width;
   let hi = total;
   for (let i = 0; i < 60; i += 1) {
     const mid = (lo + hi) / 2;
@@ -93,7 +100,10 @@ export function planRebalance(
 ): RebalanceMove[] {
   const names = new Set(accounts.map((a) => a.name));
   const mine = projects.filter((p) => names.has(p.account));
-  const target = rebalanceTargets(accounts, mine.length, spread);
+  const fixed = new Map<string, number>();
+  for (const p of mine)
+    if (!p.movable) fixed.set(p.account, (fixed.get(p.account) ?? 0) + 1);
+  const target = rebalanceTargets(accounts, mine.length, spread, fixed);
   const count = new Map(accounts.map((a) => [a.name, 0]));
   for (const p of mine) count.set(p.account, count.get(p.account)! + 1);
   const load = new Map(accounts.map((a) => [a.name, a.load]));
