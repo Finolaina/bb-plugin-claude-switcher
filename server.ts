@@ -3477,21 +3477,33 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   // as the checkpoint would have moved it, so the next such turn does not
   // start there; with nowhere to go it stays, and the checkpoint holds the
   // next turn it sees.
-  // Only the project's latest turn decides, and only while nothing moved
-  // the project since it started (Codex OPUS-002): a newer message of
-  // another thread (a Fable turn placed meanwhile), a pick by hand, or any
-  // other move outranks a turn that is over. A turn whose start was not
-  // seen (the plugin loaded meanwhile) moves nothing.
-  /** The project's moves (`movesOf().epoch`) as each thread's turn started. */
-  const turnEpoch = new Map<string, number>();
-  /** Per project, the thread whose message bb's checkpoint asked about last. */
-  const lastDispatched = new Map<string, string>();
+  // Only while nothing came after the turn started (Codex OPUS-002,
+  // OPUS-R2-001/002): a message of the project asked about at the
+  // checkpoint since (a Fable turn placed meanwhile), a pick by hand (also
+  // one that confirms the account) or a release, or any move outranks a
+  // turn that is over; what came before it does not. A turn whose start
+  // was not seen (the plugin loaded meanwhile) moves nothing.
+  /** What each thread's turn started after: the project's moves, picks and checkpoint messages then. */
+  const turnStart = new Map<
+    string,
+    { epoch: number; picks: number; dispatches: number }
+  >();
+  /** Per project, the messages bb's checkpoint asked about. */
+  const dispatches = new Map<string, number>();
+  function projectMarks(projectId: string) {
+    const move = movesOf(projectId);
+    return {
+      epoch: move.epoch,
+      picks: move.picks,
+      dispatches: dispatches.get(projectId) ?? 0,
+    };
+  }
   bb.events.on("thread.active", ({ thread }) => {
-    turnEpoch.set(thread.id, movesOf(thread.projectId).epoch);
+    turnStart.set(thread.id, projectMarks(thread.projectId));
   });
   bb.events.on("thread.idle", async ({ thread }) => {
-    const started = turnEpoch.get(thread.id);
-    turnEpoch.delete(thread.id);
+    const started = turnStart.get(thread.id);
+    turnStart.delete(thread.id);
     if (
       !current.autoSwitch ||
       thread.providerId !== CLAUDE_CODE_PROVIDER ||
@@ -3500,10 +3512,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     )
       return;
     const projectId = thread.projectId;
-    const stillLatest = () =>
-      current.autoSwitch &&
-      movesOf(projectId).epoch === started &&
-      (lastDispatched.get(projectId) ?? thread.id) === thread.id;
+    const stillLatest = () => {
+      const now = projectMarks(projectId);
+      return (
+        current.autoSwitch &&
+        now.epoch === started.epoch &&
+        now.picks === started.picks &&
+        now.dispatches === started.dispatches
+      );
+    };
     if (!stillLatest()) return;
     const model =
       (await loggedTurn(thread.id)).model ?? threadModel.get(thread.id) ?? null;
@@ -3515,7 +3532,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // Asked again: the setting, a move or a newer message may have come
       // while the log was read or the queue waited (Codex OPUS-004).
       if (!stillLatest()) return;
-      await placeTurn(thread, model, { abandoned: false }, "after");
+      // And once more after placeTurn's reads, just before it writes
+      // (Codex OPUS-R2-003): `abandoned` is asked then.
+      await placeTurn(
+        thread,
+        model,
+        {
+          get abandoned() {
+            return !stillLatest();
+          },
+        },
+        "after",
+      );
     });
   });
 
@@ -3911,15 +3939,21 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     now: number,
     /** For a thread of background work (see isBackground); false when the thread is not known. */
     background = false,
+    /** The thread the turn is placed for: a seat it already holds counts as free for it (Codex OPUS-R2-004). */
+    threadId?: string,
   ): Omit<PlacementInput, "currentAccount"> {
     const measured = measuredAccounts(model);
+    const own = threadId === undefined ? null : seats.seatOf(threadId);
     return {
       isNew: false,
       accounts: measured,
       preferredModel: model,
       reserveModel: current.preferredModel,
       excursionFrom: wayHome(projectId, model, measured, now),
-      freeSeats,
+      freeSeats:
+        own === null
+          ? freeSeats
+          : (name) => freeSeats(name) + (seatKey(name) === own.account ? 1 : 0),
       ...paceFilter(background),
       now,
     };
@@ -4005,7 +4039,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const now = deps.now();
     const excursion = excursions.get(projectId);
     const input: PlacementInput = {
-      ...placementOf(projectId, model, now, isBackground(thread)),
+      ...placementOf(projectId, model, now, isBackground(thread), thread.id),
       currentAccount: fromName,
       currentLoggedOut: unconfirmed(fromName),
     };
@@ -4325,7 +4359,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       threadModel.set(thread.id, model);
       projectModel.set(thread.projectId, model);
     }
-    lastDispatched.set(thread.projectId, thread.id);
+    dispatches.set(thread.projectId, (dispatches.get(thread.projectId) ?? 0) + 1);
     const placed: { at?: TurnPlace } = {};
     if (current.autoSwitch && ctx.attempt === "start-turn") {
       // A message sent now, not a queued one asked again: its own waits
