@@ -36,11 +36,61 @@ export function capacityFor(
   settings: SeatSettings,
   sessionAbsent = false,
 ): number {
-  const team =
-    !sessionAbsent && (kind === "team" || (kind !== "max" && weeklyAbsent));
-  const n = team ? settings.seatsTeam : settings.seatsMax;
+  const n = isTeamSeat(kind, weeklyAbsent, sessionAbsent)
+    ? settings.seatsTeam
+    : settings.seatsMax;
   return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 0;
 }
+
+/** Whose seats are `seatsTeam`: see capacityFor. */
+export function isTeamSeat(
+  kind: AccountKind | undefined,
+  weeklyAbsent: boolean,
+  sessionAbsent = false,
+): boolean {
+  return (
+    !sessionAbsent && (kind === "team" || (kind !== "max" && weeklyAbsent))
+  );
+}
+
+/**
+ * The seats of a Max or Ultra account by its load (Aitor 2026-11-03:
+ * «que se vayan balanceando, pero que no sea un "máximo 4"»): one more
+ * than `base` while its day's pace is under LOAD_MORE_PACE and its 5-hour
+ * session (when it has one) under LOAD_MORE_SESSION; one fewer once its
+ * pace passes LOAD_FEWER_PACE; `base` otherwise, and when the pace is not
+ * known. Never more than one above `base`: a fifth thread at once was
+ * seen on joytorm, siloeads and viaulab in the week to 2026-11-03 with
+ * no account cut (docs/plazas-2026-11-03), a sixth never. A Team seat, or
+ * no limit, keeps `base`.
+ */
+export function seatCeiling(
+  base: number,
+  team: boolean,
+  /** The day's pace, % of today's share spent; null when not known. */
+  pace: number | null,
+  /** The 5-hour session %; null when the account has none. */
+  session: number | null,
+): { capacity: number; why: string | null } {
+  if (base === 0 || team || pace === null) return { capacity: base, why: null };
+  if (pace > LOAD_FEWER_PACE)
+    return {
+      capacity: Math.max(1, base - 1),
+      why: `day's pace ${Math.round(pace)} % (above ${LOAD_FEWER_PACE} %)`,
+    };
+  if (pace < LOAD_MORE_PACE && (session === null || session < LOAD_MORE_SESSION))
+    return {
+      capacity: base + 1,
+      why: `day's pace ${Math.round(pace)} % (below ${LOAD_MORE_PACE} %), ${session === null ? "no 5-hour window" : `5-hour session ${Math.round(session)} % (below ${LOAD_MORE_SESSION} %)`}`,
+    };
+  return { capacity: base, why: null };
+}
+/** Under this day's pace (%) a Max account takes a seat more (see seatCeiling). */
+export const LOAD_MORE_PACE = 50;
+/** ... and under this 5-hour session (%), when it has one. */
+export const LOAD_MORE_SESSION = 40;
+/** Over this day's pace (%) it takes a seat fewer. */
+export const LOAD_FEWER_PACE = 90;
 
 export interface AccountSeats {
   /** 0 = no limit. */
