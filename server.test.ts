@@ -15154,6 +15154,37 @@ describe("a project whose account has its seats full moves to one with a free se
     expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-1"]);
   });
 
+  it("a hidden thread's turn keeps its project where it is too (Codex PLAZAS-R2-003)", async () => {
+    const h = await host(FABLE_EVERYWHERE, {
+      settings: { preferredModel: "Fable", seatsMax: 1 },
+      presetEnv: { "proj-1": on("main"), "proj-2": on("main") },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "hidden-1", projectId: "proj-1", visibility: "hidden", originPluginId: "some-plugin" }),
+    });
+    await running(h, "thr-2", "proj-2");
+    expect(await fable(h, "thr-1", "proj-1")).toMatchObject({ action: "wait" });
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("after a reload, a hidden thread bb lists as running keeps its project where it is (Codex PLAZAS-R2-003)", async () => {
+    const h = await host(FABLE_EVERYWHERE, {
+      settings: { preferredModel: "Fable", seatsMax: 1 },
+      presetEnv: { "proj-1": on("main"), "proj-2": on("main") },
+      threads: {
+        "hidden-1": { projectId: "proj-1", status: "active", visibility: "hidden", originPluginId: "some-plugin" },
+        "thr-2": { projectId: "proj-2", status: "active" },
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await vi.waitFor(async () => expect((await seatsOf(h))?.main?.running).toBe(1));
+    expect(await fable(h, "thr-1", "proj-1")).toMatchObject({ action: "wait" });
+    expect(h.envSet).toEqual([]);
+  });
+
   it("with the automatic choice off nothing moves for a seat", async () => {
     const h = await host(FABLE_EVERYWHERE, {
       settings: { preferredModel: "Fable", seatsMax: 1, autoSwitch: false },
