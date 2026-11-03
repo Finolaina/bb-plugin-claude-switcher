@@ -9,6 +9,7 @@ import type { PluginTurnFailedEvent } from "@get-bb/plugin-sdk";
 import {
   canRunModel,
   chooseAccount,
+  holdsForReserve,
   isUsable,
   modelWindow,
   reserving,
@@ -570,8 +571,10 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   const others = accounts.filter((a) => a.name !== input.currentAccount);
   const choice =
     chooseSeated(others, options, input.freeSeats) ??
-    // Without a login a turn kept here fails for sure: the reserve gives way.
-    (loggedOut
+    // Without a login a turn kept here fails for sure: the reserve gives
+    // way, but not for a model held off it (Codex OPUS-001): that turn
+    // waits at the checkpoint, and the rescue leaves the project.
+    (loggedOut && !holdsForReserve(options)
       ? chooseSeated(
           others,
           {
