@@ -1,4 +1,3 @@
 # START · claude-switcher
 
-- [ ] Con el OK de Aitor (Inbox #219, 2026-11-03), subir a `main` la limpieza 054586d: quita de `docs/plazas-2026-11-03/` los nombres de proyectos y los títulos de hilos que publicó d01559a (el repo es público). Reescribir el historial solo si Aitor lo pide.
-- [ ] Preguntas abiertas de las plazas: `docs/plazas-2026-11-03/START-preguntas-abiertas.md`.
+- [ ] Tras reescribir el historial sin nombres de proyectos (Aitor, 2026-11-03 ~19:15: «Sí, borrarlos del historial»): confirmar que GitHub Support purgó las vistas en caché de los commits viejos (d01559a y los de la rama de 0.2.37). Estado en `docs/plazas-2026-11-03/START-preguntas-abiertas.md`.
