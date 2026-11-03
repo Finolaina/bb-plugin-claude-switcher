@@ -17101,3 +17101,102 @@ describe("bb claude-switcher reserve / unreserve: a seat held from outside bb", 
     expect((await ask(h, "t1")).action).toBe("proceed");
   });
 });
+
+// The state of 2026-11-03 23:10 (docs/revision-2026-11-04/PLAN.md), through
+// the real parser: every Team seat reports a weekly_all by then, so its login
+// is what makes it Team. `main` is an Ultra that keeps Fable, `spare` the only
+// Team out of Fable, full; `work` a free Team with Fable left.
+describe("caminos 2026-11-04", () => {
+  const FABLE = { preferredModel: "Fable" };
+  const OPUS = "claude-opus-5-5";
+  const FABLE_ID = "claude-fable-5-1";
+  const teamLogin = (h: Awaited<ReturnType<typeof host>>, ...names: string[]) => {
+    for (const name of names)
+      h.files[`${ACCOUNTS}/${name}/.claude.json`] = JSON.stringify({
+        oauthAccount: {
+          accountUuid: `uuid-${name}`,
+          emailAddress: `${name}@example.com`,
+          organizationType: "claude_team",
+        },
+      });
+  };
+  const INCIDENT = {
+    main: () => Response.json(payload(13, 88, 98)),
+    spare: () => Response.json(payload(81, 48, 100)),
+    work: () => Response.json(payload(0, 2, 0)),
+  };
+  const dispatch = (
+    h: Awaited<ReturnType<typeof host>>,
+    threadId: string,
+    projectId: string,
+    model: string | null,
+    queued = false,
+  ) =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: threadId, projectId }),
+        requestedExecution: { providerId: "claude-code", model },
+        attempt: "start-turn",
+        ...(queued ? { queuedMessages: [{ id: `queued_${threadId}` }] as never } : {}),
+      }),
+    ) as Promise<{ action: string; reason?: string; sendAt?: number }>;
+  const on = (name: string) => [
+    { name: ENV_VAR, note: ownNote(name), secret: true, value: null },
+  ];
+  /** Team seats by login, measured; `spare`'s one seat taken by another project's Opus thread. */
+  const incident = async (
+    usage: Record<string, () => Response> = INCIDENT,
+    options: HostOptions = {},
+  ) => {
+    const h = await host(usage, {
+      ...options,
+      settings: { ...FABLE, seatsTeam: 1, ...options.settings },
+      presetEnv: { "proj-2": on("spare"), ...options.presetEnv },
+    });
+    dispose = () => h.harness.dispose();
+    teamLogin(h, "spare", "work");
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect((await dispatch(h, "other", "proj-2", OPUS)).action).toBe("proceed");
+    return h;
+  };
+
+  it("T1 reserve: an Opus turn on an Ultra goes to the free Team seat with Fable left, not to the queue of the only Team out of Fable", async () => {
+    const h = await incident();
+    expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    const seats = await h.harness.behavior.callRpc("accounts_list", null) as State;
+    expect(seats.seats?.spare?.queued).toEqual([]);
+    expect(seats.seats?.work?.reserved).toBe(1);
+  });
+
+  it("T6 wait always: with every Team seat full an Opus turn waits, and never runs on an Ultra with a free seat", async () => {
+    const h = await incident();
+    expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("proceed");
+    const r = await dispatch(h, "t2", "proj-3", OPUS);
+    expect(r.action).toBe("wait");
+    expect(h.envSet.filter((e) => e.projectId === "proj-3")).toEqual([]);
+  });
+
+  it("T7 a Team seat with its weekly at 100 % is no target, whatever its Fable", async () => {
+    const h = await incident({
+      ...INCIDENT,
+      work: () => Response.json(payload(0, 100, 0)),
+    });
+    expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("wait");
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("T9b a sibling at work does not hold an Opus turn back: the project goes to the Team seat as since 0.2.35", async () => {
+    const h = await incident();
+    expect((await dispatch(h, "busy", "proj-1", FABLE_ID)).action).toBe("proceed");
+    expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+  });
+
+  it("T3 a pick by hand of an Ultra does not make it run Opus: «Esperar siempre» holds, and the turn goes to the Team seat", async () => {
+    const h = await incident();
+    await h.harness.behavior.runCli(["use", "proj-1", "main"]);
+    expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+  });
+});

@@ -31,6 +31,13 @@ export interface AccountUsage {
   weekly: UsageWindow;
   /** Per-model weekly windows keyed by display name ("Fable", "Opus"...). */
   models: Record<string, UsageWindow>;
+  /**
+   * The login is a Team seat, whatever windows it reports: since November
+   * 2026 a Team seat reports a general weekly too (`list --json`, 2026-11-03),
+   * so `weekly.absent` no longer tells one. Set where the login is known
+   * (measuredAccounts).
+   */
+  team?: true;
 }
 
 export interface ChoiceOptions {
@@ -114,7 +121,8 @@ function deadline(account: AccountUsage, model: string): number {
  */
 export function spendsNoWeekly(account: AccountUsage, model: string): boolean {
   return (
-    account.weekly.absent === true && modelWindow(account, model) === undefined
+    (account.team === true || account.weekly.absent === true) &&
+    modelWindow(account, model) === undefined
   );
 }
 
@@ -137,7 +145,9 @@ export function reserving(options: ChoiceOptions): boolean {
  * general weekly and Fable's window reset together (measured 2026-10-13),
  * so what another model spends there is Fable's. Such an account is never
  * chosen for another model, not even as the last resort: the turn waits or
- * stays where it is ("the Max accounts are Fable's", 2026-10-13).
+ * stays where it is ("the Max accounts are Fable's", 2026-10-13). A Team seat
+ * never keeps it, also once it reports a weekly: it is where those turns go
+ * (Aitor 2026-11-03, «Esperar siempre»: the first free Team seat).
  */
 export function spendsReservedWeekly(
   account: AccountUsage,
@@ -146,6 +156,7 @@ export function spendsReservedWeekly(
   return (
     reserving(options) &&
     canRunModel(account, options.reserveModel!) &&
+    account.team !== true &&
     account.weekly.absent !== true
   );
 }
