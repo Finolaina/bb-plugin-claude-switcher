@@ -3534,6 +3534,27 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     )
       return;
     const projectId = thread.projectId;
+    // From now until its model is known, a rescue of the project neither
+    // decides nor lands (Codex OPUS-0236-R2-001).
+    turnEnds.set(projectId, (turnEnds.get(projectId) ?? 0) + 1);
+    modelReads.set(projectId, (modelReads.get(projectId) ?? 0) + 1);
+    try {
+      await afterTurn(thread, started);
+    } finally {
+      const left = (modelReads.get(projectId) ?? 1) - 1;
+      if (left === 0) modelReads.delete(projectId);
+      else modelReads.set(projectId, left);
+    }
+  });
+  /** Per project, the turns that ended (counted as each end begins). */
+  const turnEnds = new Map<string, number>();
+  /** Per project, the ended turns whose model is still being read. */
+  const modelReads = new Map<string, number>();
+  async function afterTurn(
+    thread: ThreadResponse,
+    started: { epoch: number; picks: number; activity: number },
+  ): Promise<void> {
+    const projectId = thread.projectId;
     const stillLatest = () => {
       const now = projectMarks(projectId);
       return (
@@ -3572,7 +3593,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         "after",
       );
     });
-  });
+  }
 
   // ---- No project left where a turn cannot run ---------------------------
   /**
@@ -3682,6 +3703,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (from.external) return;
     const fromName = from.account ?? current.defaultAccountName;
     const now = deps.now();
+    if (modelReads.has(projectId)) {
+      bb.log.debug(
+        `project ${projectName}: left on ${fromName}: the model of a turn that ended is being read`,
+      );
+      return;
+    }
     const model = modelOfProject(projectId);
     const why = stranded(fromName, now, model);
     if (why === null) return;
@@ -3705,13 +3732,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     // Decided for the model of the project's latest turn as known now: a
     // message or a turn of it while the sessions are shared, or the end of
-    // a turn that names another model, may change that model, and this
-    // move is dropped (Codex OPUS-R5-002, OPUS-R6-001).
+    // a turn (whatever model its log names, read later or not), may change
+    // that model, and this move is dropped (Codex OPUS-R5-002, OPUS-R6-001,
+    // OPUS-0236-R2-001).
     const seen = activity.get(projectId) ?? 0;
+    const ended = turnEnds.get(projectId) ?? 0;
     if (
       !(await applyAccount(projectId, accountOrDefault(decision.account), from, {
         stillValid: () =>
           (activity.get(projectId) ?? 0) === seen &&
+          (turnEnds.get(projectId) ?? 0) === ended &&
           modelOfProject(projectId) === model,
       }))
     )
