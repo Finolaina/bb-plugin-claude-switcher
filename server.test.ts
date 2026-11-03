@@ -10235,6 +10235,51 @@ describe("an Opus turn on a Max account that keeps Fable", () => {
     expect(h.envSet).toEqual([]);
   });
 
+  it("a held Opus turn waits in the Team seat's queue: a later message on that seat does not overtake it (Codex OPUS-R4-002)", async () => {
+    const onWork = [{ name: ENV_VAR, note: ownNote("work"), secret: true, value: null }];
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, 10, 2)),
+        spare: () => Response.json(payload(10, 10, 5)),
+        work: () => Response.json(teamPayload(17, 42)),
+      },
+      { settings: { ...FABLE, seatsTeam: 1 }, presetEnv: { "proj-2": onWork } },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const send = (threadId: string, projectId: string, model: string) =>
+      h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id: threadId, projectId }),
+          requestedExecution: { providerId: "claude-code", model },
+          attempt: "start-turn",
+        }),
+      );
+    // proj-2 takes work's only seat.
+    expect(await send("thread-9", "proj-2", OPUS_ID)).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-9", projectId: "proj-2" }),
+    });
+    // proj-1's Opus turn, on main, is held in work's queue.
+    expect(await send("thread-1", "proj-1", OPUS_ID)).toMatchObject({
+      action: "wait",
+      reason: "Waiting for a seat on work: 1/1 threads running, 0 ahead in the queue",
+    });
+    // A later message of proj-2, already on work, comes behind it.
+    expect(await send("thread-8", "proj-2", OPUS_ID)).toMatchObject({
+      action: "wait",
+      reason: "Waiting for a seat on work: 1/1 threads running, 1 ahead in the queue",
+    });
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "thread-9", projectId: "proj-2" }),
+      lastAssistantText: null,
+    });
+    // The freed seat is thread-1's: thread-8 still waits, thread-1 moves there.
+    expect(await send("thread-8", "proj-2", OPUS_ID)).toMatchObject({ action: "wait" });
+    expect(await send("thread-1", "proj-1", OPUS_ID)).toEqual({ action: "proceed" });
+    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+  });
+
   it("a Fable turn on the Max account is not held", async () => {
     const h = await host(
       {
@@ -10396,6 +10441,60 @@ describe("an Opus turn on a Max account that keeps Fable", () => {
         expect(h.envSet).toEqual([]);
       });
     }
+
+    it("an older Fable turn whose log answers after a newer Opus turn ended does not make the rescue judge the project for Fable (Codex OPUS-R4-001)", async () => {
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      let armed = false;
+      const options: HostOptions = {
+        settings: FABLE,
+        threadEvents: {
+          "thread-1": logged(FABLE_ID)["thread-1"]!,
+          "thread-2": logged(OPUS_ID)["thread-1"]!.map((e) => ({ ...e, threadId: "thread-2" })),
+        },
+      };
+      const h = await host(
+        {
+          main: () => Response.json(payload(10, 10, 2)),
+          spare: () => Response.json(payload(10, 60, 20)),
+          // A Team seat out of Fable, with room for Opus.
+          work: () => Response.json(teamPayload(17, 100)),
+        },
+        options,
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      options.beforeEvents = async () => {
+        if (!armed) return;
+        armed = false;
+        await held;
+      };
+      const on = (id: string) => ({ thread: thread({ id, projectId: "proj-1" }) });
+      // Both turns past the checkpoint: thread-1 (Fable) starts first.
+      await h.harness.behavior.emitThreadEvent("thread.active", on("thread-1"));
+      await h.harness.behavior.emitThreadEvent("thread.active", on("thread-2"));
+      armed = true;
+      const older = h.harness.behavior.emitThreadEvent("thread.idle", {
+        ...on("thread-1"),
+        lastAssistantText: null,
+      });
+      await vi.waitFor(() => expect(armed).toBe(false));
+      await h.harness.behavior.emitThreadEvent("thread.idle", {
+        ...on("thread-2"),
+        lastAssistantText: null,
+      });
+      expect(h.envSet.map((e) => e.note)).toEqual([ownNote("work")]);
+      release();
+      await older;
+      // A refresh: the rescue judges the project for Opus, which work runs.
+      const before = h.usageCalls.length;
+      const run = h.harness.behavior.runService("usage-refresh");
+      await vi.waitFor(() => expect(h.usageCalls).toHaveLength(before + 3));
+      run.controller.abort();
+      await run.done;
+      expect(h.envSet.map((e) => e.note)).toEqual([ownNote("work")]);
+      expect(h.envDeleted).toEqual([]);
+    });
 
     it("moves nothing for a turn whose start it did not see", async () => {
       const h = await host(MAX_AND_SEAT, { settings: FABLE, threadEvents: logged(OPUS_ID) });

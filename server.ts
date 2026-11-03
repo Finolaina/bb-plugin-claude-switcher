@@ -3478,27 +3478,34 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   // start there; with nowhere to go it stays, and the checkpoint holds the
   // next turn it sees.
   // Only while nothing came after the turn started (Codex OPUS-002,
-  // OPUS-R2-001/002): a message of the project asked about at the
-  // checkpoint since (a Fable turn placed meanwhile), a pick by hand (also
-  // one that confirms the account) or a release, or any move outranks a
-  // turn that is over; what came before it does not. A turn whose start
-  // was not seen (the plugin loaded meanwhile) moves nothing.
-  /** What each thread's turn started after: the project's moves, picks and checkpoint messages then. */
+  // OPUS-R2-001/002, OPUS-R4-001): a message of the project asked about at
+  // the checkpoint or a turn of it started since (a Fable turn placed
+  // meanwhile, another turn past the checkpoint), a pick by hand (also one
+  // that confirms the account) or a release, or any move outranks a turn
+  // that is over; what came before it does not. A turn whose start was
+  // not seen (the plugin loaded meanwhile) moves nothing.
+  /** What each thread's turn started after: the project's moves, picks and activity then. */
   const turnStart = new Map<
     string,
-    { epoch: number; picks: number; dispatches: number }
+    { epoch: number; picks: number; activity: number }
   >();
-  /** Per project, the messages bb's checkpoint asked about. */
-  const dispatches = new Map<string, number>();
+  /** Per project, its checkpoint messages and turn starts, counted together: their order. */
+  const activity = new Map<string, number>();
+  function noteActivity(projectId: string): number {
+    const n = (activity.get(projectId) ?? 0) + 1;
+    activity.set(projectId, n);
+    return n;
+  }
   function projectMarks(projectId: string) {
     const move = movesOf(projectId);
     return {
       epoch: move.epoch,
       picks: move.picks,
-      dispatches: dispatches.get(projectId) ?? 0,
+      activity: activity.get(projectId) ?? 0,
     };
   }
   bb.events.on("thread.active", ({ thread }) => {
+    noteActivity(thread.projectId);
     turnStart.set(thread.id, projectMarks(thread.projectId));
   });
   bb.events.on("thread.idle", async ({ thread }) => {
@@ -3512,25 +3519,24 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     )
       return;
     const projectId = thread.projectId;
-    const newerMessage = () =>
-      (dispatches.get(projectId) ?? 0) !== started.dispatches;
     const stillLatest = () => {
       const now = projectMarks(projectId);
       return (
         current.autoSwitch &&
         now.epoch === started.epoch &&
         now.picks === started.picks &&
-        now.dispatches === started.dispatches
+        now.activity === started.activity
       );
     };
-    if (newerMessage()) return;
     const model =
       (await loggedTurn(thread.id)).model ?? threadModel.get(thread.id) ?? null;
-    if (model === null || newerMessage()) return;
-    // The model the project's latest turn ran, also when a move or a pick
-    // came meanwhile: those stop the move below, not what the rescue
-    // judges the project for (Codex OPUS-R3-002).
-    projectModel.set(projectId, model);
+    if (model === null) return;
+    // The model the turn ran, unless what the project's model says was
+    // seen later (a newer message or turn start, also of a turn that
+    // ended first: Codex OPUS-R4-001); a move or a pick meanwhile stops
+    // only the move below (Codex OPUS-R3-002).
+    if ((projectModel.get(projectId)?.at ?? 0) < started.activity)
+      projectModel.set(projectId, { model, at: started.activity });
     if (!stillLatest()) return;
     if (!reserving({ preferredModel: model, reserveModel: current.preferredModel }))
       return;
@@ -3562,10 +3568,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * (or a Max account out of Fable) that still ran Opus, to a Max account
    * whose weekly Fable needs (viaulab → aitor, 2 Nov 18:23).
    */
-  const projectModel = new Map<string, string>();
+  const projectModel = new Map<string, { model: string; at: number }>();
   /** The model a project's next turn is judged for: its latest turn's, else the preferred one. */
   function modelOfProject(projectId: string): string {
-    return projectModel.get(projectId) ?? current.preferredModel;
+    return projectModel.get(projectId)?.model ?? current.preferredModel;
   }
   /**
    * Why `name` cannot run `model`, as measured now: not logged in, or out
@@ -3976,7 +3982,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     now: number,
     /** Why the turn does not run where the project is. */
     here: string,
-  ): { sendAt: number; reason: string } {
+  ): { sendAt: number; reason: string; seatOn?: string } {
     const reserve = current.preferredModel;
     const free = reserveWait(input);
     if (free === null)
@@ -3988,6 +3994,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return {
         sendAt: now + SEAT_RECHECK_MS,
         reason: `Waiting for a free seat for ${model} on ${free.account}: ${here}`,
+        seatOn: free.account,
       };
     return {
       sendAt: Math.min(free.at + RESET_BUFFER_MS, now + RESERVE_RECHECK_MS),
@@ -4028,7 +4035,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     thread: ThreadResponse,
     model: string,
     /** `held`: set when the turn must wait (see reserveWait). */
-    turn: { abandoned: boolean; held?: { sendAt: number; reason: string } },
+    turn: {
+      abandoned: boolean;
+      held?: { sendAt: number; reason: string; seatOn?: string };
+    },
     /** "after": placed as a turn of the thread ends, for its next one (see the thread.idle below). */
     when: "before" | "after" = "before",
   ): Promise<TurnPlace | null> {
@@ -4277,8 +4287,22 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     const done = turnPlaced === null ? null : await turnPlaced;
     if (turn.held !== undefined) {
-      bb.log.info(`thread ${thread.id}: its message waits (${turn.held.reason})`);
-      return { action: "wait", ...turn.held };
+      const { seatOn, ...held } = turn.held;
+      if (seatOn !== undefined) {
+        // In that account's seat queue, first come first served, so later
+        // arrivals there do not overtake it (Codex OPUS-R4-002); admitted,
+        // its own seat lets the placement move the project there.
+        seatGenerations.set(thread.id, (seatGenerations.get(thread.id) ?? 0) + 1);
+        const queued = seatWait(thread, seatOn);
+        if (queued !== null) return queued;
+        return {
+          action: "wait",
+          reason: `Placing ${turnModel} on ${seatOn}: a seat there is its own`,
+          sendAt: deps.now(),
+        };
+      }
+      bb.log.info(`thread ${thread.id}: its message waits (${held.reason})`);
+      return { action: "wait", ...held };
     }
     const where: TurnPlace | null =
       typeof done === "object" && done !== null ? done.value : null;
@@ -4365,11 +4389,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       };
     }
     const model = modelFamily(ctx.requestedExecution.model);
+    const seen = noteActivity(thread.projectId);
     if (model !== null) {
       threadModel.set(thread.id, model);
-      projectModel.set(thread.projectId, model);
+      projectModel.set(thread.projectId, { model, at: seen });
     }
-    dispatches.set(thread.projectId, (dispatches.get(thread.projectId) ?? 0) + 1);
     const placed: { at?: TurnPlace } = {};
     if (current.autoSwitch && ctx.attempt === "start-turn") {
       // A message sent now, not a queued one asked again: its own waits
