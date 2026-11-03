@@ -17302,6 +17302,38 @@ describe("caminos 2026-11-04", () => {
       );
     });
 
+    it("a message cancelled by hand leaves the next one its own 10 tries", async () => {
+      let clock = NOW;
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 88, 100)),
+          spare: () => Response.json(payload(81, 48, 100)),
+          work: () => Response.json(payload(0, 2, 0)),
+        },
+        {
+          clock: () => clock,
+          settings: FABLE,
+          presetEnv: { "proj-1": on("spare") },
+          failSet: ["proj-1"],
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      for (let i = 0; i < 9; i++) {
+        expect((await dispatch(h, "t1", "proj-1", FABLE_ID, true)).action).toBe("wait");
+        clock += SEAT_RECHECK_MS;
+      }
+      await h.harness.behavior.emitThreadEvent("message.cancelled", {
+        entry: { id: "row-1", threadId: "t1", payload: { kind: "message" } } as never,
+      });
+      for (let i = 0; i < 10; i++) {
+        expect((await dispatch(h, "t1", "proj-1", FABLE_ID, true)).action).toBe("wait");
+        clock += SEAT_RECHECK_MS;
+      }
+      expect((await dispatch(h, "t1", "proj-1", FABLE_ID, true)).action).toBe("proceed");
+    });
+
     it("admitted, with the capacity lowered since: its seat is its own, and it does not ask bb again for ever", async () => {
       const h = await host(
         {
@@ -17477,6 +17509,30 @@ describe("caminos 2026-11-04", () => {
       await h.harness.behavior.callRpc("accounts_refresh", null);
       await dispatch(h, "t3", "proj-1", FABLE_ID);
       await vi.waitFor(async () => expect((await stored(h))?.["proj-1"]).toBe("Fable"));
+    });
+
+    it("a write that failed is tried again on the next turn, also of the same model", async () => {
+      const h = await host(USAGE, {
+        settings: FABLE,
+        presetEnv: { "proj-1": on("work") },
+        kvPreset: { "project-models": { "proj-1": "Fable" } },
+      });
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      const set = h.bb.storage.kv.set.bind(h.bb.storage.kv);
+      let failing = true;
+      h.bb.storage.kv.set = async (key: string, value: unknown) => {
+        if (key === "project-models" && failing) throw new Error("storage down");
+        return set(key, value);
+      };
+      await dispatch(h, "t1", "proj-1", OPUS);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(await stored(h)).toEqual({ "proj-1": "Fable" });
+      failing = false;
+      await dispatch(h, "t1", "proj-1", OPUS, true);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(await stored(h)).toEqual({ "proj-1": "Opus" });
     });
 
     it("a store that could not be read is not written over, for a later load to find", async () => {
@@ -17672,6 +17728,27 @@ describe("caminos 2026-11-04", () => {
         lastAssistantText: null,
       });
       expect((await report(h)).atascos).toEqual([]);
+    });
+
+    it("the last held message cancelled by hand: the next one's wait counts from zero, and with another still held it keeps its age", async () => {
+      const { h, at } = await stuck();
+      const rows = h.queued.splice(0);
+      at(10 * 60_000);
+      await h.harness.behavior.emitThreadEvent("message.cancelled", { entry: rows[0] as never });
+      h.queued.push(...rows);
+      expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("proceed");
+      expect((await dispatch(h, "t2", "proj-3", OPUS)).action).toBe("wait");
+      await h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: thread({ id: "t1", projectId: "proj-1" }),
+        lastAssistantText: null,
+      });
+      expect((await report(h)).atascos).toEqual([]);
+      at(20 * 60_000);
+      expect((await report(h)).atascos).toHaveLength(1);
+      await h.harness.behavior.emitThreadEvent("message.cancelled", {
+        entry: { ...(rows[0] as object), id: "another" } as never,
+      });
+      expect((await report(h)).atascos).toHaveLength(1);
     });
 
     it("a row bb hides while it asks again keeps its age; gone 10 minutes with no ask, the wait is over", async () => {

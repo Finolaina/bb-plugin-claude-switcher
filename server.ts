@@ -3869,18 +3869,22 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   );
   /** Writes in order (see storeHolds). */
   let projectModelWrites: Promise<void> = Promise.resolve();
-  /** Stored as it changes, without holding the turn back: a failed write is only logged. */
+  /** The latest write failed: the next turn stores it again, also with no change (Codex IR-001). */
+  let projectModelsUnsaved = false;
+  /** Stored as it changes, without holding the turn back: a failed write is logged and tried again. */
   function noteProjectModel(projectId: string, model: string, at: number): void {
     const before = projectModel.get(projectId)?.model;
     projectModel.set(projectId, { model, at });
-    if (before === model || !projectModelsRead) return;
+    if (!projectModelsRead || (before === model && !projectModelsUnsaved)) return;
     const snapshot = Object.fromEntries(
       [...projectModel].map(([id, known]) => [id, known.model]),
     );
     projectModelWrites = projectModelWrites.then(async () => {
       try {
         await bb.storage.kv.set(KV_PROJECT_MODELS, snapshot);
+        projectModelsUnsaved = false;
       } catch (error) {
+        projectModelsUnsaved = true;
         bb.log.warn(
           `could not store the projects' models (a reload forgets them): ${error instanceof Error ? error.message : String(error)}`,
         );
@@ -5274,6 +5278,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // The message that waited for its account to be read is gone: the
     // next one waits on its own count (Astra SEATS-R2-005).
     seatReadWaits.delete(entry.threadId);
+    blockedWaits.delete(entry.threadId);
     const own = ownDeletes.get(entry.id);
     if (own !== undefined) {
       if (own.done) ownDeletes.delete(entry.id);
@@ -5281,8 +5286,28 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return;
     }
     await leaveSeatQueue(entry.threadId);
+    await forgetCancelledWait(entry.threadId);
     await cancelledByHand(entry);
   });
+
+  /**
+   * The user cancelled the thread's last held message: the next one's wait
+   * counts from zero, not from this one's (Codex IR-002). Unread, or with
+   * another of it held or asked for meanwhile, the wait stands.
+   */
+  async function forgetCancelledWait(threadId: string): Promise<void> {
+    const asked = waitAsked.get(threadId);
+    if (asked === undefined) return;
+    const rows = await within(
+      bb.sdk.threads.queuedMessages.list({ threadId }),
+      DISPATCH_LIMIT_MS,
+      `thread ${threadId}: its queued messages not read after a cancellation`,
+    );
+    if (typeof rows !== "object" || rows.value.length > 0) return;
+    if (waitAsked.get(threadId) !== asked) return;
+    waitSince.delete(threadId);
+    waitAsked.delete(threadId);
+  }
 
   /**
    * The user cancelled the thread's last message waiting for a seat: its
