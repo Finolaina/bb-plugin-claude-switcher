@@ -439,8 +439,12 @@ export function opusInsteadText(model: string, account: string): string {
 }
 
 export type PlacementDecision =
-  /** `why`: kept although its account spends the reserve, because no account spares it. */
-  | { kind: "keep"; why?: "current-reserved" }
+  /**
+   * `why`: kept although its account spends the reserve, because no account
+   * spares it (`current-reserved`), or although it is measured unable to run
+   * the turn, because no other with a free seat can (`current-blocked`).
+   */
+  | { kind: "keep"; why?: "current-reserved" | "current-blocked" }
   | {
       kind: "move";
       account: string;
@@ -619,7 +623,11 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
         )
       : null);
   if (choice === null)
-    return runs ? { kind: "keep", why: "current-reserved" } : { kind: "keep" };
+    return runs
+      ? { kind: "keep", why: "current-reserved" }
+      : loggedOut
+        ? { kind: "keep" }
+        : { kind: "keep", why: "current-blocked" };
   return {
     kind: "move",
     account: choice.account,

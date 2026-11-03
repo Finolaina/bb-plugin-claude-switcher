@@ -849,7 +849,7 @@ describe("decidePlacement", () => {
         preferredModel: "Fable",
         now: NOW,
       }),
-    ).toEqual({ kind: "keep" });
+    ).toEqual({ kind: "keep", why: "current-blocked" });
     expect(
       decidePlacement({
         currentAccount: "main",
@@ -1846,7 +1846,8 @@ describe("seats steer where a project goes, and never move one by themselves", (
         freeSeats,
       }),
     ).toEqual({ kind: "move", account: "spare", why: "current-blocked" });
-    // No seat free anywhere: it stays, and its thread waits there.
+    // No seat free anywhere: it stays, and says it cannot run here (its
+    // thread waits for a seat where it can: see placeTurn).
     expect(
       decidePlacement({
         currentAccount: "main",
@@ -1856,7 +1857,7 @@ describe("seats steer where a project goes, and never move one by themselves", (
         now: NOW,
         freeSeats: () => 0,
       }),
-    ).toEqual({ kind: "keep" });
+    ).toEqual({ kind: "keep", why: "current-blocked" });
   });
 
   it("a wait released elsewhere goes only to an account with a free seat (Astra SEATS-R05)", () => {

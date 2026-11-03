@@ -7098,7 +7098,10 @@ describe("the model a thread's turn runs on", () => {
       });
       const answer = dispatch(h, "claude-opus-5-5");
       await vi.advanceTimersByTimeAsync(3_000);
-      expect(await answer).toEqual({ action: "proceed" });
+      // Read for its seat: on main, out of Opus, with work able to run it:
+      // it waits and is placed again rather than start there to fail
+      // (revisión 2026-11-04).
+      expect(await answer).toMatchObject({ action: "wait" });
       await vi.advanceTimersByTimeAsync(3_000);
       // The placement's, given up, and the seat's (Astra SEATS-R01).
       expect(reads).toBe(2);
@@ -14942,9 +14945,14 @@ describe("seats: the cases the fourth inspection found (Astra SEATS-R4)", () => 
     placeGate.release();
     const got = await answer;
     expect((await seatsOf(h))?.work).toMatchObject({ running: 0, reserved: 0 });
-    // Read again: on spare, where the project is.
-    expect(got).toEqual({ action: "proceed" });
-    expect((await seatsOf(h))?.spare).toMatchObject({ reserved: 1 });
+    // Read again: on spare, where the project is and it cannot run, with
+    // work able to: it waits and is placed again (T5, 2026-11-04), instead
+    // of starting there to fail.
+    expect(got.action).toBe("wait");
+    expect((await seatsOf(h))?.spare).toMatchObject({ reserved: 0 });
+    expect(await opus(h, "t1")).toEqual({ action: "proceed" });
+    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", value: `${ACCOUNTS}/work` });
+    expect((await seatsOf(h))?.work).toMatchObject({ reserved: 1 });
   });
 
   it("R4-003: a message of the thread sent while its cancellation reads the queue keeps the seat it reserved", async () => {
@@ -17200,6 +17208,87 @@ describe("caminos 2026-11-04", () => {
     // Every Team seat full now: it waits, it does not slip through on the Ultra.
     const r = await dispatch(h, "t2", "proj-1", "opus");
     expect(r.action).toBe("wait");
+  });
+
+  describe("T5 an account out of the model takes no new turn while another can run it", () => {
+    /** proj-1 on spare, out of Fable with its seat free; work runs Fable, its one seat taken; main out of Fable. */
+    const out = async (usage: Record<string, () => Response> = {}) => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 88, 100)),
+          spare: () => Response.json(payload(81, 48, 100)),
+          work: () => Response.json(payload(0, 2, 0)),
+          ...usage,
+        },
+        {
+          settings: { ...FABLE, seatsTeam: 1 },
+          presetEnv: { "proj-1": on("spare"), "proj-2": on("work") },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect((await dispatch(h, "other", "proj-2", FABLE_ID)).action).toBe("proceed");
+      return h;
+    };
+    const seatsNow = async (h: Awaited<ReturnType<typeof host>>) =>
+      ((await h.harness.behavior.callRpc("accounts_list", null)) as State).seats!;
+
+    it("waits in the queue of the account that can run it, without starting where it cannot", async () => {
+      const h = await out();
+      const r = await dispatch(h, "t1", "proj-1", FABLE_ID);
+      expect(r.action).toBe("wait");
+      expect(r.reason).toContain("Waiting for a seat on work");
+      expect(r.sendAt).toBe(NOW + SEAT_RECHECK_MS);
+      const seats = await seatsNow(h);
+      expect(seats.spare).toMatchObject({ reserved: 0, running: 0 });
+      expect(seats.work?.queued.map((q) => q.threadId)).toEqual(["t1"]);
+      expect(h.envSet.filter((e) => e.projectId === "proj-1")).toEqual([]);
+    });
+
+    it("goes there when that seat frees, and asks bb again", async () => {
+      const h = await out();
+      expect((await dispatch(h, "t1", "proj-1", FABLE_ID)).action).toBe("wait");
+      await h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: thread({ id: "other", projectId: "proj-2" }),
+        lastAssistantText: null,
+      });
+      expect(await dispatch(h, "t1", "proj-1", FABLE_ID, true)).toEqual({ action: "proceed" });
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    });
+
+    it("with a seat free on the other it moves at once, as before", async () => {
+      const h = await out({ main: () => Response.json(payload(13, 88, 40)) });
+      expect(await dispatch(h, "t1", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      // main is the default account: moved there, the project's variable goes.
+      expect(h.harness.logEntries.map((e) => e.message)).toContainEqual(
+        expect.stringContaining("Moved to account main before the turn: spare cannot run Fable"),
+      );
+    });
+
+    it("with no account able to run it the turn starts and fails: that failure is what tells the user", async () => {
+      const h = await out({ work: () => Response.json(payload(0, 2, 100)) });
+      expect(await dispatch(h, "t1", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      expect(h.envSet.filter((e) => e.projectId === "proj-1")).toEqual([]);
+    });
+
+    it("a turn queued on an account that runs out then follows the one that can run it", async () => {
+      let workFable = 0;
+      let mainFable = 100;
+      const h = await out({
+        main: () => Response.json(payload(13, 88, mainFable)),
+        work: () => Response.json(payload(0, 2, workFable)),
+      });
+      expect((await dispatch(h, "t1", "proj-1", FABLE_ID)).action).toBe("wait");
+      workFable = 100;
+      mainFable = 10;
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "t1", "proj-1", FABLE_ID, true)).toEqual({ action: "proceed" });
+      expect(h.harness.logEntries.map((e) => e.message)).toContainEqual(
+        expect.stringContaining("Moved to account main before the turn: spare cannot run Fable"),
+      );
+      expect((await seatsNow(h)).work?.queued).toEqual([]);
+    });
   });
 
   it("T3 a pick by hand of an Ultra does not make it run Opus: «Esperar siempre» holds, and the turn goes to the Team seat", async () => {
