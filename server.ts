@@ -241,6 +241,8 @@ const KV_SERIES = "usage-series";
 const KV_PACE = "pace-day";
 /** Seats held from outside bb (`reserve`): a reload must not lose them. */
 const KV_EXTERNAL = "external-seats";
+/** The model of each project's latest turn (see projectModel). */
+const KV_PROJECT_MODELS = "project-models";
 const externalHoldSchema = z.object({
   id: z.string(),
   account: z.string(),
@@ -3752,7 +3754,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // ended first: Codex OPUS-R4-001); a move or a pick meanwhile stops
     // only the move below (Codex OPUS-R3-002).
     if ((projectModel.get(projectId)?.at ?? 0) < started.activity)
-      projectModel.set(projectId, { model, at: started.activity });
+      noteProjectModel(projectId, model, started.activity);
     read();
     if (!stillLatest()) return;
     if (!reserving({ preferredModel: model, reserveModel: current.preferredModel }))
@@ -3779,13 +3781,46 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   // ---- No project left where a turn cannot run ---------------------------
   /**
    * The model of each project's latest turn, as its checkpoint or the end
-   * of the turn named it (in memory: a reload forgets it, and the preferred
-   * model decides again). Aitor 2026-11-03: the rescue judged every project
+   * of the turn named it, kept over a reload (with `at: 0`, so any new turn
+   * beats it: measured 2026-11-03 17:59Z, a reload that forgot it made the
+   * rescue move 7 projects). Aitor 2026-11-03: the rescue judged every project
    * for the preferred model, and moved one working in Opus off a Team seat
    * (or a Max account out of Fable) that still ran Opus, to a Max account
    * whose weekly Fable needs (viaulab → aitor, 2 Nov 18:23).
    */
   const projectModel = new Map<string, { model: string; at: number }>();
+  /** Writes in order (see storeHolds). */
+  let projectModelWrites: Promise<void> = Promise.resolve();
+  /** Stored as it changes, without holding the turn back: a failed write is only logged. */
+  function noteProjectModel(projectId: string, model: string, at: number): void {
+    const before = projectModel.get(projectId)?.model;
+    projectModel.set(projectId, { model, at });
+    if (before === model) return;
+    const snapshot = Object.fromEntries(
+      [...projectModel].map(([id, known]) => [id, known.model]),
+    );
+    projectModelWrites = projectModelWrites.then(async () => {
+      try {
+        await bb.storage.kv.set(KV_PROJECT_MODELS, snapshot);
+      } catch (error) {
+        bb.log.warn(
+          `could not store the projects' models (a reload forgets them): ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    });
+  }
+  try {
+    const parsed = z
+      .record(z.string(), z.string())
+      .safeParse(await bb.storage.kv.get<unknown>(KV_PROJECT_MODELS));
+    if (parsed.success)
+      for (const [id, model] of Object.entries(parsed.data))
+        if (!projectModel.has(id)) projectModel.set(id, { model, at: 0 });
+  } catch (error) {
+    bb.log.warn(
+      `could not read the projects' models; the preferred model judges them: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   /** The model a project's next turn is judged for: its latest turn's, else the preferred one. */
   function modelOfProject(projectId: string): string {
     return projectModel.get(projectId)?.model ?? current.preferredModel;
@@ -4712,7 +4747,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const seen = noteActivity(thread.projectId);
     if (model !== null) {
       threadModel.set(thread.id, model);
-      projectModel.set(thread.projectId, { model, at: seen });
+      noteProjectModel(thread.projectId, model, seen);
     }
     const placed: { at?: TurnPlace } = {};
     if (current.autoSwitch && ctx.attempt === "start-turn") {

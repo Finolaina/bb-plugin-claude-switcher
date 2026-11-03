@@ -14671,7 +14671,7 @@ describe("seats: the cases the third inspection found (Astra SEATS-R3)", () => {
     expect(await opus(h, "thr-2", "proj-2")).toEqual({ action: "proceed" });
     const set = h.bb.storage.kv.set.bind(h.bb.storage.kv);
     h.bb.storage.kv.set = async (key: string, value: unknown) => {
-      if (hold) {
+      if (hold && key === "switch-history") {
         hold = false;
         gate.captured();
         await gate.held;
@@ -17288,6 +17288,82 @@ describe("caminos 2026-11-04", () => {
         expect.stringContaining("Moved to account main before the turn: spare cannot run Fable"),
       );
       expect((await seatsNow(h)).work?.queued).toEqual([]);
+    });
+  });
+
+  describe("T4 a reload does not forget the model of a project's latest turn", () => {
+    const USAGE = {
+      main: () => Response.json(payload(13, 10, 5)),
+      spare: () => Response.json(payload(20, 48, 100)),
+      work: () => Response.json(payload(0, 2, 100)),
+    };
+    const start = async (kvPreset?: Record<string, unknown>) => {
+      const h = await host(USAGE, {
+        settings: FABLE,
+        presetEnv: { "proj-1": on("spare") },
+        ...(kvPreset === undefined ? {} : { kvPreset }),
+      });
+      teamLogin(h, "spare", "work");
+      return h;
+    };
+    const stored = (h: Awaited<ReturnType<typeof host>>) =>
+      h.bb.storage.kv.get<Record<string, string>>("project-models");
+    /** One pass of the refresh, whose rescue judges every project. */
+    const pass = async (h: Awaited<ReturnType<typeof host>>) => {
+      const before = h.usageCalls.length;
+      const run = h.harness.behavior.runService("usage-refresh");
+      await vi.waitFor(() => expect(h.usageCalls).toHaveLength(before + 3));
+      run.controller.abort();
+      await run.done;
+    };
+    const log = (h: Awaited<ReturnType<typeof host>>) =>
+      h.harness.logEntries.map((e) => e.message).join("\n");
+
+    it("the rescue leaves a project working in Opus on its Team seat out of Fable, with no refresh between its turn and the reload", async () => {
+      const before = await start();
+      await before.harness.behavior.callRpc("accounts_refresh", null);
+      expect((await dispatch(before, "t1", "proj-1", OPUS)).action).toBe("proceed");
+      await vi.waitFor(async () => expect((await stored(before))?.["proj-1"]).toBe("Opus"));
+      const models = await stored(before);
+      before.harness.dispose();
+      const h = await start({ "project-models": models });
+      dispose = () => h.harness.dispose();
+      await pass(h);
+      expect(log(h)).not.toMatch(/moved from spare/i);
+      expect(h.envDeleted).toEqual([]);
+    });
+
+    it("a project with no model stored is judged for the preferred one, as before", async () => {
+      const h = await start();
+      dispose = () => h.harness.dispose();
+      await pass(h);
+      expect(log(h)).toMatch(/moved from spare \(exhausted for Fable/);
+      expect(h.envDeleted).toEqual([{ projectId: "proj-1", name: ENV_VAR }]);
+    });
+
+    it("the store follows every change, and a new turn beats what a reload brought", async () => {
+      const before = await start();
+      await before.harness.behavior.callRpc("accounts_refresh", null);
+      await dispatch(before, "t1", "proj-1", OPUS);
+      await before.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: thread({ id: "t1", projectId: "proj-1" }),
+        lastAssistantText: null,
+      });
+      await dispatch(before, "t2", "proj-1", FABLE_ID);
+      await vi.waitFor(async () => expect((await stored(before))?.["proj-1"]).toBe("Fable"));
+      before.harness.dispose();
+      const h = await start({ "project-models": { "proj-1": "Opus" } });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      await dispatch(h, "t3", "proj-1", FABLE_ID);
+      await vi.waitFor(async () => expect((await stored(h))?.["proj-1"]).toBe("Fable"));
+    });
+
+    it("what is stored in another shape is left out", async () => {
+      const h = await start({ "project-models": "junk" });
+      dispose = () => h.harness.dispose();
+      await pass(h);
+      expect(log(h)).toMatch(/moved from spare \(exhausted for Fable/);
     });
   });
 
