@@ -15068,6 +15068,58 @@ describe("a project whose account has its seats full moves to one with a free se
     expect(h.envSet).toEqual([]);
   });
 
+  it("an Opus turn whose project's Max account is full goes to the Team seat it was admitted to, its own seat counted (Codex PLAZAS-001)", async () => {
+    const onWork = [{ name: ENV_VAR, note: ownNote("work"), secret: true, value: null }];
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, 10, 2)),
+        spare: () => Response.json(payload(10, 10, 5)),
+        work: () => Response.json(teamPayload(17, 100)),
+      },
+      {
+        settings: { preferredModel: "Fable", seatsTeam: 1, seatsMax: 1 },
+        presetEnv: { "proj-1": onWork, "proj-2": onWork },
+        projectCreatedAt: { "proj-3": NOW - 24 * HOUR },
+      },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const send = (threadId: string, projectId: string, model: string) =>
+      h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id: threadId, projectId }),
+          requestedExecution: { providerId: "claude-code", model },
+          attempt: "start-turn",
+        }),
+      );
+    const OPUS = "claude-opus-5-5";
+    const FABLE_MODEL = "claude-fable-5-1";
+    // proj-2's Opus thread takes work's only seat; proj-1's waits for it.
+    expect(await send("thread-9", "proj-2", OPUS)).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-9", projectId: "proj-2" }),
+    });
+    expect(await send("thread-1", "proj-1", OPUS)).toMatchObject({ action: "wait" });
+    // proj-1's Fable thread takes the project to main and ends.
+    expect(await send("thread-2", "proj-1", FABLE_MODEL)).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "thread-2", projectId: "proj-1" }),
+      lastAssistantText: null,
+    });
+    // proj-3, on main, takes its only seat.
+    expect(await send("thread-3", "proj-3", FABLE_MODEL)).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-3" }),
+    });
+    // work's seat goes to thread-1, which moves there.
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "thread-9", projectId: "proj-2" }),
+      lastAssistantText: null,
+    });
+    expect(await send("thread-1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+  });
+
   it("with the automatic choice off nothing moves for a seat", async () => {
     const h = await host(FABLE_EVERYWHERE, {
       settings: { preferredModel: "Fable", seatsMax: 1, autoSwitch: false },

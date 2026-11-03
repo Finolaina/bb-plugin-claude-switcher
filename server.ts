@@ -4225,7 +4225,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       ...(seatsFull
         ? {
             seatsFull,
-            freeSeats: seatRoom,
+            // A seat this thread already holds elsewhere (an Opus turn
+            // admitted to a Team seat's queue) is its own (Codex
+            // PLAZAS-001).
+            freeSeats: (name: string) =>
+              seatRoom(name) +
+              (seats.seatOf(thread.id)?.account === seatKey(name) ? 1 : 0),
             aheadThreshold: aheadThreshold(model),
           }
         : {}),
