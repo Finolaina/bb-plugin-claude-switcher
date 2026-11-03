@@ -14,7 +14,7 @@ Medido (2026-11-03 13:07, `bb claude-switcher seats`/`list`, ficheros `antes-*.t
 ## Fase 2 — `bb claude-switcher rebalance [--apply] [--json]`
 - Cuentas: las Ultra usables según `health` (plan ultra, usable). Carga = max(semana %, modelo preferido %).
 - Proyectos: los de esas cuentas (el default sin variable cuenta en el default). Un proyecto "trabajando" no se mueve: hilo Claude Code en starting/active/stopping, en error, con `queuedWork` waiting/failed, actividad (`updatedAt`) en la última hora, o un hilo con plaza o en cola.
-- Objetivo por cuenta ∝ hueco semanal (100 − carga), con banda: ninguna más de 10 proyectos por encima de la que menos (resuelto en reales con banda 8 y redondeado). Se mueven primero los menos recientes.
+- Objetivo por cuenta ∝ hueco semanal (100 − carga), contado proyecto a proyecto desde los fijos (los que trabajan) hacia arriba: cada uno va a la cuenta con menos proyectos para su hueco, salvo que eso la deje más de 10 por encima de la que menos, o haya una más de 10 por debajo de la que más: entonces a la que menos. Se mueven primero los menos recientes.
 - Sin `--apply` solo plan. Con `--apply`, cada movimiento en la cola del proyecto, se revalida (cuenta igual, sin plaza tomada) y queda en history como `Rebalanced: …`.
 
 Criterios de verde: tests que reproducen A 4/4 + B 0/4 → mueve; todas llenas → espera; proyecto con hilo activo → espera; rebalance deja spread ≤ 10 y no toca proyectos trabajando; suite completa verde.
