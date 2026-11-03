@@ -17581,6 +17581,19 @@ describe("caminos 2026-11-04", () => {
     });
   });
 
+  it("C9 an account dir named as the default account is said once per load: 2373 of the 10000 lines the log keeps were this one, and they erased the evidence", async () => {
+    const h = await host(INCIDENT, {
+      settings: FABLE,
+      dirs: () => ["spare", "work", "main"],
+    });
+    dispose = () => h.harness.dispose();
+    h.files[`${ACCOUNTS}/main/.claude.json`] = h.files[`${ACCOUNTS}/spare/.claude.json`]!;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const said = h.harness.logEntries.filter((e) => e.message.includes("collides"));
+    expect(said).toHaveLength(1);
+  });
+
   it("T3 a pick by hand of an Ultra does not make it run Opus: «Esperar siempre» holds, and the turn goes to the Team seat", async () => {
     const h = await incident();
     await h.harness.behavior.runCli(["use", "proj-1", "main"]);

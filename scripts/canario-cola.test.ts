@@ -199,7 +199,7 @@ describe("el script entero, con un bb de mentira", () => {
     const salud = JSON.stringify(INCIDENTE);
     const viejo = () => ({ primeraVez: { q1: Date.now() - UMBRAL_MS - 60_000 } });
     const bbFalso = (push: string) =>
-      `case "$1" in thread) echo '${filaJson}';; claude-switcher) echo '${salud}';; plugin) echo "$@" > "$PWD/llamada"; cp "$5" "$PWD/entrada"; ${push};; esac`;
+      `case "$1" in thread) echo '${filaJson}';; claude-switcher) echo '${salud}';; plugin) echo "$@" > "$PWD/llamada"; cp "$6" "$PWD/entrada"; ${push};; esac`;
 
     it("llama al plugin de avisos, lo apunta y no lo repite en la hora", async () => {
       const r = await correr(bbFalso(`echo '{"ok":true,"channels":["web"]}'`), viejo());

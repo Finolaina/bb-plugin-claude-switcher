@@ -805,6 +805,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     },
     warn: (message) => bb.log.warn(message),
   });
+  /** What the accounts' look skips is said once per load: 2373 of the 10000 lines the log keeps were one such message (2026-11-03). */
+  const skipsSaid = new Set<string>();
+  const warnOnce = (message: string) => {
+    if (skipsSaid.has(message)) return;
+    skipsSaid.add(message);
+    bb.log.warn(message);
+  };
   let accounts: Account[] = [];
   /**
    * Each account's seat budget by name, kept while the accounts are looked
@@ -1861,7 +1868,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     accounts = await discoverAccounts(deps.accountsIo, {
       accountsDir: current.accountsDir,
       defaultAccountName: current.defaultAccountName,
-      warn: (message) => bb.log.warn(message),
+      warn: warnOnce,
     });
     noteSeatKeys();
     // A measurement of an account that is gone must never be chosen.
