@@ -327,6 +327,8 @@ interface HostOptions {
    * projects it looks at.
    */
   listed?: string[];
+  /** More projects bb lists, after proj-1 and proj-2. */
+  extraProjects?: { id: string; name: string }[];
   presetEnv?: Record<string, EnvVar[]>;
   /** Rows already queued (e.g. by provider-retry) when the plugin acts. */
   queued?: QueuedRow[];
@@ -462,6 +464,9 @@ async function host(
     settings: {
       accountsDir: ACCOUNTS,
       defaultAccountName: "main",
+      // Off here: the tests of the seats count them as set; those of the
+      // seats by load turn it on.
+      seatsFollowLoad: false,
       ...options.settings,
     },
     sdk: {
@@ -658,6 +663,7 @@ async function host(
           [
             { id: "proj-1", name: "Website" },
             { id: "proj-2", name: "Other" },
+            ...(options.extraProjects ?? []),
             ...(args?.includePersonal === true
               ? [{ id: "personal", name: "Personal" }]
               : []),
@@ -855,6 +861,7 @@ describe("claude accounts plugin", () => {
       "paceHoldsBackground",
       "preferredModel",
       "refreshMinutes",
+      "seatsFollowLoad",
       "seatsMax",
       "seatsTeam",
       "switchAheadOtherPercent",
@@ -14971,6 +14978,518 @@ describe("seats: the cases the fourth inspection found (Astra SEATS-R4)", () => 
       queued: [{ threadId: "q2" }],
     });
     expect((await again(h, "q2")).action).toBe("wait");
+  });
+});
+
+// Aitor 2026-11-03 («tengo mucha cola? necesitaría abrir más hilos»):
+// siloeads ran 4/4 with Gloria · SEO waiting 17 min while joytorm and
+// others had 0/4 and quota; moved by hand, its message went at once.
+describe("a project whose account has its seats full moves to one with a free seat", () => {
+  /** Every account runs Fable; work ranks first, then spare. */
+  const FABLE_EVERYWHERE = {
+    main: () => Response.json(payload(10, 40, 30)),
+    spare: () => Response.json(payload(10, 60, 20)),
+    work: () => Response.json(payload(5, 20, 30)),
+  };
+  const on = (account: string) => [
+    { name: ENV_VAR, note: ownNote(account), secret: true, value: null },
+  ];
+  const fable = (h: Awaited<ReturnType<typeof host>>, id: string, projectId: string) =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id, projectId }),
+        requestedExecution: { providerId: "claude-code", model: "claude-fable-5-1" },
+        attempt: "start-turn",
+      }),
+    ) as Promise<{ action: string; reason?: string }>;
+  const running = async (h: Awaited<ReturnType<typeof host>>, id: string, projectId: string) => {
+    expect(await fable(h, id, projectId)).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id, projectId }),
+    });
+  };
+  const seatsOf = async (h: Awaited<ReturnType<typeof host>>) =>
+    ((await h.harness.behavior.callRpc("accounts_list", null)) as State).seats;
+
+  it("A full, B with a free seat: the project moves to B before the turn, which takes B's seat, and the history says why", async () => {
+    const h = await host(FABLE_EVERYWHERE, {
+      settings: { preferredModel: "Fable", seatsMax: 1 },
+      presetEnv: { "proj-1": on("main"), "proj-2": on("main") },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // Another project's thread holds main's only seat.
+    await running(h, "thr-2", "proj-2");
+    expect(await fable(h, "thr-1", "proj-1")).toEqual({ action: "proceed" });
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-1", `${ACCOUNTS}/work`],
+    ]);
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history[0]).toMatchObject({
+      projectId: "proj-1",
+      from: "main",
+      to: "work",
+      reason: "Moved to account work before the turn: main seats full (1/1), work had 1 free",
+    });
+    expect((await seatsOf(h))?.work).toMatchObject({ reserved: 1, queued: [] });
+    expect((await seatsOf(h))?.main).toMatchObject({ running: 1, queued: [] });
+  });
+
+  it("every account full: the project stays and its thread waits for a seat where it is", async () => {
+    const h = await host(FABLE_EVERYWHERE, {
+      settings: { preferredModel: "Fable", seatsMax: 1 },
+      presetEnv: {
+        "proj-1": on("main"),
+        "proj-2": on("main"),
+        "proj-3": on("spare"),
+        "proj-4": on("work"),
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await running(h, "thr-2", "proj-2");
+    await running(h, "thr-3", "proj-3");
+    await running(h, "thr-4", "proj-4");
+    expect(await fable(h, "thr-1", "proj-1")).toMatchObject({
+      action: "wait",
+      reason: "Waiting for a seat on main: 1/1 threads running, 0 ahead in the queue",
+    });
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("a project with a turn of another thread under way stays: moving it would move that thread too", async () => {
+    const h = await host(FABLE_EVERYWHERE, {
+      settings: { preferredModel: "Fable", seatsMax: 1 },
+      presetEnv: { "proj-1": on("main") },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await running(h, "thr-1a", "proj-1");
+    expect(await fable(h, "thr-1b", "proj-1")).toMatchObject({
+      action: "wait",
+      reason: "Waiting for a seat on main: 1/1 threads running, 0 ahead in the queue",
+    });
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("an Opus turn whose project's Max account is full goes to the Team seat it was admitted to, its own seat counted (Codex PLAZAS-001)", async () => {
+    const onWork = [{ name: ENV_VAR, note: ownNote("work"), secret: true, value: null }];
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, 10, 2)),
+        spare: () => Response.json(payload(10, 10, 5)),
+        work: () => Response.json(teamPayload(17, 100)),
+      },
+      {
+        settings: { preferredModel: "Fable", seatsTeam: 1, seatsMax: 1 },
+        presetEnv: { "proj-1": onWork, "proj-2": onWork },
+        projectCreatedAt: { "proj-3": NOW - 24 * HOUR },
+      },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const send = (threadId: string, projectId: string, model: string) =>
+      h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id: threadId, projectId }),
+          requestedExecution: { providerId: "claude-code", model },
+          attempt: "start-turn",
+        }),
+      );
+    const OPUS = "claude-opus-5-5";
+    const FABLE_MODEL = "claude-fable-5-1";
+    // proj-2's Opus thread takes work's only seat; proj-1's waits for it.
+    expect(await send("thread-9", "proj-2", OPUS)).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-9", projectId: "proj-2" }),
+    });
+    expect(await send("thread-1", "proj-1", OPUS)).toMatchObject({ action: "wait" });
+    // proj-1's Fable thread takes the project to main and ends.
+    expect(await send("thread-2", "proj-1", FABLE_MODEL)).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "thread-2", projectId: "proj-1" }),
+      lastAssistantText: null,
+    });
+    // proj-3, on main, takes its only seat.
+    expect(await send("thread-3", "proj-3", FABLE_MODEL)).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-3", projectId: "proj-3" }),
+    });
+    // Another Opus thread waits for work's seat behind thread-1 (Codex
+    // PLAZAS-R2-001).
+    expect(await send("thread-8", "proj-2", OPUS)).toMatchObject({ action: "wait" });
+    // work's seat goes to thread-1, which moves there.
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "thread-9", projectId: "proj-2" }),
+      lastAssistantText: null,
+    });
+    expect(await send("thread-1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+  });
+
+  it("a turn of another thread whose seat could not be counted still keeps the project where it is (Codex PLAZAS-002)", async () => {
+    const options: HostOptions = {
+      settings: { preferredModel: "Fable", seatsMax: 1 },
+      presetEnv: { "proj-1": on("main"), "proj-2": on("main") },
+    };
+    const h = await host(FABLE_EVERYWHERE, options);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // thr-1a's turn starts past the checkpoint and its account cannot be
+    // read: no seat is counted for it.
+    options.failEnvRead = ["proj-1"];
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thr-1a", projectId: "proj-1" }),
+    });
+    options.failEnvRead = [];
+    await running(h, "thr-2", "proj-2");
+    expect((await seatsOf(h))?.main).toMatchObject({ running: 1 });
+    expect(await fable(h, "thr-1b", "proj-1")).toMatchObject({ action: "wait" });
+    expect(h.envSet).toEqual([]);
+    // Its turn over, the next message moves the project.
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "thr-1a", projectId: "proj-1" }),
+    });
+    expect(await fable(h, "thr-1b", "proj-1")).toEqual({ action: "proceed" });
+    expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-1"]);
+  });
+
+  it("a hidden thread's turn keeps its project where it is too (Codex PLAZAS-R2-003)", async () => {
+    const h = await host(FABLE_EVERYWHERE, {
+      settings: { preferredModel: "Fable", seatsMax: 1 },
+      presetEnv: { "proj-1": on("main"), "proj-2": on("main") },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "hidden-1", projectId: "proj-1", visibility: "hidden", originPluginId: "some-plugin" }),
+    });
+    await running(h, "thr-2", "proj-2");
+    expect(await fable(h, "thr-1", "proj-1")).toMatchObject({ action: "wait" });
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("after a reload, a hidden thread bb lists as running keeps its project where it is (Codex PLAZAS-R2-003)", async () => {
+    const h = await host(FABLE_EVERYWHERE, {
+      settings: { preferredModel: "Fable", seatsMax: 1 },
+      presetEnv: { "proj-1": on("main"), "proj-2": on("main") },
+      threads: {
+        "hidden-1": { projectId: "proj-1", status: "active", visibility: "hidden", originPluginId: "some-plugin" },
+        "thr-2": { projectId: "proj-2", status: "active" },
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await vi.waitFor(async () => expect((await seatsOf(h))?.main?.running).toBe(1));
+    expect(await fable(h, "thr-1", "proj-1")).toMatchObject({ action: "wait" });
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("two turns at once from a full account take one free seat each, not the same one (Codex PLAZAS-R3-001)", async () => {
+    const h = await host(FABLE_EVERYWHERE, {
+      settings: { preferredModel: "Fable", seatsMax: 1 },
+      presetEnv: {
+        "proj-1": on("main"),
+        "proj-2": on("main"),
+        "proj-3": on("main"),
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await running(h, "thr-2", "proj-2");
+    const both = await Promise.all([
+      fable(h, "thr-1", "proj-1"),
+      fable(h, "thr-3", "proj-3"),
+    ]);
+    expect(both).toEqual([{ action: "proceed" }, { action: "proceed" }]);
+    expect(h.envSet.map((e) => e.value).sort()).toEqual([
+      `${ACCOUNTS}/spare`,
+      `${ACCOUNTS}/work`,
+    ]);
+  });
+
+  it("a move for a seat whose write fails frees the seat it took there (Codex PLAZAS-R3-001)", async () => {
+    const h = await host(FABLE_EVERYWHERE, {
+      settings: { preferredModel: "Fable", seatsMax: 1 },
+      presetEnv: { "proj-1": on("main"), "proj-2": on("main") },
+      failSet: ["proj-1"],
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await running(h, "thr-2", "proj-2");
+    await fable(h, "thr-1", "proj-1");
+    expect((await seatsOf(h))?.work).toMatchObject({ running: 0, reserved: 0 });
+  });
+
+  it("with the automatic choice off nothing moves for a seat", async () => {
+    const h = await host(FABLE_EVERYWHERE, {
+      settings: { preferredModel: "Fable", seatsMax: 1, autoSwitch: false },
+      presetEnv: { "proj-1": on("main"), "proj-2": on("main") },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await running(h, "thr-2", "proj-2");
+    expect((await fable(h, "thr-1", "proj-1")).action).toBe("wait");
+    expect(h.envSet).toEqual([]);
+  });
+});
+
+// Aitor 2026-11-03: siloeads held 25 projects for its 4 seats. One pass
+// spreads the projects with no thread at work by the accounts' weekly.
+describe("bb claude-switcher rebalance", () => {
+  const resets = new Date(NOW + 3 * 24 * HOUR).toISOString();
+  const ultra = (weekly: number): Payload => ({
+    limits: [{ kind: "weekly_all", percent: weekly, resets_at: resets }],
+    five_hour: null,
+    seven_day: { utilization: weekly, resets_at: resets, locked_reason: null },
+  });
+  const USAGE = {
+    main: () => Response.json(ultra(30)),
+    spare: () => Response.json(ultra(80)),
+    work: () => Response.json(ultra(30)),
+  };
+  const EXTRA = ["p3", "p4", "p5", "p6", "p7", "p8"].map((id) => ({ id, name: id.toUpperCase() }));
+  const onSpare = Object.fromEntries(
+    ["proj-1", "proj-2", ...EXTRA.map((p) => p.id)].map((id) => [
+      id,
+      [{ name: ENV_VAR, note: ownNote("spare"), secret: true, value: null }],
+    ]),
+  );
+  const opts = {
+    settings: { preferredModel: "Fable" },
+    extraProjects: EXTRA,
+    presetEnv: onSpare,
+    threads: {
+      // proj-1 runs a turn (counted on spare's seats as the plugin loads);
+      // proj-2 did something 10 minutes ago; p3's
+      // thread is idle since yesterday.
+      "thr-1": { projectId: "proj-1", status: "active" as const, updatedAt: NOW - HOUR * 3 },
+      "thr-2": { projectId: "proj-2", status: "idle" as const, updatedAt: NOW - 10 * 60_000 },
+      "thr-3": { projectId: "p3", status: "idle" as const, updatedAt: NOW - 24 * HOUR },
+    },
+  };
+
+  it("prints the plan and moves nothing without --apply", async () => {
+    const h = await host(USAGE, opts);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const { stdout, exitCode } = await h.harness.behavior.runCli(["rebalance", "--json"]);
+    expect(exitCode).toBe(0);
+    const r = JSON.parse(stdout) as {
+      applied: boolean;
+      accounts: { name: string; before: number; after: number; atWork: number }[];
+      moves: { projectId: string; from: string; to: string; done: boolean | null }[];
+    };
+    expect(r.applied).toBe(false);
+    expect(r.accounts).toEqual([
+      // The personal project, on the default account, counts there.
+      { name: "main", load: 30, before: 1, after: 4, atWork: 0 },
+      { name: "spare", load: 80, before: 8, after: 2, atWork: 2 },
+      { name: "work", load: 30, before: 0, after: 3, atWork: 0 },
+    ]);
+    expect(r.moves.map((m) => m.projectId).sort()).toEqual(["p3", "p4", "p5", "p6", "p7", "p8"]);
+    expect(r.moves.every((m) => m.done === null)).toBe(true);
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("with --apply moves them, the projects at work stay, and each move is in the history as Rebalanced", async () => {
+    const h = await host(USAGE, opts);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const { stdout, exitCode } = await h.harness.behavior.runCli(["rebalance", "--apply"]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("P3\tspare → ");
+    // To main, the default account: its variable goes.
+    const moved = [...h.envSet, ...h.envDeleted].map((e) => e.projectId).sort();
+    expect(moved).toEqual(["p3", "p4", "p5", "p6", "p7", "p8"]);
+    expect(moved).not.toContain("proj-1");
+    expect(moved).not.toContain("proj-2");
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history).toHaveLength(6);
+    expect(state.history[0]!.reason).toMatch(
+      /^Rebalanced: spare had 8 projects \(weekly 80 %\), (main 1|work 0) \(weekly 30 %\)$/,
+    );
+    // On main, the default account, with no variable: the personal project too.
+    const on = (a: string) => state.projects.filter((p) => (p.account ?? "main") === a).length;
+    expect([on("main"), on("spare"), on("work")]).toEqual([4, 2, 3]);
+    expect(state.projects.find((p) => p.id === "proj-1")?.account).toBe("spare");
+    // Done: a second pass finds nothing to move.
+    const again = await h.harness.behavior.runCli(["rebalance"]);
+    expect(again.stdout).toContain("nothing to move");
+  });
+
+  it("a project whose thread works while the pass moves the others is not moved (Codex PLAZAS-004)", async () => {
+    const options: HostOptions = { ...opts, threads: { ...opts.threads } };
+    const h = await host(USAGE, options);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // As the first move writes, p8's thread runs a short turn.
+    let first = true;
+    options.beforeSet = async () => {
+      if (!first) return;
+      first = false;
+      options.threads!["thr-8"] = { projectId: "p8", status: "idle", updatedAt: NOW };
+    };
+    const { stdout, exitCode } = await h.harness.behavior.runCli(["rebalance", "--apply"]);
+    expect(stdout).toContain("P8\tspare → main\tNOT moved: a thread of it is at work now");
+    expect(exitCode).toBe(1);
+    expect([...h.envSet, ...h.envDeleted].map((e) => e.projectId)).not.toContain("p8");
+  });
+
+  it("a project whose hidden thread runs a short turn while the pass moves the others is not moved (Codex PLAZAS-R3-002)", async () => {
+    const options: HostOptions = { ...opts, threads: { ...opts.threads } };
+    const h = await host(USAGE, options);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // As the first move writes, a hidden thread of p8 starts and ends a
+    // turn; bb's list has not caught up with it.
+    let first = true;
+    options.beforeSet = async () => {
+      if (!first) return;
+      first = false;
+      const hidden = thread({
+        id: "hidden-8",
+        projectId: "p8",
+        visibility: "hidden",
+        originPluginId: "some-plugin",
+      });
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: hidden,
+      });
+      await h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: hidden,
+      });
+    };
+    const { stdout, exitCode } = await h.harness.behavior.runCli([
+      "rebalance",
+      "--apply",
+    ]);
+    expect(stdout).toContain(
+      "P8\tspare → main\tNOT moved: a thread of it is at work now",
+    );
+    expect(exitCode).toBe(1);
+    expect(
+      [...h.envSet, ...h.envDeleted].map((e) => e.projectId),
+    ).not.toContain("p8");
+  });
+
+  it("a move that fails fails the command in JSON too (Codex PLAZAS-005)", async () => {
+    // Every write fails: the moves to work set a variable, those to main
+    // (the default) delete it.
+    const all = ["p3", "p4", "p5", "p6", "p7", "p8"];
+    const h = await host(USAGE, { ...opts, failSet: all, failDelete: all });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const { stdout, exitCode } = await h.harness.behavior.runCli(["rebalance", "--apply", "--json"]);
+    expect(exitCode).toBe(1);
+    const r = JSON.parse(stdout) as { moves: { projectId: string; done: boolean | null }[] };
+    expect(r.moves.map((m) => m.done)).toEqual(all.map(() => false));
+  });
+
+  it("a project whose thread takes a seat leaves the plan: it is at work", async () => {
+    const h = await host(USAGE, opts);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thr-4", projectId: "p4" }),
+    });
+    await vi.waitFor(async () =>
+      expect(((await h.harness.behavior.callRpc("accounts_list", null)) as State).seats?.spare?.running).toBe(2),
+    );
+    const { stdout } = await h.harness.behavior.runCli(["rebalance", "--apply"]);
+    expect(stdout).not.toContain("P4\t");
+    expect([...h.envSet, ...h.envDeleted].map((e) => e.projectId)).not.toContain("p4");
+  });
+});
+
+// Aitor 2026-11-03: «que se vayan balanceando, pero que no sea un
+// "máximo 4"». A Max account's seats follow its day's pace and session.
+describe("seats follow each account's load", () => {
+  const OFF = { autoSwitch: false, seatsFollowLoad: true, seatsMax: 2 };
+  const ask = (h: Awaited<ReturnType<typeof host>>, id: string) =>
+    sent(h, id, "proj-1") as Promise<{ action: string; reason?: string }>;
+  const seatsOf = async (h: Awaited<ReturnType<typeof host>>) =>
+    ((await h.harness.behavior.callRpc("accounts_list", null)) as State);
+
+  it("a quiet account takes one seat more, a busy one one fewer, each change in the history with why", async () => {
+    let weekly = 40;
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, weekly)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { settings: OFF },
+    );
+    dispose = () => h.harness.dispose();
+    // The day's first reading: nothing of it spent yet.
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    let state = await seatsOf(h);
+    expect(state.seats?.main?.capacity).toBe(3);
+    expect(state.history.find((r) => r.from === "main")).toMatchObject({
+      projectId: "",
+      to: "main",
+      reason: "Seats on main: 2 → 3, day's pace 0 % (below 50 %), 5-hour session 10 % (below 40 %)",
+    });
+    for (const id of ["t1", "t2", "t3"]) expect((await ask(h, id)).action).toBe("proceed");
+    expect((await ask(h, "t4")).action).toBe("wait");
+    // The week's 60 points left over three days: 20 today; 19 spent.
+    weekly = 59;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    state = await seatsOf(h);
+    expect(state.seats?.main?.capacity).toBe(1);
+    expect(state.history[0]).toMatchObject({
+      reason: expect.stringMatching(/^Seats on main: 3 → 1, day's pace 9\d % \(above 90 %\)$/),
+    });
+    const { stdout } = await h.harness.behavior.runCli(["history"]);
+    expect(stdout).toMatch(/\tseats\tmain → main\tSeats on main: 3 → 1/);
+  });
+
+  it("two directories logged into the same account: the latest measured decides (Codex PLAZAS-R2-004)", async () => {
+    let weekly = 40;
+    let spareAnswers = true;
+    let clock = NOW;
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, 40)),
+        spare: () =>
+          spareAnswers ? Response.json(payload(10, weekly)) : new Response("busy", { status: 503 }),
+        work: () => Response.json(payload(10, weekly)),
+      },
+      { settings: OFF, clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    h.files[`${ACCOUNTS}/work/.claude.json`] = claudeJson("spare@example.com", "uuid-spare");
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect((await seatsOf(h)).seats?.spare?.capacity).toBe(3);
+    // spare's read fails; work, the same login, reads the day spent.
+    spareAnswers = false;
+    weekly = 59;
+    clock = NOW + 10 * 60_000;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const state = await seatsOf(h);
+    expect(state.seats?.spare?.capacity).toBe(1);
+    expect(state.seats?.work?.capacity).toBe(1);
+    expect(state.history[0]?.reason).toMatch(/^Seats on work: 3 → 1/);
+  });
+
+  it("off, the setting holds whatever the load", async () => {
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsFollowLoad: false } });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const state = await seatsOf(h);
+    expect(state.seats?.work?.capacity).toBe(2);
+    expect(state.history).toEqual([]);
+  });
+
+  it("a Team seat keeps its setting", async () => {
+    const h = await host(
+      { ...ALL_FREE, main: () => Response.json(teamPayload(10, 10)) },
+      { settings: { ...OFF, seatsTeam: 1 } },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect((await seatsOf(h)).seats?.main?.capacity).toBe(1);
   });
 });
 

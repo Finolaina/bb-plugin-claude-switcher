@@ -101,7 +101,8 @@ import {
 } from "./src/usage-source-contract.js";
 import { toMeasurement, toResource } from "./src/usage-source.js";
 import { shareSessions, type SessionsIo } from "./src/sessions.js";
-import { Seats, capacityFor } from "./src/seats.js";
+import { Seats, capacityFor, isTeamSeat, seatCeiling } from "./src/seats.js";
+import { planRebalance, type RebalanceProject } from "./src/rebalance.js";
 import { listText, projectName, sharedWith } from "./src/ui.js";
 
 export const ENV_VAR = "CLAUDE_CONFIG_DIR";
@@ -163,6 +164,10 @@ export const SESSIONS_LIMIT_MS = 2_000;
 export const LOGIN_TIMEOUT_MS = 10 * 60_000;
 /** A thread waiting for a seat is asked about again after this long (sooner when a seat frees). */
 export const SEAT_RECHECK_MS = 30_000;
+/** A project whose Claude Code thread did anything this recently is at work: `rebalance` leaves it (its prompt cache lives up to an hour). */
+export const REBALANCE_QUIET_MS = 60 * 60_000;
+/** `rebalance` leaves no usable Ultra account more than this many projects above the one with fewest (Aitor 2026-11-03). */
+export const REBALANCE_SPREAD = 10;
 /**
  * A turn held off a Max account that keeps the reserved model (see
  * reserveWait) is asked about again after this long at most: a seat or a
@@ -574,15 +579,23 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       type: "number",
       label: "Threads at once per Max account",
       description:
-        "A thread whose turn is about to start waits when the project's account already runs this many; it starts as soon as one of them ends, first come first served. A project is never moved to find a seat. 0 = no limit.",
+        "A thread whose turn is about to start waits when the project's account already runs this many; it starts as soon as one of them ends, first come first served. With the automatic choice on, a project with no turn under way moves to another account with a free seat rather than wait. 0 = no limit.",
       default: 4,
     },
     seatsTeam: {
       type: "number",
       label: "Threads at once per Team account",
       description:
-        "A thread whose turn is about to start waits when the project's account already runs this many; it starts as soon as one of them ends, first come first served. A project is never moved to find a seat. 0 = no limit.",
+        "A thread whose turn is about to start waits when the project's account already runs this many; it starts as soon as one of them ends, first come first served. With the automatic choice on, a project with no turn under way moves to another account with a free seat rather than wait. 0 = no limit.",
       default: 2,
+    },
+    // On by default (Aitor, 2026-11-03: «que no sea un "máximo 4"»).
+    seatsFollowLoad: {
+      type: "boolean",
+      label: "Seats follow each account's load",
+      description:
+        "A Max or Ultra account takes one thread more than the setting above while its day's pace is under 50 % and its 5-hour session (when it has one) under 40 %, and one fewer once its pace passes 90 %; each change is in the history. Off: the setting above, always.",
+      default: true,
     },
     dayStartHour: {
       type: "number",
@@ -774,6 +787,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     onMeasured: (name, measurement) => {
       noteSeatSample(name, measurement);
       notePaceDay(name, measurement);
+      noteCeiling(name);
     },
     warn: (message) => bb.log.warn(message),
   });
@@ -822,16 +836,69 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * one. Kept in memory: a reload counts again the threads bb says run
    * (see rebuildSeats). Keyed by seatKey; every change is announced.
    */
-  const seats = new Seats((key) => {
-    const name = namesOf(key)[0]!;
+  const seats = new Seats(
+    (key) => seatCapacity(key).capacity,
+    seatsChanged,
+    deps.now,
+  );
+  /**
+   * The seats of the budget `key`: the setting for its kind, and on a Max
+   * or Ultra account one more or one fewer by its load when
+   * seatsFollowLoad is on (see seatCeiling). Synchronous, as the seats
+   * need it.
+   */
+  function seatCapacity(key: string): { capacity: number; why: string | null } {
+    // Of the directories logged into the same account, the latest measured
+    // (Codex PLAZAS-R2-004): a stale alias does not keep its seats.
+    const name = namesOf(key)
+      .map((n) => ({ n, at: collector.get(n)?.observedAt ?? -Infinity }))
+      .reduce((a, b) => (b.at > a.at ? b : a)).n;
     const usage = collector.get(name)?.usage;
-    return capacityFor(
-      accounts.find((a) => a.name === name)?.kind,
-      usage?.weekly.absent === true,
-      current,
-      usage?.session.absent === true,
+    const kind = accounts.find((a) => a.name === name)?.kind;
+    const weeklyAbsent = usage?.weekly.absent === true;
+    const sessionAbsent = usage?.session.absent === true;
+    const base = capacityFor(kind, weeklyAbsent, current, sessionAbsent);
+    if (current.seatsFollowLoad !== true || usage === null || usage === undefined)
+      return { capacity: base, why: null };
+    const session = settle({ ...usage, name }, deps.now()).session;
+    return seatCeiling(
+      base,
+      isTeamSeat(kind, weeklyAbsent, sessionAbsent),
+      paceFor(name)?.dayPercent ?? null,
+      session.absent === true ? null : session.usedPercent,
     );
-  }, seatsChanged, deps.now);
+  }
+  /** Each budget's seats as last measured, to tell a change (see noteCeiling). */
+  const ceilings = new Map<string, number>();
+  /**
+   * After a measurement of `name`: its seats changed by its load go in the
+   * history, with why (Aitor 2026-11-03), and a seat more lets the next in
+   * line in.
+   */
+  function noteCeiling(name: string): void {
+    const key = seatKey(name);
+    const { capacity, why } = seatCapacity(key);
+    // First measured: against the setting.
+    const previous = ceilings.get(key) ?? capacityFor(
+      accounts.find((a) => a.name === name)?.kind,
+      collector.get(name)?.usage?.weekly.absent === true,
+      current,
+      collector.get(name)?.usage?.session.absent === true,
+    );
+    ceilings.set(key, capacity);
+    if (capacity === previous) return;
+    const reason = `Seats on ${name}: ${previous} → ${capacity}, ${why ?? "back to the setting"}`;
+    bb.log.info(reason);
+    void addHistory({
+      at: deps.now(),
+      threadId: "",
+      projectId: "",
+      from: name,
+      to: name,
+      reason,
+    });
+    if (capacity > previous) admitWaiting();
+  }
   /**
    * Per account, a sample of its seats and usage each time it is measured,
    * a week of them (see noteSeatSample): what share of a window an hour of
@@ -891,6 +958,63 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   let endedWhileCounting: Set<string> | null = null;
   const freeSeats = (name: string) => seats.free(seatKey(name));
+  /** Seats free on the account beyond those owed to the threads already waiting there. */
+  const seatRoom = (name: string) =>
+    seats.free(seatKey(name)) - seats.queue(seatKey(name)).length;
+  /** The project of each thread that took a seat or a place in a queue (see projectSeated). */
+  const seatProjects = new Map<string, string>();
+  /**
+   * Threads with a turn under way, by thread: their project. Set as bb
+   * announces the turn, before any read, so a turn whose seat could not be
+   * counted is still known to run; gone as it ends, fails or the thread
+   * goes (Codex PLAZAS-002).
+   */
+  const turnsUnderWay = new Map<string, string>();
+  /**
+   * Per project, the turns started by any of its Claude threads, hidden
+   * ones too: a rebalance moves a project only if none started while it
+   * looked (Codex PLAZAS-R3-002).
+   */
+  const turnsStarted = new Map<string, number>();
+  /** Another thread of the project has a turn under way, or holds a seat for one about to start. */
+  function projectSeated(projectId: string, except: string): boolean {
+    for (const [threadId, project] of turnsUnderWay)
+      if (project === projectId && threadId !== except) return true;
+    for (const [threadId, project] of seatProjects)
+      if (
+        project === projectId &&
+        threadId !== except &&
+        seats.seatOf(threadId) !== null
+      )
+        return true;
+    return false;
+  }
+  /** A thread of the project holds a seat or waits for one. */
+  function projectAtSeats(projectId: string): boolean {
+    for (const [threadId, project] of seatProjects)
+      if (
+        project === projectId &&
+        (seats.seatOf(threadId) !== null || seats.position(threadId) !== null)
+      )
+        return true;
+    return false;
+  }
+  /**
+   * The thread's turn would wait for a seat on `name`, and no other thread
+   * of its project holds one: such a project moves to an account with a
+   * free seat (Aitor 2026-11-03, «necesitaría abrir más hilos»). A project
+   * with a turn under way stays: moving it moves that thread too.
+   */
+  function seatsFullFor(thread: ThreadResponse, name: string): boolean {
+    const key = seatKey(name);
+    if (seats.seatOf(thread.id)?.account === key) return false;
+    const queue = seats.queue(key);
+    const ahead = queue.findIndex((q) => q.threadId === thread.id);
+    return (
+      seats.free(key) <= (ahead === -1 ? queue.length : ahead) &&
+      !projectSeated(thread.projectId, thread.id)
+    );
+  }
   /**
    * Whose seat a turn of a project on `at` takes (Astra SEATS-R3-001): its
    * account's (by name), the default's when it has no variable, none (null)
@@ -988,6 +1112,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** The thread's turn ended or the thread went: its seat goes to the next in line. */
   function releaseSeat(threadId: string, why: string): void {
     seatTitles.delete(threadId);
+    seatProjects.delete(threadId);
     unseated.delete(threadId);
     endedWhileCounting?.add(threadId);
     const key = seats.release(threadId);
@@ -1024,6 +1149,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           return;
         unseated.delete(threadId);
         if (seats.seatOf(threadId) !== null) return;
+        seatProjects.set(threadId, projectId);
         const seat = seatFor(read.value);
         if (seat === UNKNOWN_SEAT) {
           bb.log.debug(
@@ -1046,6 +1172,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     admitWaiting();
     const now = deps.now();
     const key = seatKey(account);
+    seatProjects.set(thread.id, thread.projectId);
     const queuedBefore = seats.position(thread.id) !== null;
     if (seats.reserve(thread.id, key, now)) {
       seatTitles.delete(thread.id);
@@ -3849,11 +3976,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   bb.events.on("thread.active", async ({ thread }) => {
     // A turn of it runs: the advice of its last failure is over.
     adviceOver(thread.id);
+    // A hidden thread's turn too: it runs on the project's account, and
+    // keeps the project there (Codex PLAZAS-R2-003).
+    if (thread.providerId === CLAUDE_CODE_PROVIDER) {
+      turnsUnderWay.set(thread.id, thread.projectId);
+      turnsStarted.set(thread.projectId, (turnsStarted.get(thread.projectId) ?? 0) + 1);
+    }
     if (
       thread.providerId !== CLAUDE_CODE_PROVIDER ||
       notTheUsersThread(thread) !== null
     )
       return;
+    seatProjects.set(thread.id, thread.projectId);
     // The previous turn's start is not this turn's, read or still being
     // read (code-reviewer r13).
     const anchor = dispatchEpoch.get(thread.id);
@@ -3938,6 +4072,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // announces (a turn refused at the door) is the project's account's,
     // not a leftover of the account this turn ran on (code-reviewer r11).
     forgetStart(thread.id);
+    turnsUnderWay.delete(thread.id);
     // Reserved too: a turn that ended needs none (its next asks again,
     // and one that starts unannounced is counted as it starts).
     releaseSeat(thread.id, "its turn ended");
@@ -3945,6 +4080,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** The thread archived or deleted: nothing of its turns runs again, and what is kept for it goes. */
   async function threadGone({ thread }: { thread: ThreadResponse }) {
     forgetStart(thread.id);
+    turnsUnderWay.delete(thread.id);
     releaseSeat(thread.id, "the thread is gone");
     seatReadWaits.delete(thread.id);
     seatGenerations.delete(thread.id);
@@ -4160,10 +4296,30 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const fromName = from.account ?? current.defaultAccountName;
     const now = deps.now();
     const excursion = excursions.get(projectId);
+    // Its turn would wait for a seat here: reservations whose turn never
+    // started are freed first, and the seats looked at again.
+    let seatsFull = when === "before" && seatsFullFor(thread, fromName);
+    if (seatsFull) {
+      admitWaiting();
+      seatsFull = seatsFullFor(thread, fromName);
+    }
     const input: PlacementInput = {
       ...placementOf(projectId, model, now, isBackground(thread), thread.id),
       currentAccount: fromName,
       currentLoggedOut: unconfirmed(fromName),
+      ...(seatsFull
+        ? {
+            seatsFull,
+            // A seat this thread already holds elsewhere (an Opus turn
+            // admitted to a Team seat's queue) is its own, whoever waits
+            // behind it (Codex PLAZAS-001, PLAZAS-R2-001).
+            freeSeats: (name: string) =>
+              seats.seatOf(thread.id)?.account === seatKey(name)
+                ? 1
+                : seatRoom(name),
+            aheadThreshold: aheadThreshold(model),
+          }
+        : {}),
     };
     const decision = decidePlacement(input);
     if (decision.kind === "keep") {
@@ -4190,6 +4346,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return { account: fromName, byDefault: !from.owned, writes };
     }
     if (turn.abandoned) return null;
+    // Read before the move: what the seats were as it was decided.
+    const fullHere = seats.snapshot([seatKey(fromName)])[seatKey(fromName)]!;
+    const roomThere = seatRoom(decision.account);
+    // Moved for a seat: the seat is its own from now, before anything is
+    // awaited, so a turn decided meanwhile does not choose it too (Codex
+    // PLAZAS-R3-001). A move that fails leaves it as the message asks for
+    // a seat where the project is (a seat elsewhere is given up); one
+    // whose turn never starts is freed as any reservation is (SEAT_TTL_MS).
+    const claim =
+      decision.why === "current-full" ? seatKey(decision.account) : null;
+    if (claim !== null) {
+      seatProjects.set(thread.id, projectId);
+      seats.reserve(thread.id, claim, now);
+    }
     const to = accountOrDefault(decision.account);
     // The sessions are not waited for: see applyAccount (Fable, 2026-10-29).
     await applyAccount(projectId, to, from, { share: false });
@@ -4198,7 +4368,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const reason =
       decision.why === "back-from-excursion"
         ? `Moved back to account ${decision.account} before the turn: ${fromName} was an excursion for ${excursion?.model ?? "another model"}`
-        : `Moved to account ${decision.account} ${when === "after" ? `after a turn in ${model}` : "before the turn"}: ${fromName} ${whyOut(fromName, model)}`;
+        : decision.why === "current-full"
+          ? `Moved to account ${decision.account} before the turn: ${fromName} seats full (${fullHere.running + fullHere.reserved + (fullHere.external?.length ?? 0)}/${fullHere.capacity}), ${decision.account} had ${Number.isFinite(roomThere) ? roomThere : "unlimited"} free`
+          : `Moved to account ${decision.account} ${when === "after" ? `after a turn in ${model}` : "before the turn"}: ${fromName} ${whyOut(fromName, model)}`;
     bb.log.info(`thread ${thread.id}: ${reason}`);
     await recordMove(
       {
@@ -5162,6 +5334,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // Its judgment's generation, taken before any read (see generation).
     const judgedIn = generation(event.threadId);
     forgetStart(event.threadId);
+    turnsUnderWay.delete(event.threadId);
     releaseSeat(event.threadId, "its turn failed");
     if (!current.autoSwitch) return;
     // Pure guards first: another provider's limit must not query every account.
@@ -5714,6 +5887,186 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   });
 
   // ---- CLI --------------------------------------------------------------
+  /**
+   * One pass that spreads the projects without a thread at work over the
+   * usable Ultra accounts by their weekly (see src/rebalance.ts; Aitor
+   * 2026-11-03: siloeads held 25 projects for its 4 seats). A project is at
+   * work while a Claude Code thread of it runs or starts a turn, waits (a
+   * queued message, a retry, an error), holds or waits for a seat, or did
+   * anything within REBALANCE_QUIET_MS: moving it would cut a turn or lose
+   * its prompt cache. Applied only with `apply`; each move in the history.
+   */
+  async function rebalance(apply: boolean) {
+    await discover();
+    const now = deps.now();
+    const report = await health();
+    const preferred = current.preferredModel.toLowerCase();
+    const ultra = report.cuentas
+      .filter((c) => c.plan === "ultra" && c.usable)
+      .map((c) => {
+        const model = Object.entries(c.modelos).find(
+          ([name]) => name.toLowerCase() === preferred,
+        )?.[1];
+        return {
+          name: c.nombre,
+          load: Math.max(c.semana?.pct ?? 0, model?.pct ?? 0),
+        };
+      });
+    const s = await state();
+    // Every Claude Code thread, hidden ones too (they run on the project's
+    // account all the same), of one project or of all.
+    const claudeThreads = async (projectId?: string) => {
+      const found: ListedThread[] = [];
+      const PAGE = 200;
+      for (let offset = 0; ; offset += PAGE) {
+        const page = await bb.sdk.threads.list({
+          archived: false,
+          includeHidden: true,
+          ...(projectId === undefined ? {} : { projectId }),
+          limit: PAGE,
+          offset,
+        });
+        found.push(
+          ...page.filter(
+            (t) =>
+              t.providerId === CLAUDE_CODE_PROVIDER &&
+              (projectId === undefined || t.projectId === projectId),
+          ),
+        );
+        if (page.length < PAGE) return found;
+      }
+    };
+    const atWork = (t: ListedThread, at: number) =>
+      TURN_UNDER_WAY.has(t.status) ||
+      t.status === "error" ||
+      t.queuedWork === "waiting" ||
+      t.queuedWork === "failed" ||
+      at - t.updatedAt < REBALANCE_QUIET_MS;
+    const busy = new Set<string>();
+    const lastActive = new Map<string, number>();
+    // Each project's activity as the threads are read: a message or a turn
+    // since stops its move (Codex PLAZAS-004).
+    const seen = new Map(s.projects.map((p) => [p.id, activity.get(p.id) ?? 0]));
+    const started = new Map(s.projects.map((p) => [p.id, turnsStarted.get(p.id) ?? 0]));
+    for (const t of await claudeThreads()) {
+      lastActive.set(
+        t.projectId,
+        Math.max(lastActive.get(t.projectId) ?? 0, t.updatedAt),
+      );
+      if (atWork(t, now)) busy.add(t.projectId);
+    }
+    // A hidden thread's turn too, running or over since (Codex
+    // PLAZAS-R3-002).
+    const quiet = (projectId: string) =>
+      !projectAtSeats(projectId) &&
+      !projectSeated(projectId, "") &&
+      (activity.get(projectId) ?? 0) === seen.get(projectId) &&
+      (turnsStarted.get(projectId) ?? 0) === started.get(projectId);
+    const projects: RebalanceProject[] = s.projects
+      // Not one whose variable names an account that is gone.
+      .filter((p) => !p.external && !(p.owned && p.account === null))
+      .map((p) => ({
+        id: p.id,
+        account: p.account ?? current.defaultAccountName,
+        movable: !busy.has(p.id) && quiet(p.id),
+        lastActive: lastActive.get(p.id) ?? 0,
+      }));
+    const names = new Set(ultra.map((a) => a.name));
+    const countOf = (list: { account: string }[]) =>
+      Object.fromEntries(
+        ultra.map((a) => [a.name, list.filter((p) => p.account === a.name).length]),
+      );
+    const before = countOf(projects);
+    const plan = planRebalance(ultra, projects, REBALANCE_SPREAD);
+    const load = new Map(ultra.map((a) => [a.name, a.load]));
+    const nameOf = new Map(s.projects.map((p) => [p.id, p.name]));
+    const moves: {
+      projectId: string;
+      name: string;
+      from: string;
+      to: string;
+      done: boolean | null;
+      why?: string;
+    }[] = [];
+    for (const m of plan) {
+      const row = {
+        ...m,
+        name: nameOf.get(m.projectId) ?? m.projectId,
+        done: null as boolean | null,
+        why: undefined as string | undefined,
+      };
+      moves.push(row);
+      if (!apply) continue;
+      try {
+        await inProjectQueue(m.projectId, async () => {
+          const mark = moveMark(m.projectId);
+          const from = await projectAccount(m.projectId);
+          if (from.external || (from.account ?? current.defaultAccountName) !== m.from) {
+            row.done = false;
+            row.why = "moved meanwhile";
+            return;
+          }
+          // Read again just before the move: a thread of it may have
+          // worked since the first read (Codex PLAZAS-004).
+          const live = await claudeThreads(m.projectId);
+          if (!quiet(m.projectId) || live.some((t) => atWork(t, deps.now()))) {
+            row.done = false;
+            row.why = "a thread of it is at work now";
+            return;
+          }
+          const moved = await applyAccount(
+            m.projectId,
+            accountOrDefault(m.to),
+            from,
+            { share: false, stillValid: () => quiet(m.projectId) },
+          );
+          if (!moved) {
+            row.done = false;
+            row.why = "moved or started meanwhile";
+            return;
+          }
+          await markHandled(m.projectId);
+          noteMove(m.projectId, m.from, m.to, current.preferredModel, mark);
+          const reason = `Rebalanced: ${m.from} had ${before[m.from]} projects (weekly ${load.get(m.from)} %), ${m.to} ${before[m.to]} (weekly ${load.get(m.to)} %)`;
+          bb.log.info(`project ${m.projectId}: ${reason}`);
+          await addHistory({
+            at: now,
+            threadId: "",
+            projectId: m.projectId,
+            from: m.from,
+            to: m.to,
+            reason,
+          });
+          row.done = true;
+        });
+      } catch (error) {
+        row.done = false;
+        row.why = error instanceof Error ? error.message : String(error);
+      }
+    }
+    if (apply && moves.some((m) => m.done === true))
+      bb.realtime.publish(CHANGED, { at: deps.now() });
+    const landed = projects.map((p) => {
+      const m = moves.find((x) => x.projectId === p.id);
+      return m !== undefined && (m.done ?? true) ? { account: m.to } : p;
+    });
+    const after = countOf(landed);
+    const counts = Object.values(after);
+    return {
+      applied: apply,
+      /** The most projects above the account with fewest, after the pass: above REBALANCE_SPREAD only when projects at work hold it there. */
+      spread: counts.length === 0 ? 0 : Math.max(...counts) - Math.min(...counts),
+      accounts: ultra.map((a) => ({
+        name: a.name,
+        load: a.load,
+        before: before[a.name]!,
+        after: after[a.name]!,
+        atWork: projects.filter((p) => p.account === a.name && !p.movable).length,
+      })),
+      moves,
+      leftOut: projects.filter((p) => !names.has(p.account)).length,
+    };
+  }
   const JSON_OPTION = {
     type: "boolean",
     description: "Emit machine-readable JSON",
@@ -6107,6 +6460,43 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             return { exitCode: 0, stdout: `${project.name} → ${name}\n` };
           },
         }),
+        rebalance: cliCommand({
+          summary:
+            "Spread the projects with no thread at work over the usable Ultra accounts by their weekly, none more than 10 projects above the one with fewest; prints the plan, moves only with --apply",
+          options: {
+            apply: { type: "boolean", description: "Move the projects (without it, only the plan)" },
+            json: JSON_OPTION,
+          },
+          async run({ options }) {
+            const r = await rebalance(options.apply === true);
+            // A move not made fails the command in both formats (Codex
+            // PLAZAS-005).
+            const exitCode = r.moves.some((m) => m.done === false) ? 1 : 0;
+            if (options.json)
+              return { exitCode, stdout: `${JSON.stringify(r, null, 2)}\n` };
+            const lines = [
+              "account\tweekly\tbefore\tafter\tat work",
+              ...r.accounts.map(
+                (a) => `${a.name}\t${a.load} %\t${a.before}\t${a.after}\t${a.atWork}`,
+              ),
+              "",
+              ...(r.moves.length === 0
+                ? ["nothing to move"]
+                : r.moves.map(
+                    (m) =>
+                      `${m.name}\t${m.from} → ${m.to}${m.done === null ? "" : m.done ? "\tmoved" : `\tNOT moved: ${m.why}`}`,
+                  )),
+              ...(r.spread > REBALANCE_SPREAD
+                ? [
+                    "",
+                    `The projects at work keep one account ${r.spread} projects above the one with fewest; run it again once they are done.`,
+                  ]
+                : []),
+              ...(r.applied ? [] : ["", "Plan only: run with --apply to move them."]),
+            ];
+            return { exitCode, stdout: `${lines.join("\n")}\n` };
+          },
+        }),
         release: cliCommand({
           summary:
             "Remove every CLAUDE_CONFIG_DIR this plugin set (run before uninstalling)",
@@ -6212,22 +6602,33 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     try {
       if (accounts.length === 0) await countTries("the accounts", discover);
       const running: { id: string; projectId: string }[] = [];
+      // Hidden ones too: they take no seat, but keep their project where it
+      // is (Codex PLAZAS-R2-003).
+      const underWay: { id: string; projectId: string }[] = [];
       const PAGE = 200;
       for (let offset = 0; ; offset += PAGE) {
         const page = await countTries("the threads", () =>
-          bb.sdk.threads.list({ archived: false, limit: PAGE, offset }),
+          bb.sdk.threads.list({
+            archived: false,
+            includeHidden: true,
+            limit: PAGE,
+            offset,
+          }),
         );
-        running.push(
-          ...page.filter(
-            (t) =>
-              t.providerId === CLAUDE_CODE_PROVIDER &&
-              notTheUsersThread(t) === null &&
-              TURN_UNDER_WAY.has(t.status),
-          ),
+        const claude = page.filter(
+          (t) =>
+            t.providerId === CLAUDE_CODE_PROVIDER &&
+            TURN_UNDER_WAY.has(t.status),
         );
+        underWay.push(...claude);
+        running.push(...claude.filter((t) => notTheUsersThread(t) === null));
         if (page.length < PAGE) break;
       }
       const listedAt = deps.now();
+      // Under way as bb lists them, whatever their seat's read says (Codex
+      // PLAZAS-002); not one that ended meanwhile.
+      for (const t of underWay)
+        if (!ended.has(t.id)) turnsUnderWay.set(t.id, t.projectId);
       // Each project's account read once, all at once.
       const reads = new Map<string, Promise<ProjectAccount | null>>();
       for (const t of running)
@@ -6280,6 +6681,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           // meanwhile (it counted itself).
           if (ended.has(t.id) || seats.seatOf(t.id) !== null) return;
           seats.confirm(t.id, seatKey(seat), deps.now());
+          seatProjects.set(t.id, t.projectId);
         }),
       );
       complete = !unread;

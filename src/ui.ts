@@ -34,6 +34,8 @@ export function projectName(
   projects: ReadonlyArray<{ id: string; name: string }>,
   projectId: string,
 ): string {
+  // A change of an account's seats (see noteCeiling) is no project's.
+  if (projectId === "") return "seats";
   return (
     projects.find((p) => p.id === projectId)?.name ?? "a project that is gone"
   );
