@@ -5939,13 +5939,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       const m = moves.find((x) => x.projectId === p.id);
       return m !== undefined && (m.done ?? true) ? { account: m.to } : p;
     });
+    const after = countOf(landed);
+    const counts = Object.values(after);
     return {
       applied: apply,
+      /** The most projects above the account with fewest, after the pass: above REBALANCE_SPREAD only when projects at work hold it there. */
+      spread: counts.length === 0 ? 0 : Math.max(...counts) - Math.min(...counts),
       accounts: ultra.map((a) => ({
         name: a.name,
         load: a.load,
         before: before[a.name]!,
-        after: countOf(landed)[a.name]!,
+        after: after[a.name]!,
         atWork: projects.filter((p) => p.account === a.name && !p.movable).length,
       })),
       moves,
@@ -6368,6 +6372,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                     (m) =>
                       `${m.name}\t${m.from} → ${m.to}${m.done === null ? "" : m.done ? "\tmoved" : `\tNOT moved: ${m.why}`}`,
                   )),
+              ...(r.spread > REBALANCE_SPREAD
+                ? [
+                    "",
+                    `The projects at work keep one account ${r.spread} projects above the one with fewest; run it again once they are done.`,
+                  ]
+                : []),
               ...(r.applied ? [] : ["", "Plan only: run with --apply to move them."]),
             ];
             const failed = r.moves.some((m) => m.done === false);

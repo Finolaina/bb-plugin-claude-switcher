@@ -61,6 +61,31 @@ describe("rebalance", () => {
     expect(count.get("siloeads")).toBeGreaterThanOrEqual(20);
   });
 
+  it("projects at work raise their account's floor: the rest spread over the others (Codex PLAZAS-003)", () => {
+    const even = ["a", "b", "c"].map((name) => ({ name, load: 50 }));
+    const projects = [
+      ...Array.from({ length: 36 }, (_, i) => ({ id: `a${i}`, account: "a", movable: false, lastActive: 0 })),
+      ...Array.from({ length: 54 }, (_, i) => ({ id: `b${i}`, account: "b", movable: true, lastActive: 0 })),
+    ];
+    const moves = planRebalance(even, projects, 10);
+    const count = { a: 36, b: 54, c: 0 } as Record<string, number>;
+    for (const m of moves) {
+      count[m.from]! -= 1;
+      count[m.to]! += 1;
+    }
+    expect(count).toEqual({ a: 36, b: 27, c: 27 });
+  });
+
+  it("with more fixed projects than the spread allows, the others still even out", () => {
+    const t = rebalanceTargets(
+      ["a", "b", "c"].map((name) => ({ name, load: 50 })),
+      40,
+      10,
+      new Map([["a", 36]]),
+    );
+    expect(Object.fromEntries(t)).toEqual({ a: 36, b: 2, c: 2 });
+  });
+
   it("the least recently active projects move first", () => {
     const { moves } = after(projectsOf());
     const fromSiloeads = moves
