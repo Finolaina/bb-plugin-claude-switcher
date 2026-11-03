@@ -1,16 +1,16 @@
 """Gasto por plaza y semana, de las muestras de `bb claude-switcher seats --json`.
 
-Uso: python3 medir-techo.py seats-semana.json
+Uso: python3 medir-techo.py seats-semana.json.gz
 Muestra: [t, running, reserved, session %, weekly %, session resets, weekly resets].
 Por cuenta y nº de plazas ocupadas (running+reserved del tramo, la media de
 los dos extremos redondeada), cuánto sube la sesión de 5 h y la semanal por
 hora, solo entre dos muestras de la misma ventana (mismo reset ±2 min) y de
 como mucho 15 min de separación. Cuenta nuestra.
 """
-import json, sys, statistics as st
+import gzip, json, sys
 from collections import defaultdict
 
-d = json.load(open(sys.argv[1]))
+d = json.load((gzip.open if sys.argv[1].endswith(".gz") else open)(sys.argv[1], "rt"))
 rows = defaultdict(lambda: defaultdict(lambda: {"h": 0.0, "ses": 0.0, "sem": 0.0, "n": 0}))
 peak = {}
 for name, samples in d["samples"].items():
