@@ -5828,32 +5828,50 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         };
       });
     const s = await state();
+    // Every Claude Code thread, hidden ones too (they run on the project's
+    // account all the same), of one project or of all.
+    const claudeThreads = async (projectId?: string) => {
+      const found: ListedThread[] = [];
+      const PAGE = 200;
+      for (let offset = 0; ; offset += PAGE) {
+        const page = await bb.sdk.threads.list({
+          archived: false,
+          includeHidden: true,
+          ...(projectId === undefined ? {} : { projectId }),
+          limit: PAGE,
+          offset,
+        });
+        found.push(
+          ...page.filter(
+            (t) =>
+              t.providerId === CLAUDE_CODE_PROVIDER &&
+              (projectId === undefined || t.projectId === projectId),
+          ),
+        );
+        if (page.length < PAGE) return found;
+      }
+    };
+    const atWork = (t: ListedThread, at: number) =>
+      TURN_UNDER_WAY.has(t.status) ||
+      t.status === "error" ||
+      t.queuedWork === "waiting" ||
+      t.queuedWork === "failed" ||
+      at - t.updatedAt < REBALANCE_QUIET_MS;
     const busy = new Set<string>();
     const lastActive = new Map<string, number>();
-    const PAGE = 200;
-    for (let offset = 0; ; offset += PAGE) {
-      const page = await bb.sdk.threads.list({
-        archived: false,
-        limit: PAGE,
-        offset,
-      });
-      for (const t of page) {
-        if (t.providerId !== CLAUDE_CODE_PROVIDER) continue;
-        lastActive.set(
-          t.projectId,
-          Math.max(lastActive.get(t.projectId) ?? 0, t.updatedAt),
-        );
-        if (
-          TURN_UNDER_WAY.has(t.status) ||
-          t.status === "error" ||
-          t.queuedWork === "waiting" ||
-          t.queuedWork === "failed" ||
-          now - t.updatedAt < REBALANCE_QUIET_MS
-        )
-          busy.add(t.projectId);
-      }
-      if (page.length < PAGE) break;
+    // Each project's activity as the threads are read: a message or a turn
+    // since stops its move (Codex PLAZAS-004).
+    const seen = new Map(s.projects.map((p) => [p.id, activity.get(p.id) ?? 0]));
+    for (const t of await claudeThreads()) {
+      lastActive.set(
+        t.projectId,
+        Math.max(lastActive.get(t.projectId) ?? 0, t.updatedAt),
+      );
+      if (atWork(t, now)) busy.add(t.projectId);
     }
+    const quiet = (projectId: string) =>
+      !projectAtSeats(projectId) &&
+      (activity.get(projectId) ?? 0) === seen.get(projectId);
     const projects: RebalanceProject[] = s.projects
       // Not one whose variable names an account that is gone.
       .filter((p) => !p.external && !(p.owned && p.account === null))
@@ -5898,16 +5916,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             row.why = "moved meanwhile";
             return;
           }
-          if (projectAtSeats(m.projectId)) {
+          // Read again just before the move: a thread of it may have
+          // worked since the first read (Codex PLAZAS-004).
+          const live = await claudeThreads(m.projectId);
+          if (!quiet(m.projectId) || live.some((t) => atWork(t, deps.now()))) {
             row.done = false;
-            row.why = "a thread of it took a seat meanwhile";
+            row.why = "a thread of it is at work now";
             return;
           }
           const moved = await applyAccount(
             m.projectId,
             accountOrDefault(m.to),
             from,
-            { share: false, stillValid: () => !projectAtSeats(m.projectId) },
+            { share: false, stillValid: () => quiet(m.projectId) },
           );
           if (!moved) {
             row.done = false;
