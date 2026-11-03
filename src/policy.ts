@@ -151,6 +151,17 @@ export function spendsReservedWeekly(
 }
 
 /**
+ * Whether a turn with `preferredModel` is held off every account where it
+ * would spend the reserved model's weekly, rather than run there as the
+ * last resort (Aitor 2026-11-03, «Esperar siempre»): any model other than
+ * the reserved one but Haiku, which spends little and runs the small
+ * threads (titles, the cache's ticks) that would stop for hours.
+ */
+export function holdsForReserve(options: ChoiceOptions): boolean {
+  return reserving(options) && !/^haiku$/i.test(options.preferredModel);
+}
+
+/**
  * The session's quarter: 0 for 0-24 %, 1 for 25-49 %, 2 for 50-74 %, 3 for
  * 75-99 % (100 % is not usable). Measured 9-16 Oct 2026: ordering by the
  * deadline alone sent every new session to the same account until its
