@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.36] - 2026-11-03
+
+### Fixed
+
+- **A rescue no longer lands an Opus project on a Max account that keeps
+  Fable when its turn ends during the move.** A turn that skipped the
+  checkpoint (a Send now) and ended while the refresh was moving its
+  project, decided for Fable, let the move finish onto that Max account.
+  The move is now dropped when the project's model changes meanwhile.
+- **A Codex or hidden thread no longer stops an Opus project from moving
+  off a Max account after its turn.** Their turns counted as newer
+  activity of the project, so the move after an Opus turn was skipped.
+
 ## [0.2.35] - 2026-11-03
 
 ### Changed
