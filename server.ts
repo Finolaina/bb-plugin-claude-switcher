@@ -102,6 +102,7 @@ import {
 import { toMeasurement, toResource } from "./src/usage-source.js";
 import { shareSessions, type SessionsIo } from "./src/sessions.js";
 import { Seats, capacityFor } from "./src/seats.js";
+import { planRebalance, type RebalanceProject } from "./src/rebalance.js";
 import { listText, projectName, sharedWith } from "./src/ui.js";
 
 export const ENV_VAR = "CLAUDE_CONFIG_DIR";
@@ -163,6 +164,10 @@ export const SESSIONS_LIMIT_MS = 2_000;
 export const LOGIN_TIMEOUT_MS = 10 * 60_000;
 /** A thread waiting for a seat is asked about again after this long (sooner when a seat frees). */
 export const SEAT_RECHECK_MS = 30_000;
+/** A project whose Claude Code thread did anything this recently is at work: `rebalance` leaves it (its prompt cache lives up to an hour). */
+export const REBALANCE_QUIET_MS = 60 * 60_000;
+/** `rebalance` leaves no usable Ultra account more than this many projects above the one with fewest (Aitor 2026-11-03). */
+export const REBALANCE_SPREAD = 10;
 /**
  * A turn held off a Max account that keeps the reserved model (see
  * reserveWait) is asked about again after this long at most: a seat or a
@@ -903,6 +908,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         project === projectId &&
         threadId !== except &&
         seats.seatOf(threadId) !== null
+      )
+        return true;
+    return false;
+  }
+  /** A thread of the project holds a seat or waits for one. */
+  function projectAtSeats(projectId: string): boolean {
+    for (const [threadId, project] of seatProjects)
+      if (
+        project === projectId &&
+        (seats.seatOf(threadId) !== null || seats.position(threadId) !== null)
       )
         return true;
     return false;
@@ -5769,6 +5784,156 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   });
 
   // ---- CLI --------------------------------------------------------------
+  /**
+   * One pass that spreads the projects without a thread at work over the
+   * usable Ultra accounts by their weekly (see src/rebalance.ts; Aitor
+   * 2026-11-03: siloeads held 25 projects for its 4 seats). A project is at
+   * work while a Claude Code thread of it runs or starts a turn, waits (a
+   * queued message, a retry, an error), holds or waits for a seat, or did
+   * anything within REBALANCE_QUIET_MS: moving it would cut a turn or lose
+   * its prompt cache. Applied only with `apply`; each move in the history.
+   */
+  async function rebalance(apply: boolean) {
+    await discover();
+    const now = deps.now();
+    const report = await health();
+    const preferred = current.preferredModel.toLowerCase();
+    const ultra = report.cuentas
+      .filter((c) => c.plan === "ultra" && c.usable)
+      .map((c) => {
+        const model = Object.entries(c.modelos).find(
+          ([name]) => name.toLowerCase() === preferred,
+        )?.[1];
+        return {
+          name: c.nombre,
+          load: Math.max(c.semana?.pct ?? 0, model?.pct ?? 0),
+        };
+      });
+    const s = await state();
+    const busy = new Set<string>();
+    const lastActive = new Map<string, number>();
+    const PAGE = 200;
+    for (let offset = 0; ; offset += PAGE) {
+      const page = await bb.sdk.threads.list({
+        archived: false,
+        limit: PAGE,
+        offset,
+      });
+      for (const t of page) {
+        if (t.providerId !== CLAUDE_CODE_PROVIDER) continue;
+        lastActive.set(
+          t.projectId,
+          Math.max(lastActive.get(t.projectId) ?? 0, t.updatedAt),
+        );
+        if (
+          TURN_UNDER_WAY.has(t.status) ||
+          t.status === "error" ||
+          t.queuedWork === "waiting" ||
+          t.queuedWork === "failed" ||
+          now - t.updatedAt < REBALANCE_QUIET_MS
+        )
+          busy.add(t.projectId);
+      }
+      if (page.length < PAGE) break;
+    }
+    const projects: RebalanceProject[] = s.projects
+      // Not one whose variable names an account that is gone.
+      .filter((p) => !p.external && !(p.owned && p.account === null))
+      .map((p) => ({
+        id: p.id,
+        account: p.account ?? current.defaultAccountName,
+        movable: !busy.has(p.id) && !projectAtSeats(p.id),
+        lastActive: lastActive.get(p.id) ?? 0,
+      }));
+    const names = new Set(ultra.map((a) => a.name));
+    const countOf = (list: { account: string }[]) =>
+      Object.fromEntries(
+        ultra.map((a) => [a.name, list.filter((p) => p.account === a.name).length]),
+      );
+    const before = countOf(projects);
+    const plan = planRebalance(ultra, projects, REBALANCE_SPREAD);
+    const load = new Map(ultra.map((a) => [a.name, a.load]));
+    const nameOf = new Map(s.projects.map((p) => [p.id, p.name]));
+    const moves: {
+      projectId: string;
+      name: string;
+      from: string;
+      to: string;
+      done: boolean | null;
+      why?: string;
+    }[] = [];
+    for (const m of plan) {
+      const row = {
+        ...m,
+        name: nameOf.get(m.projectId) ?? m.projectId,
+        done: null as boolean | null,
+        why: undefined as string | undefined,
+      };
+      moves.push(row);
+      if (!apply) continue;
+      try {
+        await inProjectQueue(m.projectId, async () => {
+          const mark = moveMark(m.projectId);
+          const from = await projectAccount(m.projectId);
+          if (from.external || (from.account ?? current.defaultAccountName) !== m.from) {
+            row.done = false;
+            row.why = "moved meanwhile";
+            return;
+          }
+          if (projectAtSeats(m.projectId)) {
+            row.done = false;
+            row.why = "a thread of it took a seat meanwhile";
+            return;
+          }
+          const moved = await applyAccount(
+            m.projectId,
+            accountOrDefault(m.to),
+            from,
+            { share: false, stillValid: () => !projectAtSeats(m.projectId) },
+          );
+          if (!moved) {
+            row.done = false;
+            row.why = "moved or started meanwhile";
+            return;
+          }
+          await markHandled(m.projectId);
+          noteMove(m.projectId, m.from, m.to, current.preferredModel, mark);
+          const reason = `Rebalanced: ${m.from} had ${before[m.from]} projects (weekly ${load.get(m.from)} %), ${m.to} ${before[m.to]} (weekly ${load.get(m.to)} %)`;
+          bb.log.info(`project ${m.projectId}: ${reason}`);
+          await addHistory({
+            at: now,
+            threadId: "",
+            projectId: m.projectId,
+            from: m.from,
+            to: m.to,
+            reason,
+          });
+          row.done = true;
+        });
+      } catch (error) {
+        row.done = false;
+        row.why = error instanceof Error ? error.message : String(error);
+      }
+    }
+    if (apply && moves.some((m) => m.done === true))
+      bb.realtime.publish(CHANGED, { at: deps.now() });
+    const landed = projects.map((p) => {
+      const m = moves.find((x) => x.projectId === p.id);
+      return m !== undefined && (m.done ?? true) ? { account: m.to } : p;
+    });
+    return {
+      applied: apply,
+      accounts: ultra.map((a) => ({
+        name: a.name,
+        load: a.load,
+        before: before[a.name]!,
+        after: countOf(landed)[a.name]!,
+        atWork: projects.filter((p) => p.account === a.name && !p.movable).length,
+      })),
+      moves,
+      leftOut: projects.filter((p) => !names.has(p.account)).length,
+    };
+  }
   const JSON_OPTION = {
     type: "boolean",
     description: "Emit machine-readable JSON",
@@ -6160,6 +6325,35 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             const name = positionals.account;
             await pickAccount(project.id, () => accountOrDefault(name));
             return { exitCode: 0, stdout: `${project.name} → ${name}\n` };
+          },
+        }),
+        rebalance: cliCommand({
+          summary:
+            "Spread the projects with no thread at work over the usable Ultra accounts by their weekly, none more than 10 projects above the one with fewest; prints the plan, moves only with --apply",
+          options: {
+            apply: { type: "boolean", description: "Move the projects (without it, only the plan)" },
+            json: JSON_OPTION,
+          },
+          async run({ options }) {
+            const r = await rebalance(options.apply === true);
+            if (options.json)
+              return { exitCode: 0, stdout: `${JSON.stringify(r, null, 2)}\n` };
+            const lines = [
+              "account\tweekly\tbefore\tafter\tat work",
+              ...r.accounts.map(
+                (a) => `${a.name}\t${a.load} %\t${a.before}\t${a.after}\t${a.atWork}`,
+              ),
+              "",
+              ...(r.moves.length === 0
+                ? ["nothing to move"]
+                : r.moves.map(
+                    (m) =>
+                      `${m.name}\t${m.from} → ${m.to}${m.done === null ? "" : m.done ? "\tmoved" : `\tNOT moved: ${m.why}`}`,
+                  )),
+              ...(r.applied ? [] : ["", "Plan only: run with --apply to move them."]),
+            ];
+            const failed = r.moves.some((m) => m.done === false);
+            return { exitCode: failed ? 1 : 0, stdout: `${lines.join("\n")}\n` };
           },
         }),
         release: cliCommand({

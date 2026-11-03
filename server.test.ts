@@ -327,6 +327,8 @@ interface HostOptions {
    * projects it looks at.
    */
   listed?: string[];
+  /** More projects bb lists, after proj-1 and proj-2. */
+  extraProjects?: { id: string; name: string }[];
   presetEnv?: Record<string, EnvVar[]>;
   /** Rows already queued (e.g. by provider-retry) when the plugin acts. */
   queued?: QueuedRow[];
@@ -658,6 +660,7 @@ async function host(
           [
             { id: "proj-1", name: "Website" },
             { id: "proj-2", name: "Other" },
+            ...(options.extraProjects ?? []),
             ...(args?.includePersonal === true
               ? [{ id: "personal", name: "Personal" }]
               : []),
@@ -15075,6 +15078,106 @@ describe("a project whose account has its seats full moves to one with a free se
     await running(h, "thr-2", "proj-2");
     expect((await fable(h, "thr-1", "proj-1")).action).toBe("wait");
     expect(h.envSet).toEqual([]);
+  });
+});
+
+// Aitor 2026-11-03: siloeads held 25 projects for its 4 seats. One pass
+// spreads the projects with no thread at work by the accounts' weekly.
+describe("bb claude-switcher rebalance", () => {
+  const resets = new Date(NOW + 3 * 24 * HOUR).toISOString();
+  const ultra = (weekly: number): Payload => ({
+    limits: [{ kind: "weekly_all", percent: weekly, resets_at: resets }],
+    five_hour: null,
+    seven_day: { utilization: weekly, resets_at: resets, locked_reason: null },
+  });
+  const USAGE = {
+    main: () => Response.json(ultra(30)),
+    spare: () => Response.json(ultra(80)),
+    work: () => Response.json(ultra(30)),
+  };
+  const EXTRA = ["p3", "p4", "p5", "p6", "p7", "p8"].map((id) => ({ id, name: id.toUpperCase() }));
+  const onSpare = Object.fromEntries(
+    ["proj-1", "proj-2", ...EXTRA.map((p) => p.id)].map((id) => [
+      id,
+      [{ name: ENV_VAR, note: ownNote("spare"), secret: true, value: null }],
+    ]),
+  );
+  const opts = {
+    settings: { preferredModel: "Fable" },
+    extraProjects: EXTRA,
+    presetEnv: onSpare,
+    threads: {
+      // proj-1 runs a turn (counted on spare's seats as the plugin loads);
+      // proj-2 did something 10 minutes ago; p3's
+      // thread is idle since yesterday.
+      "thr-1": { projectId: "proj-1", status: "active" as const, updatedAt: NOW - HOUR * 3 },
+      "thr-2": { projectId: "proj-2", status: "idle" as const, updatedAt: NOW - 10 * 60_000 },
+      "thr-3": { projectId: "p3", status: "idle" as const, updatedAt: NOW - 24 * HOUR },
+    },
+  };
+
+  it("prints the plan and moves nothing without --apply", async () => {
+    const h = await host(USAGE, opts);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const { stdout, exitCode } = await h.harness.behavior.runCli(["rebalance", "--json"]);
+    expect(exitCode).toBe(0);
+    const r = JSON.parse(stdout) as {
+      applied: boolean;
+      accounts: { name: string; before: number; after: number; atWork: number }[];
+      moves: { projectId: string; from: string; to: string; done: boolean | null }[];
+    };
+    expect(r.applied).toBe(false);
+    expect(r.accounts).toEqual([
+      // The personal project, on the default account, counts there.
+      { name: "main", load: 30, before: 1, after: 4, atWork: 0 },
+      { name: "spare", load: 80, before: 8, after: 2, atWork: 2 },
+      { name: "work", load: 30, before: 0, after: 3, atWork: 0 },
+    ]);
+    expect(r.moves.map((m) => m.projectId).sort()).toEqual(["p3", "p4", "p5", "p6", "p7", "p8"]);
+    expect(r.moves.every((m) => m.done === null)).toBe(true);
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("with --apply moves them, the projects at work stay, and each move is in the history as Rebalanced", async () => {
+    const h = await host(USAGE, opts);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const { stdout, exitCode } = await h.harness.behavior.runCli(["rebalance", "--apply"]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("P3\tspare → ");
+    // To main, the default account: its variable goes.
+    const moved = [...h.envSet, ...h.envDeleted].map((e) => e.projectId).sort();
+    expect(moved).toEqual(["p3", "p4", "p5", "p6", "p7", "p8"]);
+    expect(moved).not.toContain("proj-1");
+    expect(moved).not.toContain("proj-2");
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history).toHaveLength(6);
+    expect(state.history[0]!.reason).toMatch(
+      /^Rebalanced: spare had 8 projects \(weekly 80 %\), (main 1|work 0) \(weekly 30 %\)$/,
+    );
+    // On main, the default account, with no variable: the personal project too.
+    const on = (a: string) => state.projects.filter((p) => (p.account ?? "main") === a).length;
+    expect([on("main"), on("spare"), on("work")]).toEqual([4, 2, 3]);
+    expect(state.projects.find((p) => p.id === "proj-1")?.account).toBe("spare");
+    // Done: a second pass finds nothing to move.
+    const again = await h.harness.behavior.runCli(["rebalance"]);
+    expect(again.stdout).toContain("nothing to move");
+  });
+
+  it("a project whose thread takes a seat leaves the plan: it is at work", async () => {
+    const h = await host(USAGE, opts);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thr-4", projectId: "p4" }),
+    });
+    await vi.waitFor(async () =>
+      expect(((await h.harness.behavior.callRpc("accounts_list", null)) as State).seats?.spare?.running).toBe(2),
+    );
+    const { stdout } = await h.harness.behavior.runCli(["rebalance", "--apply"]);
+    expect(stdout).not.toContain("P4\t");
+    expect([...h.envSet, ...h.envDeleted].map((e) => e.projectId)).not.toContain("p4");
   });
 });
 
