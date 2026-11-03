@@ -18,3 +18,8 @@ Medido (2026-11-03 13:07, `bb claude-switcher seats`/`list`, ficheros `antes-*.t
 - Sin `--apply` solo plan. Con `--apply`, cada movimiento en la cola del proyecto, se revalida (cuenta igual, sin plaza tomada) y queda en history como `Rebalanced: …`.
 
 Criterios de verde: tests que reproducen A 4/4 + B 0/4 → mueve; todas llenas → espera; proyecto con hilo activo → espera; rebalance deja spread ≤ 10 y no toca proyectos trabajando; suite completa verde.
+
+## Fase 1b (añadido de Aitor, 2026-11-03 ~13:15: «que se vayan balanceando, pero que no sea un "máximo 4"»)
+- `seatsFollowLoad` (por defecto sí): una Max/Ultra tiene `seatsMax`+1 con ritmo del día < 50 % y sesión de 5 h < 40 % (o sin ventana de 5 h); `seatsMax`−1 (mínimo 1) con ritmo > 90 %; si no, `seatsMax`. Team: `seatsTeam` siempre. Nunca más de +1.
+- Medida: `medir-techo.py` sobre `seats-semana.json` (una semana de muestras): 4 hilos gastan 36-42 %/h de sesión; picos de 5 hilos sin corte.
+- Cada cambio de techo, al medir la cuenta, va a history (`projectId` vacío, from=to=cuenta) con su motivo; un techo que sube deja entrar al siguiente en cola.
