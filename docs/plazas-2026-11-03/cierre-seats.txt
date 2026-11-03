@@ -1,0 +1,12 @@
+mariscal	seats 0/4 (0 running, 0 reserved)	0 waiting
+aitor	seats 3/3 (3 running, 0 reserved)	0 waiting
+ganaresenas	seats 0/4 (0 running, 0 reserved)	0 waiting
+joytorm	seats 0/5 (0 running, 0 reserved)	0 waiting
+siloeads	seats 3/4 (3 running, 0 reserved)	0 waiting
+team1	seats 1/2 (1 running, 0 reserved)	0 waiting
+team2	seats 0/2 (0 running, 0 reserved)	0 waiting
+team3	seats 0/2 (0 running, 0 reserved)	0 waiting
+team4	seats 0/2 (0 running, 0 reserved)	0 waiting
+team5	seats 1/2 (1 running, 0 reserved)	0 waiting
+viaulab	seats 0/3 (0 running, 0 reserved)	0 waiting
+

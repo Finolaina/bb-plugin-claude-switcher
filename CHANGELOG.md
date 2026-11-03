@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.38] - 2026-11-03
+
+### Changed
+
+- **The measurements of 0.2.37 no longer carry project names or thread
+  titles** (this repository is public): `docs/plazas-2026-11-03/` keeps
+  the counts only, and the history was rewritten without them, by Aitor's
+  request of 2026-11-03. The decisions on the open questions are in
+  `docs/plazas-2026-11-03/START-preguntas-abiertas.md`. No change to the
+  plugin's behaviour.
+
 ## [0.2.37] - 2026-11-03
 
 ### Changed
