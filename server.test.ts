@@ -15302,6 +15302,37 @@ describe("bb claude-switcher rebalance", () => {
     },
   };
 
+  it("T11 a project with a thread in a seat's queue stays, with the rest moved", async () => {
+    const h = await host(USAGE, {
+      ...opts,
+      settings: { preferredModel: "Fable", seatsMax: 1 },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const until = new Date(NOW + HOUR).toISOString().replace("Z", "+00:00");
+    for (const name of ["main", "work"])
+      expect(
+        (await h.harness.behavior.runCli(["reserve", name, "--id", `h-${name}`, "--until", until])).exitCode,
+      ).toBe(0);
+    const r = (await h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: "q3", projectId: "p3" }),
+        requestedExecution: { providerId: "claude-code", model: "claude-fable-5-1" },
+        attempt: "start-turn",
+      }),
+    )) as { action: string; reason?: string };
+    expect(r.action).toBe("wait");
+    expect(r.reason).toContain("Waiting for a seat on spare");
+    for (const name of ["main", "work"])
+      await h.harness.behavior.runCli(["unreserve", name, "--id", `h-${name}`]);
+    const { exitCode } = await h.harness.behavior.runCli(["rebalance", "--apply"]);
+    expect(exitCode).toBe(0);
+    const moved = [...h.envSet, ...h.envDeleted].map((e) => e.projectId);
+    expect(moved).not.toContain("p3");
+    expect(moved).toContain("p4");
+    expect(moved).not.toContain("proj-1");
+  });
+
   it("prints the plan and moves nothing without --apply", async () => {
     const h = await host(USAGE, opts);
     dispose = () => h.harness.dispose();
@@ -17592,6 +17623,93 @@ describe("caminos 2026-11-04", () => {
     await h.harness.behavior.callRpc("accounts_refresh", null);
     const said = h.harness.logEntries.filter((e) => e.message.includes("collides"));
     expect(said).toHaveLength(1);
+  });
+
+  describe("T9 seats full", () => {
+    const start = async () => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 40, 30)),
+          spare: () => Response.json(payload(81, 48, 100)),
+          work: () => Response.json(payload(0, 2, 0)),
+        },
+        {
+          settings: { ...FABLE, seatsMax: 1, seatsTeam: 1 },
+          presetEnv: { "proj-1": on("main"), "proj-2": on("main") },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      // Another project's turn holds main's only seat.
+      expect((await dispatch(h, "busy", "proj-2", FABLE_ID)).action).toBe("proceed");
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "busy", projectId: "proj-2" }),
+      });
+      return h;
+    };
+
+    it("a Fable turn on a full Ultra moves to the account with a seat, as in 0.2.37", async () => {
+      const h = await start();
+      expect(await dispatch(h, "t1", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    });
+
+    it("with a thread of its project at work it stays and waits: a move would take that thread's project away", async () => {
+      const h = await start();
+      const r = await dispatch(h, "t1", "proj-2", FABLE_ID);
+      expect(r.action).toBe("wait");
+      expect(r.reason).toContain("Waiting for a seat on main");
+      expect(h.envSet).toEqual([]);
+    });
+  });
+
+  it("T10 a Fable turn with no Fable anywhere is told to pass to Opus, and told the Team seat with room", async () => {
+    const h = await host(
+      {
+        // The project's account, out of session and of Fable.
+        main: () => Response.json(payload(100, 88, 100)),
+        spare: () => Response.json(payload(81, 48, 100)),
+        work: () => Response.json(payload(0, 2, 100)),
+      },
+      {
+        settings: { ...FABLE, seatsTeam: 1 },
+        presetEnv: { "proj-2": on("spare") },
+      },
+    );
+    dispose = () => h.harness.dispose();
+    teamLogin(h, "spare", "work");
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect((await dispatch(h, "other", "proj-2", OPUS)).action).toBe("proceed");
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "other", projectId: "proj-2" }),
+    });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.retries.at(-1)?.reason).toContain(
+      "pasa este hilo a Opus con el selector de modelo; irá a work",
+    );
+  });
+
+  it("T12 a seat held from outside bb is refused on a full Team seat, and overtakes no thread waiting", async () => {
+    const h = await incident();
+    expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("proceed");
+    expect((await dispatch(h, "t2", "proj-3", OPUS)).action).toBe("wait");
+    const until = new Date(NOW + HOUR).toISOString().replace("Z", "+00:00");
+    const r = await h.harness.behavior.runCli(["reserve", "spare", "--id", "night", "--until", until]);
+    expect(r.exitCode).not.toBe(0);
+    expect(`${r.stdout}${r.stderr}`).toMatch(/no free seat|no_free_seat/i);
+    const seats = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(seats.seats?.spare?.external ?? []).toEqual([]);
+    expect(seats.seats?.spare?.queued.map((q) => q.threadId)).toEqual(["t2"]);
+  });
+
+  it("T3b a pick by hand of an Ultra with every Team seat full waits: it does not run Opus there", async () => {
+    const h = await incident();
+    expect((await dispatch(h, "t1", "proj-3", OPUS)).action).toBe("proceed");
+    await h.harness.behavior.runCli(["use", "proj-1", "main"]);
+    const r = await dispatch(h, "t2", "proj-1", OPUS);
+    expect(r.action).toBe("wait");
+    expect(r.reason).toContain("main keeps its weekly for Fable");
   });
 
   it("T3 a pick by hand of an Ultra does not make it run Opus: «Esperar siempre» holds, and the turn goes to the Team seat", async () => {
