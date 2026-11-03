@@ -188,6 +188,13 @@ export const RESERVE_RECHECK_MS = 5 * 60_000;
 const WAIT_FORGOTTEN_MS = 2 * RESERVE_RECHECK_MS;
 /** How long looking for stuck threads may take: it is only a look, and health and the refresh wait for it. */
 const STUCK_READ_LIMIT_MS = 15_000;
+/**
+ * Times a turn waits, SEAT_RECHECK_MS apart, on an account that cannot run it
+ * with another that can, before it starts anyway: the placement should have
+ * moved it, so a bb that fails every write would hold it for ever with no
+ * failure to see (code-reviewer r1). Started, it fails where the user is told.
+ */
+const BLOCKED_WAITS = 10;
 /** A seat reserved for a turn that has not started within this long is freed. */
 export const SEAT_TTL_MS = 90_000;
 /** Times a message waits because its project's account could not be read for its seat; then it goes (Astra SEATS-R01). */
@@ -1440,6 +1447,21 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   } catch (error) {
     bb.log.warn(
       `could not read the seats held from outside bb; they are not counted: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  // The model of each project's latest turn (see projectModel). Not read:
+  // nothing is written over what it holds, for a later load to find.
+  let storedProjectModels: Record<string, string> = {};
+  let projectModelsRead = true;
+  try {
+    const parsed = z
+      .record(z.string(), z.string())
+      .safeParse(await bb.storage.kv.get<unknown>(KV_PROJECT_MODELS));
+    if (parsed.success) storedProjectModels = parsed.data;
+  } catch (error) {
+    projectModelsRead = false;
+    bb.log.warn(
+      `could not read the projects' models; the preferred model judges them, and they are not stored until a reload: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
   // The seat samples kept; one of another shape (before 0.2.31's second
@@ -3839,14 +3861,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * (or a Max account out of Fable) that still ran Opus, to a Max account
    * whose weekly Fable needs (viaulab → aitor, 2 Nov 18:23).
    */
-  const projectModel = new Map<string, { model: string; at: number }>();
+  const projectModel = new Map<string, { model: string; at: number }>(
+    Object.entries(storedProjectModels).map(([id, model]) => [
+      id,
+      { model, at: 0 },
+    ]),
+  );
   /** Writes in order (see storeHolds). */
   let projectModelWrites: Promise<void> = Promise.resolve();
   /** Stored as it changes, without holding the turn back: a failed write is only logged. */
   function noteProjectModel(projectId: string, model: string, at: number): void {
     const before = projectModel.get(projectId)?.model;
     projectModel.set(projectId, { model, at });
-    if (before === model) return;
+    if (before === model || !projectModelsRead) return;
     const snapshot = Object.fromEntries(
       [...projectModel].map(([id, known]) => [id, known.model]),
     );
@@ -3859,18 +3886,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         );
       }
     });
-  }
-  try {
-    const parsed = z
-      .record(z.string(), z.string())
-      .safeParse(await bb.storage.kv.get<unknown>(KV_PROJECT_MODELS));
-    if (parsed.success)
-      for (const [id, model] of Object.entries(parsed.data))
-        if (!projectModel.has(id)) projectModel.set(id, { model, at: 0 });
-  } catch (error) {
-    bb.log.warn(
-      `could not read the projects' models; the preferred model judges them: ${error instanceof Error ? error.message : String(error)}`,
-    );
   }
   /** The model a project's next turn is judged for: its latest turn's, else the preferred one. */
   function modelOfProject(projectId: string): string {
@@ -4295,7 +4310,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       freeSeats:
         own === null
           ? freeSeats
-          : (name) => freeSeats(name) + (seatKey(name) === own.account ? 1 : 0),
+          : (name) =>
+              // Its own seat is one whatever the rest: with the capacity
+              // lowered since it was admitted, free is below zero.
+              seatKey(name) === own.account
+                ? Math.max(freeSeats(name), 0) + 1
+                : freeSeats(name),
       ...paceFilter(background),
       now,
     };
@@ -4796,6 +4816,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   const waitAsked = new Map<string, number>();
   /** When each thread was last said to be stuck. */
   const stuckSaid = new Map<string, number>();
+  /** How many times each thread waited in a row at the last look (see BLOCKED_WAITS). */
+  const blockedWaits = new Map<string, number>();
   bb.experimental_hooks.on("message.dispatch", async (ctx) => {
     const decision = await dispatchDecision(ctx);
     if (decision.action === "wait") {
@@ -4805,6 +4827,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     } else if (ctx.attempt === "start-turn") {
       waitSince.delete(ctx.thread.id);
       waitAsked.delete(ctx.thread.id);
+      blockedWaits.delete(ctx.thread.id);
     }
     return decision;
   });
@@ -5013,9 +5036,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         at.account !== null &&
         blockedOff(at.account, model)
       ) {
-        const reason = `Waiting to place ${model} again: the project is on ${at.account}, which ${whyOut(at.account, model)}`;
-        bb.log.info(`thread ${thread.id}: its message waits (${reason})`);
-        return { action: "wait", reason, sendAt: deps.now() + SEAT_RECHECK_MS };
+        const waited = blockedWaits.get(thread.id) ?? 0;
+        if (waited < BLOCKED_WAITS) {
+          blockedWaits.set(thread.id, waited + 1);
+          const reason = `Waiting to place ${model} again: the project is on ${at.account}, which ${whyOut(at.account, model)}`;
+          bb.log.info(`thread ${thread.id}: its message waits (${reason})`);
+          return { action: "wait", reason, sendAt: deps.now() + SEAT_RECHECK_MS };
+        }
+        bb.log.warn(
+          `thread ${thread.id}: starts on ${at.account}, which ${whyOut(at.account, model)}: its project could not be moved in ${BLOCKED_WAITS} tries`,
+        );
       }
       if (at === null) {
         // Unknown where it starts: it waits, and is asked again, a few
