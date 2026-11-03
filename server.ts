@@ -3512,6 +3512,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     };
   }
   bb.events.on("thread.active", ({ thread }) => {
+    // Only the turns the checkpoint and the end of a turn look at: another
+    // provider's or a hidden thread's turn never stops the move (Codex
+    // OPUS-R6-002).
+    if (
+      thread.providerId !== CLAUDE_CODE_PROVIDER ||
+      notTheUsersThread(thread) !== null
+    )
+      return;
     noteActivity(thread.projectId);
     turnStart.set(thread.id, projectMarks(thread.projectId));
   });
@@ -3696,12 +3704,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return;
     }
     // Decided for the model of the project's latest turn as known now: a
-    // message or a turn of it while the sessions are shared may change
-    // that model, and this move is dropped (Codex OPUS-R5-002).
+    // message or a turn of it while the sessions are shared, or the end of
+    // a turn that names another model, may change that model, and this
+    // move is dropped (Codex OPUS-R5-002, OPUS-R6-001).
     const seen = activity.get(projectId) ?? 0;
     if (
       !(await applyAccount(projectId, accountOrDefault(decision.account), from, {
-        stillValid: () => (activity.get(projectId) ?? 0) === seen,
+        stillValid: () =>
+          (activity.get(projectId) ?? 0) === seen &&
+          modelOfProject(projectId) === model,
       }))
     )
       return;

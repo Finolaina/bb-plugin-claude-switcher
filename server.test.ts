@@ -10392,6 +10392,20 @@ describe("an Opus turn on a Max account that keeps Fable", () => {
       expect(await reasons(h)).toEqual([]);
     });
 
+    it("moves the project after an Opus turn during which a Codex thread and a hidden thread of the project started (Codex OPUS-R6-002)", async () => {
+      const h = await host(MAX_AND_SEAT, { settings: FABLE, threadEvents: logged(OPUS_ID) });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      await started(h);
+      for (const other of [
+        thread({ id: "thread-c", projectId: "proj-1", providerId: "codex" }),
+        thread({ id: "thread-h", projectId: "proj-1", visibility: "hidden", originPluginId: "bb-recap" }),
+      ])
+        await h.harness.behavior.emitThreadEvent("thread.active", { thread: other });
+      await ended(h);
+      expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([["proj-1", ownNote("work")]]);
+    });
+
     it("moves nothing when a newer message of another thread came meanwhile (Codex OPUS-002)", async () => {
       const h = await host(MAX_AND_SEAT, { settings: FABLE, threadEvents: logged(OPUS_ID) });
       dispose = () => h.harness.dispose();
@@ -15414,6 +15428,67 @@ describe("no project is left on an account out of the preferred model or without
       await vi.waitFor(() => expect(order).toEqual(["link"]));
       expect(await opusTurn(h)).toEqual({ action: "proceed" });
       release();
+      run.controller.abort();
+      await run.done;
+      expect(h.envSet).toEqual([]);
+      expect(logged(h, "info")).toContainEqual(
+        expect.stringMatching(/^project proj-1: not moved to work: picked by hand or moved meanwhile$/),
+      );
+    });
+
+    it("drops a rescue decided for Fable when an Opus turn that started before it ends while its sessions are shared (Codex OPUS-R6-001)", async () => {
+      const order: string[] = [];
+      let logReads = 0;
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      const h = await host(
+        {
+          // A Team seat out of Fable, with room for Opus.
+          main: () => Response.json(teamPayload(10, 100)),
+          spare: () => Response.json(payload(10, 60, 20)),
+          work: () => Response.json(payload(5, 20, 30)),
+        },
+        {
+          ...OPTIONS,
+          sessionsIo: oneSessionIo(order, () => held),
+          environments: SITE,
+          beforeEvents: async () => {
+            logReads++;
+          },
+          threadEvents: {
+            "thr-1": [
+              {
+                id: "evt_1",
+                scope: { kind: "thread" },
+                threadId: "thr-1",
+                seq: 1,
+                createdAt: NOW - HOUR,
+                type: "client/turn/requested",
+                data: { requestId: "creq_1", execution: { model: "claude-opus-5-5" } },
+              },
+            ],
+          },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      // An Opus turn past the checkpoint (a Send now) starts: its model is not known yet.
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "thr-1", projectId: "proj-1" }),
+      });
+      const before = h.usageCalls.length;
+      const run = h.harness.behavior.runService("usage-refresh");
+      await vi.waitFor(() => expect(h.usageCalls).toHaveLength(before + 3));
+      // The rescue (for Fable, the only model known) shares the sessions into work.
+      await vi.waitFor(() => expect(order).toEqual(["link"]));
+      // The turn ends meanwhile: its log says Opus.
+      const idle = h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: thread({ id: "thr-1", projectId: "proj-1" }),
+        lastAssistantText: null,
+      });
+      await vi.waitFor(() => expect(logReads).toBeGreaterThan(0));
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+      release();
+      await idle;
       run.controller.abort();
       await run.done;
       expect(h.envSet).toEqual([]);
