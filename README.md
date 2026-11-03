@@ -770,7 +770,7 @@ bb claude-switcher list [--json]          # a line per account (ses, sem, prefer
 bb claude-switcher refresh [--json]       # query the usage endpoint now
 bb claude-switcher history [--json]       # every move of a project, latest first, and why
 bb claude-switcher seats [--json]         # seats of every account, who waits, and each usage sample with the seats taken then
-bb claude-switcher health [--json]        # a stable read for other threads and scripts (version 1): plan, 5-hour window, weekly, models, the day's pace, seats, usable
+bb claude-switcher health [--json]        # a stable read for other threads and scripts (version 1): plan, 5-hour window, weekly, models, the day's pace, seats, usable, threads stuck
 bb claude-switcher reserve <account> --id <x> --until <ISO with zone> [--json]   # hold a seat for a run outside bb (at most 12 h); fails with no free seat (exit 1), or with exit 75 while the seats are still being counted after a reload
 bb claude-switcher unreserve --id <x> [--json]   # end it; an id not held is no error
 bb claude-switcher use <project> <account | default>   # project id, or its name when unique
@@ -876,7 +876,14 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
   checkpoint), the turn needs a seat on the account its project runs on.
   With none free the message waits, bb shows «Waiting for a seat on
   team1: 2/2 threads running, 1 ahead in the queue», and asks again every
-  30 s. Every turn is checked, placed by the plugin or not (the automatic
+  30 s. A turn queued on another account's seat says why («Waiting for a
+  seat on team5 for Opus: main keeps its weekly for Fable; …»). A turn the
+  project's account cannot run (out of its model or of usage) waits in the
+  queue of an account that can, when another can; with none able, it starts
+  and fails, and that failure is what tells the user. A pick by hand asks
+  bb again at once. A thread held 10 minutes with another account free is
+  logged as `STUCK:` and listed in `atascos` (`health --json`, `seats
+  --json`; `null` when bb's queue could not be read). Every turn is checked, placed by the plugin or not (the automatic
   choice off, a model bb does not name, a placement that failed): when the
   project's account cannot be read, the message waits up to three times
   and then goes, with a warning in the log. When a turn ends (or fails,
