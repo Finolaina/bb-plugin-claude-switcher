@@ -2505,6 +2505,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // that applied nothing (refused, or failed before): that read would clear
     // the error Settings shows for it.
     let applied = false;
+    let measuredPick = false;
     try {
       await inProjectQueue(projectId, async () => {
         await discover();
@@ -2520,6 +2521,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         await markHandled(projectId);
         const fromName = from.account ?? current.defaultAccountName;
         const toName = to?.name ?? current.defaultAccountName;
+        measuredPick = collector.get(toName) !== undefined;
         if (toName === fromName) return;
         bb.log.info(
           `project ${projectId}: picked by hand, ${fromName} → ${toName}`,
@@ -2554,7 +2556,28 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         else recentSwitches.delete(projectId);
       });
     } finally {
-      if (applied) bb.realtime.publish(CHANGED, { at: deps.now() });
+      if (applied) {
+        bb.realtime.publish(CHANGED, { at: deps.now() });
+        // What waits for this project is looked at now, not at its next
+        // ask (up to RESERVE_RECHECK_MS) or refresh: outside the project's
+        // queue, which the reads below enter themselves. recheck asks for
+        // the rows held by a plugin; the retries with a time are revisited.
+        void bb.experimental_hooks
+          .recheck("message.dispatch")
+          .catch((error: unknown) =>
+            bb.log.warn(
+              `bb not asked again after a pick: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          );
+        // An account never measured (just after a load) may have no login:
+        // nothing is released on it before the refresh looks at it.
+        if (measuredPick)
+          void revisitWaits().catch((error: unknown) =>
+            bb.log.warn(
+              `the waiting turns were not looked at again after a pick: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          );
+      }
     }
   }
 

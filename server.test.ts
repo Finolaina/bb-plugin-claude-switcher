@@ -8548,6 +8548,28 @@ describe("a wait another account can end sooner", () => {
     );
   });
 
+  it("T14 a pick by hand releases a retry with a far time at once, with no refresh in between", async () => {
+    const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")]);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect(h.retries).toEqual([]);
+    const calls = h.usageCalls.length;
+    await h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-1",
+      account: "spare",
+    });
+    await vi.waitFor(() =>
+      expect(h.retries).toEqual([
+        {
+          threadId: "thread-1",
+          turnRequestId: "creq_r1",
+          reason: "Retrying on account spare, where the project is now",
+        },
+      ]),
+    );
+    expect(h.usageCalls).toHaveLength(calls);
+  });
+
   it("never retries a wait on a hand-picked account without a login: it moves to one that can run it, or keeps waiting", async () => {
     // Codex r3 (IR-003): an account without a login is not measured, but it
     // is known unable to run anything.
@@ -17365,6 +17387,29 @@ describe("caminos 2026-11-04", () => {
       await pass(h);
       expect(log(h)).toMatch(/moved from spare \(exhausted for Fable/);
     });
+  });
+
+  it("T2 a pin to a free Team seat delivers the message waiting on a full account: bb is asked again at once, well within 2 minutes", async () => {
+    const h = await incident();
+    expect(h.harness.recheckCount).toBe(0);
+    // work full too: the message waits on spare's queue, its project on the Ultra.
+    expect((await dispatch(h, "busy", "proj-3", OPUS)).action).toBe("proceed");
+    const r = await dispatch(h, "t1", "proj-1", OPUS);
+    expect(r.action).toBe("wait");
+    // A seat frees on work, and the user pins the project there.
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "busy", projectId: "proj-3" }),
+      lastAssistantText: null,
+    });
+    const asked = h.harness.recheckCount;
+    await h.harness.behavior.runCli(["use", "proj-1", "work"]);
+    await vi.waitFor(() => expect(h.harness.recheckCount).toBeGreaterThan(asked));
+    expect(r.sendAt! - NOW).toBeLessThanOrEqual(2 * 60_000);
+    expect(await dispatch(h, "t1", "proj-1", OPUS, true)).toEqual({ action: "proceed" });
+    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    const seats = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(seats.seats?.spare?.queued).toEqual([]);
+    expect(seats.seats?.work?.reserved).toBe(1);
   });
 
   it("T3 a pick by hand of an Ultra does not make it run Opus: «Esperar siempre» holds, and the turn goes to the Team seat", async () => {
