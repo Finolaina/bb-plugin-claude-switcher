@@ -58,6 +58,7 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
       measured: NOW,
       dayStartHour: 9,
       holdsBackground: true,
+      atascos: [],
       accounts: [
         account({
           name: "aitor",
@@ -76,6 +77,7 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
       medido: "2026-10-30T21:55:58+01:00",
       inicioDia: 9,
       freno: true,
+      atascos: [],
       cuentas: [
         {
           nombre: "aitor",
@@ -83,8 +85,8 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
           planTexto: "Ultra · sin tope de 5 h",
           cincoHoras: false,
           sesion: null,
-          semana: { pct: 98, vuelve: "2026-11-01T18:00:00+01:00" },
-          modelos: { Fable: { pct: 100, vuelve: "2026-11-01T18:00:00+01:00" } },
+          semana: { pct: 98, pctExacto: 98, vuelve: "2026-11-01T18:00:00+01:00" },
+          modelos: { Fable: { pct: 100, pctExacto: 100, vuelve: "2026-11-01T18:00:00+01:00" } },
           ritmo: { presupuesto: 1.2, gastado: 0.4, pctDia: 33, fondo: true },
           plazas: { usadas: 1, total: 4, externas: [] },
           usable: true,
@@ -99,6 +101,7 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
       measured: NOW,
       dayStartHour: 9,
       holdsBackground: true,
+      atascos: [],
       accounts: [
         account({
           name: "team1",
@@ -125,6 +128,7 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
       measured: NOW,
       dayStartHour: 9,
       holdsBackground: true,
+      atascos: [],
       accounts: [account({ name: "work", usage: usage("ultra-con-5h-b") })],
     }).cuentas;
     expect(ultra).toMatchObject({
@@ -140,6 +144,7 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
       measured: NOW,
       dayStartHour: 9,
       holdsBackground: true,
+      atascos: [],
       accounts: [
         account({
           name: "nologin",
@@ -181,6 +186,7 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
       measured: NOW,
       dayStartHour: 9,
       holdsBackground: true,
+      atascos: [],
       accounts: [
         account({
           name: "x",
@@ -203,6 +209,7 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
       measured: NOW,
       dayStartHour: 9,
       holdsBackground: true,
+      atascos: [],
       accounts: [
         account({
           name: "x",
@@ -223,6 +230,7 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
       measured: NOW,
       dayStartHour: 9,
       holdsBackground: true,
+      atascos: [],
       accounts: [
         account({
           name: "a",
@@ -248,6 +256,7 @@ describe("the brake on background work (paceHoldsBackground; off by default, Ait
       measured: NOW,
       dayStartHour: 9,
       holdsBackground,
+      atascos: [],
       accounts: [
         account({ name: "aitor", usage: usage("ultra-sin-5h"), pace: spentDay }),
       ],
@@ -281,6 +290,7 @@ describe("healthText", () => {
         measured: NOW,
         dayStartHour: 9,
         holdsBackground: true,
+      atascos: [],
         accounts: [
           account({
             name: "aitor",

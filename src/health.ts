@@ -6,6 +6,7 @@
 // version.
 import type { PlanInfo } from "./accounts.js";
 import { DAY_ZONE, zoneOffsetMs, type Pace } from "./pace.js";
+import type { Atasco } from "./atascos.js";
 import type { AccountUsage, UsageWindow } from "./policy.js";
 
 export const HEALTH_VERSION = 1;
@@ -40,6 +41,8 @@ export interface HealthAccount {
 
 interface Point {
   pct: number;
+  /** Unrounded: 99.6 % is `pct` 100 and still runs a turn. */
+  pctExacto: number;
   vuelve: string | null;
 }
 
@@ -49,6 +52,8 @@ export interface HealthReport {
   inicioDia: number;
   /** The day's pace holds background work back (the plugin's paceHoldsBackground; off by default). */
   freno: boolean;
+  /** Threads this plugin holds 10 min or more with another account free; null when the queue could not be read. */
+  atascos: Atasco[] | null;
   cuentas: Array<{
     nombre: string;
     plan: "ultra" | "max" | "team" | "desconocido";
@@ -91,6 +96,7 @@ export function isoInZone(ms: number, timeZone: string = DAY_ZONE): string {
 function point(w: UsageWindow): Point {
   return {
     pct: Math.round(w.usedPercent),
+    pctExacto: w.usedPercent,
     vuelve: w.resetsAt === null ? null : isoInZone(w.resetsAt),
   };
 }
@@ -123,6 +129,8 @@ export function healthReport(input: {
   dayStartHour: number;
   /** The brake is on: an account past 90 % of its day takes no background work. */
   holdsBackground: boolean;
+  /** See HealthReport.atascos. */
+  atascos: Atasco[] | null;
   accounts: HealthAccount[];
 }): HealthReport {
   return {
@@ -130,6 +138,7 @@ export function healthReport(input: {
     medido: isoInZone(input.measured),
     inicioDia: input.dayStartHour,
     freno: input.holdsBackground,
+    atascos: input.atascos,
     cuentas: input.accounts.map((a) => {
       const u = a.usage;
       const whole = u !== null && u.unknown !== true;
@@ -196,6 +205,12 @@ export function healthText(report: HealthReport): string {
   return [
     `medido ${report.medido} · el día empieza a las ${report.inicioDia}:00 · freno de fondo ${report.freno ? "encendido" : "apagado"}`,
     ...lines,
+    ...(report.atascos === null
+      ? ["atascos: la cola no se pudo leer"]
+      : report.atascos.map(
+          (a) =>
+            `atasco: ${a.cuenta} retiene ${a.hilo} (${a.modelo}) ${a.minutos} min; libres: ${a.libres.join(", ")}${a.proyectoOcupado ? "; proyecto con otro hilo en marcha" : ""}`,
+        )),
     "",
   ].join("\n");
 }

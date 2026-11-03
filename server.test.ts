@@ -311,6 +311,8 @@ interface QueuedRow {
         retryOfTurnRequestId: string;
       };
   sendAt: number | null;
+  /** bb's reason a row will not run (measured: "Thread is archived"). */
+  failureReason?: string | null;
   /** What the row waits on, as bb says it; a plugin's hold names the plugin. */
   waitingOn?: { kind: "time" } | { kind: "plugin"; pluginId: string; reason: string } | null;
   createdAt?: number;
@@ -17417,6 +17419,166 @@ describe("caminos 2026-11-04", () => {
     const seats = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
     expect(seats.seats?.spare?.queued).toEqual([]);
     expect(seats.seats?.work?.reserved).toBe(1);
+  });
+
+  describe("T13 a thread held 10 minutes with another account free is said to be stuck", () => {
+    const held = (over: Partial<QueuedRow> = {}): QueuedRow => ({
+      id: "q-t2",
+      threadId: "t2",
+      payload: { kind: "inline" },
+      sendAt: NOW + 30_000,
+      waitingOn: { kind: "plugin", pluginId: "claude-switcher", reason: "seat" },
+      // Queued an hour ago, held only from the dispatch below.
+      createdAt: NOW - HOUR,
+      model: "opus",
+      failureReason: null,
+      ...over,
+    });
+    /** t2 queued on spare, every Team seat full; then work's seat frees and nobody asks again. */
+    const stuck = async (row: QueuedRow = held(), options: HostOptions = {}) => {
+      let clock = NOW;
+      const h = await incident(INCIDENT, {
+        queued: [row],
+        clock: () => clock,
+        threads: { t2: { projectId: "proj-3" } },
+        ...options,
+      });
+      // spare's one seat stays taken: a turn under way, no reservation that expires.
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "other", projectId: "proj-2" }),
+      });
+      expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("proceed");
+      expect((await dispatch(h, "t2", "proj-3", OPUS)).action).toBe("wait");
+      await h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: thread({ id: "t1", projectId: "proj-1" }),
+        lastAssistantText: null,
+      });
+      return { h, at: (ms: number) => (clock = NOW + ms) };
+    };
+    const report = async (h: Awaited<ReturnType<typeof host>>) =>
+      JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout) as {
+        atascos: { hilo: string; cuenta: string; modelo: string; minutos: number; libres: string[]; proyectoOcupado: boolean }[] | null;
+      };
+    const lines = (h: Awaited<ReturnType<typeof host>>) =>
+      h.harness.logEntries.filter((e) => e.message.startsWith("STUCK")).map((e) => e.message);
+    const pass = async (h: Awaited<ReturnType<typeof host>>) => {
+      const before = h.usageCalls.length;
+      const run = h.harness.behavior.runService("usage-refresh");
+      await vi.waitFor(() => expect(h.usageCalls.length).toBeGreaterThan(before));
+      run.controller.abort();
+      await run.done;
+    };
+
+    it("from when the plugin began to hold it, not from when bb queued it: 9:59 no, 10:00 yes", async () => {
+      const { h, at } = await stuck();
+      at(10 * 60_000 - 1);
+      expect((await report(h)).atascos).toEqual([]);
+      at(10 * 60_000);
+      expect((await report(h)).atascos).toEqual([
+        { hilo: "t2", cuenta: "spare", modelo: "Opus", minutos: 10, libres: ["work"], proyectoOcupado: false },
+      ]);
+    });
+
+    it("`seats` says it too, in its text and its JSON", async () => {
+      const { h, at } = await stuck();
+      at(12 * 60_000);
+      const text = await h.harness.behavior.runCli(["seats"]);
+      expect(text.stdout).toContain("STUCK: spare holds thread t2 (Opus) 12 min, work is free");
+      const json = JSON.parse((await h.harness.behavior.runCli(["seats", "--json"])).stdout);
+      expect(json.atascos).toHaveLength(1);
+    });
+
+    it("says it once per 10 minutes in the log", async () => {
+      const { h, at } = await stuck();
+      at(10 * 60_000);
+      await pass(h);
+      // Not asked again for 10 min here (in bb, every 30 s), its place in the
+      // queue has lapsed: the holder said is then the project's account.
+      expect(lines(h)).toEqual(["STUCK: main holds thread t2 (Opus) 10 min, work is free"]);
+      at(19 * 60_000);
+      await pass(h);
+      expect(lines(h)).toHaveLength(1);
+      at(20 * 60_000);
+      await pass(h);
+      expect(lines(h)).toHaveLength(2);
+    });
+
+    it("with no other account free it waits as it must: Team full and only Ultras free is «Esperar siempre»", async () => {
+      const { h, at } = await stuck();
+      expect((await dispatch(h, "t3", "proj-4", OPUS)).action).toBe("proceed");
+      at(10 * 60_000);
+      expect((await report(h)).atascos).toEqual([]);
+    });
+
+    it("a row bb says has failed is not stuck", async () => {
+      const { h, at } = await stuck(held({ failureReason: "Thread is archived" }));
+      at(10 * 60_000);
+      expect((await report(h)).atascos).toEqual([]);
+    });
+
+    it("a hold with no seat queue counts on the project's account", async () => {
+      let workSession = 100;
+      let spareSession = 100;
+      let clock = NOW;
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 88, 98)),
+          spare: () => Response.json(payload(spareSession, 48, 100)),
+          work: () => Response.json(payload(workSession, 2, 0)),
+        },
+        {
+          settings: { ...FABLE, seatsTeam: 1 },
+          clock: () => clock,
+          queued: [held({ threadId: "t1", id: "q-t1" })],
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      // No Team can take it for now: held off main, no seat in any queue.
+      const r = await dispatch(h, "t1", "proj-1", OPUS);
+      expect(r.action).toBe("wait");
+      const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+      expect(state.seats?.work?.queued).toEqual([]);
+      workSession = 0;
+      spareSession = 100;
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      clock = NOW + 10 * 60_000;
+      const stuckNow = (await report(h)).atascos!;
+      expect(stuckNow.map((a) => [a.cuenta, a.libres])).toEqual([["main", ["work"]]]);
+    });
+
+    it("a thread with another of its project at work says so", async () => {
+      const { h, at } = await stuck();
+      expect((await dispatch(h, "t9", "proj-3", FABLE_ID)).action).toBe("proceed");
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "t9", projectId: "proj-3" }),
+      });
+      at(10 * 60_000);
+      const [a] = (await report(h)).atascos!;
+      expect(a?.proyectoOcupado).toBe(true);
+    });
+
+    it("the wait is forgotten once it goes: the next one counts from zero", async () => {
+      const { h, at } = await stuck();
+      at(10 * 60_000);
+      expect((await dispatch(h, "t2", "proj-3", OPUS, true)).action).toBe("proceed");
+      await h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: thread({ id: "t2", projectId: "proj-3" }),
+        lastAssistantText: null,
+      });
+      expect((await report(h)).atascos).toEqual([]);
+    });
+
+    it("an unreadable queue is `null`, never «nothing stuck»", async () => {
+      const { h } = await stuck();
+      h.harness.sdk.stub("threads.queue.list", async () => {
+        throw new Error("bb is down");
+      });
+      expect((await report(h)).atascos).toBeNull();
+      const text = await h.harness.behavior.runCli(["seats"]);
+      expect(text.stdout).toContain("stuck threads unknown");
+    });
   });
 
   it("T3 a pick by hand of an Ultra does not make it run Opus: «Esperar siempre» holds, and the turn goes to the Team seat", async () => {
