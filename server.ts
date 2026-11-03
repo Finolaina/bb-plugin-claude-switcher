@@ -22,11 +22,20 @@ import {
   defineCli,
   defineRpcContract,
   type BbPluginApi,
+  type MessageDispatchHookContext,
   type MessageDispatchHookDecision,
   type PluginThreadEventPayloads,
   type PluginTurnFailedEvent,
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import {
+  STUCK_WAIT_MS,
+  atascoLine,
+  heldBy,
+  heldLong,
+  type Atasco,
+  type HeldRow,
+} from "./src/atascos.js";
 import {
   discoverAccounts,
   expandHome,
@@ -241,6 +250,8 @@ const KV_SERIES = "usage-series";
 const KV_PACE = "pace-day";
 /** Seats held from outside bb (`reserve`): a reload must not lose them. */
 const KV_EXTERNAL = "external-seats";
+/** This plugin as bb names it in a queued row's `waitingOn`. */
+const PLUGIN_ID = "claude-switcher";
 /** The model of each project's latest turn (see projectModel). */
 const KV_PROJECT_MODELS = "project-models";
 const externalHoldSchema = z.object({
@@ -4310,6 +4321,22 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       reason: `Waiting for ${model} on ${free.account}, free from ${isoInZone(free.at).slice(0, 16).replace("T", " ")}: ${here}`,
     };
   }
+  /** The accounts other than `name` that could take a turn in `model` now: a free seat no queue is ahead for, and the reserve spared. */
+  function freeElsewhere(name: string, model: string): string[] {
+    const now = deps.now();
+    return measuredAccounts(model)
+      .filter((a) => a.name !== name)
+      .map((a) => settle(a, now))
+      .filter(
+        (a) =>
+          chooseAccount([a], {
+            preferredModel: model,
+            reserveModel: current.preferredModel,
+            freeSeats: seatRoom,
+          }) !== null,
+      )
+      .map((a) => a.name);
+  }
   /**
    * The best account other than `name` that can run `model` now, its seats
    * aside and without spending the reserve; null when none can.
@@ -4752,7 +4779,90 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     };
   }
 
+  /** Since when this plugin holds each thread's message: answered "wait", until it goes (see src/atascos.ts). */
+  const waitSince = new Map<string, number>();
+  /** When each thread was last said to be stuck. */
+  const stuckSaid = new Map<string, number>();
   bb.experimental_hooks.on("message.dispatch", async (ctx) => {
+    const decision = await dispatchDecision(ctx);
+    if (decision.action === "wait") {
+      if (!waitSince.has(ctx.thread.id)) waitSince.set(ctx.thread.id, deps.now());
+    } else if (ctx.attempt === "start-turn") waitSince.delete(ctx.thread.id);
+    return decision;
+  });
+  /**
+   * The threads held long with another account free, as bb's queue stands;
+   * null when it could not be read: «nothing stuck» is never said unread.
+   */
+  async function atascos(
+    rows?: readonly HeldRow[],
+  ): Promise<Atasco[] | null> {
+    let all = rows;
+    if (all === undefined)
+      try {
+        all = await bb.sdk.threads.queue.list();
+      } catch (error) {
+        bb.log.warn(
+          `the queue could not be read to look for stuck threads: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return null;
+      }
+    const out: Atasco[] = [];
+    const now = deps.now();
+    for (const held of heldLong(all, PLUGIN_ID, waitSince, now)) {
+      try {
+        const queued = seats.position(held.threadId)?.account;
+        const known = await bb.sdk.threads.get({ threadId: held.threadId });
+        let account: string;
+        if (queued !== undefined) account = seatName(queued);
+        else {
+          const read = await projectAccount(known.projectId);
+          if (read.external) continue;
+          account = read.account ?? current.defaultAccountName;
+        }
+        const modelo = modelFamily(held.model) ?? current.preferredModel;
+        const libres = freeElsewhere(account, modelo);
+        if (libres.length === 0) continue;
+        out.push({
+          hilo: held.threadId,
+          cuenta: account,
+          modelo,
+          minutos: Math.floor((now - held.since) / 60_000),
+          libres,
+          proyectoOcupado: projectSeated(known.projectId, held.threadId),
+        });
+      } catch (error) {
+        bb.log.warn(
+          `thread ${held.threadId}: not looked at for being stuck: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    return out;
+  }
+  /** Says each stuck thread once per STUCK_WAIT_MS, and forgets the threads bb no longer holds. */
+  async function sayStuck(
+    rows: readonly HeldRow[],
+    readAt: number,
+  ): Promise<void> {
+    for (const [threadId, since] of waitSince)
+      if (
+        since < readAt &&
+        !rows.some((row) => row.threadId === threadId && heldBy(row, PLUGIN_ID))
+      )
+        waitSince.delete(threadId);
+    const stuck = (await atascos(rows)) ?? [];
+    const now = deps.now();
+    for (const a of stuck) {
+      if (now - (stuckSaid.get(a.hilo) ?? -Infinity) < STUCK_WAIT_MS) continue;
+      stuckSaid.set(a.hilo, now);
+      bb.log.warn(atascoLine(a));
+    }
+    for (const threadId of stuckSaid.keys())
+      if (!waitSince.has(threadId)) stuckSaid.delete(threadId);
+  }
+  async function dispatchDecision(
+    ctx: MessageDispatchHookContext,
+  ): Promise<MessageDispatchHookDecision> {
     const { thread } = ctx;
     if (
       // Queued behind a turn: bb asks again when it sends the message.
@@ -4933,7 +5043,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // Where the project stands as the turn is sent, for `thread.active`.
     dispatchEpoch.set(thread.id, movesOf(thread.projectId).epoch);
     return { action: "proceed" };
-  });
+  }
 
   // ---- Automatic switch on subscription limit ---------------------------
   /** `name` refused a turn (no login): chosen for nothing for a while. */
@@ -5523,7 +5633,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // Marks made while bb reads are kept: its snapshot may predate them
     // (Codex Sol 0.2.18 r1, R0218-CODEX-002).
     const marksBefore = putBackMarks;
+    const readAt = deps.now();
     const all = await bb.sdk.threads.queue.list();
+    await sayStuck(all, readAt).catch((error: unknown) =>
+      bb.log.warn(
+        `the stuck threads were not looked for: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+    );
     for (const [key, mark] of putBack)
       if (
         mark <= marksBefore &&
@@ -6209,6 +6325,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       .map((a) => collector.get(a.name)?.observedAt ?? null)
       .filter((at): at is number => at !== null);
     return healthReport({
+      atascos: await atascos(),
       measured: observed.length === 0 ? now : Math.max(...observed),
       dayStartHour: dayHour(),
       holdsBackground: current.paceHoldsBackground === true,
@@ -6490,17 +6607,22 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           options: { json: JSON_OPTION },
           async run({ options }) {
             const taken = seatsState();
+            const stuck = await atascos();
             pruneSeatSamples();
             if (options.json)
               return {
                 exitCode: 0,
-                stdout: `${JSON.stringify({ seats: taken, samples: seatSamples }, null, 2)}\n`,
+                stdout: `${JSON.stringify({ seats: taken, atascos: stuck, samples: seatSamples }, null, 2)}\n`,
               };
             const lines: string[] = [];
             for (const [name, a] of Object.entries(taken))
               lines.push(
                 `${name}\tseats ${a.running + a.reserved + (a.external?.length ?? 0)}/${a.capacity === 0 ? "no limit" : a.capacity} (${a.running} running, ${a.reserved} reserved${a.external === undefined ? "" : `, ${a.external.length} held outside bb: ${a.external.map((e) => `${e.id} until ${isoInZone(e.until)}`).join(", ")}`})\t${a.queued.length} waiting`,
               );
+            if (stuck === null)
+              lines.push("", "The queue could not be read: stuck threads unknown.");
+            else if (stuck.length > 0)
+              lines.push("", ...stuck.map((a) => atascoLine(a)));
             const time = (at: number | null) =>
               at === null ? "" : new Date(at).toISOString();
             lines.push(
