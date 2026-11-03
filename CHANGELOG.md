@@ -12,7 +12,8 @@ project uses [Semantic Versioning](https://semver.org/).
   Fable when its turn ends during the move.** A turn that skipped the
   checkpoint (a Send now) and ended while the refresh was moving its
   project, decided for Fable, let the move finish onto that Max account.
-  The move is now dropped when the project's model changes meanwhile.
+  The move is now dropped when a turn of the project ends meanwhile, and
+  no rescue decides while the model of a turn that ended is being read.
 - **A Codex or hidden thread no longer stops an Opus project from moving
   off a Max account after its turn.** Their turns counted as newer
   activity of the project, so the move after an Opus turn was skipped.
