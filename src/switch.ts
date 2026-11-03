@@ -131,10 +131,16 @@ export function declineReason(
 /**
  * The usage API's name for the model a bb model id runs
  * ("claude-opus-5-5" → "Opus"), or null when the id is not a Claude model id
- * (none resolved yet, an alias): the preferred model decides then.
+ * (none resolved yet): the preferred model decides then. An alias is that
+ * model: `bb thread tell --model opus` keeps `opus` on its row, and read as
+ * no model it ran past the reserve on the project's account (2026-11-03,
+ * `bb thread queue list --json`).
  */
 export function modelFamily(modelId: string | null): string | null {
-  const family = /^claude-([a-z]+)-/.exec(modelId ?? "")?.[1];
+  const id = modelId ?? "";
+  const family =
+    /^claude-([a-z]+)-/.exec(id)?.[1] ??
+    /^(fable|opus|sonnet|haiku)(?:\[[^\]]*\])?$/i.exec(id)?.[1]?.toLowerCase();
   return family === undefined
     ? null
     : family[0]!.toUpperCase() + family.slice(1);

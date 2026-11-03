@@ -1192,12 +1192,31 @@ describe("modelFamily", () => {
     expect(modelFamily("claude-haiku-4-5-20251001")).toBe("Haiku");
   });
 
-  it("names nothing for a model bb has not resolved, an alias or another provider's model", () => {
+  // `bb thread tell --model opus` queues the alias as is (`queue list --json`,
+  // 2026-11-03): read as "no model" it skipped the reserve and ran as Fable.
+  it.each([
+    ["claude-opus-5-5", "Opus"],
+    ["claude-opus-5-5[1m]", "Opus"],
+    ["claude-fable-5-1", "Fable"],
+    ["opus", "Opus"],
+    ["OPUS", "Opus"],
+    ["opus[1m]", "Opus"],
+    ["fable", "Fable"],
+    ["sonnet", "Sonnet"],
+    ["haiku", "Haiku"],
+    ["default", null],
+    ["opusplan", null],
+    ["", null],
+    [null, null],
+  ])("%s is %s", (id, family) => {
+    expect(modelFamily(id)).toBe(family);
+  });
+
+  it("names nothing for a model bb has not resolved or another provider's model", () => {
     for (const id of [
       null,
       "",
       "opusplan",
-      "opus",
       "gpt-6-astra",
       "claude-",
       "claude-opus",

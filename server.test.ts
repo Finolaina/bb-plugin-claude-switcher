@@ -17193,6 +17193,15 @@ describe("caminos 2026-11-04", () => {
     expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
   });
 
+  it("T8 a model named by its alias is that model: `--model opus` is an Opus turn, placed and held like one", async () => {
+    const h = await incident();
+    expect(await dispatch(h, "t1", "proj-1", "opus")).toEqual({ action: "proceed" });
+    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    // Every Team seat full now: it waits, it does not slip through on the Ultra.
+    const r = await dispatch(h, "t2", "proj-1", "opus");
+    expect(r.action).toBe("wait");
+  });
+
   it("T3 a pick by hand of an Ultra does not make it run Opus: «Esperar siempre» holds, and the turn goes to the Team seat", async () => {
     const h = await incident();
     await h.harness.behavior.runCli(["use", "proj-1", "main"]);
