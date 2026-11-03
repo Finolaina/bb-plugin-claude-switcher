@@ -15244,6 +15244,24 @@ describe("bb claude-switcher rebalance", () => {
     expect(again.stdout).toContain("nothing to move");
   });
 
+  it("a project whose thread works while the pass moves the others is not moved (Codex PLAZAS-004)", async () => {
+    const options: HostOptions = { ...opts, threads: { ...opts.threads } };
+    const h = await host(USAGE, options);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // As the first move writes, p8's thread runs a short turn.
+    let first = true;
+    options.beforeSet = async () => {
+      if (!first) return;
+      first = false;
+      options.threads!["thr-8"] = { projectId: "p8", status: "idle", updatedAt: NOW };
+    };
+    const { stdout, exitCode } = await h.harness.behavior.runCli(["rebalance", "--apply"]);
+    expect(stdout).toContain("P8\tspare → main\tNOT moved: a thread of it is at work now");
+    expect(exitCode).toBe(1);
+    expect([...h.envSet, ...h.envDeleted].map((e) => e.projectId)).not.toContain("p8");
+  });
+
   it("a project whose thread takes a seat leaves the plan: it is at work", async () => {
     const h = await host(USAGE, opts);
     dispose = () => h.harness.dispose();
