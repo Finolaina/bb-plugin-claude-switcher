@@ -3453,6 +3453,22 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     aheadLeft.set(projectId, { account: fromName, model, threshold });
   }
 
+  // First of the listeners of a turn's end, and without waiting: the ones
+  // below read the turn's log first, and a rescue sharing the project's
+  // sessions meanwhile must already see that a turn ended (Codex
+  // OPUS-0236-R4-001).
+  bb.events.on("thread.idle", ({ thread }) => {
+    const started = turnStart.get(thread.id);
+    if (
+      !current.autoSwitch ||
+      thread.providerId !== CLAUDE_CODE_PROVIDER ||
+      notTheUsersThread(thread) !== null ||
+      started === undefined
+    )
+      return;
+    endingTurns.set(thread.id, turnEnded(thread.projectId, started.activity));
+  });
+
   bb.events.on("thread.idle", async ({ thread }) => {
     if (
       !current.autoSwitch ||
@@ -3528,31 +3544,40 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   bb.events.on("thread.idle", async ({ thread }) => {
     const started = turnStart.get(thread.id);
     turnStart.delete(thread.id);
-    if (
-      !current.autoSwitch ||
-      thread.providerId !== CLAUDE_CODE_PROVIDER ||
-      notTheUsersThread(thread) !== null ||
-      started === undefined
-    )
-      return;
-    const projectId = thread.projectId;
-    // From now until its model is known, a rescue of the project neither
-    // decides nor lands (Codex OPUS-0236-R2-001).
+    let ending = endingTurns.get(thread.id);
+    endingTurns.delete(thread.id);
+    try {
+      if (
+        !current.autoSwitch ||
+        thread.providerId !== CLAUDE_CODE_PROVIDER ||
+        notTheUsersThread(thread) !== null ||
+        started === undefined
+      )
+        return;
+      ending ??= turnEnded(thread.projectId, started.activity);
+      await afterTurn(thread, started, ending);
+    } finally {
+      ending?.();
+    }
+  });
+  /**
+   * A turn of the project ended: from now until its model is known, a
+   * rescue of it neither decides nor lands (Codex OPUS-0236-R2-001). The
+   * answer ends that wait; asking it again does nothing.
+   */
+  function turnEnded(projectId: string, activity: number): () => void {
     turnEnds.set(projectId, (turnEnds.get(projectId) ?? 0) + 1);
     const reads = modelReads.get(projectId) ?? new Map<number, number>();
     modelReads.set(projectId, reads);
-    reads.set(started.activity, deps.now() + MODEL_READ_LIMIT_MS);
-    const read = () => {
-      reads.delete(started.activity);
+    reads.set(activity, deps.now() + MODEL_READ_LIMIT_MS);
+    return () => {
+      reads.delete(activity);
       if (reads.size === 0 && modelReads.get(projectId) === reads)
         modelReads.delete(projectId);
     };
-    try {
-      await afterTurn(thread, started, read);
-    } finally {
-      read();
-    }
-  });
+  }
+  /** Per thread, the end of its turn counted by the first listener, until the last one reads it. */
+  const endingTurns = new Map<string, () => void>();
   /** Per project, the turns that ended (counted as each end begins). */
   const turnEnds = new Map<string, number>();
   /**

@@ -15564,6 +15564,74 @@ describe("no project is left on an account out of the preferred model or without
       );
     });
 
+    it("drops a rescue decided for Fable when an Opus turn ends while its sessions are shared and switch-ahead reads its log first (Codex OPUS-0236-R4-001)", async () => {
+      const order: string[] = [];
+      let releaseSharing!: () => void;
+      const sharing = new Promise<void>((resolve) => (releaseSharing = resolve));
+      let releaseLog!: () => void;
+      const log = new Promise<void>((resolve) => (releaseLog = resolve));
+      let logReads = 0;
+      const h = await host(
+        {
+          // A Team seat out of Fable, with room for Opus.
+          main: () => Response.json(teamPayload(10, 100)),
+          spare: () => Response.json(payload(10, 60, 20)),
+          work: () => Response.json(payload(5, 20, 30)),
+        },
+        {
+          ...OPTIONS,
+          // Switch-ahead on: its listener of a turn's end reads the log first.
+          settings: { ...OPTIONS.settings, switchAheadPercent: 90, switchAheadOtherPercent: 0 },
+          sessionsIo: oneSessionIo(order, () => sharing),
+          environments: SITE,
+          beforeEvents: async () => {
+            logReads++;
+            await log;
+          },
+          threadEvents: {
+            "thr-1": [
+              {
+                id: "evt_1",
+                scope: { kind: "thread" },
+                threadId: "thr-1",
+                seq: 1,
+                createdAt: NOW - HOUR,
+                type: "client/turn/requested",
+                data: { requestId: "creq_1", execution: { model: "claude-opus-5-5" } },
+              },
+            ],
+          },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      // An Opus turn past the checkpoint (a Send now) starts: its model is not known yet.
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "thr-1", projectId: "proj-1" }),
+      });
+      const before = h.usageCalls.length;
+      const run = h.harness.behavior.runService("usage-refresh");
+      await vi.waitFor(() => expect(h.usageCalls).toHaveLength(before + 3));
+      // The rescue (for Fable, the only model known) shares the sessions into work.
+      await vi.waitFor(() => expect(order).toEqual(["link"]));
+      // The turn ends meanwhile; its log does not answer yet.
+      const idle = h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: thread({ id: "thr-1", projectId: "proj-1" }),
+        lastAssistantText: null,
+      });
+      await vi.waitFor(() => expect(logReads).toBeGreaterThan(0));
+      // The sessions are shared before the log answers.
+      releaseSharing();
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+      releaseLog();
+      await idle;
+      run.controller.abort();
+      await run.done;
+      expect(h.envSet).toEqual([]);
+      expect(logged(h, "info")).toContainEqual(
+        expect.stringMatching(/^project proj-1: not moved to work: picked by hand or moved meanwhile$/),
+      );
+    });
+
     it("leaves a project alone while the model of a turn of it that ended is being read (Codex OPUS-0236-R2-001)", async () => {
       let releaseLog!: () => void;
       const log = new Promise<void>((resolve) => (releaseLog = resolve));
