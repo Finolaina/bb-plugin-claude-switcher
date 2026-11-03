@@ -6379,8 +6379,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           },
           async run({ options }) {
             const r = await rebalance(options.apply === true);
+            // A move not made fails the command in both formats (Codex
+            // PLAZAS-005).
+            const exitCode = r.moves.some((m) => m.done === false) ? 1 : 0;
             if (options.json)
-              return { exitCode: 0, stdout: `${JSON.stringify(r, null, 2)}\n` };
+              return { exitCode, stdout: `${JSON.stringify(r, null, 2)}\n` };
             const lines = [
               "account\tweekly\tbefore\tafter\tat work",
               ...r.accounts.map(
@@ -6401,8 +6404,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                 : []),
               ...(r.applied ? [] : ["", "Plan only: run with --apply to move them."]),
             ];
-            const failed = r.moves.some((m) => m.done === false);
-            return { exitCode: failed ? 1 : 0, stdout: `${lines.join("\n")}\n` };
+            return { exitCode, stdout: `${lines.join("\n")}\n` };
           },
         }),
         release: cliCommand({
