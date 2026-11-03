@@ -76,6 +76,23 @@ describe("rebalance", () => {
     expect(count).toEqual({ a: 36, b: 27, c: 27 });
   });
 
+  it("with unequal loads too, the fixed projects raise the others' floor (Codex PLAZAS-R2-002)", () => {
+    const t = rebalanceTargets(
+      [
+        { name: "a", load: 50 },
+        { name: "b", load: 0 },
+        { name: "c", load: 90 },
+      ],
+      90,
+      10,
+      new Map([["a", 36]]),
+    );
+    const v = [...t.values()];
+    expect(Math.max(...v) - Math.min(...v)).toBeLessThanOrEqual(10);
+    expect(t.get("a")).toBe(36);
+    expect(t.get("b")!).toBeGreaterThanOrEqual(t.get("c")!);
+  });
+
   it("with more fixed projects than the spread allows, the others still even out", () => {
     const t = rebalanceTargets(
       ["a", "b", "c"].map((name) => ({ name, load: 50 })),
