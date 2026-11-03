@@ -184,6 +184,10 @@ export const REBALANCE_SPREAD = 10;
  * measurement may free an account before the reset it waits for.
  */
 export const RESERVE_RECHECK_MS = 5 * 60_000;
+/** Not asked again in this long, and no row held: that wait is over (every hold is asked again within RESERVE_RECHECK_MS). */
+const WAIT_FORGOTTEN_MS = 2 * RESERVE_RECHECK_MS;
+/** How long looking for stuck threads may take: it is only a look, and health and the refresh wait for it. */
+const STUCK_READ_LIMIT_MS = 15_000;
 /** A seat reserved for a turn that has not started within this long is freed. */
 export const SEAT_TTL_MS = 90_000;
 /** Times a message waits because its project's account could not be read for its seat; then it goes (Astra SEATS-R01). */
@@ -4788,61 +4792,62 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
 
   /** Since when this plugin holds each thread's message: answered "wait", until it goes (see src/atascos.ts). */
   const waitSince = new Map<string, number>();
+  /** When bb last heard "wait" for each of them: bb hides a row while it asks again (Codex R1-001), so a row missing from a read is not yet a wait over. */
+  const waitAsked = new Map<string, number>();
   /** When each thread was last said to be stuck. */
   const stuckSaid = new Map<string, number>();
   bb.experimental_hooks.on("message.dispatch", async (ctx) => {
     const decision = await dispatchDecision(ctx);
     if (decision.action === "wait") {
-      if (!waitSince.has(ctx.thread.id)) waitSince.set(ctx.thread.id, deps.now());
-    } else if (ctx.attempt === "start-turn") waitSince.delete(ctx.thread.id);
+      const now = deps.now();
+      if (!waitSince.has(ctx.thread.id)) waitSince.set(ctx.thread.id, now);
+      waitAsked.set(ctx.thread.id, now);
+    } else if (ctx.attempt === "start-turn") {
+      waitSince.delete(ctx.thread.id);
+      waitAsked.delete(ctx.thread.id);
+    }
     return decision;
   });
   /**
    * The threads held long with another account free, as bb's queue stands;
-   * null when it could not be read: «nothing stuck» is never said unread.
+   * null when anything of it could not be read, within STUCK_READ_LIMIT_MS:
+   * «nothing stuck» is never said unread.
    */
   async function atascos(
     rows?: readonly HeldRow[],
   ): Promise<Atasco[] | null> {
-    let all = rows;
-    if (all === undefined)
-      try {
-        all = await bb.sdk.threads.queue.list();
-      } catch (error) {
-        bb.log.warn(
-          `the queue could not be read to look for stuck threads: ${error instanceof Error ? error.message : String(error)}`,
-        );
-        return null;
-      }
+    const read = await within(
+      readAtascos(rows),
+      STUCK_READ_LIMIT_MS,
+      "the stuck threads could not be read",
+    );
+    return typeof read === "object" ? read.value : null;
+  }
+  async function readAtascos(rows?: readonly HeldRow[]): Promise<Atasco[]> {
+    const all = rows ?? (await bb.sdk.threads.queue.list());
     const out: Atasco[] = [];
     const now = deps.now();
     for (const held of heldLong(all, PLUGIN_ID, waitSince, now)) {
-      try {
-        const queued = seats.position(held.threadId)?.account;
-        const known = await bb.sdk.threads.get({ threadId: held.threadId });
-        let account: string;
-        if (queued !== undefined) account = seatName(queued);
-        else {
-          const read = await projectAccount(known.projectId);
-          if (read.external) continue;
-          account = read.account ?? current.defaultAccountName;
-        }
-        const modelo = modelFamily(held.model) ?? current.preferredModel;
-        const libres = freeElsewhere(account, modelo);
-        if (libres.length === 0) continue;
-        out.push({
-          hilo: held.threadId,
-          cuenta: account,
-          modelo,
-          minutos: Math.floor((now - held.since) / 60_000),
-          libres,
-          proyectoOcupado: projectSeated(known.projectId, held.threadId),
-        });
-      } catch (error) {
-        bb.log.warn(
-          `thread ${held.threadId}: not looked at for being stuck: ${error instanceof Error ? error.message : String(error)}`,
-        );
+      const queued = seats.position(held.threadId)?.account;
+      const known = await bb.sdk.threads.get({ threadId: held.threadId });
+      let account: string;
+      if (queued !== undefined) account = seatName(queued);
+      else {
+        const read = await projectAccount(known.projectId);
+        if (read.external) continue;
+        account = read.account ?? current.defaultAccountName;
       }
+      const modelo = modelFamily(held.model) ?? current.preferredModel;
+      const libres = freeElsewhere(account, modelo);
+      if (libres.length === 0) continue;
+      out.push({
+        hilo: held.threadId,
+        cuenta: account,
+        modelo,
+        minutos: Math.floor((now - held.since) / 60_000),
+        libres,
+        proyectoOcupado: projectSeated(known.projectId, held.threadId),
+      });
     }
     return out;
   }
@@ -4851,12 +4856,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     rows: readonly HeldRow[],
     readAt: number,
   ): Promise<void> {
-    for (const [threadId, since] of waitSince)
+    for (const [threadId, asked] of waitAsked)
       if (
-        since < readAt &&
+        readAt - asked > WAIT_FORGOTTEN_MS &&
         !rows.some((row) => row.threadId === threadId && heldBy(row, PLUGIN_ID))
-      )
+      ) {
+        waitAsked.delete(threadId);
         waitSince.delete(threadId);
+      }
     const stuck = (await atascos(rows)) ?? [];
     const now = deps.now();
     for (const a of stuck) {
@@ -5642,7 +5649,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const marksBefore = putBackMarks;
     const readAt = deps.now();
     const all = await bb.sdk.threads.queue.list();
-    await sayStuck(all, readAt).catch((error: unknown) =>
+    // Beside the pass, not before it: a slow read of a thread that may be
+    // stuck does not hold a retry back (Codex R1-002).
+    const looked = sayStuck(all, readAt).catch((error: unknown) =>
       bb.log.warn(
         `the stuck threads were not looked for: ${error instanceof Error ? error.message : String(error)}`,
       ),
@@ -5678,6 +5687,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       }
     }
     await rescueStuck(all);
+    await looked;
   }
 
   /**
@@ -6344,6 +6354,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             : settle({ ...m.usage, name: account.name }, now);
         const unconfirmed =
           usage !== null && !trusted.has(account.name) && m?.observedAt != null;
+        // The same per model: a window out at the last good read, its reset
+        // past, with the queries failing since (Codex R1-003).
+        const unconfirmedModels =
+          usage === null || m?.observedAt == null
+            ? []
+            : Object.keys(usage.models).filter(
+                (model) =>
+                  !collector
+                    .usable(maxReadAgeMs(), model)
+                    .some((a) => a.name === account.name),
+              );
         return {
           name: account.name,
           plan: planOf(account, m?.usage ?? null),
@@ -6358,6 +6379,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                   external: taken[account.name]!.external ?? [],
                 },
           ...(unconfirmed ? { unconfirmedSince: m!.observedAt! } : {}),
+          ...(unconfirmedModels.length > 0 ? { unconfirmedModels } : {}),
           usable:
             usage !== null &&
             !unconfirmed &&

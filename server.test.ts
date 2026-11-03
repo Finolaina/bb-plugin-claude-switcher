@@ -17601,6 +17601,62 @@ describe("caminos 2026-11-04", () => {
       expect((await report(h)).atascos).toEqual([]);
     });
 
+    it("a row bb hides while it asks again keeps its age; gone 10 minutes with no ask, the wait is over", async () => {
+      const { h, at } = await stuck();
+      const rows = [...h.queued];
+      h.queued.splice(0);
+      at(5 * 60_000);
+      await pass(h);
+      h.queued.push(...rows);
+      at(10 * 60_000);
+      expect((await report(h)).atascos).toHaveLength(1);
+      h.queued.splice(0);
+      at(10 * 60_000 + 10 * 60_000 + 1);
+      await pass(h);
+      h.queued.push(...rows);
+      expect((await report(h)).atascos).toEqual([]);
+    });
+
+    it("a thread whose read never answers makes the look `null` within its limit, not a wait", async () => {
+      const { h, at } = await stuck();
+      at(10 * 60_000);
+      vi.useFakeTimers();
+      try {
+        h.harness.sdk.stub("threads.get", () => new Promise(() => {}));
+        const answer = report(h);
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect((await answer).atascos).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("health marks a model's window only the clock frees, with the queries failing, and the rest as they are", async () => {
+      let failing = false;
+      let clock = NOW;
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 10, 5)),
+          spare: () => Response.json(payload(20, 48, 100)),
+          work: () =>
+            failing
+              ? new Response(null, { status: 500 })
+              : Response.json(payload(0, 2, 100)),
+        },
+        { settings: FABLE, clock: () => clock },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      failing = true;
+      // Past the window's reset (payload: +4 h) and the age the policy trusts.
+      clock = NOW + 5 * HOUR;
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      const out = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout) as {
+        cuentas: { nombre: string; modelos: Record<string, { sinConfirmar?: boolean }> }[];
+      };
+      expect(out.cuentas.find((c) => c.nombre === "work")?.modelos.Fable?.sinConfirmar).toBe(true);
+    });
+
     it("an unreadable queue is `null`, never «nothing stuck»", async () => {
       const { h } = await stuck();
       h.harness.sdk.stub("threads.queue.list", async () => {
