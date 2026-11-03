@@ -774,6 +774,7 @@ bb claude-switcher health [--json]        # a stable read for other threads and 
 bb claude-switcher reserve <account> --id <x> --until <ISO with zone> [--json]   # hold a seat for a run outside bb (at most 12 h); fails with no free seat (exit 1), or with exit 75 while the seats are still being counted after a reload
 bb claude-switcher unreserve --id <x> [--json]   # end it; an id not held is no error
 bb claude-switcher use <project> <account | default>   # project id, or its name when unique
+bb claude-switcher rebalance [--apply] [--json]   # spread the projects with no thread at work over the usable Ultra accounts by their weekly (the plan; --apply moves them)
 bb claude-switcher release                # remove every CLAUDE_CONFIG_DIR this plugin set
 ```
 
@@ -800,6 +801,7 @@ named `default`; the default account's own name always works.
 | `claudeCommand`      | `claude`             | The Claude Code executable used to log an account in from bb: a name looked up in the `PATH` of bb's server, or a full path.                                                                                        |
 | `seatsMax`           | `4`                  | Threads at once on a Max account: a thread whose turn is about to start waits when the project's account already runs this many. 0 = no limit. See [Seats per account](#seats-per-account). |
 | `seatsTeam`          | `2`                  | The same for a Team account. |
+| `seatsFollowLoad`    | `true`               | A Max or Ultra account takes one thread more than `seatsMax` while its day's pace is under 50 % and its 5-hour session (when it has one) under 40 %, and one fewer once its pace passes 90 %; each change is in the history. Off: `seatsMax`, always. See [Seats per account](#seats-per-account). |
 | `dayStartHour`       | `9`                  | Hour the day starts in Europe/Madrid. Each day gets an even share of what is left of an account's weekly window; the panel and `health` show how much of it is spent. |
 | `paceHoldsBackground` | `false`             | On: an Ultra or Max account at 90 % of its share of the day takes no more background work (a thread another thread, an automation or a plugin opens) unless no other account can run it, and the panel shows it as kept for you. Your own threads are never held back by it. Off (the default since 0.2.33): the day's share is only shown. |
 | `loginPrivateWindow` | `true`               | macOS: open logins in a private Chrome window, so they do not reuse the browser's Claude session. Off, without Chrome, or on Linux: the default browser.                                                            |
@@ -852,6 +854,18 @@ and emptied its 5-hour window in minutes (2026-10-29: 7 of 8 accounts at
 may run turns on it at once, `seatsMax` (default 4) on a Max account and
 `seatsTeam` (default 2) on a Team account; 0 = no limit.
 
+- **By load** (`seatsFollowLoad`, on by default since 0.2.37; Aitor,
+  2026-11-03: «que se vayan balanceando, pero que no sea un "máximo
+  4"»). `seatsMax` is the middle, not a fixed cap: a Max or Ultra account
+  takes one thread more while its day's pace is under 50 % and its 5-hour
+  session (when it has one) under 40 %, and one fewer once its pace
+  passes 90 %. Never more than one above: in the week to 2026-11-03 five
+  threads at once ran on joytorm, siloeads and viaulab with no account
+  cut, never six; four threads spent 37-44 % of a 5-hour session an hour
+  there (`docs/plazas-2026-11-03/medir-techo.salida.txt`). Each change is
+  in the history (`Seats on joytorm: 4 → 5, day's pace 0 % (below 50 %),
+  5-hour session 3 % (below 40 %)`), measured as the account is. A Team
+  seat keeps `seatsTeam`.
 - **Which kind.** From `oauthAccount.organizationType` in the account's
   `.claude.json` (`claude_max`, `claude_team`). Anything else: Team when
   the provider reports no general weekly window, Max otherwise.
@@ -870,8 +884,18 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
   first come, first served. A seat reserved for a turn that does not start
   within 90 s is freed; a thread that stops asking (its message was
   removed) leaves the line.
-- **A project is never moved to find a seat**: moving it moves all its
-  threads. Seats only steer the moves made for other reasons: a new
+- **A full account sends the project to one with a free seat** (since
+  0.2.37; Aitor, 2026-11-03: «necesitaría abrir más hilos»). With the
+  automatic choice on, a turn that would wait for a seat moves its
+  project first to the best other account with a seat free beyond those
+  owed to the threads already waiting there, chosen as any move chooses
+  (one that can run the turn's model, below the switch-ahead share when
+  one is set, never a Max account that keeps Fable for another model).
+  The history says `Moved to account joytorm before the turn: siloeads
+  seats full (4/4), joytorm had 4 free`. A project with another thread's
+  turn under way (or about to start) stays: moving it moves all its
+  threads. The message waits only when no such account has a seat.
+- **Otherwise seats steer the moves made for other reasons**: a new
   project, a move before a turn off an account that cannot run it, a
   move off a long wait and a switch ahead of the limit go only to an
   account with a free seat (by quota among them); with none free anywhere
@@ -879,7 +903,20 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
   exception is the switch after a turn failed on a limit: that account
   cannot work, so with no seat free anywhere the project goes to the best
   of the others by quota and its threads wait for a seat there. A project
-  picked by hand waits for a seat on that account like any.
+  picked by hand is no exception: a full account moves it too, as above.
+- **Spreading the projects** (`bb claude-switcher rebalance`, since
+  0.2.37; Aitor, 2026-11-03: siloeads held 25 projects for its 4
+  seats). One pass over the usable Ultra accounts: each gets a share of
+  the projects by the room left in its weekly (the fuller of the weekly
+  and the preferred model's window), none ends more than 10 projects
+  above the one with fewest. A project at work stays where it is and
+  counts there: a Claude Code thread of it running or starting a turn,
+  waiting (a queued message, a retry, an error), holding or waiting for
+  a seat, or active within the last hour (its prompt cache). The least
+  recently active projects move first. Without `--apply` it only prints
+  the plan; each move it makes is in the history as `Rebalanced: siloeads
+  had 25 projects (weekly 77 %), joytorm 9 (weekly 21 %)`, and `use`
+  undoes it.
 - **Counted anyway.** A turn sent past the checkpoint (a queued message
   sent by hand) takes a seat as it starts, even over the limit (logged
   as «over capacity»). A turn that started keeps the seat its dispatch

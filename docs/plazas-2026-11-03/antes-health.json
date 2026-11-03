@@ -1,0 +1,347 @@
+# 2026-11-03 13:07:43 CET  bb claude-switcher health --json
+{
+  "version": 1,
+  "medido": "2026-11-03T13:07:21+01:00",
+  "inicioDia": 9,
+  "freno": false,
+  "cuentas": [
+    {
+      "nombre": "mariscal",
+      "plan": "desconocido",
+      "planTexto": "sin datos de plan",
+      "cincoHoras": null,
+      "sesion": null,
+      "semana": null,
+      "modelos": {},
+      "ritmo": null,
+      "plazas": {
+        "usadas": 0,
+        "total": 4,
+        "externas": []
+      },
+      "usable": false,
+      "problema": "sin login"
+    },
+    {
+      "nombre": "aitor",
+      "plan": "ultra",
+      "planTexto": "Ultra · sin tope de 5 h",
+      "cincoHoras": false,
+      "sesion": null,
+      "semana": {
+        "pct": 51,
+        "vuelve": "2026-11-08T18:00:00+01:00"
+      },
+      "modelos": {
+        "Fable": {
+          "pct": 27,
+          "vuelve": "2026-11-08T18:00:00+01:00"
+        }
+      },
+      "ritmo": {
+        "presupuesto": 10.4,
+        "gastado": 7,
+        "pctDia": 67,
+        "fondo": true
+      },
+      "plazas": {
+        "usadas": 2,
+        "total": 4,
+        "externas": []
+      },
+      "usable": true,
+      "problema": null
+    },
+    {
+      "nombre": "ganaresenas",
+      "plan": "ultra",
+      "planTexto": "Ultra · sin tope de 5 h",
+      "cincoHoras": false,
+      "sesion": null,
+      "semana": {
+        "pct": 53,
+        "vuelve": "2026-11-08T22:00:00+01:00"
+      },
+      "modelos": {
+        "Fable": {
+          "pct": 50,
+          "vuelve": "2026-11-08T22:00:00+01:00"
+        }
+      },
+      "ritmo": {
+        "presupuesto": 10.1,
+        "gastado": 9,
+        "pctDia": 89,
+        "fondo": true
+      },
+      "plazas": {
+        "usadas": 0,
+        "total": 4,
+        "externas": []
+      },
+      "usable": true,
+      "problema": null
+    },
+    {
+      "nombre": "joytorm",
+      "plan": "ultra",
+      "planTexto": "Ultra · 5 h hasta que Anthropic la verifique",
+      "cincoHoras": true,
+      "sesion": {
+        "pct": 3,
+        "vuelve": "2026-11-03T13:50:00+01:00"
+      },
+      "semana": {
+        "pct": 21,
+        "vuelve": "2026-11-09T09:00:00+01:00"
+      },
+      "modelos": {
+        "Fable": {
+          "pct": 18,
+          "vuelve": "2026-11-09T09:00:00+01:00"
+        }
+      },
+      "ritmo": {
+        "presupuesto": 13.2,
+        "gastado": 0,
+        "pctDia": 0,
+        "fondo": true
+      },
+      "plazas": {
+        "usadas": 0,
+        "total": 4,
+        "externas": []
+      },
+      "usable": true,
+      "problema": null
+    },
+    {
+      "nombre": "siloeads",
+      "plan": "ultra",
+      "planTexto": "Ultra · 5 h hasta que Anthropic la verifique",
+      "cincoHoras": true,
+      "sesion": {
+        "pct": 5,
+        "vuelve": "2026-11-03T18:00:00+01:00"
+      },
+      "semana": {
+        "pct": 68,
+        "vuelve": "2026-11-06T12:00:00+01:00"
+      },
+      "modelos": {
+        "Fable": {
+          "pct": 77,
+          "vuelve": "2026-11-06T12:00:00+01:00"
+        }
+      },
+      "ritmo": {
+        "presupuesto": 13.1,
+        "gastado": 9,
+        "pctDia": 69,
+        "fondo": true
+      },
+      "plazas": {
+        "usadas": 4,
+        "total": 4,
+        "externas": []
+      },
+      "usable": true,
+      "problema": null
+    },
+    {
+      "nombre": "team1",
+      "plan": "team",
+      "planTexto": "Team",
+      "cincoHoras": true,
+      "sesion": {
+        "pct": 14,
+        "vuelve": "2026-11-03T13:40:00+01:00"
+      },
+      "semana": {
+        "pct": 12,
+        "vuelve": "2026-11-05T12:00:00+01:00"
+      },
+      "modelos": {
+        "Fable": {
+          "pct": 100,
+          "vuelve": "2026-11-05T12:00:00+01:00"
+        }
+      },
+      "ritmo": {
+        "presupuesto": 41.9,
+        "gastado": 1,
+        "pctDia": 2,
+        "fondo": true
+      },
+      "plazas": {
+        "usadas": 2,
+        "total": 2,
+        "externas": []
+      },
+      "usable": true,
+      "problema": null
+    },
+    {
+      "nombre": "team2",
+      "plan": "team",
+      "planTexto": "Team",
+      "cincoHoras": true,
+      "sesion": {
+        "pct": 0,
+        "vuelve": "2026-11-03T14:50:00+01:00"
+      },
+      "semana": {
+        "pct": 0,
+        "vuelve": "2026-11-09T17:00:00+01:00"
+      },
+      "modelos": {
+        "Fable": {
+          "pct": 0,
+          "vuelve": "2026-11-09T17:00:00+01:00"
+        }
+      },
+      "ritmo": {
+        "presupuesto": 15.8,
+        "gastado": 0,
+        "pctDia": 0,
+        "fondo": true
+      },
+      "plazas": {
+        "usadas": 0,
+        "total": 2,
+        "externas": []
+      },
+      "usable": true,
+      "problema": null
+    },
+    {
+      "nombre": "team3",
+      "plan": "team",
+      "planTexto": "Team",
+      "cincoHoras": true,
+      "sesion": {
+        "pct": 43,
+        "vuelve": "2026-11-03T16:40:00+01:00"
+      },
+      "semana": {
+        "pct": 7,
+        "vuelve": "2026-11-10T10:00:00+01:00"
+      },
+      "modelos": {
+        "Fable": {
+          "pct": 0,
+          "vuelve": "2026-11-10T10:00:00+01:00"
+        }
+      },
+      "ritmo": {
+        "presupuesto": 14.3,
+        "gastado": 7,
+        "pctDia": 49,
+        "fondo": true
+      },
+      "plazas": {
+        "usadas": 0,
+        "total": 2,
+        "externas": []
+      },
+      "usable": true,
+      "problema": null
+    },
+    {
+      "nombre": "team4",
+      "plan": "team",
+      "planTexto": "Team",
+      "cincoHoras": true,
+      "sesion": {
+        "pct": 0,
+        "vuelve": null
+      },
+      "semana": {
+        "pct": 2,
+        "vuelve": "2026-11-09T17:00:00+01:00"
+      },
+      "modelos": {
+        "Fable": {
+          "pct": 0,
+          "vuelve": "2026-11-09T17:00:00+01:00"
+        }
+      },
+      "ritmo": {
+        "presupuesto": 15.5,
+        "gastado": 0,
+        "pctDia": 0,
+        "fondo": true
+      },
+      "plazas": {
+        "usadas": 0,
+        "total": 2,
+        "externas": []
+      },
+      "usable": true,
+      "problema": null
+    },
+    {
+      "nombre": "team5",
+      "plan": "team",
+      "planTexto": "Team",
+      "cincoHoras": true,
+      "sesion": {
+        "pct": 29,
+        "vuelve": "2026-11-03T16:00:00+01:00"
+      },
+      "semana": {
+        "pct": 19,
+        "vuelve": "2026-11-05T07:00:00+01:00"
+      },
+      "modelos": {
+        "Fable": {
+          "pct": 100,
+          "vuelve": "2026-11-05T07:00:00+01:00"
+        }
+      },
+      "ritmo": {
+        "presupuesto": 43.8,
+        "gastado": 3,
+        "pctDia": 7,
+        "fondo": true
+      },
+      "plazas": {
+        "usadas": 1,
+        "total": 2,
+        "externas": []
+      },
+      "usable": true,
+      "problema": null
+    },
+    {
+      "nombre": "viaulab",
+      "plan": "ultra",
+      "planTexto": "Ultra · sin tope de 5 h",
+      "cincoHoras": false,
+      "sesion": null,
+      "semana": {
+        "pct": 100,
+        "vuelve": "2026-11-04T01:00:00+01:00"
+      },
+      "modelos": {
+        "Fable": {
+          "pct": 100,
+          "vuelve": "2026-11-04T01:00:00+01:00"
+        }
+      },
+      "ritmo": {
+        "presupuesto": 0,
+        "gastado": 0,
+        "pctDia": 100,
+        "fondo": true
+      },
+      "plazas": {
+        "usadas": 0,
+        "total": 4,
+        "externas": []
+      },
+      "usable": false,
+      "problema": "agotada hasta 2026-11-04T01:00:00+01:00"
+    }
+  ]
+}

@@ -2044,3 +2044,77 @@ describe("background work in every choice of another account (Codex ULTRA-R01)",
     expect(bestAccount(accounts.slice(1), "", NOW)).toBe("work");
   });
 });
+
+// Aitor 2026-11-03 («necesitaría abrir más hilos»): siloeads 4/4 with a
+// thread waiting while joytorm had 0/4; the project moves to the account
+// with a free seat instead of waiting.
+describe("decidePlacement with the current account's seats full", () => {
+  const fable = (usedPercent: number) => ({
+    Fable: { usedPercent, resetsAt: NOW + 4 * HOUR },
+  });
+  const accounts = [
+    account("siloeads", { weekly: { usedPercent: 68, resetsAt: NOW + 3 * 24 * HOUR }, models: fable(77) }),
+    account("joytorm", { weekly: { usedPercent: 21, resetsAt: NOW + 5 * 24 * HOUR }, models: fable(18) }),
+    account("ganaresenas", { weekly: { usedPercent: 53, resetsAt: NOW + 4 * 24 * HOUR }, models: fable(50) }),
+  ];
+  const seated = (free: Record<string, number>) => (name: string) => free[name] ?? 0;
+  const full = (overrides: Partial<PlacementInput> = {}): PlacementInput => ({
+    currentAccount: "siloeads",
+    isNew: false,
+    accounts,
+    preferredModel: "Fable",
+    reserveModel: "Fable",
+    seatsFull: true,
+    freeSeats: seated({ joytorm: 4, ganaresenas: 4 }),
+    now: NOW,
+    ...overrides,
+  });
+
+  it("moves to the best account with a free seat, as any other move chooses (A 4/4, B 0/4)", () => {
+    expect(decidePlacement(full())).toEqual({
+      kind: "move",
+      account: "ganaresenas",
+      why: "current-full",
+    });
+    expect(
+      decidePlacement(full({ freeSeats: seated({ joytorm: 4 }) })),
+    ).toEqual({ kind: "move", account: "joytorm", why: "current-full" });
+  });
+
+  it("waits where it is when no other account has a free seat", () => {
+    expect(decidePlacement(full({ freeSeats: seated({}) }))).toEqual({
+      kind: "keep",
+    });
+  });
+
+  it("keeps the project while its account has a seat for the turn", () => {
+    expect(decidePlacement(full({ seatsFull: false }))).toEqual({
+      kind: "keep",
+    });
+  });
+
+  it("never to an account that cannot run the model, or at or above the switch-ahead share", () => {
+    const out = [
+      accounts[0]!,
+      account("joytorm", { models: fable(100) }),
+      accounts[2]!,
+    ];
+    expect(
+      decidePlacement(full({ accounts: out, freeSeats: seated({ joytorm: 4 }) })),
+    ).toEqual({ kind: "keep" });
+    expect(decidePlacement(full({ aheadThreshold: 50 }))).toEqual({
+      kind: "move",
+      account: "joytorm",
+      why: "current-full",
+    });
+    expect(decidePlacement(full({ aheadThreshold: 20 }))).toEqual({
+      kind: "keep",
+    });
+  });
+
+  it("an Opus turn never goes to a Max account that keeps Fable for a seat", () => {
+    expect(
+      decidePlacement(full({ preferredModel: "Opus", reserveModel: "Fable" })),
+    ).toMatchObject({ kind: "keep" });
+  });
+});

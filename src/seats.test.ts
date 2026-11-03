@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Seats, capacityFor } from "./seats.js";
+import { Seats, capacityFor, seatCeiling } from "./seats.js";
 
 const T0 = 1_000_000;
 
@@ -292,5 +292,33 @@ describe("Seats: external holds (a `claude -p` run outside bb, 2026-10-30)", () 
       { id: "a", account: "team", until: T0 + H, at: T0 - H },
       { id: "long", account: "free", until: T0 + 11 * H, at: T0 - H },
     ]);
+  });
+});
+
+describe("seatCeiling: the seats of a Max account by its load (Aitor 2026-11-03)", () => {
+  it("one more under 50 % of the day's pace and 40 % of the session, at the exact cut", () => {
+    expect(seatCeiling(4, false, 49, 39).capacity).toBe(5);
+    expect(seatCeiling(4, false, 50, 39).capacity).toBe(4);
+    expect(seatCeiling(4, false, 49, 40).capacity).toBe(4);
+    // No 5-hour window (Ultra without it): the pace alone.
+    expect(seatCeiling(4, false, 49, null)).toEqual({
+      capacity: 5,
+      why: "day's pace 49 % (below 50 %), no 5-hour window",
+    });
+  });
+
+  it("one fewer above 90 % of the day's pace, at the exact cut, never below 1", () => {
+    expect(seatCeiling(4, false, 90, 10).capacity).toBe(4);
+    expect(seatCeiling(4, false, 91, 10)).toEqual({
+      capacity: 3,
+      why: "day's pace 91 % (above 90 %)",
+    });
+    expect(seatCeiling(1, false, 95, 10).capacity).toBe(1);
+  });
+
+  it("a Team seat, no limit, or a pace not known: the setting", () => {
+    expect(seatCeiling(2, true, 0, 0).capacity).toBe(2);
+    expect(seatCeiling(0, false, 0, 0).capacity).toBe(0);
+    expect(seatCeiling(4, false, null, 0)).toEqual({ capacity: 4, why: null });
   });
 });
