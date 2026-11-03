@@ -10158,6 +10158,50 @@ describe("an Opus turn on a Max account that keeps Fable", () => {
     expect(h.envSet).toEqual([]);
   });
 
+  it("an Opus turn admitted to a Team seat while its project went to a Max account moves to that seat, not held by its own seat (Codex OPUS-R2-004)", async () => {
+    const onWork = [{ name: ENV_VAR, note: ownNote("work"), secret: true, value: null }];
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, 10, 2)),
+        spare: () => Response.json(payload(10, 10, 5)),
+        // A Team seat out of Fable: a Fable turn leaves it.
+        work: () => Response.json(teamPayload(17, 100)),
+      },
+      {
+        settings: { ...FABLE, seatsTeam: 1 },
+        presetEnv: { "proj-1": onWork, "proj-2": onWork },
+      },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const send = (threadId: string, projectId: string, model: string) =>
+      h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id: threadId, projectId }),
+          requestedExecution: { providerId: "claude-code", model },
+          attempt: "start-turn",
+        }),
+      );
+    // proj-2's Opus thread takes work's only seat.
+    expect(await send("thread-9", "proj-2", OPUS_ID)).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-9", projectId: "proj-2" }),
+    });
+    // proj-1's Opus thread waits in work's queue.
+    expect(await send("thread-1", "proj-1", OPUS_ID)).toMatchObject({ action: "wait" });
+    // proj-1's Fable thread takes the project to a Max account.
+    expect(await send("thread-2", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+    // main is the default account: there means no variable.
+    expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-1"]);
+    // proj-2's turn ends: work's seat goes to thread-1, which moves there.
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "thread-9", projectId: "proj-2" }),
+      lastAssistantText: null,
+    });
+    expect(await send("thread-1", "proj-1", OPUS_ID)).toEqual({ action: "proceed" });
+    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+  });
+
   it("a Fable turn on the Max account is not held", async () => {
     const h = await host(
       {
@@ -10262,6 +10306,63 @@ describe("an Opus turn on a Max account that keeps Fable", () => {
       await ended(h);
       expect(h.envSet.map((e) => e.note)).toEqual([ownNote("spare")]);
     });
+
+    it("moves the project after an Opus turn that came after another thread's Fable message (Codex OPUS-R2-001)", async () => {
+      const h = await host(MAX_AND_SEAT, { settings: FABLE, threadEvents: logged(OPUS_ID) });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "thread-2", FABLE_ID)).toEqual({ action: "proceed" });
+      await turn(h);
+      expect(h.envSet.map((e) => e.note)).toEqual([ownNote("work")]);
+    });
+
+    it("moves nothing when the user confirms the project's own account while the turn runs (Codex OPUS-R2-002)", async () => {
+      const options: HostOptions = {
+        settings: FABLE,
+        threadEvents: logged(OPUS_ID),
+        presetEnv: {
+          "proj-1": [{ name: ENV_VAR, note: ownNote("spare"), secret: true, value: null }],
+        },
+      };
+      const h = await host(MAX_AND_SEAT, options);
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      await started(h);
+      expect((await h.harness.behavior.runCli(["use", "Website", "spare"])).exitCode).toBe(0);
+      const before = h.envSet.length;
+      await ended(h);
+      expect(h.envSet.slice(before)).toEqual([]);
+    });
+
+    for (const [what, meanwhile] of [
+      [
+        "automatic switching is turned off",
+        (h: Awaited<ReturnType<typeof host>>) =>
+          h.harness.behavior.setSettings({ autoSwitch: false }),
+      ],
+      [
+        "a Fable message of another thread is placed",
+        (h: Awaited<ReturnType<typeof host>>) => dispatch(h, "thread-2", FABLE_ID),
+      ],
+    ] as const) {
+      it(`moves nothing when ${what} while the move reads the project's account (Codex OPUS-R2-003)`, async () => {
+        let armed = false;
+        const options: HostOptions = { settings: FABLE, threadEvents: logged(OPUS_ID) };
+        const h = await host(MAX_AND_SEAT, options);
+        dispose = () => h.harness.dispose();
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        options.beforeEnvRead = async () => {
+          if (!armed) return;
+          armed = false;
+          await meanwhile(h);
+        };
+        await started(h);
+        armed = true;
+        await ended(h);
+        expect(armed).toBe(false);
+        expect(h.envSet).toEqual([]);
+      });
+    }
 
     it("moves nothing for a turn whose start it did not see", async () => {
       const h = await host(MAX_AND_SEAT, { settings: FABLE, threadEvents: logged(OPUS_ID) });
