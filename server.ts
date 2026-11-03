@@ -88,6 +88,7 @@ import {
 } from "./src/switch.js";
 import {
   canRunModel,
+  chooseAccount,
   holdsForReserve,
   isUsable,
   modelWindow,
@@ -4245,6 +4246,33 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     };
   }
   /**
+   * The best account other than `name` that can run `model` now, its seats
+   * aside and without spending the reserve; null when none can.
+   */
+  function otherThatRuns(name: string, model: string): string | null {
+    const now = deps.now();
+    return (
+      chooseAccount(
+        measuredAccounts(model)
+          .filter((a) => a.name !== name)
+          .map((a) => settle(a, now)),
+        { preferredModel: model, reserveModel: current.preferredModel },
+      )?.account ?? null
+    );
+  }
+  /**
+   * A turn in `model` on `name` could not run there, as measured now, and
+   * another account can: it waits and is placed again, rather than start
+   * where it fails (a pick by hand that crossed its placement).
+   */
+  function blockedOff(name: string, model: string): boolean {
+    const usage = measuredAccounts(model).find((a) => a.name === name);
+    if (usage === undefined || usage.unknown === true) return false;
+    const settled = settle(usage, deps.now());
+    if (isUsable(settled) && canRunModel(settled, model)) return false;
+    return otherThatRuns(name, model) !== null;
+  }
+  /**
    * A turn in `model` on `name` would spend the weekly the reserved model
    * needs, and `model` is held off such an account (see holdsForReserve),
    * as measured now; false when nothing is known of it.
@@ -4348,6 +4376,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             ? `${fromName} has no login`
             : `${fromName} keeps its weekly for ${current.preferredModel}`,
         );
+      // Kept where it cannot run because no other has a free seat: it waits
+      // in the queue of one that can run it instead of taking a seat here
+      // to fail. With none able to run it, it starts: the failure is what
+      // tells the user and applies the longest wait (revisión 2026-11-04).
+      else if (decision.why === "current-blocked") {
+        const other = otherThatRuns(fromName, model);
+        if (other !== null)
+          turn.held = {
+            sendAt: now + SEAT_RECHECK_MS,
+            reason: `Waiting for a free seat for ${model} on ${other}: ${fromName} ${whyOut(fromName, model)}`,
+            seatOn: other,
+          };
+      }
       return { account: fromName, byDefault: !from.owned, writes };
     }
     if (turn.abandoned) return null;
@@ -4772,6 +4813,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         heldOff(at.account, model)
       ) {
         const reason = `Waiting to place ${model} again: the project is on ${at.account}, which keeps its weekly for ${current.preferredModel}`;
+        bb.log.info(`thread ${thread.id}: its message waits (${reason})`);
+        return { action: "wait", reason, sendAt: deps.now() + SEAT_RECHECK_MS };
+      }
+      if (
+        current.autoSwitch &&
+        model !== null &&
+        at !== null &&
+        at.account !== null &&
+        blockedOff(at.account, model)
+      ) {
+        const reason = `Waiting to place ${model} again: the project is on ${at.account}, which ${whyOut(at.account, model)}`;
         bb.log.info(`thread ${thread.id}: its message waits (${reason})`);
         return { action: "wait", reason, sendAt: deps.now() + SEAT_RECHECK_MS };
       }
