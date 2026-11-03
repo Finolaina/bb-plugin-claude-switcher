@@ -15262,6 +15262,19 @@ describe("bb claude-switcher rebalance", () => {
     expect([...h.envSet, ...h.envDeleted].map((e) => e.projectId)).not.toContain("p8");
   });
 
+  it("a move that fails fails the command in JSON too (Codex PLAZAS-005)", async () => {
+    // Every write fails: the moves to work set a variable, those to main
+    // (the default) delete it.
+    const all = ["p3", "p4", "p5", "p6", "p7", "p8"];
+    const h = await host(USAGE, { ...opts, failSet: all, failDelete: all });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const { stdout, exitCode } = await h.harness.behavior.runCli(["rebalance", "--apply", "--json"]);
+    expect(exitCode).toBe(1);
+    const r = JSON.parse(stdout) as { moves: { projectId: string; done: boolean | null }[] };
+    expect(r.moves.map((m) => m.done)).toEqual(all.map(() => false));
+  });
+
   it("a project whose thread takes a seat leaves the plan: it is at work", async () => {
     const h = await host(USAGE, opts);
     dispose = () => h.harness.dispose();
