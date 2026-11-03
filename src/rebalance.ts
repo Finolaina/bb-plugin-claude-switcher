@@ -34,10 +34,13 @@ function room(account: RebalanceAccount): number {
 /**
  * Projects per account: by the room in its weekly, no account more than
  * `spread` above the one with fewest, and never fewer than the projects
- * `fixed` there (Codex PLAZAS-003): those raise its floor, and the rest
- * spread over the others. Solved in real numbers with a band two
- * narrower, then rounded (each by less than one), so the integers stay
- * within `spread` whenever the fixed projects allow it.
+ * `fixed` there (Codex PLAZAS-003). Counted one project at a time, from
+ * the fixed ones up: the account with the fewest projects for its room
+ * takes it, unless that would leave it more than `spread` above the one
+ * with fewest, or one sits more than `spread` below the one with most:
+ * then the one with fewest takes it (the fixed projects raise the others'
+ * floor: Codex PLAZAS-R2-002). Over `spread` only when the fixed projects
+ * alone are (and by one at most with a `spread` of 0).
  */
 export function rebalanceTargets(
   accounts: readonly RebalanceAccount[],
@@ -45,46 +48,29 @@ export function rebalanceTargets(
   spread: number,
   fixed: ReadonlyMap<string, number> = new Map(),
 ): Map<string, number> {
-  const width = Math.max(0, spread - 2);
+  const count = accounts.map((a) => fixed.get(a.name) ?? 0);
   const rooms = accounts.map(room);
-  const sum = rooms.reduce((a, b) => a + b, 0);
-  const ideal = rooms.map((r) => (total * r) / sum);
-  const floor = accounts.map((a) => fixed.get(a.name) ?? 0);
-  const banded = (low: number) =>
-    ideal.map((x, i) =>
-      Math.max(floor[i]!, Math.min(Math.max(x, low), low + width)),
-    );
-  // The band's floor such that the shares add up to the projects; from
-  // -width, where only the fixed projects count.
-  let lo = -width;
-  let hi = total;
-  for (let i = 0; i < 60; i += 1) {
-    const mid = (lo + hi) / 2;
-    if (banded(mid).reduce((a, b) => a + b, 0) < total) lo = mid;
-    else hi = mid;
+  const tie = (i: number, j: number) =>
+    accounts[i]!.load - accounts[j]!.load ||
+    (accounts[i]!.name < accounts[j]!.name ? -1 : 1);
+  const all = accounts.map((_, i) => i);
+  for (let left = total - count.reduce((a, b) => a + b, 0); left > 0; left -= 1) {
+    const most = Math.max(...count);
+    const fewest = Math.min(...count);
+    const lowest = [...all].sort((i, j) => count[i]! - count[j]! || tie(i, j));
+    const best = [...all].sort(
+      (i, j) =>
+        (count[i]! + 1) / rooms[i]! - (count[j]! + 1) / rooms[j]! || tie(i, j),
+    )[0]!;
+    // The lowest takes it while one is too far below the most, or while
+    // the best for its room would end too far above the fewest.
+    const pick =
+      count[lowest[0]!]! < most - spread || count[best]! + 1 > fewest + spread
+        ? lowest[0]!
+        : best;
+    count[pick]! += 1;
   }
-  const real = banded(hi);
-  const whole = real.map(Math.floor);
-  let left = total - whole.reduce((a, b) => a + b, 0);
-  const order = accounts
-    .map((a, i) => ({
-      i,
-      frac: real[i]! - whole[i]!,
-      load: a.load,
-      name: a.name,
-    }))
-    .sort(
-      (a, b) =>
-        b.frac - a.frac ||
-        a.load - b.load ||
-        (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
-    );
-  for (const o of order) {
-    if (left <= 0) break;
-    whole[o.i]! += 1;
-    left -= 1;
-  }
-  return new Map(accounts.map((a, i) => [a.name, whole[i]!]));
+  return new Map(accounts.map((a, i) => [a.name, count[i]!]));
 }
 
 /**
