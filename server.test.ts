@@ -15115,6 +15115,9 @@ describe("a project whose account has its seats full moves to one with a free se
     await h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-3", projectId: "proj-3" }),
     });
+    // Another Opus thread waits for work's seat behind thread-1 (Codex
+    // PLAZAS-R2-001).
+    expect(await send("thread-8", "proj-2", OPUS)).toMatchObject({ action: "wait" });
     // work's seat goes to thread-1, which moves there.
     await h.harness.behavior.emitThreadEvent("thread.idle", {
       thread: thread({ id: "thread-9", projectId: "proj-2" }),
