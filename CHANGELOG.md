@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.37] - 2026-11-03
+
+### Changed
+
+- **A thread no longer waits for a seat while another account has one.**
+  By Aitor's request of 2026-11-03 («necesitaría abrir más hilos»):
+  siloeads ran 4/4 with a thread waiting 17 minutes while joytorm had
+  0/4. With the automatic choice on, a turn that would wait for a seat
+  moves its project first to the best other account with a seat free
+  (beyond those owed to its queue), chosen as every move chooses; the
+  history says `Moved to account joytorm before the turn: siloeads seats
+  full (4/4), joytorm had 4 free`. A project with another thread's turn
+  under way stays and waits, as before; so does every project when no
+  account has a seat.
+
+### Added
+
+- **`bb claude-switcher rebalance [--apply]`**: one pass that spreads the
+  projects with no thread at work over the usable Ultra accounts by the
+  room in their weekly, none more than 10 projects above the one with
+  fewest; each move is in the history as `Rebalanced`.
+
 ## [0.2.36] - 2026-11-03
 
 ### Fixed
