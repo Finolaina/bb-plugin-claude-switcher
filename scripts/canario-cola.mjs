@@ -10,10 +10,11 @@
 // Una lectura que falla sale con código 1 (visible en `bb automation runs`):
 // nunca «todo bien» sin haber mirado.
 import { execFile } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { appendFile, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 export const UMBRAL_MS = 10 * 60_000;
@@ -59,7 +60,7 @@ export function puedeCorrer(cuenta, modelo) {
 }
 
 /**
- * El juicio, puro. `estado`: { primeraVez: {fila: ms}, avisado: {fila: ms} }.
+ * El juicio, puro. `estado`: { primeraVez: {fila: ms}, vista: {fila: ms}, avisado: {hilo: ms} }.
  * Devuelve los avisos de esta pasada y el estado siguiente.
  */
 export function judge({ filas, health, estado, ahora }) {
@@ -78,22 +79,22 @@ export function judge({ filas, health, estado, ahora }) {
     if (ahora - cuando < OLVIDO_MS && estado.primeraVez?.[id] !== undefined) {
       primeraVez[id] = estado.primeraVez[id];
       vista[id] = cuando;
-      if (estado.avisado?.[id] !== undefined) avisado[id] = estado.avisado[id];
     }
+  // Por hilo: tres mensajes del mismo hilo son un aviso, no tres.
+  for (const [hilo, cuando] of Object.entries(estado.avisado ?? {}))
+    if (ahora - cuando < REAVISO_MS) avisado[hilo] = cuando;
   for (const fila of vivas) {
     const desde = estado.primeraVez?.[fila.id] ?? ahora;
     primeraVez[fila.id] = desde;
     vista[fila.id] = ahora;
-    const antes = estado.avisado?.[fila.id];
-    if (antes !== undefined) avisado[fila.id] = antes;
     if (ahora - desde < UMBRAL_MS) continue;
     const modelo = familia(fila.model);
     const libres = health.cuentas
       .filter((c) => puedeCorrer(c, modelo))
       .map((c) => c.nombre);
     if (libres.length === 0) continue;
-    if (antes !== undefined && ahora - antes < REAVISO_MS) continue;
-    avisado[fila.id] = ahora;
+    if (avisado[fila.threadId] !== undefined) continue;
+    avisado[fila.threadId] = ahora;
     avisos.push({
       fila: fila.id,
       hilo: fila.threadId,
@@ -185,7 +186,7 @@ export async function main({ dir = process.cwd(), ahora = Date.now() } = {}) {
     } catch (error) {
       entregado = false;
       // Sin marcar: se repite en la pasada siguiente.
-      delete veredicto.estado.avisado[aviso.fila];
+      delete veredicto.estado.avisado[aviso.hilo];
       console.error(`aviso no entregado: ${error.message}`);
     }
   }
@@ -198,10 +199,21 @@ export async function main({ dir = process.cwd(), ahora = Date.now() } = {}) {
   return entregado ? 0 : 1;
 }
 
-if (
-  process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(process.argv[1]).href
-)
+/**
+ * Ejecutado y no importado (por los tests). Por un enlace `argv[1]` es el
+ * enlace e `import.meta.url` su destino: compararlos sin más sale en verde
+ * sin haber mirado.
+ */
+function esEntrada() {
+  if (process.argv[1] === undefined) return true;
+  try {
+    return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+  } catch {
+    return true;
+  }
+}
+
+if (esEntrada())
   main().then(
     (code) => {
       process.exitCode = code;

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -125,11 +125,24 @@ describe("judge", () => {
       judge({
         filas: [fila()],
         health: INCIDENTE,
-        estado: { primeraVez: { q1: NOW - 2 * REAVISO_MS }, avisado: { q1: avisado } },
+        estado: { primeraVez: { q1: NOW - 2 * REAVISO_MS }, avisado: { t1: avisado } },
         ahora: NOW,
       }).avisos;
     expect(paso(NOW - REAVISO_MS + 1)).toEqual([]);
     expect(paso(NOW - REAVISO_MS)).toHaveLength(1);
+  });
+
+  it("tres mensajes del mismo hilo son un aviso, no tres", () => {
+    const filas = [fila(), fila({ id: "q2" }), fila({ id: "q3" })];
+    const { avisos } = judge({
+      filas,
+      health: INCIDENTE,
+      estado: {
+        primeraVez: { q1: NOW - UMBRAL_MS, q2: NOW - UMBRAL_MS, q3: NOW - UMBRAL_MS },
+      },
+      ahora: NOW,
+    });
+    expect(avisos.map((a) => a.fila)).toEqual(["q1"]);
   });
 
   it("recuerda la primera vez que ve cada fila y olvida las que llevan 20 minutos sin verse", () => {
@@ -138,7 +151,7 @@ describe("judge", () => {
       health: INCIDENTE,
       estado: {
         primeraVez: { q1: NOW - UMBRAL_MS },
-        avisado: { q1: NOW },
+        avisado: { t1: NOW - REAVISO_MS },
         vista: { q1: NOW - OLVIDO_MS },
       },
       ahora: NOW,
@@ -236,6 +249,20 @@ describe("el script entero, con un bb de mentira", () => {
     }
   };
 
+  it("ejecutado por un enlace mira igual: no sale en verde sin haber mirado", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "canario-enlace-"));
+    const binario = join(dir, "bb-falso");
+    await writeFile(binario, `#!/bin/sh\ncase "$1" in thread) echo '[]';; *) echo '{"cuentas":[]}';; esac\n`);
+    await chmod(binario, 0o755);
+    const enlace = join(dir, "canario.mjs");
+    await symlink(SCRIPT, enlace);
+    const salida = await promisify(execFile)(process.execPath, [enlace], {
+      cwd: dir,
+      env: { ...process.env, BB_CLI: binario },
+    });
+    expect(salida.stdout).toContain("0 retenidas");
+  });
+
   it("sale 1 si bb falla: nunca «todo bien» sin haber mirado", async () => {
     const r = await correr("exit 3");
     expect(r.code).toBe(1);
@@ -272,7 +299,7 @@ describe("el script entero, con un bb de mentira", () => {
       });
       expect(await readFile(join(r.dir, "avisos.log"), "utf8")).toContain("t1");
       const estado = JSON.parse(await readFile(join(r.dir, "canario-cola-estado.json"), "utf8"));
-      expect(estado.avisado.q1).toBeGreaterThan(0);
+      expect(estado.avisado.t1).toBeGreaterThan(0);
     });
 
     it.each([
@@ -283,7 +310,7 @@ describe("el script entero, con un bb de mentira", () => {
       expect(r.code).toBe(1);
       expect(r.stderr).toContain("aviso no entregado");
       const estado = JSON.parse(await readFile(join(r.dir, "canario-cola-estado.json"), "utf8"));
-      expect(estado.avisado.q1).toBeUndefined();
+      expect(estado.avisado.t1).toBeUndefined();
     });
   });
 

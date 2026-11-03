@@ -17271,6 +17271,64 @@ describe("caminos 2026-11-04", () => {
   });
 
   describe("T5 an account out of the model takes no new turn while another can run it", () => {
+    it("a bb that fails every write does not hold the turn for ever: 10 tries, then it starts, says so, and fails where the user is told", async () => {
+      let clock = NOW;
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 88, 100)),
+          spare: () => Response.json(payload(81, 48, 100)),
+          work: () => Response.json(payload(0, 2, 0)),
+        },
+        {
+          clock: () => clock,
+          settings: FABLE,
+          presetEnv: { "proj-1": on("spare") },
+          failSet: ["proj-1"],
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      const seen: string[] = [];
+      for (let i = 0; i < 12; i++) {
+        const r = await dispatch(h, "t1", "proj-1", FABLE_ID, true);
+        seen.push(r.action);
+        if (r.action !== "wait") break;
+        clock += SEAT_RECHECK_MS;
+      }
+      expect(seen).toEqual([...Array(10).fill("wait"), "proceed"]);
+      expect(h.harness.logEntries.map((e) => e.message)).toContainEqual(
+        expect.stringContaining("could not be moved in 10 tries"),
+      );
+    });
+
+    it("admitted, with the capacity lowered since: its seat is its own, and it does not ask bb again for ever", async () => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 88, 100)),
+          spare: () => Response.json(payload(81, 48, 100)),
+          work: () => Response.json(payload(0, 2, 0)),
+        },
+        {
+          settings: { ...FABLE, seatsTeam: 2 },
+          presetEnv: { "proj-1": on("spare"), "proj-2": on("work"), "proj-3": on("work") },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect((await dispatch(h, "a", "proj-2", FABLE_ID)).action).toBe("proceed");
+      expect((await dispatch(h, "b", "proj-3", FABLE_ID)).action).toBe("proceed");
+      expect((await dispatch(h, "t1", "proj-1", FABLE_ID)).action).toBe("wait");
+      await h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: thread({ id: "b", projectId: "proj-3" }),
+        lastAssistantText: null,
+      });
+      await h.harness.behavior.setSettings({ seatsTeam: 1 });
+      expect(await dispatch(h, "t1", "proj-1", FABLE_ID, true)).toEqual({ action: "proceed" });
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    });
+
     /** proj-1 on spare, out of Fable with its seat free; work runs Fable, its one seat taken; main out of Fable. */
     const out = async (usage: Record<string, () => Response> = {}) => {
       const h = await host(
@@ -17419,6 +17477,21 @@ describe("caminos 2026-11-04", () => {
       await h.harness.behavior.callRpc("accounts_refresh", null);
       await dispatch(h, "t3", "proj-1", FABLE_ID);
       await vi.waitFor(async () => expect((await stored(h))?.["proj-1"]).toBe("Fable"));
+    });
+
+    it("a store that could not be read is not written over, for a later load to find", async () => {
+      const h = await host(USAGE, {
+        settings: FABLE,
+        presetEnv: { "proj-1": on("spare") },
+        kvPreset: { "project-models": { "proj-8": "Opus" } },
+        kvReadError: "storage is down",
+      });
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("proceed");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(await stored(h)).toEqual({ "proj-8": "Opus" });
     });
 
     it("what is stored in another shape is left out", async () => {
