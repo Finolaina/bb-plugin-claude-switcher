@@ -774,6 +774,7 @@ bb claude-switcher health [--json]        # a stable read for other threads and 
 bb claude-switcher reserve <account> --id <x> --until <ISO with zone> [--json]   # hold a seat for a run outside bb (at most 12 h); fails with no free seat (exit 1), or with exit 75 while the seats are still being counted after a reload
 bb claude-switcher unreserve --id <x> [--json]   # end it; an id not held is no error
 bb claude-switcher use <project> <account | default>   # project id, or its name when unique
+bb claude-switcher rebalance [--apply] [--json]   # spread the projects with no thread at work over the usable Ultra accounts by their weekly (the plan; --apply moves them)
 bb claude-switcher release                # remove every CLAUDE_CONFIG_DIR this plugin set
 ```
 
@@ -890,6 +891,19 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
   cannot work, so with no seat free anywhere the project goes to the best
   of the others by quota and its threads wait for a seat there. A project
   picked by hand is no exception: a full account moves it too, as above.
+- **Spreading the projects** (`bb claude-switcher rebalance`, since
+  0.2.37; Aitor, 2026-11-03: siloeads held 25 projects for its 4
+  seats). One pass over the usable Ultra accounts: each gets a share of
+  the projects by the room left in its weekly (the fuller of the weekly
+  and the preferred model's window), none ends more than 10 projects
+  above the one with fewest. A project at work stays where it is and
+  counts there: a Claude Code thread of it running or starting a turn,
+  waiting (a queued message, a retry, an error), holding or waiting for
+  a seat, or active within the last hour (its prompt cache). The least
+  recently active projects move first. Without `--apply` it only prints
+  the plan; each move it makes is in the history as `Rebalanced: siloeads
+  had 25 projects (weekly 77 %), joytorm 9 (weekly 21 %)`, and `use`
+  undoes it.
 - **Counted anyway.** A turn sent past the checkpoint (a queued message
   sent by hand) takes a seat as it starts, even over the limit (logged
   as «over capacity»). A turn that started keeps the seat its dispatch
