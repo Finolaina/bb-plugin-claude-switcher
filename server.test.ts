@@ -15185,6 +15185,42 @@ describe("a project whose account has its seats full moves to one with a free se
     expect(h.envSet).toEqual([]);
   });
 
+  it("two turns at once from a full account take one free seat each, not the same one (Codex PLAZAS-R3-001)", async () => {
+    const h = await host(FABLE_EVERYWHERE, {
+      settings: { preferredModel: "Fable", seatsMax: 1 },
+      presetEnv: {
+        "proj-1": on("main"),
+        "proj-2": on("main"),
+        "proj-3": on("main"),
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await running(h, "thr-2", "proj-2");
+    const both = await Promise.all([
+      fable(h, "thr-1", "proj-1"),
+      fable(h, "thr-3", "proj-3"),
+    ]);
+    expect(both).toEqual([{ action: "proceed" }, { action: "proceed" }]);
+    expect(h.envSet.map((e) => e.value).sort()).toEqual([
+      `${ACCOUNTS}/spare`,
+      `${ACCOUNTS}/work`,
+    ]);
+  });
+
+  it("a move for a seat whose write fails frees the seat it took there (Codex PLAZAS-R3-001)", async () => {
+    const h = await host(FABLE_EVERYWHERE, {
+      settings: { preferredModel: "Fable", seatsMax: 1 },
+      presetEnv: { "proj-1": on("main"), "proj-2": on("main") },
+      failSet: ["proj-1"],
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await running(h, "thr-2", "proj-2");
+    await fable(h, "thr-1", "proj-1");
+    expect((await seatsOf(h))?.work).toMatchObject({ running: 0, reserved: 0 });
+  });
+
   it("with the automatic choice off nothing moves for a seat", async () => {
     const h = await host(FABLE_EVERYWHERE, {
       settings: { preferredModel: "Fable", seatsMax: 1, autoSwitch: false },

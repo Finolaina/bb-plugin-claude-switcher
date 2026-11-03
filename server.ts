@@ -4349,6 +4349,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // Read before the move: what the seats were as it was decided.
     const fullHere = seats.snapshot([seatKey(fromName)])[seatKey(fromName)]!;
     const roomThere = seatRoom(decision.account);
+    // Moved for a seat: the seat is its own from now, before anything is
+    // awaited, so a turn decided meanwhile does not choose it too (Codex
+    // PLAZAS-R3-001). A move that fails leaves it as the message asks for
+    // a seat where the project is (a seat elsewhere is given up); one
+    // whose turn never starts is freed as any reservation is (SEAT_TTL_MS).
+    const claim =
+      decision.why === "current-full" ? seatKey(decision.account) : null;
+    if (claim !== null) {
+      seatProjects.set(thread.id, projectId);
+      seats.reserve(thread.id, claim, now);
+    }
     const to = accountOrDefault(decision.account);
     // The sessions are not waited for: see applyAccount (Fable, 2026-10-29).
     await applyAccount(projectId, to, from, { share: false });
