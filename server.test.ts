@@ -20,6 +20,7 @@ import {
   ENV_VAR,
   FIRST_PLACEMENT_WAIT_MS,
   MAX_START_WAITS,
+  MODEL_READ_LIMIT_MS,
   RESERVE_RECHECK_MS,
   SEAT_RECHECK_MS,
   type State,
@@ -350,7 +351,7 @@ interface HostOptions {
   /** Rows another plugin queues once threads.list has answered (while the pass runs). */
   queueAfterList?: QueuedRow[];
   /** Runs before threads.events.list answers (a toggle flipped while the pass reads). */
-  beforeEvents?: () => Promise<void>;
+  beforeEvents?: (threadId: string) => Promise<void>;
   /** Runs before threads.get answers (a failure's look at its thread, outside the project's queue). */
   beforeThreadGet?: () => Promise<void>;
   /** Runs before threads.list answers (a list that never answers, Astra SEATS-R2-001). */
@@ -500,7 +501,7 @@ async function host(
           }) => {
             if (options.threadEventsError !== undefined)
               throw new Error(options.threadEventsError);
-            await options.beforeEvents?.();
+            await options.beforeEvents?.(args.threadId);
             const rows = (options.threadEvents?.[args.threadId] ?? [])
               .filter(
                 (row) => args.types === undefined || args.types.includes(row.type),
@@ -15610,6 +15611,113 @@ describe("no project is left on an account out of the preferred model or without
       );
       releaseLog();
       await idle;
+    });
+
+    it("rescues the project when a newer Fable turn named its model while an older turn's log is still unread (Codex OPUS-0236-R3-001)", async () => {
+      let logReads = 0;
+      const h = await host(
+        {
+          main: () => Response.json(teamPayload(10, 100)),
+          spare: () => Response.json(payload(10, 60, 20)),
+          work: () => Response.json(payload(5, 20, 30)),
+        },
+        {
+          ...OPTIONS,
+          // thr-1's log never answers.
+          beforeEvents: async (threadId) => {
+            logReads++;
+            if (threadId === "thr-1") await new Promise<never>(() => {});
+          },
+          threadEvents: {
+            "thr-1": [
+              {
+                id: "evt_thr-1",
+                scope: { kind: "thread" },
+                threadId: "thr-1",
+                seq: 1,
+                createdAt: NOW - HOUR,
+                type: "client/turn/requested",
+                data: { requestId: "creq_thr-1", execution: { model: "claude-opus-5-5" } },
+              },
+            ],
+            "thr-2": [
+              {
+                id: "evt_thr-2",
+                scope: { kind: "thread" },
+                threadId: "thr-2",
+                seq: 1,
+                createdAt: NOW - HOUR,
+                type: "client/turn/requested",
+                data: { requestId: "creq_thr-2", execution: { model: "claude-fable-5-1" } },
+              },
+            ],
+          },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      const turn = async (id: string) => {
+        await h.harness.behavior.emitThreadEvent("thread.active", {
+          thread: thread({ id, projectId: "proj-1" }),
+        });
+        return h.harness.behavior.emitThreadEvent("thread.idle", {
+          thread: thread({ id, projectId: "proj-1" }),
+          lastAssistantText: null,
+        });
+      };
+      void turn("thr-1");
+      await vi.waitFor(() => expect(logReads).toBe(1));
+      // A newer Fable turn ends, its log read: the project's model is Fable.
+      await turn("thr-2");
+      await onePass(h);
+      expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([["proj-1", ownNote("work")]]);
+    });
+
+    it("rescues the project once a turn's log has gone unread for MODEL_READ_LIMIT_MS (Codex OPUS-0236-R3-001)", async () => {
+      let logReads = 0;
+      let clock = NOW;
+      const h = await host(
+        {
+          main: () => Response.json(teamPayload(10, 100)),
+          spare: () => Response.json(payload(10, 60, 20)),
+          work: () => Response.json(payload(5, 20, 30)),
+        },
+        {
+          ...OPTIONS,
+          clock: () => clock,
+          beforeEvents: async () => {
+            logReads++;
+            await new Promise<never>(() => {});
+          },
+          threadEvents: {
+            "thr-1": [
+              {
+                id: "evt_thr-1",
+                scope: { kind: "thread" },
+                threadId: "thr-1",
+                seq: 1,
+                createdAt: NOW - HOUR,
+                type: "client/turn/requested",
+                data: { requestId: "creq_thr-1", execution: { model: "claude-opus-5-5" } },
+              },
+            ],
+          },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "thr-1", projectId: "proj-1" }),
+      });
+      void h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: thread({ id: "thr-1", projectId: "proj-1" }),
+        lastAssistantText: null,
+      });
+      await vi.waitFor(() => expect(logReads).toBe(1));
+      clock = NOW + MODEL_READ_LIMIT_MS - 1;
+      await onePass(h);
+      expect(h.envSet).toEqual([]);
+      clock = NOW + MODEL_READ_LIMIT_MS;
+      await onePass(h);
+      expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([["proj-1", ownNote("work")]]);
     });
 
     it("stays on a Team seat out of its session when only Max accounts that keep Fable could take it", async () => {

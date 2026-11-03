@@ -127,6 +127,8 @@ export const REFUSAL_MS = 6 * 60 * 60_000;
 export const AHEAD_FRESH_MS = 60_000;
 /** bb fails a dispatch whose checkpoint takes 10 s: the placement before a turn is left behind well before. */
 export const DISPATCH_LIMIT_MS = 3_000;
+/** How long a rescue waits for the model of a turn that ended, its log unread. */
+export const MODEL_READ_LIMIT_MS = 60_000;
 /**
  * The whole dispatch checkpoint, every read in it together, answers within
  * this long: each read gets what is left, at most DISPATCH_LIMIT_MS (Astra
@@ -3537,22 +3539,42 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // From now until its model is known, a rescue of the project neither
     // decides nor lands (Codex OPUS-0236-R2-001).
     turnEnds.set(projectId, (turnEnds.get(projectId) ?? 0) + 1);
-    modelReads.set(projectId, (modelReads.get(projectId) ?? 0) + 1);
+    const reads = modelReads.get(projectId) ?? new Map<number, number>();
+    modelReads.set(projectId, reads);
+    reads.set(started.activity, deps.now() + MODEL_READ_LIMIT_MS);
+    const read = () => {
+      reads.delete(started.activity);
+      if (reads.size === 0 && modelReads.get(projectId) === reads)
+        modelReads.delete(projectId);
+    };
     try {
-      await afterTurn(thread, started);
+      await afterTurn(thread, started, read);
     } finally {
-      const left = (modelReads.get(projectId) ?? 1) - 1;
-      if (left === 0) modelReads.delete(projectId);
-      else modelReads.set(projectId, left);
+      read();
     }
   });
   /** Per project, the turns that ended (counted as each end begins). */
   const turnEnds = new Map<string, number>();
-  /** Per project, the ended turns whose model is still being read. */
-  const modelReads = new Map<string, number>();
+  /**
+   * Per project, the ended turns whose model is still being read: when
+   * each started (its activity count), and until when a rescue waits for it.
+   */
+  const modelReads = new Map<string, Map<number, number>>();
+  /**
+   * Whether a turn of the project that ended may still name its model:
+   * its log not read yet, within MODEL_READ_LIMIT_MS, and no newer turn
+   * or message has named it meanwhile (Codex OPUS-0236-R3-001).
+   */
+  function modelBeingRead(projectId: string, now: number): boolean {
+    const known = projectModel.get(projectId)?.at ?? 0;
+    for (const [at, until] of modelReads.get(projectId) ?? [])
+      if (at > known && now < until) return true;
+    return false;
+  }
   async function afterTurn(
     thread: ThreadResponse,
     started: { epoch: number; picks: number; activity: number },
+    read: () => void,
   ): Promise<void> {
     const projectId = thread.projectId;
     const stillLatest = () => {
@@ -3573,6 +3595,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // only the move below (Codex OPUS-R3-002).
     if ((projectModel.get(projectId)?.at ?? 0) < started.activity)
       projectModel.set(projectId, { model, at: started.activity });
+    read();
     if (!stillLatest()) return;
     if (!reserving({ preferredModel: model, reserveModel: current.preferredModel }))
       return;
@@ -3703,7 +3726,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (from.external) return;
     const fromName = from.account ?? current.defaultAccountName;
     const now = deps.now();
-    if (modelReads.has(projectId)) {
+    if (modelBeingRead(projectId, deps.now())) {
       bb.log.debug(
         `project ${projectName}: left on ${fromName}: the model of a turn that ended is being read`,
       );
