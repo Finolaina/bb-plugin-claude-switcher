@@ -3967,13 +3967,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   bb.events.on("thread.active", async ({ thread }) => {
     // A turn of it runs: the advice of its last failure is over.
     adviceOver(thread.id);
+    // A hidden thread's turn too: it runs on the project's account, and
+    // keeps the project there (Codex PLAZAS-R2-003).
+    if (thread.providerId === CLAUDE_CODE_PROVIDER)
+      turnsUnderWay.set(thread.id, thread.projectId);
     if (
       thread.providerId !== CLAUDE_CODE_PROVIDER ||
       notTheUsersThread(thread) !== null
     )
       return;
     seatProjects.set(thread.id, thread.projectId);
-    turnsUnderWay.set(thread.id, thread.projectId);
     // The previous turn's start is not this turn's, read or still being
     // read (code-reviewer r13).
     const anchor = dispatchEpoch.get(thread.id);
@@ -6572,25 +6575,32 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     try {
       if (accounts.length === 0) await countTries("the accounts", discover);
       const running: { id: string; projectId: string }[] = [];
+      // Hidden ones too: they take no seat, but keep their project where it
+      // is (Codex PLAZAS-R2-003).
+      const underWay: { id: string; projectId: string }[] = [];
       const PAGE = 200;
       for (let offset = 0; ; offset += PAGE) {
         const page = await countTries("the threads", () =>
-          bb.sdk.threads.list({ archived: false, limit: PAGE, offset }),
+          bb.sdk.threads.list({
+            archived: false,
+            includeHidden: true,
+            limit: PAGE,
+            offset,
+          }),
         );
-        running.push(
-          ...page.filter(
-            (t) =>
-              t.providerId === CLAUDE_CODE_PROVIDER &&
-              notTheUsersThread(t) === null &&
-              TURN_UNDER_WAY.has(t.status),
-          ),
+        const claude = page.filter(
+          (t) =>
+            t.providerId === CLAUDE_CODE_PROVIDER &&
+            TURN_UNDER_WAY.has(t.status),
         );
+        underWay.push(...claude);
+        running.push(...claude.filter((t) => notTheUsersThread(t) === null));
         if (page.length < PAGE) break;
       }
       const listedAt = deps.now();
       // Under way as bb lists them, whatever their seat's read says (Codex
       // PLAZAS-002); not one that ended meanwhile.
-      for (const t of running)
+      for (const t of underWay)
         if (!ended.has(t.id)) turnsUnderWay.set(t.id, t.projectId);
       // Each project's account read once, all at once.
       const reads = new Map<string, Promise<ProjectAccount | null>>();
