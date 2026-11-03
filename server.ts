@@ -901,8 +901,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     seats.free(seatKey(name)) - seats.queue(seatKey(name)).length;
   /** The project of each thread that took a seat or a place in a queue (see projectSeated). */
   const seatProjects = new Map<string, string>();
-  /** Another thread of the project holds a seat: a turn of it runs, or is about to start. */
+  /**
+   * Threads with a turn under way, by thread: their project. Set as bb
+   * announces the turn, before any read, so a turn whose seat could not be
+   * counted is still known to run; gone as it ends, fails or the thread
+   * goes (Codex PLAZAS-002).
+   */
+  const turnsUnderWay = new Map<string, string>();
+  /** Another thread of the project has a turn under way, or holds a seat for one about to start. */
   function projectSeated(projectId: string, except: string): boolean {
+    for (const [threadId, project] of turnsUnderWay)
+      if (project === projectId && threadId !== except) return true;
     for (const [threadId, project] of seatProjects)
       if (
         project === projectId &&
@@ -3905,6 +3914,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     )
       return;
     seatProjects.set(thread.id, thread.projectId);
+    turnsUnderWay.set(thread.id, thread.projectId);
     // The previous turn's start is not this turn's, read or still being
     // read (code-reviewer r13).
     const anchor = dispatchEpoch.get(thread.id);
@@ -3989,6 +3999,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // announces (a turn refused at the door) is the project's account's,
     // not a leftover of the account this turn ran on (code-reviewer r11).
     forgetStart(thread.id);
+    turnsUnderWay.delete(thread.id);
     // Reserved too: a turn that ended needs none (its next asks again,
     // and one that starts unannounced is counted as it starts).
     releaseSeat(thread.id, "its turn ended");
@@ -3996,6 +4007,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** The thread archived or deleted: nothing of its turns runs again, and what is kept for it goes. */
   async function threadGone({ thread }: { thread: ThreadResponse }) {
     forgetStart(thread.id);
+    turnsUnderWay.delete(thread.id);
     releaseSeat(thread.id, "the thread is gone");
     seatReadWaits.delete(thread.id);
     seatGenerations.delete(thread.id);
@@ -5237,6 +5249,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // Its judgment's generation, taken before any read (see generation).
     const judgedIn = generation(event.threadId);
     forgetStart(event.threadId);
+    turnsUnderWay.delete(event.threadId);
     releaseSeat(event.threadId, "its turn failed");
     if (!current.autoSwitch) return;
     // Pure guards first: another provider's limit must not query every account.
@@ -6482,6 +6495,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         if (page.length < PAGE) break;
       }
       const listedAt = deps.now();
+      // Under way as bb lists them, whatever their seat's read says (Codex
+      // PLAZAS-002); not one that ended meanwhile.
+      for (const t of running)
+        if (!ended.has(t.id)) turnsUnderWay.set(t.id, t.projectId);
       // Each project's account read once, all at once.
       const reads = new Map<string, Promise<ProjectAccount | null>>();
       for (const t of running)
