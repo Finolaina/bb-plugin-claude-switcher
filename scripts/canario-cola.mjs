@@ -79,13 +79,16 @@ export function judge({ filas, health, estado, ahora }) {
       modelo,
       minutos: Math.floor((ahora - desde) / 60_000),
       libres,
+      // Dato del plugin, solo para el texto: no decide si se avisa.
+      ocupado:
+        health.atascos?.some((a) => a.hilo === fila.threadId && a.proyectoOcupado) === true,
     });
   }
   return { avisos, estado: { primeraVez, avisado }, retenidas: vivas.length };
 }
 
 export function textoAviso(a) {
-  return `El switcher retiene el hilo ${a.hilo} (${a.modelo}) ${a.minutos} min con ${a.libres.join(", ")} libre${a.libres.length === 1 ? "" : "s"}`;
+  return `El switcher retiene el hilo ${a.hilo} (${a.modelo}) ${a.minutos} min con ${a.libres.join(", ")} libre${a.libres.length === 1 ? "" : "s"}${a.ocupado ? "; su proyecto tiene otro hilo en marcha y por eso no se mueve solo" : ""}`;
 }
 
 const run = promisify(execFile);
