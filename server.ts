@@ -127,6 +127,8 @@ export const REFUSAL_MS = 6 * 60 * 60_000;
 export const AHEAD_FRESH_MS = 60_000;
 /** bb fails a dispatch whose checkpoint takes 10 s: the placement before a turn is left behind well before. */
 export const DISPATCH_LIMIT_MS = 3_000;
+/** How long a rescue waits for the model of a turn that ended, its log unread. */
+export const MODEL_READ_LIMIT_MS = 60_000;
 /**
  * The whole dispatch checkpoint, every read in it together, answers within
  * this long: each read gets what is left, at most DISPATCH_LIMIT_MS (Astra
@@ -3451,6 +3453,22 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     aheadLeft.set(projectId, { account: fromName, model, threshold });
   }
 
+  // First of the listeners of a turn's end, and without waiting: the ones
+  // below read the turn's log first, and a rescue sharing the project's
+  // sessions meanwhile must already see that a turn ended (Codex
+  // OPUS-0236-R4-001).
+  bb.events.on("thread.idle", ({ thread }) => {
+    const started = turnStart.get(thread.id);
+    if (
+      !current.autoSwitch ||
+      thread.providerId !== CLAUDE_CODE_PROVIDER ||
+      notTheUsersThread(thread) !== null ||
+      started === undefined
+    )
+      return;
+    endingTurns.set(thread.id, turnEnded(thread.projectId, started.activity));
+  });
+
   bb.events.on("thread.idle", async ({ thread }) => {
     if (
       !current.autoSwitch ||
@@ -3512,19 +3530,77 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     };
   }
   bb.events.on("thread.active", ({ thread }) => {
+    // Only the turns the checkpoint and the end of a turn look at: another
+    // provider's or a hidden thread's turn never stops the move (Codex
+    // OPUS-R6-002).
+    if (
+      thread.providerId !== CLAUDE_CODE_PROVIDER ||
+      notTheUsersThread(thread) !== null
+    )
+      return;
     noteActivity(thread.projectId);
     turnStart.set(thread.id, projectMarks(thread.projectId));
   });
   bb.events.on("thread.idle", async ({ thread }) => {
     const started = turnStart.get(thread.id);
     turnStart.delete(thread.id);
-    if (
-      !current.autoSwitch ||
-      thread.providerId !== CLAUDE_CODE_PROVIDER ||
-      notTheUsersThread(thread) !== null ||
-      started === undefined
-    )
-      return;
+    let ending = endingTurns.get(thread.id);
+    endingTurns.delete(thread.id);
+    try {
+      if (
+        !current.autoSwitch ||
+        thread.providerId !== CLAUDE_CODE_PROVIDER ||
+        notTheUsersThread(thread) !== null ||
+        started === undefined
+      )
+        return;
+      ending ??= turnEnded(thread.projectId, started.activity);
+      await afterTurn(thread, started, ending);
+    } finally {
+      ending?.();
+    }
+  });
+  /**
+   * A turn of the project ended: from now until its model is known, a
+   * rescue of it neither decides nor lands (Codex OPUS-0236-R2-001). The
+   * answer ends that wait; asking it again does nothing.
+   */
+  function turnEnded(projectId: string, activity: number): () => void {
+    turnEnds.set(projectId, (turnEnds.get(projectId) ?? 0) + 1);
+    const reads = modelReads.get(projectId) ?? new Map<number, number>();
+    modelReads.set(projectId, reads);
+    reads.set(activity, deps.now() + MODEL_READ_LIMIT_MS);
+    return () => {
+      reads.delete(activity);
+      if (reads.size === 0 && modelReads.get(projectId) === reads)
+        modelReads.delete(projectId);
+    };
+  }
+  /** Per thread, the end of its turn counted by the first listener, until the last one reads it. */
+  const endingTurns = new Map<string, () => void>();
+  /** Per project, the turns that ended (counted as each end begins). */
+  const turnEnds = new Map<string, number>();
+  /**
+   * Per project, the ended turns whose model is still being read: when
+   * each started (its activity count), and until when a rescue waits for it.
+   */
+  const modelReads = new Map<string, Map<number, number>>();
+  /**
+   * Whether a turn of the project that ended may still name its model:
+   * its log not read yet, within MODEL_READ_LIMIT_MS, and no newer turn
+   * or message has named it meanwhile (Codex OPUS-0236-R3-001).
+   */
+  function modelBeingRead(projectId: string, now: number): boolean {
+    const known = projectModel.get(projectId)?.at ?? 0;
+    for (const [at, until] of modelReads.get(projectId) ?? [])
+      if (at > known && now < until) return true;
+    return false;
+  }
+  async function afterTurn(
+    thread: ThreadResponse,
+    started: { epoch: number; picks: number; activity: number },
+    read: () => void,
+  ): Promise<void> {
     const projectId = thread.projectId;
     const stillLatest = () => {
       const now = projectMarks(projectId);
@@ -3544,6 +3620,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // only the move below (Codex OPUS-R3-002).
     if ((projectModel.get(projectId)?.at ?? 0) < started.activity)
       projectModel.set(projectId, { model, at: started.activity });
+    read();
     if (!stillLatest()) return;
     if (!reserving({ preferredModel: model, reserveModel: current.preferredModel }))
       return;
@@ -3564,7 +3641,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         "after",
       );
     });
-  });
+  }
 
   // ---- No project left where a turn cannot run ---------------------------
   /**
@@ -3674,6 +3751,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (from.external) return;
     const fromName = from.account ?? current.defaultAccountName;
     const now = deps.now();
+    if (modelBeingRead(projectId, deps.now())) {
+      bb.log.debug(
+        `project ${projectName}: left on ${fromName}: the model of a turn that ended is being read`,
+      );
+      return;
+    }
     const model = modelOfProject(projectId);
     const why = stranded(fromName, now, model);
     if (why === null) return;
@@ -3696,12 +3779,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return;
     }
     // Decided for the model of the project's latest turn as known now: a
-    // message or a turn of it while the sessions are shared may change
-    // that model, and this move is dropped (Codex OPUS-R5-002).
+    // message or a turn of it while the sessions are shared, or the end of
+    // a turn (whatever model its log names, read later or not), may change
+    // that model, and this move is dropped (Codex OPUS-R5-002, OPUS-R6-001,
+    // OPUS-0236-R2-001).
     const seen = activity.get(projectId) ?? 0;
+    const ended = turnEnds.get(projectId) ?? 0;
     if (
       !(await applyAccount(projectId, accountOrDefault(decision.account), from, {
-        stillValid: () => (activity.get(projectId) ?? 0) === seen,
+        stillValid: () =>
+          (activity.get(projectId) ?? 0) === seen &&
+          (turnEnds.get(projectId) ?? 0) === ended &&
+          modelOfProject(projectId) === model,
       }))
     )
       return;
