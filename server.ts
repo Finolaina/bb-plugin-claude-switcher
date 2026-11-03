@@ -970,6 +970,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * goes (Codex PLAZAS-002).
    */
   const turnsUnderWay = new Map<string, string>();
+  /**
+   * Per project, the turns started by any of its Claude threads, hidden
+   * ones too: a rebalance moves a project only if none started while it
+   * looked (Codex PLAZAS-R3-002).
+   */
+  const turnsStarted = new Map<string, number>();
   /** Another thread of the project has a turn under way, or holds a seat for one about to start. */
   function projectSeated(projectId: string, except: string): boolean {
     for (const [threadId, project] of turnsUnderWay)
@@ -3972,8 +3978,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     adviceOver(thread.id);
     // A hidden thread's turn too: it runs on the project's account, and
     // keeps the project there (Codex PLAZAS-R2-003).
-    if (thread.providerId === CLAUDE_CODE_PROVIDER)
+    if (thread.providerId === CLAUDE_CODE_PROVIDER) {
       turnsUnderWay.set(thread.id, thread.projectId);
+      turnsStarted.set(thread.projectId, (turnsStarted.get(thread.projectId) ?? 0) + 1);
+    }
     if (
       thread.providerId !== CLAUDE_CODE_PROVIDER ||
       notTheUsersThread(thread) !== null
@@ -5928,6 +5936,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // Each project's activity as the threads are read: a message or a turn
     // since stops its move (Codex PLAZAS-004).
     const seen = new Map(s.projects.map((p) => [p.id, activity.get(p.id) ?? 0]));
+    const started = new Map(s.projects.map((p) => [p.id, turnsStarted.get(p.id) ?? 0]));
     for (const t of await claudeThreads()) {
       lastActive.set(
         t.projectId,
@@ -5935,16 +5944,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
       if (atWork(t, now)) busy.add(t.projectId);
     }
+    // A hidden thread's turn too, running or over since (Codex
+    // PLAZAS-R3-002).
     const quiet = (projectId: string) =>
       !projectAtSeats(projectId) &&
-      (activity.get(projectId) ?? 0) === seen.get(projectId);
+      !projectSeated(projectId, "") &&
+      (activity.get(projectId) ?? 0) === seen.get(projectId) &&
+      (turnsStarted.get(projectId) ?? 0) === started.get(projectId);
     const projects: RebalanceProject[] = s.projects
       // Not one whose variable names an account that is gone.
       .filter((p) => !p.external && !(p.owned && p.account === null))
       .map((p) => ({
         id: p.id,
         account: p.account ?? current.defaultAccountName,
-        movable: !busy.has(p.id) && !projectAtSeats(p.id),
+        movable: !busy.has(p.id) && quiet(p.id),
         lastActive: lastActive.get(p.id) ?? 0,
       }));
     const names = new Set(ultra.map((a) => a.name));
