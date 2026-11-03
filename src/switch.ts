@@ -444,7 +444,9 @@ export type PlacementDecision =
         /** A turn in another model: its account spends the reserved model's weekly. */
         | "current-reserved"
         /** A turn in the reserved model: back to the account the project left for another model. */
-        | "back-from-excursion";
+        | "back-from-excursion"
+        /** The turn would wait for a seat where the project is: another account has one free. */
+        | "current-full";
     };
 
 export interface PlacementInput {
@@ -466,10 +468,22 @@ export interface PlacementInput {
   excursionFrom?: string | null;
   /**
    * Seats free on an account (see src/seats.ts). A move goes only to an
-   * account with one (Astra SEATS-R05); seats never move a project by
-   * themselves.
+   * account with one (Astra SEATS-R05); seats move a project by
+   * themselves only with `seatsFull`.
    */
   freeSeats?: (account: string) => number;
+  /**
+   * The turn would wait for a seat on the current account, and no other
+   * thread of the project holds one: the project moves to the best other
+   * account with a free seat, and waits where it is only when none has one
+   * (Aitor 2026-11-03, «necesitaría abrir más hilos»).
+   */
+  seatsFull?: boolean;
+  /**
+   * The switch-ahead share for the turn's model (see decideAhead), 0 = off:
+   * a move for a seat goes only to an account below it in every window.
+   */
+  aheadThreshold?: number;
   /**
    * The thread is background work (see ChoiceOptions.savedForUser): every
    * choice of another account (a new project, a move off an account that
@@ -567,7 +581,21 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     current !== undefined &&
     isUsable(current) &&
     canRunModel(current, input.preferredModel);
-  if (runs && !spendsReservedWeekly(current, options)) return { kind: "keep" };
+  if (runs && !spendsReservedWeekly(current, options)) {
+    if (input.seatsFull !== true) return { kind: "keep" };
+    const threshold = input.aheadThreshold ?? 0;
+    const roomy = accounts.filter(
+      (a) =>
+        a.name !== input.currentAccount &&
+        a.unknown !== true &&
+        (threshold <= 0 ||
+          fullestWindow(a, input.preferredModel).used < threshold),
+    );
+    const choice = chooseSeated(roomy, options, input.freeSeats);
+    return choice === null
+      ? { kind: "keep" }
+      : { kind: "move", account: choice.account, why: "current-full" };
+  }
   const others = accounts.filter((a) => a.name !== input.currentAccount);
   const choice =
     chooseSeated(others, options, input.freeSeats) ??

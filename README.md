@@ -870,8 +870,18 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
   first come, first served. A seat reserved for a turn that does not start
   within 90 s is freed; a thread that stops asking (its message was
   removed) leaves the line.
-- **A project is never moved to find a seat**: moving it moves all its
-  threads. Seats only steer the moves made for other reasons: a new
+- **A full account sends the project to one with a free seat** (since
+  0.2.37; Aitor, 2026-11-03: «necesitaría abrir más hilos»). With the
+  automatic choice on, a turn that would wait for a seat moves its
+  project first to the best other account with a seat free beyond those
+  owed to the threads already waiting there, chosen as any move chooses
+  (one that can run the turn's model, below the switch-ahead share when
+  one is set, never a Max account that keeps Fable for another model).
+  The history says `Moved to account joytorm before the turn: siloeads
+  seats full (4/4), joytorm had 4 free`. A project with another thread's
+  turn under way (or about to start) stays: moving it moves all its
+  threads. The message waits only when no such account has a seat.
+- **Otherwise seats steer the moves made for other reasons**: a new
   project, a move before a turn off an account that cannot run it, a
   move off a long wait and a switch ahead of the limit go only to an
   account with a free seat (by quota among them); with none free anywhere
@@ -879,7 +889,7 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
   exception is the switch after a turn failed on a limit: that account
   cannot work, so with no seat free anywhere the project goes to the best
   of the others by quota and its threads wait for a seat there. A project
-  picked by hand waits for a seat on that account like any.
+  picked by hand is no exception: a full account moves it too, as above.
 - **Counted anyway.** A turn sent past the checkpoint (a queued message
   sent by hand) takes a seat as it starts, even over the limit (logged
   as «over capacity»). A turn that started keeps the seat its dispatch

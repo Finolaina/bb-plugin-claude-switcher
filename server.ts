@@ -574,14 +574,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       type: "number",
       label: "Threads at once per Max account",
       description:
-        "A thread whose turn is about to start waits when the project's account already runs this many; it starts as soon as one of them ends, first come first served. A project is never moved to find a seat. 0 = no limit.",
+        "A thread whose turn is about to start waits when the project's account already runs this many; it starts as soon as one of them ends, first come first served. With the automatic choice on, a project with no turn under way moves to another account with a free seat rather than wait. 0 = no limit.",
       default: 4,
     },
     seatsTeam: {
       type: "number",
       label: "Threads at once per Team account",
       description:
-        "A thread whose turn is about to start waits when the project's account already runs this many; it starts as soon as one of them ends, first come first served. A project is never moved to find a seat. 0 = no limit.",
+        "A thread whose turn is about to start waits when the project's account already runs this many; it starts as soon as one of them ends, first come first served. With the automatic choice on, a project with no turn under way moves to another account with a free seat rather than wait. 0 = no limit.",
       default: 2,
     },
     dayStartHour: {
@@ -891,6 +891,38 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   let endedWhileCounting: Set<string> | null = null;
   const freeSeats = (name: string) => seats.free(seatKey(name));
+  /** Seats free on the account beyond those owed to the threads already waiting there. */
+  const seatRoom = (name: string) =>
+    seats.free(seatKey(name)) - seats.queue(seatKey(name)).length;
+  /** The project of each thread that took a seat or a place in a queue (see projectSeated). */
+  const seatProjects = new Map<string, string>();
+  /** Another thread of the project holds a seat: a turn of it runs, or is about to start. */
+  function projectSeated(projectId: string, except: string): boolean {
+    for (const [threadId, project] of seatProjects)
+      if (
+        project === projectId &&
+        threadId !== except &&
+        seats.seatOf(threadId) !== null
+      )
+        return true;
+    return false;
+  }
+  /**
+   * The thread's turn would wait for a seat on `name`, and no other thread
+   * of its project holds one: such a project moves to an account with a
+   * free seat (Aitor 2026-11-03, «necesitaría abrir más hilos»). A project
+   * with a turn under way stays: moving it moves that thread too.
+   */
+  function seatsFullFor(thread: ThreadResponse, name: string): boolean {
+    const key = seatKey(name);
+    if (seats.seatOf(thread.id)?.account === key) return false;
+    const queue = seats.queue(key);
+    const ahead = queue.findIndex((q) => q.threadId === thread.id);
+    return (
+      seats.free(key) <= (ahead === -1 ? queue.length : ahead) &&
+      !projectSeated(thread.projectId, thread.id)
+    );
+  }
   /**
    * Whose seat a turn of a project on `at` takes (Astra SEATS-R3-001): its
    * account's (by name), the default's when it has no variable, none (null)
@@ -988,6 +1020,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** The thread's turn ended or the thread went: its seat goes to the next in line. */
   function releaseSeat(threadId: string, why: string): void {
     seatTitles.delete(threadId);
+    seatProjects.delete(threadId);
     unseated.delete(threadId);
     endedWhileCounting?.add(threadId);
     const key = seats.release(threadId);
@@ -1024,6 +1057,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           return;
         unseated.delete(threadId);
         if (seats.seatOf(threadId) !== null) return;
+        seatProjects.set(threadId, projectId);
         const seat = seatFor(read.value);
         if (seat === UNKNOWN_SEAT) {
           bb.log.debug(
@@ -1046,6 +1080,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     admitWaiting();
     const now = deps.now();
     const key = seatKey(account);
+    seatProjects.set(thread.id, thread.projectId);
     const queuedBefore = seats.position(thread.id) !== null;
     if (seats.reserve(thread.id, key, now)) {
       seatTitles.delete(thread.id);
@@ -3854,6 +3889,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       notTheUsersThread(thread) !== null
     )
       return;
+    seatProjects.set(thread.id, thread.projectId);
     // The previous turn's start is not this turn's, read or still being
     // read (code-reviewer r13).
     const anchor = dispatchEpoch.get(thread.id);
@@ -4160,10 +4196,24 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const fromName = from.account ?? current.defaultAccountName;
     const now = deps.now();
     const excursion = excursions.get(projectId);
+    // Its turn would wait for a seat here: reservations whose turn never
+    // started are freed first, and the seats looked at again.
+    let seatsFull = when === "before" && seatsFullFor(thread, fromName);
+    if (seatsFull) {
+      admitWaiting();
+      seatsFull = seatsFullFor(thread, fromName);
+    }
     const input: PlacementInput = {
       ...placementOf(projectId, model, now, isBackground(thread), thread.id),
       currentAccount: fromName,
       currentLoggedOut: unconfirmed(fromName),
+      ...(seatsFull
+        ? {
+            seatsFull,
+            freeSeats: seatRoom,
+            aheadThreshold: aheadThreshold(model),
+          }
+        : {}),
     };
     const decision = decidePlacement(input);
     if (decision.kind === "keep") {
@@ -4190,6 +4240,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return { account: fromName, byDefault: !from.owned, writes };
     }
     if (turn.abandoned) return null;
+    // Read before the move: what the seats were as it was decided.
+    const fullHere = seats.snapshot([seatKey(fromName)])[seatKey(fromName)]!;
+    const roomThere = seatRoom(decision.account);
     const to = accountOrDefault(decision.account);
     // The sessions are not waited for: see applyAccount (Fable, 2026-10-29).
     await applyAccount(projectId, to, from, { share: false });
@@ -4198,7 +4251,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const reason =
       decision.why === "back-from-excursion"
         ? `Moved back to account ${decision.account} before the turn: ${fromName} was an excursion for ${excursion?.model ?? "another model"}`
-        : `Moved to account ${decision.account} ${when === "after" ? `after a turn in ${model}` : "before the turn"}: ${fromName} ${whyOut(fromName, model)}`;
+        : decision.why === "current-full"
+          ? `Moved to account ${decision.account} before the turn: ${fromName} seats full (${fullHere.running + fullHere.reserved + (fullHere.external?.length ?? 0)}/${fullHere.capacity}), ${decision.account} had ${Number.isFinite(roomThere) ? roomThere : "unlimited"} free`
+          : `Moved to account ${decision.account} ${when === "after" ? `after a turn in ${model}` : "before the turn"}: ${fromName} ${whyOut(fromName, model)}`;
     bb.log.info(`thread ${thread.id}: ${reason}`);
     await recordMove(
       {
@@ -6280,6 +6335,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           // meanwhile (it counted itself).
           if (ended.has(t.id) || seats.seatOf(t.id) !== null) return;
           seats.confirm(t.id, seatKey(seat), deps.now());
+          seatProjects.set(t.id, t.projectId);
         }),
       );
       complete = !unread;

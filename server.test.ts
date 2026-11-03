@@ -14974,6 +14974,110 @@ describe("seats: the cases the fourth inspection found (Astra SEATS-R4)", () => 
   });
 });
 
+// Aitor 2026-11-03 («tengo mucha cola? necesitaría abrir más hilos»):
+// siloeads ran 4/4 with Gloria · SEO waiting 17 min while joytorm and
+// others had 0/4 and quota; moved by hand, its message went at once.
+describe("a project whose account has its seats full moves to one with a free seat", () => {
+  /** Every account runs Fable; work ranks first, then spare. */
+  const FABLE_EVERYWHERE = {
+    main: () => Response.json(payload(10, 40, 30)),
+    spare: () => Response.json(payload(10, 60, 20)),
+    work: () => Response.json(payload(5, 20, 30)),
+  };
+  const on = (account: string) => [
+    { name: ENV_VAR, note: ownNote(account), secret: true, value: null },
+  ];
+  const fable = (h: Awaited<ReturnType<typeof host>>, id: string, projectId: string) =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id, projectId }),
+        requestedExecution: { providerId: "claude-code", model: "claude-fable-5-1" },
+        attempt: "start-turn",
+      }),
+    ) as Promise<{ action: string; reason?: string }>;
+  const running = async (h: Awaited<ReturnType<typeof host>>, id: string, projectId: string) => {
+    expect(await fable(h, id, projectId)).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id, projectId }),
+    });
+  };
+  const seatsOf = async (h: Awaited<ReturnType<typeof host>>) =>
+    ((await h.harness.behavior.callRpc("accounts_list", null)) as State).seats;
+
+  it("A full, B with a free seat: the project moves to B before the turn, which takes B's seat, and the history says why", async () => {
+    const h = await host(FABLE_EVERYWHERE, {
+      settings: { preferredModel: "Fable", seatsMax: 1 },
+      presetEnv: { "proj-1": on("main"), "proj-2": on("main") },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // Another project's thread holds main's only seat.
+    await running(h, "thr-2", "proj-2");
+    expect(await fable(h, "thr-1", "proj-1")).toEqual({ action: "proceed" });
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-1", `${ACCOUNTS}/work`],
+    ]);
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history[0]).toMatchObject({
+      projectId: "proj-1",
+      from: "main",
+      to: "work",
+      reason: "Moved to account work before the turn: main seats full (1/1), work had 1 free",
+    });
+    expect((await seatsOf(h))?.work).toMatchObject({ reserved: 1, queued: [] });
+    expect((await seatsOf(h))?.main).toMatchObject({ running: 1, queued: [] });
+  });
+
+  it("every account full: the project stays and its thread waits for a seat where it is", async () => {
+    const h = await host(FABLE_EVERYWHERE, {
+      settings: { preferredModel: "Fable", seatsMax: 1 },
+      presetEnv: {
+        "proj-1": on("main"),
+        "proj-2": on("main"),
+        "proj-3": on("spare"),
+        "proj-4": on("work"),
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await running(h, "thr-2", "proj-2");
+    await running(h, "thr-3", "proj-3");
+    await running(h, "thr-4", "proj-4");
+    expect(await fable(h, "thr-1", "proj-1")).toMatchObject({
+      action: "wait",
+      reason: "Waiting for a seat on main: 1/1 threads running, 0 ahead in the queue",
+    });
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("a project with a turn of another thread under way stays: moving it would move that thread too", async () => {
+    const h = await host(FABLE_EVERYWHERE, {
+      settings: { preferredModel: "Fable", seatsMax: 1 },
+      presetEnv: { "proj-1": on("main") },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await running(h, "thr-1a", "proj-1");
+    expect(await fable(h, "thr-1b", "proj-1")).toMatchObject({
+      action: "wait",
+      reason: "Waiting for a seat on main: 1/1 threads running, 0 ahead in the queue",
+    });
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("with the automatic choice off nothing moves for a seat", async () => {
+    const h = await host(FABLE_EVERYWHERE, {
+      settings: { preferredModel: "Fable", seatsMax: 1, autoSwitch: false },
+      presetEnv: { "proj-1": on("main"), "proj-2": on("main") },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await running(h, "thr-2", "proj-2");
+    expect((await fable(h, "thr-1", "proj-1")).action).toBe("wait");
+    expect(h.envSet).toEqual([]);
+  });
+});
+
 describe("bb claude-switcher seats", () => {
   it("prints each account's seats and every usage sample with the seats taken then", async () => {
     const h = await host(ALL_FREE, { settings: { autoSwitch: false, seatsMax: 2 } });
