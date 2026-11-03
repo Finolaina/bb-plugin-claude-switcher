@@ -10202,6 +10202,39 @@ describe("an Opus turn on a Max account that keeps Fable", () => {
     expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
   });
 
+  it("holds an Opus turn whose placement took too long when the project's account keeps Fable (Codex OPUS-R3-001)", async () => {
+    const options: HostOptions = { settings: FABLE };
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, 10, 2)),
+        spare: () => Response.json(payload(10, 10, 5)),
+        work: () => Response.json(teamPayload(100, 42)),
+      },
+      options,
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    let reads = 0;
+    // The placement's read takes 5 s; the seat's answers at once.
+    options.beforeEnvRead = async () => {
+      if (reads++ === 0) await new Promise((resolve) => setTimeout(resolve, 5_000));
+    };
+    vi.useFakeTimers();
+    try {
+      const answer = dispatch(h, "thread-1", OPUS_ID);
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(await answer).toMatchObject({
+        action: "wait",
+        reason: "Waiting to place Opus again: the project is on main, which keeps its weekly for Fable",
+      });
+      expect(reads).toBe(2);
+      await vi.advanceTimersByTimeAsync(3_000);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(h.envSet).toEqual([]);
+  });
+
   it("a Fable turn on the Max account is not held", async () => {
     const h = await host(
       {
@@ -10708,7 +10741,7 @@ describe("an Opus turn never retried, released or placed on a Max account that k
       hold.gate.release();
       expect(await out).toEqual({
         action: "wait",
-        reason: "Waiting to place Opus again: the project moved to spare, which keeps its weekly for Fable",
+        reason: "Waiting to place Opus again: the project is on spare, which keeps its weekly for Fable",
         sendAt: NOW + SEAT_RECHECK_MS,
       });
     });
@@ -15190,6 +15223,46 @@ describe("no project is left on an account out of the preferred model or without
       expect(logged(h, "info")).toContain(
         "project Website: moved from main (exhausted for Opus until 2026-09-29 12:00) to work (seats 0/2)",
       );
+    });
+
+    it("judges the project for Opus after an Opus turn past the checkpoint during which the user moved it to a Team seat out of Fable (Codex OPUS-R3-002)", async () => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(10, 10, 2)),
+          spare: () => Response.json(payload(10, 60, 20)),
+          work: () => Response.json(teamPayload(10, 100)),
+        },
+        {
+          ...OPTIONS,
+          threadEvents: {
+            "thr-1": [
+              {
+                id: "evt_1",
+                scope: { kind: "thread" },
+                threadId: "thr-1",
+                seq: 1,
+                createdAt: NOW - HOUR,
+                type: "client/turn/requested",
+                data: { requestId: "creq_1", execution: { model: "claude-opus-5-5" } },
+              },
+            ],
+          },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "thr-1", projectId: "proj-1" }),
+      });
+      expect((await h.harness.behavior.runCli(["use", "Website", "work"])).exitCode).toBe(0);
+      await h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: thread({ id: "thr-1", projectId: "proj-1" }),
+        lastAssistantText: null,
+      });
+      await onePass(h);
+      // Left on work: Opus runs there, its Fable at 100 % does not count
+      // (back to main, the default account, would be a deletion).
+      expect(h.envSet.map((e) => e.note)).toEqual([ownNote("work")]);
+      expect(h.envDeleted).toEqual([]);
     });
 
     it("stays on a Team seat out of its session when only Max accounts that keep Fable could take it", async () => {

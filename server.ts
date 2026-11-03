@@ -3512,6 +3512,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     )
       return;
     const projectId = thread.projectId;
+    const newerMessage = () =>
+      (dispatches.get(projectId) ?? 0) !== started.dispatches;
     const stillLatest = () => {
       const now = projectMarks(projectId);
       return (
@@ -3521,11 +3523,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         now.dispatches === started.dispatches
       );
     };
-    if (!stillLatest()) return;
+    if (newerMessage()) return;
     const model =
       (await loggedTurn(thread.id)).model ?? threadModel.get(thread.id) ?? null;
-    if (model === null || !stillLatest()) return;
+    if (model === null || newerMessage()) return;
+    // The model the project's latest turn ran, also when a move or a pick
+    // came meanwhile: those stop the move below, not what the rescue
+    // judges the project for (Codex OPUS-R3-002).
     projectModel.set(projectId, model);
+    if (!stillLatest()) return;
     if (!reserving({ preferredModel: model, reserveModel: current.preferredModel }))
       return;
     await inProjectQueue(projectId, async () => {
@@ -3997,10 +4003,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const options = { preferredModel: model, reserveModel: current.preferredModel };
     if (!holdsForReserve(options)) return false;
     const usage = measuredAccounts(model).find((a) => a.name === name);
+    if (usage === undefined || usage.unknown === true) return false;
+    // Where the turn cannot run anyway it fails there, and the failure
+    // moves it: only a turn that would run and spend the reserve is held.
+    const settled = settle(usage, deps.now());
     return (
-      usage !== undefined &&
-      usage.unknown !== true &&
-      spendsReservedWeekly(settle(usage, deps.now()), options)
+      isUsable(settled) &&
+      canRunModel(settled, model) &&
+      spendsReservedWeekly(settled, options)
     );
   }
   /**
@@ -4446,20 +4456,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // Checked last, with nothing awaited till the seat is reserved: the
       // project moved after it was read is read again (Astra SEATS-R3-002).
       if (at !== null && at.account !== null && !still(at.writes)) at = null;
-      // The account the turn starts on, read again when a move crossed its
-      // placement, may be one the placement would not have put it on: a
-      // turn held off the reserve does not start there, it is placed again
-      // (Codex OPUS-003).
+      // The account the turn starts on may be one no placement put it on:
+      // read again when a move crossed its placement (Codex OPUS-003), or
+      // read alone when the placement failed or took too long (Codex
+      // OPUS-R3-001). A turn held off the reserve does not start there: it
+      // waits and is placed again.
       if (
         current.autoSwitch &&
         model !== null &&
-        typeof placed.at === "object" &&
         at !== null &&
         at.account !== null &&
-        at.account !== placed.at.account &&
         heldOff(at.account, model)
       ) {
-        const reason = `Waiting to place ${model} again: the project moved to ${at.account}, which keeps its weekly for ${current.preferredModel}`;
+        const reason = `Waiting to place ${model} again: the project is on ${at.account}, which keeps its weekly for ${current.preferredModel}`;
         bb.log.info(`thread ${thread.id}: its message waits (${reason})`);
         return { action: "wait", reason, sendAt: deps.now() + SEAT_RECHECK_MS };
       }
