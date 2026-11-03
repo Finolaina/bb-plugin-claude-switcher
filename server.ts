@@ -80,6 +80,7 @@ import {
   opusInstead,
   opusInsteadText,
   RESET_BUFFER_MS,
+  reserveWait,
   RESET_JITTER_MS,
   settle,
   type PlacementInput,
@@ -159,6 +160,12 @@ export const SESSIONS_LIMIT_MS = 2_000;
 export const LOGIN_TIMEOUT_MS = 10 * 60_000;
 /** A thread waiting for a seat is asked about again after this long (sooner when a seat frees). */
 export const SEAT_RECHECK_MS = 30_000;
+/**
+ * A turn held off a Max account that keeps the reserved model (see
+ * reserveWait) is asked about again after this long at most: a seat or a
+ * measurement may free an account before the reset it waits for.
+ */
+export const RESERVE_RECHECK_MS = 5 * 60_000;
 /** A seat reserved for a turn that has not started within this long is freed. */
 export const SEAT_TTL_MS = 90_000;
 /** Times a message waits because its project's account could not be read for its seat; then it goes (Astra SEATS-R01). */
@@ -3461,18 +3468,56 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     await inProjectQueue(thread.projectId, () => moveAhead(thread, model));
   });
 
+  // Aitor 2026-11-03: a turn that skips the checkpoint (a message from a
+  // child thread, a Send now, the provider's own follow-up) runs wherever
+  // the project sits: this plugin's own Opus thread ran on aitor that way
+  // for 15 hours. When a turn in another model than the reserved one ends
+  // where it spends the reserve's weekly, the project moves off at once,
+  // as the checkpoint would have moved it, so the next such turn does not
+  // start there; with nowhere to go it stays, and the checkpoint holds the
+  // next turn it sees.
+  bb.events.on("thread.idle", async ({ thread }) => {
+    if (
+      !current.autoSwitch ||
+      thread.providerId !== CLAUDE_CODE_PROVIDER ||
+      notTheUsersThread(thread) !== null
+    )
+      return;
+    const model =
+      (await loggedTurn(thread.id)).model ?? threadModel.get(thread.id) ?? null;
+    if (model === null) return;
+    projectModel.set(thread.projectId, model);
+    if (!reserving({ preferredModel: model, reserveModel: current.preferredModel }))
+      return;
+    await inProjectQueue(thread.projectId, async () => {
+      await placeTurn(thread, model, { abandoned: false }, "after");
+    });
+  });
+
   // ---- No project left where a turn cannot run ---------------------------
   /**
-   * Why `name` cannot run the preferred model, as measured now: not logged
-   * in, or out of it (session, weekly or the model's own window full, or
-   * locked) until when; null when it can, or nothing is known of it.
+   * The model of each project's latest turn, as its checkpoint or the end
+   * of the turn named it (in memory: a reload forgets it, and the preferred
+   * model decides again). Aitor 2026-11-03: the rescue judged every project
+   * for the preferred model, and moved one working in Opus off a Team seat
+   * (or a Max account out of Fable) that still ran Opus, to a Max account
+   * whose weekly Fable needs (viaulab → aitor, 2 Nov 18:23).
    */
-  function stranded(name: string, now: number): string | null {
+  const projectModel = new Map<string, string>();
+  /** The model a project's next turn is judged for: its latest turn's, else the preferred one. */
+  function modelOfProject(projectId: string): string {
+    return projectModel.get(projectId) ?? current.preferredModel;
+  }
+  /**
+   * Why `name` cannot run `model`, as measured now: not logged in, or out
+   * of it (session, weekly or the model's own window full, or locked)
+   * until when; null when it can, or nothing is known of it.
+   */
+  function stranded(name: string, now: number, model: string): string | null {
     if (loggedOut(name)) return "not logged in";
-    const known = measuredAccounts().find((a) => a.name === name);
+    const known = measuredAccounts(model).find((a) => a.name === name);
     if (known === undefined || known.unknown === true) return null;
     const settled = settle(known, now);
-    const model = current.preferredModel;
     if (isUsable(settled) && canRunModel(settled, model)) return null;
     const full = [
       settled.session,
@@ -3516,7 +3561,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     );
     for (const project of projects) {
       if (project === null || project.external) continue;
-      if (stranded(project.account ?? current.defaultAccountName, now) === null)
+      if (
+        stranded(
+          project.account ?? current.defaultAccountName,
+          now,
+          modelOfProject(project.id),
+        ) === null
+      )
         continue;
       // One project that cannot be moved, or whose queue is held, does not
       // keep the rest where they are, nor the refresh (Astra SEATS-R4-004).
@@ -3551,14 +3602,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (from.external) return;
     const fromName = from.account ?? current.defaultAccountName;
     const now = deps.now();
-    const why = stranded(fromName, now);
+    const model = modelOfProject(projectId);
+    const why = stranded(fromName, now, model);
     if (why === null) return;
-    const model = current.preferredModel;
+    // For another model than the reserved one, never to an account where
+    // it spends the reserve's weekly: that turn waits at the checkpoint.
     const decision = decidePlacement({
       currentAccount: fromName,
       isNew: false,
       accounts: aheadTargets(projectId, fromName, model, now),
       preferredModel: model,
+      reserveModel: current.preferredModel,
       freeSeats,
       now,
       currentLoggedOut: loggedOut(fromName),
@@ -3846,6 +3900,34 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     };
   }
   /**
+   * How long a turn in `model` kept where it spends the reserve's weekly
+   * waits, and why (see reserveWait): till the account that spares it
+   * frees, asked again within RESERVE_RECHECK_MS; a seat, within
+   * SEAT_RECHECK_MS; none in sight, RESERVE_RECHECK_MS.
+   */
+  function reserveHold(
+    input: PlacementInput,
+    model: string,
+    now: number,
+  ): { sendAt: number; reason: string } {
+    const reserve = current.preferredModel;
+    const free = reserveWait(input);
+    if (free === null)
+      return {
+        sendAt: now + RESERVE_RECHECK_MS,
+        reason: `Waiting for an account that spares ${reserve}'s weekly for ${model}: ${input.currentAccount} keeps it`,
+      };
+    if (free.at <= now)
+      return {
+        sendAt: now + SEAT_RECHECK_MS,
+        reason: `Waiting for a free seat for ${model} on ${free.account}: ${input.currentAccount} keeps its weekly for ${reserve}`,
+      };
+    return {
+      sendAt: Math.min(free.at + RESET_BUFFER_MS, now + RESERVE_RECHECK_MS),
+      reason: `Waiting for ${model} on ${free.account}, free from ${isoInZone(free.at).slice(0, 16).replace("T", " ")}: ${input.currentAccount} keeps its weekly for ${reserve}`,
+    };
+  }
+  /**
    * Before a turn starts: when the project's account is MEASURED unable to
    * run the model the turn is sent with and another account can, the project
    * moves there first. The preferred model does not decide here: a thread
@@ -3859,7 +3941,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   async function placeTurn(
     thread: ThreadResponse,
     model: string,
-    turn: { abandoned: boolean },
+    /** `held`: set when the turn must wait (see reserveWait). */
+    turn: { abandoned: boolean; held?: { sendAt: number; reason: string } },
+    /** "after": placed as a turn of the thread ends, for its next one (see the thread.idle below). */
+    when: "before" | "after" = "before",
   ): Promise<TurnPlace | null> {
     const projectId = thread.projectId;
     // Emptied by a change of the accounts directory, until the next look.
@@ -3877,18 +3962,21 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const fromName = from.account ?? current.defaultAccountName;
     const now = deps.now();
     const excursion = excursions.get(projectId);
-    const decision = decidePlacement({
+    const input: PlacementInput = {
       ...placementOf(projectId, model, now, isBackground(thread)),
       currentAccount: fromName,
       currentLoggedOut: unconfirmed(fromName),
-    });
+    };
+    const decision = decidePlacement(input);
     if (decision.kind === "keep") {
       // The turn runs where the project is (refused at the checkpoint only
-      // when that is the default account and it has no login).
-      if (decision.why === "current-reserved")
-        bb.log.info(
-          `thread ${thread.id}: ${model} turn stays on ${fromName}: no account spares ${current.preferredModel}`,
-        );
+      // when that is the default account and it has no login), unless it
+      // would spend the reserve's weekly there: then it waits for an
+      // account that spares it (Aitor 2026-11-03, «Esperar siempre»).
+      // Haiku is not held: it spends little, and the small threads that
+      // run it (titles, the cache's ticks) would stop for hours.
+      if (decision.why === "current-reserved" && !/^haiku$/i.test(model))
+        turn.held = reserveHold(input, model, now);
       return { account: fromName, byDefault: !from.owned, writes };
     }
     if (turn.abandoned) return null;
@@ -3900,7 +3988,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const reason =
       decision.why === "back-from-excursion"
         ? `Moved back to account ${decision.account} before the turn: ${fromName} was an excursion for ${excursion?.model ?? "another model"}`
-        : `Moved to account ${decision.account} before the turn: ${fromName} ${whyOut(fromName, model)}`;
+        : `Moved to account ${decision.account} ${when === "after" ? `after a turn in ${model}` : "before the turn"}: ${fromName} ${whyOut(fromName, model)}`;
     bb.log.info(`thread ${thread.id}: ${reason}`);
     await recordMove(
       {
@@ -4054,7 +4142,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const turnModel =
       model ??
       (unconfirmed(current.defaultAccountName) ? current.preferredModel : null);
-    const turn = { abandoned: false };
+    const turn: Parameters<typeof placeTurn>[2] = { abandoned: false };
     const turnPlaced =
       turnModel === null
         ? null
@@ -4090,6 +4178,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
     }
     const done = turnPlaced === null ? null : await turnPlaced;
+    if (turn.held !== undefined) {
+      bb.log.info(`thread ${thread.id}: its message waits (${turn.held.reason})`);
+      return { action: "wait", ...turn.held };
+    }
     const where: TurnPlace | null =
       typeof done === "object" && done !== null ? done.value : null;
     if (where !== null) turnAt.at = where;
@@ -4175,7 +4267,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       };
     }
     const model = modelFamily(ctx.requestedExecution.model);
-    if (model !== null) threadModel.set(thread.id, model);
+    if (model !== null) {
+      threadModel.set(thread.id, model);
+      projectModel.set(thread.projectId, model);
+    }
     const placed: { at?: TurnPlace } = {};
     if (current.autoSwitch && ctx.attempt === "start-turn") {
       // A message sent now, not a queued one asked again: its own waits
