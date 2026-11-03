@@ -1,4 +1,4 @@
-# Plazas 0.2.37: lo que queda para Aitor
+# Plazas 0.2.37-0.2.38: decisiones y estado
 
 Encargo: «Qué tal va el sistema de carga, tengo mucha cola? necesitaría abrir
 más hilos por favor» y «que se vayan balanceando, pero que no sea un "máximo
@@ -6,21 +6,18 @@ más hilos por favor» y «que se vayan balanceando, pero que no sea un "máximo
 Publicado como v0.2.37 (d01559a) e instalado en bb a las 13:56 CET
 (`bb plugin source claude-switcher`).
 
-## Preguntas abiertas (ninguna bloquea lo publicado)
+## Decidido (Fable, hilo thr_zudr84azva, 2026-11-03 18:50; Aitor 19:15)
 
-1. **¿Mover también un proyecto que tiene otro hilo trabajando cuando su cuenta
-   está llena?** Hoy no se mueve: ese hilo perdería la caché y podría cortarse
-   su turno, así que el mensaje nuevo espera plaza. Recomendación: dejarlo así.
-2. **¿Techo por encima de 5 hilos por cuenta?** No está medido: se vieron 5 a
-   la vez sin cortes y nunca 6 (`medir-techo.salida.txt`). Se queda en «4 de
-   base, 5 con carga baja, 3 con ritmo por encima del 90 %» mientras no haya
-   medida. Subirlo es decisión tuya (`CLAUDE.md`).
-3. [SUPUESTO] **Las Team siguen con 2 plazas fijas** (`seatsTeam`): el encargo
-   habla de las Ultra y no hay medida de las Team con más hilos.
-4. **`~/.claude-cuentas/cuota.json` no está en la máquina Linux** donde se hizo
-   esto: la propuesta de techos salió del historial de plazas del propio plugin
-   de la última semana (`seats-semana.json.gz`, `medir-techo.py`). Si quieres
-   contrastarla con `cuota.json`, se repite `medir-techo.py` en el Mac.
+1. **No se mueve un proyecto con un hilo trabajando**: se queda como está.
+2. **Techo**: no hay número fijo; manda la carga (Aitor, 2026-11-03: «que no
+   sea un "máximo 4"»). Hoy la medida solo respalda un 5.º hilo (se vieron 5 a
+   la vez sin cortes y nunca 6, `medir-techo.salida.txt`), así que el 6.º no
+   se admite hasta que una medida lo respalde.
+3. **Las Team siguen con 2 plazas fijas** (`seatsTeam`).
+4. `~/.claude-cuentas/cuota.json` no está en la máquina Linux: la propuesta de
+   techos salió del historial de plazas del plugin (`seats-semana.json.gz`).
+5. **Nombres de proyectos fuera del repo público, también del historial**
+   (Aitor, 2026-11-03 ~19:15: «Sí, borrarlos del historial»).
 
 ## Estado al cerrar (13:58 CET, `cierre-seats.txt`)
 
@@ -36,9 +33,4 @@ Este repo es público: la lista de proyectos, los títulos de hilos y la salida
 de `rebalance` con nombres están fuera, en el almacenamiento del hilo
 thr_zf8ncnt6de (`/home/aitor/.bb-machines/macbook-pro-de-aitor.tail81fad6.ts.net/thread-storage/thr_zf8ncnt6de/plazas-2026-11-03`). La primera publicación de 0.2.37 (d01559a) sí llevaba
 los nombres de 79 proyectos y dos títulos de hilos; el commit siguiente los
-quita de `main`, pero siguen en el historial de git (ver la pregunta 5).
-
-5. **¿Borrar esos nombres también del historial público?** Exige reescribir
-   la historia de `main` y subirla con `--force`, que solo se hace si tú lo
-   pides, y también rehacer la etiqueta v0.2.37 y su release, que los llevan.
-   Si no, se quedan en d01559a, visibles para quien lo busque.
+quita de `main`, y el historial se reescribió sin ellos (ver «Decidido», punto 5).
