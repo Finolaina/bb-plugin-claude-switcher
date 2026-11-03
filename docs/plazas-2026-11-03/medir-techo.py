@@ -5,13 +5,14 @@ Muestra: [t, running, reserved, session %, weekly %, session resets, weekly rese
 Por cuenta y nº de plazas ocupadas (running+reserved del tramo, la media de
 los dos extremos redondeada), cuánto sube la sesión de 5 h y la semanal por
 hora, solo entre dos muestras de la misma ventana (mismo reset ±2 min) y de
-como mucho 15 min de separación. Cuenta nuestra.
+como mucho 15 min de separación; cada ventana sobre su propio tiempo válido
+(una sin ventana de 5 h da «—»). Cuenta nuestra.
 """
 import gzip, json, sys
 from collections import defaultdict
 
 d = json.load((gzip.open if sys.argv[1].endswith(".gz") else open)(sys.argv[1], "rt"))
-rows = defaultdict(lambda: defaultdict(lambda: {"h": 0.0, "ses": 0.0, "sem": 0.0, "n": 0}))
+rows = defaultdict(lambda: defaultdict(lambda: {"h": 0.0, "hs": 0.0, "ses": 0.0, "sem": 0.0, "n": 0}))
 peak = {}
 for name, samples in d["samples"].items():
     samples = sorted(samples)
@@ -28,14 +29,15 @@ for name, samples in d["samples"].items():
             r["h"] += dt
             r["sem"] += b[4] - a[4]
             r["n"] += 1
-            if same_ses and a[3] is not None and b[3] is not None:
-                r["ses"] += b[3] - a[3]
-            else:
-                r.setdefault("ses_h_missing", 0)
-print("cuenta\tplazas\thoras\tsesión %/h\tsemanal %/h\tmuestras\tpico de plazas")
+        # The session over its own valid time (Codex PLAZAS-R2-005).
+        if same_ses and a[3] is not None and b[3] is not None:
+            r["hs"] += dt
+            r["ses"] += b[3] - a[3]
+print("cuenta\tplazas\thoras semana\tsemanal %/h\thoras sesión\tsesión %/h\tmuestras\tpico de plazas")
 for name in sorted(rows):
     for seats in sorted(rows[name]):
         r = rows[name][seats]
         if r["h"] < 0.25:
             continue
-        print(f"{name}\t{seats}\t{r['h']:.1f}\t{r['ses']/r['h']:.1f}\t{r['sem']/r['h']:.2f}\t{r['n']}\t{peak[name]}")
+        ses = f"{r['ses']/r['hs']:.1f}" if r["hs"] >= 0.25 else "—"
+        print(f"{name}\t{seats}\t{r['h']:.1f}\t{r['sem']/r['h']:.2f}\t{r['hs']:.1f}\t{ses}\t{r['n']}\t{peak[name]}")

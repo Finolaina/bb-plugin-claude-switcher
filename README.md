@@ -861,7 +861,7 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
   session (when it has one) under 40 %, and one fewer once its pace
   passes 90 %. Never more than one above: in the week to 2026-11-03 five
   threads at once ran on joytorm, siloeads and viaulab with no account
-  cut, never six; four threads spent 36-42 % of a 5-hour session an hour
+  cut, never six; four threads spent 37-44 % of a 5-hour session an hour
   there (`docs/plazas-2026-11-03/medir-techo.salida.txt`). Each change is
   in the history (`Seats on joytorm: 4 → 5, day's pace 0 % (below 50 %),
   5-hour session 3 % (below 40 %)`), measured as the account is. A Team
