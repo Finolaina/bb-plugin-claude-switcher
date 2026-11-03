@@ -148,9 +148,11 @@ turn does not fail first. Needs the automatic choice on. A second
 percentage covers threads running in another model, so an Opus thread
 moves at 95 % while Fable threads keep theirs.
 Whatever the percentages say, every refresh moves a project off an
-account out of the preferred model or without a login, to the best
-account with a free seat (bb greys out the composer of such a project, so
-no turn would get to move it); with no seat free, it stays.
+account out of the model of its latest turn (the preferred model until
+one is seen) or without a login, to the best account with a free seat
+(bb greys out the composer of such a project, so no turn would get to
+move it); with no seat free, it stays. A project working in Opus never
+goes to a Max account that keeps Fable this way.
 
 </td>
 </tr>
@@ -393,9 +395,18 @@ flowchart TD
   account the project left for that (a reload forgets it, and the project
   stays where it is; a pick by hand, also one that confirms the account,
   and `release` forget it too). When no account spares Fable the Opus
-  turn stays where the project is and the log says so (`stays on …: no
-  account spares Fable`). The history reads `Moved to account … before
-  the turn: … would spend Fable's weekly` on the way out and `Moved back
+  turn waits, also in your own threads (Aitor's decision of 2026-11-03):
+  bb holds the message with `Waiting for Opus on <seat>, free from
+  <time>: <account> keeps its weekly for Fable` (or `Waiting for a free
+  seat …`, or `Waiting for an account that spares Fable's weekly …` when
+  none is in sight) and asks again within 5 minutes, so a seat that
+  frees early is taken. A Haiku turn is not held: it spends little. When
+  a turn in another model ends on a Max account that keeps Fable (a turn
+  that skipped the check below, such as a message from a child thread),
+  the project moves off at once, so the next one does not start there
+  either. The history reads `Moved to account … before
+  the turn: … would spend Fable's weekly` on the way out (`after a turn
+  in Opus` for that move) and `Moved back
   to account … before the turn: … was an excursion for Opus` on the way
   back. A failed Opus turn then waits only for an
   account that will spare Fable when the retry is sent, or is left alone
@@ -405,7 +416,7 @@ flowchart TD
   that fails there is judged like any other and may move the project
   out. This is
   decided on the measurements already there and never refuses a message
-  (at worst it delays it 3 seconds); the plugin never changes a thread's
+  (it delays it 3 seconds at most, or holds an Opus turn as above); the plugin never changes a thread's
   model. bb does not ask for a Send now of a queued message nor for an
   edited message sent again: those run where the project is.
 - **When a turn ends (opt-in).** With `switchAheadPercent` above 0 and

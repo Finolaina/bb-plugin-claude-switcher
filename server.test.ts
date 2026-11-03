@@ -20,6 +20,7 @@ import {
   ENV_VAR,
   FIRST_PLACEMENT_WAIT_MS,
   MAX_START_WAITS,
+  RESERVE_RECHECK_MS,
   SEAT_RECHECK_MS,
   type State,
 } from "./server.js";
@@ -5925,11 +5926,16 @@ describe("moving a project ahead of the limit for a thread in another model", ()
     expect(h.envSet.map((e) => e.note)).toEqual([ownNote("spare")]);
     release();
     await ahead;
-    // The move ahead, decided on main, is dropped: the project stays on spare.
-    expect(h.envSet.map((e) => e.note)).toEqual([ownNote("spare")]);
+    // The move ahead, decided on main, is dropped. Then the Opus turn that
+    // ended takes the project off spare, a Max account that keeps Fable,
+    // to the seat, as its next turn's checkpoint would (2026-11-03).
+    expect(h.envSet.map((e) => e.note)).toEqual([ownNote("spare"), ownNote("work")]);
     const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
-    expect(state.history.map((r) => r.to)).toEqual(["spare"]);
-    expect(state.projects.find((p) => p.id === "proj-1")?.account).toBe("spare");
+    expect(state.history.map((r) => [r.to, r.reason])).toEqual([
+      ["work", "Moved to account work after a turn in Opus: spare would spend Fable's weekly"],
+      ["spare", expect.stringMatching(/^Moved to account spare before the turn: /)],
+    ]);
+    expect(state.projects.find((p) => p.id === "proj-1")?.account).toBe("work");
   });
 
   it("leaves a Fable thread alone when switchAheadPercent is 0, whatever switchAheadOtherPercent says", async () => {
@@ -6108,10 +6114,11 @@ describe("moving a project ahead of the limit with two percentages", () => {
   // main: Fable at 96 (over the Fable percentage), session 20. work: session
   // 85 (over the Opus percentage), Fable 10. A Fable thread moves the project
   // to work; the project's Opus thread must not move it back while main is
-  // still over the share that moved it away (code-reviewer r2).
+  // still over the share that moved it away (code-reviewer r2). Team seats:
+  // since 2026-11-03 an Opus turn is held off a Max account that keeps Fable.
   const TWO = {
-    main: () => Response.json(payload(20, 30, 96)),
-    work: () => Response.json(payload(85, 30, 10)),
+    main: () => Response.json(teamPayload(20, 96)),
+    work: () => Response.json(teamPayload(85, 10)),
   };
   const idleOf = (h: Awaited<ReturnType<typeof host>>, id: string) =>
     h.harness.behavior.emitThreadEvent("thread.idle", {
@@ -10065,7 +10072,10 @@ describe("an Opus turn on a Max account that keeps Fable", () => {
     expect(h.envDeleted).toEqual([]);
   });
 
-  it("leaves the Opus turn on the Max account when no account spares Fable, and says so", async () => {
+  // Aitor 2026-11-03 («Esperar siempre»): with no account that spares
+  // Fable, an Opus turn no longer runs on the Max account it sits on: it
+  // waits, the user's own threads too, and is asked about again.
+  it("holds the Opus turn when no account spares Fable, and asks again within RESERVE_RECHECK_MS", async () => {
     const h = await host(
       {
         main: () => Response.json(payload(10, 10, 2)),
@@ -10076,12 +10086,137 @@ describe("an Opus turn on a Max account that keeps Fable", () => {
     );
     dispose = () => h.harness.dispose();
     await h.harness.behavior.callRpc("accounts_refresh", null);
-    expect(await dispatch(h, "thread-1", OPUS_ID)).toEqual({ action: "proceed" });
+    expect(await dispatch(h, "thread-1", OPUS_ID)).toEqual({
+      action: "wait",
+      reason: "Waiting for an account that spares Fable's weekly for Opus: main keeps it",
+      sendAt: NOW + RESERVE_RECHECK_MS,
+    });
     expect(h.envSet).toEqual([]);
-    expect(h.harness.logEntries.map((e) => e.message)).toContain(
-      "thread thread-1: Opus turn stays on main: no account spares Fable",
-    );
     expect(await reasons(h)).toEqual([]);
+  });
+
+  it("holds the Opus turn till the Team seat's session resets, asked again meanwhile, and moves it there once the seat has room", async () => {
+    let clock = NOW;
+    let workSession = 100;
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, 10, 2)),
+        spare: () => Response.json(payload(10, 10, 5)),
+        work: () => Response.json(teamPayload(workSession, 42)),
+      },
+      { settings: FABLE, clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect(await dispatch(h, "thread-1", OPUS_ID)).toEqual({
+      action: "wait",
+      reason: "Waiting for Opus on work, free from 2026-09-29 14:00: main keeps its weekly for Fable",
+      sendAt: NOW + RESERVE_RECHECK_MS,
+    });
+    expect(h.envSet).toEqual([]);
+    // The seat's session resets: measured again, the turn goes there.
+    clock = NOW + 2 * HOUR + 60_000;
+    workSession = 0;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect(await dispatch(h, "thread-1", OPUS_ID)).toEqual({ action: "proceed" });
+    expect(h.envSet.map((e) => e.note)).toEqual([ownNote("work")]);
+  });
+
+  it("holds a background Opus turn as the user's own: no Max account that keeps Fable runs it", async () => {
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, 10, 2)),
+        spare: () => Response.json(payload(10, 10, 5)),
+        work: () => Response.json(teamPayload(100, 42)),
+      },
+      { settings: FABLE },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const decision = await h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: "thread-9", projectId: "proj-1", parentThreadId: "thread-1" }),
+        requestedExecution: { providerId: "claude-code", model: OPUS_ID },
+        attempt: "start-turn",
+      }),
+    );
+    expect(decision).toMatchObject({ action: "wait" });
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("a Fable turn on the Max account is not held", async () => {
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, 10, 2)),
+        spare: () => Response.json(payload(10, 10, 5)),
+        work: () => Response.json(payload(10, 10, 7)),
+      },
+      { settings: FABLE },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect(await dispatch(h, "thread-1", FABLE_ID)).toEqual({ action: "proceed" });
+  });
+
+  // Aitor 2026-11-03: a turn that skips the checkpoint (a message from a
+  // child thread, a Send now) is never placed; the Opus thread of this
+  // plugin's own project ran on aitor that way for 15 hours. When an Opus
+  // turn ends on a Max account that keeps Fable, the project moves off it
+  // at once, so the next one does not start there.
+  describe("after an Opus turn that ran on the Max account", () => {
+    const idle = (h: Awaited<ReturnType<typeof host>>) =>
+      h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: thread({ id: "thread-1", projectId: "proj-1" }),
+        lastAssistantText: null,
+      });
+    const logged = (model: string): Record<string, LoggedEvent[]> => ({
+      "thread-1": [
+        {
+          id: "evt_1",
+          scope: { kind: "thread" },
+          threadId: "thread-1",
+          seq: 1,
+          createdAt: NOW - HOUR,
+          type: "client/turn/requested",
+          data: { requestId: "creq_1", execution: { model } },
+        },
+      ],
+    });
+
+    it("moves the project to the Team seat", async () => {
+      const h = await host(MAX_AND_SEAT, { settings: FABLE, threadEvents: logged(OPUS_ID) });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      await idle(h);
+      expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([["proj-1", ownNote("work")]]);
+      expect(await reasons(h)).toEqual([
+        ["main", "work", "Moved to account work after a turn in Opus: main would spend Fable's weekly"],
+      ]);
+    });
+
+    it("leaves it after a Fable turn", async () => {
+      const h = await host(MAX_AND_SEAT, { settings: FABLE, threadEvents: logged(FABLE_ID) });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      await idle(h);
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("leaves it when no account spares Fable: its next turn is held at the checkpoint", async () => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(10, 10, 2)),
+          spare: () => Response.json(payload(10, 10, 5)),
+          work: () => Response.json(teamPayload(100, 42)),
+        },
+        { settings: FABLE, threadEvents: logged(OPUS_ID) },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      await idle(h);
+      expect(h.envSet).toEqual([]);
+      expect(await reasons(h)).toEqual([]);
+    });
   });
 
   it("keeps the first origin through a second move for Opus (ahead of the seat's limit), so the Fable turn goes home, not to the first seat", async () => {
@@ -10309,18 +10444,21 @@ describe("an Opus turn never retried, released or placed on a Max account that k
 
     it("a leftover Opus turn that fails once the Fable turn's move home has landed but is not yet recorded is judged, not retried on the recorded seat (BM-INSPECT-002)", async () => {
       let workSession = 100;
+      // Out of Fable as thread-3 starts: since 2026-11-03 an Opus turn is
+      // held off a Max account that keeps Fable, never started there.
+      let spareFable = 100;
       const hold = heldSet();
       const h = await host(
         {
           main: () => Response.json(payload(10, 10, 2)),
-          spare: () => Response.json(payload(10, 10, 5)),
+          spare: () => Response.json(payload(10, 10, spareFable)),
           work: () => Response.json(teamPayload(workSession, 42)),
         },
         { ...FABLE, afterSet: hold.afterSet },
       );
       dispose = () => h.harness.dispose();
       await h.harness.behavior.callRpc("accounts_refresh", null);
-      // The project lives on spare by hand; with no seat free, thread-3 (Opus) stays and starts there.
+      // The project lives on spare by hand, out of Fable: thread-3 (Opus) starts there.
       expect(
         (await h.harness.behavior.runCli(["use", "Website", "spare"])).exitCode,
       ).toBe(0);
@@ -10331,6 +10469,7 @@ describe("an Opus turn never retried, released or placed on a Max account that k
       expect(notes(h)).toEqual([ownNote("spare")]);
       // A seat frees: thread-1 (Opus) takes the project out to work.
       workSession = 17;
+      spareFable = 5;
       await h.harness.behavior.callRpc("accounts_refresh", null);
       expect(await dispatch(h, "thread-1", OPUS_ID)).toEqual({
         action: "proceed",
@@ -10384,12 +10523,15 @@ describe("an Opus turn never retried, released or placed on a Max account that k
 
     it("an Opus retry provider-retry queued is never sent past bb's checkpoint: once the Fable turn took the project home meanwhile, the retry is queued through it and placed on the seat again (Astra r2, BM-INSPECT-R2-001)", async () => {
       let workSession = 100;
+      // Out of Fable as thread-3 starts: since 2026-11-03 an Opus turn is
+      // held off a Max account that keeps Fable, never started there.
+      let spareFable = 100;
       let armed = false;
       const gate = envGate();
       const h = await host(
         {
           main: () => Response.json(payload(10, 10, 2)),
-          spare: () => Response.json(payload(10, 10, 5)),
+          spare: () => Response.json(payload(10, 10, spareFable)),
           work: () => Response.json(teamPayload(workSession, 42)),
         },
         {
@@ -10404,7 +10546,7 @@ describe("an Opus turn never retried, released or placed on a Max account that k
       );
       dispose = () => h.harness.dispose();
       await h.harness.behavior.callRpc("accounts_refresh", null);
-      // The project lives on spare by hand; with no seat free, thread-3 (Opus) stays and starts there.
+      // The project lives on spare by hand, out of Fable: thread-3 (Opus) starts there.
       expect(
         (await h.harness.behavior.runCli(["use", "Website", "spare"])).exitCode,
       ).toBe(0);
@@ -10416,6 +10558,7 @@ describe("an Opus turn never retried, released or placed on a Max account that k
       // A seat frees; the Opus turn fails on spare: the project moves out to
       // work and the plugin looks for the retry provider-retry queued.
       workSession = 17;
+      spareFable = 5;
       await h.harness.behavior.callRpc("accounts_refresh", null);
       armed = true;
       const failed = h.harness.behavior.emitThreadEvent(
@@ -14799,6 +14942,81 @@ describe("no project is left on an account out of the preferred model or without
     expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
       ["proj-1", `${ACCOUNTS}/spare`],
     ]);
+  });
+  // Aitor 2026-11-03: the rescue judged every project for Fable, so a
+  // project working in Opus left a Team seat (or a Max out of Fable) that
+  // still ran Opus for a Max that keeps Fable, and the turns that skip the
+  // checkpoint spent that Max's weekly (viaulab → aitor, 2 Nov 18:23).
+  describe("a project whose latest turn was in another model is judged for that model", () => {
+    const opusTurn = (h: Awaited<ReturnType<typeof host>>) =>
+      h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id: "thr-1", projectId: "proj-1" }),
+          requestedExecution: { providerId: "claude-code", model: "claude-opus-5-5" },
+          attempt: "start-turn",
+        }),
+      );
+
+    it("stays on a Team seat out of Fable that still runs Opus", async () => {
+      const h = await host(
+        {
+          main: () => Response.json(teamPayload(10, 100)),
+          spare: () => Response.json(payload(10, 10, 5)),
+          work: () => Response.json(payload(5, 20, 30)),
+        },
+        OPTIONS,
+      );
+      dispose = () => h.harness.dispose();
+      expect(await opusTurn(h)).toEqual({ action: "proceed" });
+      await onePass(h);
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("stays on a Max account out of Fable: an Opus turn there spends no weekly Fable needs", async () => {
+      const h = await host(MAIN_OUT_OF_FABLE, OPTIONS);
+      dispose = () => h.harness.dispose();
+      expect(await opusTurn(h)).toEqual({ action: "proceed" });
+      await onePass(h);
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("off a Team seat out of its session, to another Team seat, never to a Max account that keeps Fable", async () => {
+      const h = await host(
+        {
+          main: () => Response.json(teamPayload(100, 20)),
+          spare: () => Response.json(payload(5, 10, 5)),
+          work: () => Response.json(teamPayload(40, 30)),
+        },
+        OPTIONS,
+      );
+      dispose = () => h.harness.dispose();
+      expect(await opusTurn(h)).toEqual({ action: "proceed" });
+      await onePass(h);
+      expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+        ["proj-1", `${ACCOUNTS}/work`],
+      ]);
+      expect(logged(h, "info")).toContain(
+        "project Website: moved from main (exhausted for Opus until 2026-09-29 12:00) to work (seats 0/2)",
+      );
+    });
+
+    it("stays on a Team seat out of its session when only Max accounts that keep Fable could take it", async () => {
+      const h = await host(
+        {
+          main: () => Response.json(teamPayload(100, 20)),
+          spare: () => Response.json(payload(5, 10, 5)),
+          work: () => Response.json(payload(5, 20, 30)),
+        },
+        OPTIONS,
+      );
+      dispose = () => h.harness.dispose();
+      expect(await opusTurn(h)).toEqual({ action: "proceed" });
+      await onePass(h);
+      expect(h.envSet).toEqual([]);
+      expect(logged(h, "debug")).toContain(
+        "project Website: left on main (exhausted for Opus until 2026-09-29 12:00): no other account with a free seat can run Opus",
+      );
+    });
   });
 });
 
