@@ -801,6 +801,7 @@ named `default`; the default account's own name always works.
 | `claudeCommand`      | `claude`             | The Claude Code executable used to log an account in from bb: a name looked up in the `PATH` of bb's server, or a full path.                                                                                        |
 | `seatsMax`           | `4`                  | Threads at once on a Max account: a thread whose turn is about to start waits when the project's account already runs this many. 0 = no limit. See [Seats per account](#seats-per-account). |
 | `seatsTeam`          | `2`                  | The same for a Team account. |
+| `seatsFollowLoad`    | `true`               | A Max or Ultra account takes one thread more than `seatsMax` while its day's pace is under 50 % and its 5-hour session (when it has one) under 40 %, and one fewer once its pace passes 90 %; each change is in the history. Off: `seatsMax`, always. See [Seats per account](#seats-per-account). |
 | `dayStartHour`       | `9`                  | Hour the day starts in Europe/Madrid. Each day gets an even share of what is left of an account's weekly window; the panel and `health` show how much of it is spent. |
 | `paceHoldsBackground` | `false`             | On: an Ultra or Max account at 90 % of its share of the day takes no more background work (a thread another thread, an automation or a plugin opens) unless no other account can run it, and the panel shows it as kept for you. Your own threads are never held back by it. Off (the default since 0.2.33): the day's share is only shown. |
 | `loginPrivateWindow` | `true`               | macOS: open logins in a private Chrome window, so they do not reuse the browser's Claude session. Off, without Chrome, or on Linux: the default browser.                                                            |
@@ -853,6 +854,18 @@ and emptied its 5-hour window in minutes (2026-10-29: 7 of 8 accounts at
 may run turns on it at once, `seatsMax` (default 4) on a Max account and
 `seatsTeam` (default 2) on a Team account; 0 = no limit.
 
+- **By load** (`seatsFollowLoad`, on by default since 0.2.37; Aitor,
+  2026-11-03: «que se vayan balanceando, pero que no sea un "máximo
+  4"»). `seatsMax` is the middle, not a fixed cap: a Max or Ultra account
+  takes one thread more while its day's pace is under 50 % and its 5-hour
+  session (when it has one) under 40 %, and one fewer once its pace
+  passes 90 %. Never more than one above: in the week to 2026-11-03 five
+  threads at once ran on joytorm, siloeads and viaulab with no account
+  cut, never six; four threads spent 36-42 % of a 5-hour session an hour
+  there (`docs/plazas-2026-11-03/medir-techo.salida.txt`). Each change is
+  in the history (`Seats on joytorm: 4 → 5, day's pace 0 % (below 50 %),
+  5-hour session 3 % (below 40 %)`), measured as the account is. A Team
+  seat keeps `seatsTeam`.
 - **Which kind.** From `oauthAccount.organizationType` in the account's
   `.claude.json` (`claude_max`, `claude_team`). Anything else: Team when
   the provider reports no general weekly window, Max otherwise.

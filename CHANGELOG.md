@@ -21,6 +21,11 @@ project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Seats follow each account's load** (`seatsFollowLoad`, on). By
+  Aitor's request of 2026-11-03 («que no sea un "máximo 4"»): a Max or
+  Ultra account takes a fifth thread while its day's pace is under 50 %
+  and its 5-hour session under 40 %, and drops to three once its pace
+  passes 90 %; each change is in the history with why.
 - **`bb claude-switcher rebalance [--apply]`**: one pass that spreads the
   projects with no thread at work over the usable Ultra accounts by the
   room in their weekly, none more than 10 projects above the one with

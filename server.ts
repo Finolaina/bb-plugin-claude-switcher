@@ -101,7 +101,7 @@ import {
 } from "./src/usage-source-contract.js";
 import { toMeasurement, toResource } from "./src/usage-source.js";
 import { shareSessions, type SessionsIo } from "./src/sessions.js";
-import { Seats, capacityFor } from "./src/seats.js";
+import { Seats, capacityFor, isTeamSeat, seatCeiling } from "./src/seats.js";
 import { planRebalance, type RebalanceProject } from "./src/rebalance.js";
 import { listText, projectName, sharedWith } from "./src/ui.js";
 
@@ -589,6 +589,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         "A thread whose turn is about to start waits when the project's account already runs this many; it starts as soon as one of them ends, first come first served. With the automatic choice on, a project with no turn under way moves to another account with a free seat rather than wait. 0 = no limit.",
       default: 2,
     },
+    // On by default (Aitor, 2026-11-03: «que no sea un "máximo 4"»).
+    seatsFollowLoad: {
+      type: "boolean",
+      label: "Seats follow each account's load",
+      description:
+        "A Max or Ultra account takes one thread more than the setting above while its day's pace is under 50 % and its 5-hour session (when it has one) under 40 %, and one fewer once its pace passes 90 %; each change is in the history. Off: the setting above, always.",
+      default: true,
+    },
     dayStartHour: {
       type: "number",
       label: "Hour the day starts (Europe/Madrid)",
@@ -779,6 +787,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     onMeasured: (name, measurement) => {
       noteSeatSample(name, measurement);
       notePaceDay(name, measurement);
+      noteCeiling(name);
     },
     warn: (message) => bb.log.warn(message),
   });
@@ -827,16 +836,66 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * one. Kept in memory: a reload counts again the threads bb says run
    * (see rebuildSeats). Keyed by seatKey; every change is announced.
    */
-  const seats = new Seats((key) => {
+  const seats = new Seats(
+    (key) => seatCapacity(key).capacity,
+    seatsChanged,
+    deps.now,
+  );
+  /**
+   * The seats of the budget `key`: the setting for its kind, and on a Max
+   * or Ultra account one more or one fewer by its load when
+   * seatsFollowLoad is on (see seatCeiling). Synchronous, as the seats
+   * need it.
+   */
+  function seatCapacity(key: string): { capacity: number; why: string | null } {
     const name = namesOf(key)[0]!;
     const usage = collector.get(name)?.usage;
-    return capacityFor(
-      accounts.find((a) => a.name === name)?.kind,
-      usage?.weekly.absent === true,
-      current,
-      usage?.session.absent === true,
+    const kind = accounts.find((a) => a.name === name)?.kind;
+    const weeklyAbsent = usage?.weekly.absent === true;
+    const sessionAbsent = usage?.session.absent === true;
+    const base = capacityFor(kind, weeklyAbsent, current, sessionAbsent);
+    if (current.seatsFollowLoad !== true || usage === null || usage === undefined)
+      return { capacity: base, why: null };
+    const session = settle({ ...usage, name }, deps.now()).session;
+    return seatCeiling(
+      base,
+      isTeamSeat(kind, weeklyAbsent, sessionAbsent),
+      paceFor(name)?.dayPercent ?? null,
+      session.absent === true ? null : session.usedPercent,
     );
-  }, seatsChanged, deps.now);
+  }
+  /** Each budget's seats as last measured, to tell a change (see noteCeiling). */
+  const ceilings = new Map<string, number>();
+  /**
+   * After a measurement of `name`: its seats changed by its load go in the
+   * history, with why (Aitor 2026-11-03), and a seat more lets the next in
+   * line in.
+   */
+  function noteCeiling(name: string): void {
+    const key = seatKey(name);
+    if (namesOf(key)[0] !== name) return;
+    const { capacity, why } = seatCapacity(key);
+    // First measured: against the setting.
+    const previous = ceilings.get(key) ?? capacityFor(
+      accounts.find((a) => a.name === name)?.kind,
+      collector.get(name)?.usage?.weekly.absent === true,
+      current,
+      collector.get(name)?.usage?.session.absent === true,
+    );
+    ceilings.set(key, capacity);
+    if (capacity === previous) return;
+    const reason = `Seats on ${name}: ${previous} → ${capacity}, ${why ?? "back to the setting"}`;
+    bb.log.info(reason);
+    void addHistory({
+      at: deps.now(),
+      threadId: "",
+      projectId: "",
+      from: name,
+      to: name,
+      reason,
+    });
+    if (capacity > previous) admitWaiting();
+  }
   /**
    * Per account, a sample of its seats and usage each time it is measured,
    * a week of them (see noteSeatSample): what share of a window an hour of

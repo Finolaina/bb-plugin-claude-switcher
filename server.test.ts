@@ -464,6 +464,9 @@ async function host(
     settings: {
       accountsDir: ACCOUNTS,
       defaultAccountName: "main",
+      // Off here: the tests of the seats count them as set; those of the
+      // seats by load turn it on.
+      seatsFollowLoad: false,
       ...options.settings,
     },
     sdk: {
@@ -858,6 +861,7 @@ describe("claude accounts plugin", () => {
       "paceHoldsBackground",
       "preferredModel",
       "refreshMinutes",
+      "seatsFollowLoad",
       "seatsMax",
       "seatsTeam",
       "switchAheadOtherPercent",
@@ -15288,6 +15292,69 @@ describe("bb claude-switcher rebalance", () => {
     const { stdout } = await h.harness.behavior.runCli(["rebalance", "--apply"]);
     expect(stdout).not.toContain("P4\t");
     expect([...h.envSet, ...h.envDeleted].map((e) => e.projectId)).not.toContain("p4");
+  });
+});
+
+// Aitor 2026-11-03: «que se vayan balanceando, pero que no sea un
+// "máximo 4"». A Max account's seats follow its day's pace and session.
+describe("seats follow each account's load", () => {
+  const OFF = { autoSwitch: false, seatsFollowLoad: true, seatsMax: 2 };
+  const ask = (h: Awaited<ReturnType<typeof host>>, id: string) =>
+    sent(h, id, "proj-1") as Promise<{ action: string; reason?: string }>;
+  const seatsOf = async (h: Awaited<ReturnType<typeof host>>) =>
+    ((await h.harness.behavior.callRpc("accounts_list", null)) as State);
+
+  it("a quiet account takes one seat more, a busy one one fewer, each change in the history with why", async () => {
+    let weekly = 40;
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, weekly)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { settings: OFF },
+    );
+    dispose = () => h.harness.dispose();
+    // The day's first reading: nothing of it spent yet.
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    let state = await seatsOf(h);
+    expect(state.seats?.main?.capacity).toBe(3);
+    expect(state.history.find((r) => r.from === "main")).toMatchObject({
+      projectId: "",
+      to: "main",
+      reason: "Seats on main: 2 → 3, day's pace 0 % (below 50 %), 5-hour session 10 % (below 40 %)",
+    });
+    for (const id of ["t1", "t2", "t3"]) expect((await ask(h, id)).action).toBe("proceed");
+    expect((await ask(h, "t4")).action).toBe("wait");
+    // The week's 60 points left over three days: 20 today; 19 spent.
+    weekly = 59;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    state = await seatsOf(h);
+    expect(state.seats?.main?.capacity).toBe(1);
+    expect(state.history[0]).toMatchObject({
+      reason: expect.stringMatching(/^Seats on main: 3 → 1, day's pace 9\d % \(above 90 %\)$/),
+    });
+    const { stdout } = await h.harness.behavior.runCli(["history"]);
+    expect(stdout).toMatch(/\tseats\tmain → main\tSeats on main: 3 → 1/);
+  });
+
+  it("off, the setting holds whatever the load", async () => {
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsFollowLoad: false } });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const state = await seatsOf(h);
+    expect(state.seats?.work?.capacity).toBe(2);
+    expect(state.history).toEqual([]);
+  });
+
+  it("a Team seat keeps its setting", async () => {
+    const h = await host(
+      { ...ALL_FREE, main: () => Response.json(teamPayload(10, 10)) },
+      { settings: { ...OFF, seatsTeam: 1 } },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect((await seatsOf(h)).seats?.main?.capacity).toBe(1);
   });
 });
 
