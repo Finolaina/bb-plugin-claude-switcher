@@ -15372,6 +15372,34 @@ describe("seats follow each account's load", () => {
     expect(stdout).toMatch(/\tseats\tmain → main\tSeats on main: 3 → 1/);
   });
 
+  it("two directories logged into the same account: the latest measured decides (Codex PLAZAS-R2-004)", async () => {
+    let weekly = 40;
+    let spareAnswers = true;
+    let clock = NOW;
+    const h = await host(
+      {
+        main: () => Response.json(payload(10, 40)),
+        spare: () =>
+          spareAnswers ? Response.json(payload(10, weekly)) : new Response("busy", { status: 503 }),
+        work: () => Response.json(payload(10, weekly)),
+      },
+      { settings: OFF, clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    h.files[`${ACCOUNTS}/work/.claude.json`] = claudeJson("spare@example.com", "uuid-spare");
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect((await seatsOf(h)).seats?.spare?.capacity).toBe(3);
+    // spare's read fails; work, the same login, reads the day spent.
+    spareAnswers = false;
+    weekly = 59;
+    clock = NOW + 10 * 60_000;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const state = await seatsOf(h);
+    expect(state.seats?.spare?.capacity).toBe(1);
+    expect(state.seats?.work?.capacity).toBe(1);
+    expect(state.history[0]?.reason).toMatch(/^Seats on work: 3 → 1/);
+  });
+
   it("off, the setting holds whatever the load", async () => {
     const h = await host(ALL_FREE, { settings: { ...OFF, seatsFollowLoad: false } });
     dispose = () => h.harness.dispose();

@@ -848,7 +848,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * need it.
    */
   function seatCapacity(key: string): { capacity: number; why: string | null } {
-    const name = namesOf(key)[0]!;
+    // Of the directories logged into the same account, the latest measured
+    // (Codex PLAZAS-R2-004): a stale alias does not keep its seats.
+    const name = namesOf(key)
+      .map((n) => ({ n, at: collector.get(n)?.observedAt ?? -Infinity }))
+      .reduce((a, b) => (b.at > a.at ? b : a)).n;
     const usage = collector.get(name)?.usage;
     const kind = accounts.find((a) => a.name === name)?.kind;
     const weeklyAbsent = usage?.weekly.absent === true;
@@ -873,7 +877,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   function noteCeiling(name: string): void {
     const key = seatKey(name);
-    if (namesOf(key)[0] !== name) return;
     const { capacity, why } = seatCapacity(key);
     // First measured: against the setting.
     const previous = ceilings.get(key) ?? capacityFor(
