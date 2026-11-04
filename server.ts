@@ -4673,11 +4673,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       }
       return { account: fromName, byDefault: !from.owned, writes };
     }
-    if (turn.abandoned) return null;
     if (turn.tick === true && decision.account !== fromName) {
       turn.refused = `it would move its project from ${fromName} to ${decision.account}`;
       return { account: fromName, byDefault: !from.owned, writes };
     }
+    if (turn.abandoned) return null;
     // Its move would carry along a sibling about to start: asked again soon.
     const admitted =
       decision.account === fromName
