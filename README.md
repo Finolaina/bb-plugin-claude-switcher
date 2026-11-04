@@ -895,7 +895,8 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
   removed) leaves the line.
 - **A canary from outside the plugin** (`scripts/canario-cola.mjs`, a `bb
   automation` every 10 minutes on bb's server) warns of a message held 10
-  minutes with another account free, held 2 hours with none, or stopped by
+  minutes with another account free in two looks in a row (a seat just
+  freed is taken within 30 s), held 2 hours with none, or stopped by
   a failure 10 minutes, and of not being able to look for 30 minutes.
 - **A full account sends the project to one with a free seat** (since
   0.2.37; Aitor, 2026-11-03: «necesitaría abrir más hilos»). With the
@@ -960,8 +961,9 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
   whole project and a turn reads it as it starts, so no automatic move is
   written during that time: 90 s from the first answer and, for a turn another
   plugin holds and that is asked again, 10 s from each answer. A turn that
-  takes longer can start on the account a sibling moved the project to. A
-  move by hand is not held back. A thread held by this waits up to 30 s more,
+  takes longer can start on the account a sibling moved the project to, and
+  a thread whose earlier turn never started has only the 10 s. A move by hand
+  is not held back. A thread held by this waits up to 30 s more,
   and a move after a turn is tried once per turn.
 - **With every usage read down at once,** a turn may try a Team seat by what
   its login says; if that seat is out, the turn fails where you can see it and

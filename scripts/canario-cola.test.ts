@@ -44,11 +44,13 @@ const INCIDENTE = {
     cuenta("ultra1", { plan: "ultra", modelos: { Fable: { pct: 90, pctExacto: 90 } } }),
   ],
 };
+/** La pasada anterior ya vio un destino libre para t1. */
+const ANTES = { t1: NOW - UMBRAL_MS };
 const juzga = (health: { cuentas: unknown[]; atascos?: unknown[] }, filas: unknown[] = [fila()], desde = NOW - UMBRAL_MS) =>
   judge({
     filas,
     health,
-    estado: { primeraVez: { q1: desde } },
+    estado: { primeraVez: { q1: desde }, conLibre: ANTES },
     ahora: NOW,
   });
 
@@ -129,7 +131,7 @@ describe("judge", () => {
     const { avisos } = judge({
       filas: [fila(), fila({ id: "q2", failureReason: "hook timed out" })],
       health: INCIDENTE,
-      estado: { primeraVez: { q1: NOW - UMBRAL_MS, q2: NOW - UMBRAL_MS } },
+      estado: { primeraVez: { q1: NOW - UMBRAL_MS, q2: NOW - UMBRAL_MS }, conLibre: ANTES },
       ahora: NOW,
     });
     expect(avisos.map((a) => (a as { tipo?: string }).tipo)).toEqual([undefined, "fallida"]);
@@ -217,7 +219,7 @@ describe("judge", () => {
       judge({
         filas: [fila()],
         health: INCIDENTE,
-        estado: { primeraVez: { q1: NOW - 2 * REAVISO_MS }, avisado: { t1: avisado } },
+        estado: { primeraVez: { q1: NOW - 2 * REAVISO_MS }, avisado: { t1: avisado }, conLibre: ANTES },
         ahora: NOW,
       }).avisos;
     expect(paso(NOW - REAVISO_MS + 1)).toEqual([]);
@@ -231,6 +233,7 @@ describe("judge", () => {
       health: INCIDENTE,
       estado: {
         primeraVez: { q1: NOW - UMBRAL_MS, q2: NOW - UMBRAL_MS, q3: NOW - UMBRAL_MS },
+        conLibre: ANTES,
       },
       ahora: NOW,
     });
@@ -249,7 +252,7 @@ describe("judge", () => {
       ahora: NOW,
     });
     expect(avisos).toEqual([]);
-    expect(estado).toEqual({ primeraVez: { q2: NOW }, avisado: {}, vista: { q2: NOW } });
+    expect(estado).toEqual({ primeraVez: { q2: NOW }, avisado: {}, vista: { q2: NOW }, conLibre: { t1: NOW } });
   });
 
   it("una fila que bb oculta un momento mientras la reevalúa no pierde su antigüedad", () => {
@@ -270,7 +273,68 @@ describe("judge", () => {
       estado: hueco.estado,
       ahora: NOW + 2 * 60_000,
     });
-    expect(vuelve.avisos).toHaveLength(1);
+    // Ya lleva sus 10 minutos; le falta volver a ver el destino libre.
+    expect(vuelve.avisos).toEqual([]);
+    const sigue = judge({
+      filas: [fila()],
+      health: INCIDENTE,
+      estado: vuelve.estado,
+      ahora: NOW + 12 * 60_000,
+    });
+    expect(sigue.avisos).toHaveLength(1);
+  });
+
+  describe("una plaza que se ve libre en una sola pasada", () => {
+    const LLENAS = { cuentas: [cuenta("team5", lleno), cuenta("team2", lleno)] };
+    const pasa = (health: { cuentas: unknown[] }, estado: unknown, ahora: number) =>
+      judge({ filas: [fila()], health, estado, ahora });
+
+    it("no avisa, y sí cuando sigue libre en la siguiente", () => {
+      const inicio = { primeraVez: { q1: NOW - 3 * UMBRAL_MS } };
+      const una = pasa(INCIDENTE, inicio, NOW);
+      expect(una.avisos).toEqual([]);
+      expect(pasa(INCIDENTE, una.estado, NOW + UMBRAL_MS).avisos).toHaveLength(1);
+    });
+
+    it("una pasada llena en medio vuelve a empezar", () => {
+      const una = pasa(INCIDENTE, { primeraVez: { q1: NOW - 3 * UMBRAL_MS } }, NOW);
+      const llena = pasa(LLENAS, una.estado, NOW + UMBRAL_MS);
+      expect(pasa(INCIDENTE, llena.estado, NOW + 2 * UMBRAL_MS).avisos).toEqual([]);
+    });
+
+    it("con la fila aún por debajo de los 10 minutos también cuenta como vista", () => {
+      const una = pasa(INCIDENTE, {}, NOW - UMBRAL_MS);
+      expect(una.avisos).toEqual([]);
+      expect(pasa(INCIDENTE, una.estado, NOW).avisos).toHaveLength(1);
+    });
+
+    it("una fila fallida no cuenta como vista con destino libre", () => {
+      const filas = [fila({ failureReason: "hook timed out" })];
+      const { estado } = judge({ filas, health: INCIDENTE, estado: {}, ahora: NOW });
+      expect(estado.conLibre).toEqual({});
+    });
+
+    it("no rompe el tope de un aviso sin destino cada 6 horas, con la cola saturada", () => {
+      const NADIE = { cuentas: [cuenta("team5", lleno)] };
+      let estado: unknown = { primeraVez: { q1: NOW - 2 * SIN_DESTINO_MS } };
+      const vistos: string[] = [];
+      for (let i = 0; i < 12; i++) {
+        const r = pasa(i % 3 === 2 ? { cuentas: [cuenta("team5")] } : NADIE, estado, NOW + i * UMBRAL_MS);
+        estado = r.estado;
+        vistos.push(...r.avisos.map((a) => (a as { tipo?: string }).tipo ?? "retenida"));
+      }
+      expect(vistos).toEqual(["sin-destino"]);
+    });
+
+    it("sin nadie con 2 horas, una fila joven no conserva la marca", () => {
+      const { estado } = judge({
+        filas: [fila()],
+        health: INCIDENTE,
+        estado: { primeraVez: { q1: NOW - SIN_DESTINO_MS + 1 }, avisado: { "sin-destino": NOW - 60_000 } },
+        ahora: NOW,
+      });
+      expect(estado.avisado).toEqual({});
+    });
   });
 
   it("no se fía de una ventana cuyo reset solo dice el reloj, con las consultas fallando", () => {
@@ -419,7 +483,10 @@ describe("el script entero, con un bb de mentira", () => {
   describe("un aviso de verdad", () => {
     const filaJson = JSON.stringify([fila()]);
     const salud = JSON.stringify(INCIDENTE);
-    const viejo = () => ({ primeraVez: { q1: Date.now() - UMBRAL_MS - 60_000 } });
+    const viejo = () => ({
+      primeraVez: { q1: Date.now() - UMBRAL_MS - 60_000 },
+      conLibre: { t1: Date.now() - UMBRAL_MS },
+    });
     const bbFalso = (push: string) =>
       `case "$1" in thread) echo '${filaJson}';; claude-switcher) echo '${salud}';; plugin) echo "$@" > "$PWD/llamada"; cp "$6" "$PWD/entrada"; ${push};; esac`;
 
