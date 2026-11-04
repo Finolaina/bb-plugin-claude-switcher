@@ -679,18 +679,29 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
  * than spend a Max account's weekly the reserved model and the Opus work
  * inside its threads need.
  */
-/** The Team seats with nothing measured, as accounts: nothing they spend is what the reserve needs. */
+/**
+ * The Team seats not fully measured, as accounts: nothing they spend is what
+ * the reserve needs. What an incomplete answer did say still counts (Astra
+ * FINAL-002); a window it left out reads as 100 % with no reset (src/usage.ts).
+ */
 function unreadTeamSeats(input: PlacementInput): AccountUsage[] {
+  const known = (window: UsageWindow | undefined): UsageWindow =>
+    window === undefined || (window.usedPercent >= 100 && window.resetsAt === null)
+      ? { usedPercent: 0, resetsAt: null }
+      : window;
   return (input.unreadTeams ?? [])
     .filter((name) => name !== input.currentAccount)
-    .map((name) => ({
-      name,
-      blocked: false,
-      session: { usedPercent: 0, resetsAt: null },
-      weekly: { usedPercent: 0, resetsAt: null },
-      models: {},
-      team: true as const,
-    }));
+    .map((name) => {
+      const read = input.accounts.find((a) => a.name === name);
+      return {
+        name,
+        blocked: false,
+        session: known(read?.session),
+        weekly: known(read?.weekly),
+        models: read?.models ?? {},
+        team: true as const,
+      };
+    });
 }
 
 export function reserveWait(
