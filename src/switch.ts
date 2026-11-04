@@ -696,7 +696,9 @@ function unreadTeamSeats(input: PlacementInput): AccountUsage[] {
 export function reserveWait(
   input: PlacementInput,
 ): { account: string; at: number } | null {
-  const known = new Set(input.accounts.map((a) => a.name));
+  const known = new Set(
+    input.accounts.filter((a) => a.unknown !== true).map((a) => a.name),
+  );
   const options = {
     preferredModel: input.preferredModel,
     reserveModel: input.reserveModel,

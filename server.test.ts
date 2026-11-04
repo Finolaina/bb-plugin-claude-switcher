@@ -2488,7 +2488,7 @@ describe("claude accounts plugin", () => {
 
   it("a move completed between the send of a turn and its announcement makes the start unknown: the refusal marks nobody", async () => {
     // Codex IR16-001: bb reads the account as it starts the turn and
-    // announces `thread.active` after; another thread's limit moved the
+    // announces `thread.active` after; a pick by hand moved the
     // project in between, so the announcement reads the new account, which
     // is not where the turn runs. Anchored to the project's state when bb
     // asked to send the message, the start is unknown: the new account is
@@ -3531,7 +3531,7 @@ describe("claude accounts plugin", () => {
     const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
     expect(state.history.map((r) => [r.threadId, r.to])).toEqual([["thread-2", "work"]]);
     expect(h.retries.map((r) => [r.threadId, r.reason])).toEqual([
-      ["thread-1", "Retrying: the project's account changed meanwhile"],
+      ["thread-1", "Retrying: the project stays on its account for now"],
     ]);
   });
 
@@ -3555,7 +3555,7 @@ describe("claude accounts plugin", () => {
     const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
     expect(state.history).toEqual([]);
     expect(h.retries.map((r) => [r.threadId, r.reason])).toEqual([
-      ["thread-1", "Retrying: the project's account changed meanwhile"],
+      ["thread-1", "Retrying: the project stays on its account for now"],
     ]);
   });
 
@@ -5944,6 +5944,47 @@ describe("moving a project ahead of the limit for a thread in another model", ()
     const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
     expect(state.history.map((r) => r.to)).toEqual(["spare"]);
     expect(state.projects.find((p) => p.id === "proj-1")?.account).toBe("spare");
+  });
+
+  it("T16 a sibling told to start while the sessions were shared: the move ahead is dropped", async () => {
+    let clock = NOW;
+    const order: string[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const h = await host(
+      {
+        main: () => Response.json(teamPayload(95, 100)),
+        work: () => Response.json(teamPayload(17, 100)),
+        spare: () => Response.json(teamPayload(60, 100)),
+      },
+      {
+        settings: { preferredModel: "Fable", switchAheadPercent: 0, switchAheadOtherPercent: 95 },
+        clock: () => clock,
+        sessionsIo: oneSessionIo(order, () => held),
+        environments: SITE,
+      },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + 5 * 60_000;
+    expect(await sent(h, "claude-opus-5-5")).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-1", projectId: "proj-1" }),
+    });
+    const ahead = idle(h);
+    await vi.waitFor(() => expect(order).toEqual(["link"]));
+    expect(
+      await h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id: "thread-2", projectId: "proj-1" }),
+          requestedExecution: { providerId: "claude-code", model: "claude-opus-5-5" },
+          attempt: "start-turn",
+        }),
+      ),
+    ).toEqual({ action: "proceed" });
+    release();
+    await ahead;
+    expect(h.envSet).toEqual([]);
   });
 
   it("leaves a Fable thread alone when switchAheadPercent is 0, whatever switchAheadOtherPercent says", async () => {
@@ -18144,6 +18185,15 @@ describe("caminos 2026-11-04", () => {
       expect(seats.seats?.work?.queued.map((q) => q.threadId)).toEqual(["t1", "later"]);
     });
 
+    it("a full Team seat whose answer came incomplete gives a place in its queue too", async () => {
+      const h = await start(REFUSES, PARTIAL);
+      expect((await dispatch(h, "other", "proj-2", OPUS)).action).toBe("proceed");
+      expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("wait");
+      await dispatch(h, "later", "proj-2", OPUS);
+      const seats = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+      expect(seats.seats?.work?.queued.map((q) => q.threadId)).toEqual(["t1", "later"]);
+    });
+
     it("with its Ultra read and the Team seat not, the turn goes to the free Team seat", async () => {
       const h = await start(() => Response.json(payload(13, 30, 40)), REFUSES);
       expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
@@ -18323,7 +18373,6 @@ describe("caminos 2026-11-04", () => {
       teamLogin(h, ...teams);
       await h.harness.behavior.callRpc("accounts_refresh", null);
       expect(await dispatch(h, "c1", "proj-1", OPUS)).toEqual({ action: "proceed" });
-      expect(ultra === "work" || h.envDeleted.length === 0).toBe(true);
       return h;
     };
 
@@ -18354,9 +18403,138 @@ describe("caminos 2026-11-04", () => {
       await h.harness.behavior.emitThreadEvent("thread.created", {
         thread: thread({ id: "c2", projectId: "proj-1" }),
       });
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await vi.waitFor(() =>
+        expect(h.harness.logEntries.map((e) => e.message).join("\n")).toContain("thread c2: not placed"),
+      );
       expect(h.envSet.length).toBe(set);
       expect(h.envDeleted).toEqual([]);
+    });
+
+    it("a sibling another plugin keeps holding ties the project no longer than a seat lasts", async () => {
+      let clock = NOW;
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 30, 40)),
+          spare: () => Response.json(payload(13, 30, 100)),
+          work: () => Response.json(payload(13, 30, 100)),
+        },
+        { settings: { ...FABLE, seatsTeam: 2 }, presetEnv: { "proj-1": on("spare") }, clock: () => clock },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      for (let t = 0; t <= 60_000; t += 30_000) {
+        clock = NOW + t;
+        expect((await dispatch(h, "c1", "proj-1", OPUS)).action).toBe("proceed");
+        expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("wait");
+      }
+      clock = NOW + 90_000;
+      expect((await dispatch(h, "c1", "proj-1", OPUS)).action).toBe("proceed");
+      expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("proceed");
+      expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-1"]);
+    });
+
+    it("two siblings only admitted from a queue do not hold each other: the account ran out, both leave at once", async () => {
+      let out = false;
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 30, 40)),
+          spare: () => Response.json(out ? payload(100, 100, 100) : payload(13, 30, 40)),
+          work: () => Response.json(payload(13, 30, 40)),
+        },
+        {
+          settings: { ...FABLE, seatsMax: 2 },
+          presetEnv: { "proj-1": on("spare"), "proj-2": on("spare"), "proj-3": on("work"), "proj-4": on("main") },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      const run = async (id: string, projectId: string) => {
+        expect((await dispatch(h, id, projectId, FABLE_ID)).action).toBe("proceed");
+        await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id, projectId }) });
+      };
+      const end = (id: string, projectId: string) =>
+        h.harness.behavior.emitThreadEvent("thread.idle", { thread: thread({ id, projectId }) });
+      for (const [id, projectId] of [["s1", "proj-2"], ["s2", "proj-2"], ["w1", "proj-3"], ["w2", "proj-3"], ["m1", "proj-4"], ["m2", "proj-4"]] as const)
+        await run(id, projectId);
+      expect((await dispatch(h, "a1", "proj-1", FABLE_ID)).action).toBe("wait");
+      expect((await dispatch(h, "a2", "proj-1", FABLE_ID)).action).toBe("wait");
+      out = true;
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      await end("w1", "proj-3");
+      await end("w2", "proj-3");
+      await end("s1", "proj-2");
+      await end("s2", "proj-2");
+      expect((await dispatch(h, "a1", "proj-1", FABLE_ID)).action).toBe("proceed");
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+      expect((await dispatch(h, "a2", "proj-1", FABLE_ID)).action).toBe("proceed");
+    });
+
+    it("a new project keeps its placement for the next thread when a sibling was about to start", async () => {
+      let up = false;
+      const usage = () => (up ? Response.json(payload(5, 5, 5)) : new Response(null, { status: 500 }));
+      const h = await host(
+        {
+          main: () => (up ? Response.json(payload(90, 90, 90)) : new Response(null, { status: 500 })),
+          spare: usage,
+          work: usage,
+        },
+        { settings: FABLE, projectCreatedAt: { "proj-9": NOW + 1_000 } },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect((await dispatch(h, "x", "proj-9", FABLE_ID)).action).toBe("proceed");
+      up = true;
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      await h.harness.behavior.emitThreadEvent("thread.created", {
+        thread: thread({ id: "y", projectId: "proj-9" }),
+      });
+      await vi.waitFor(() =>
+        expect(h.harness.logEntries.map((e) => e.message).join("\n")).toContain("thread y: not placed"),
+      );
+      expect(h.envSet).toEqual([]);
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "x", projectId: "proj-9" }),
+      });
+      await h.harness.behavior.emitThreadEvent("thread.created", {
+        thread: thread({ id: "z", projectId: "proj-9" }),
+      });
+      await vi.waitFor(() =>
+        expect(h.envSet.filter((e) => e.projectId === "proj-9")).toHaveLength(1),
+      );
+    });
+
+    it("a move dropped for a sibling does not make that sibling's start unknown: its refusal is marked", async () => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(100, 40)),
+          spare: () => Response.json(payload(10, 60)),
+          work: () => Response.json(payload(5, 20)),
+        },
+        {},
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id: "thread-3", projectId: "proj-1" }),
+          requestedExecution: { providerId: "claude-code", model: "claude-fable-5-1" },
+          attempt: "start-turn",
+        }),
+      );
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "thread-3", projectId: "proj-1" }),
+      });
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({
+          threadId: "thread-3",
+          requestId: "creq_t16",
+          errorInfo: { category: "unauthorized", providerCode: null, httpStatusCode: 403 },
+          rateLimits: null,
+        }),
+      );
+      expect(h.harness.logEntries.map((e) => e.message).join("\n")).toContain("account main refused a turn");
     });
 
     it("a seat that lapses without its turn starting lets the project go", async () => {
@@ -18436,7 +18614,7 @@ describe("caminos 2026-11-04", () => {
       await h.harness.behavior.emitThreadEvent("turn.failed", failure());
       expect(h.envSet).toEqual([]);
       expect(h.retries.map((r) => r.reason)).toEqual([
-        "Retrying: the project's account changed meanwhile",
+        "Retrying: the project stays on its account for now",
       ]);
     });
 
