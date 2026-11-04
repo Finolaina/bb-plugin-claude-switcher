@@ -18043,7 +18043,12 @@ describe("caminos 2026-11-04", () => {
 
   describe("T15 an Ultra not read yet does not run Opus: its login says what it keeps", () => {
     const OK = () => Response.json(payload(0, 2, 0));
-    const start = async (spare: () => Response, work: () => Response = OK, onSpare = true) => {
+    const start = async (
+      spare: () => Response,
+      work: () => Response = OK,
+      onSpare = true,
+      plan: Record<string, string> = { planDisplayName: "Ultra" },
+    ) => {
       const h = await host(
         { main: () => Response.json(payload(13, 10, 5)), spare, work },
         {
@@ -18057,7 +18062,7 @@ describe("caminos 2026-11-04", () => {
           accountUuid: "uuid-spare",
           emailAddress: "spare@example.com",
           organizationType: "claude_max",
-          planDisplayName: "Ultra",
+          ...plan,
         },
       });
       teamLogin(h, "work");
@@ -18087,6 +18092,45 @@ describe("caminos 2026-11-04", () => {
       const r = await dispatch(h, "t1", "proj-1", OPUS);
       expect(r.action).toBe("wait");
       expect(r.reason).toContain("the project is on spare, which keeps its weekly for Fable");
+    });
+
+    it("a login that says no more than Max or Ultra is enough: to the Team seat, or it waits", async () => {
+      const free = await start(REFUSES, OK, true, {});
+      expect(await dispatch(free, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(free.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+      free.harness.dispose();
+      const full = await start(REFUSES, OK, true, {});
+      expect((await dispatch(full, "other", "proj-2", OPUS)).action).toBe("proceed");
+      expect((await dispatch(full, "t1", "proj-1", OPUS)).action).toBe("wait");
+    });
+
+    it("with its project's account not read either, it keeps waiting past the read retries", async () => {
+      const options: HostOptions = {
+        settings: { ...FABLE, seatsTeam: 1 },
+        presetEnv: { "proj-1": on("spare") },
+      };
+      const h = await host(
+        {
+          main: () => Response.json(teamPayload(10, 100)),
+          spare: REFUSES,
+          work: () => Response.json(teamPayload(10, 100)),
+        },
+        options,
+      );
+      dispose = () => h.harness.dispose();
+      h.files[`${ACCOUNTS}/spare/.claude.json`] = JSON.stringify({
+        oauthAccount: {
+          accountUuid: "uuid-spare",
+          emailAddress: "spare@example.com",
+          organizationType: "claude_max",
+          planDisplayName: "Ultra",
+        },
+      });
+      teamLogin(h, "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      options.failEnvRead = ["proj-1"];
+      for (let i = 0; i < 12; i++)
+        expect((await dispatch(h, "t1", "proj-1", OPUS, i > 0)).action).toBe("wait");
     });
 
     it("Fable, or a Team seat not read yet, starts as ever", async () => {

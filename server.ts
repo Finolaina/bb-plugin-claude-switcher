@@ -4419,14 +4419,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /**
    * With nothing measured of `name`, its login still says what it is: a Max
    * or an Ultra keeps the reserved model's weekly until a read says otherwise
-   * (just after a reload, or with its reads failing: code-reviewer r3). A
-   * Team seat, or a plan the login does not tell, starts as ever.
+   * (just after a reload, or with its reads failing: code-reviewer r3), also
+   * when the login says no more than that it is one of the two (Astra
+   * IR4-001). A Team seat, or a login that says nothing, starts as ever.
    */
   function unreadKeepsReserve(name: string): boolean {
     const login = accounts.find((a) => a.name === name);
     if (login === undefined) return false;
     const { plan } = planOf(login, null);
-    return plan === "ultra" || plan === "max";
+    return login.kind === "max" || plan === "ultra" || plan === "max";
   }
   /**
    * A turn in `model` on `name` would spend the weekly the reserved model
@@ -5081,7 +5082,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         const mayBeHeld =
           current.autoSwitch &&
           model !== null &&
-          measuredAccounts(model).some((a) => heldOff(a.name, model));
+          [...measuredAccounts(model), ...accounts].some((a) =>
+            heldOff(a.name, model),
+          );
         if (waited < SEAT_READ_WAITS || mayBeHeld) {
           seatReadWaits.set(thread.id, waited + 1);
           return {
