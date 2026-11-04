@@ -120,9 +120,19 @@ describe("judge", () => {
     const { avisos, retenidas } = juzga(INCIDENTE, filas);
     expect(retenidas).toBe(1);
     expect(avisos).toEqual([
-      { tipo: "fallida", fila: "q1", hilo: "t1", minutos: 10, razon: "hook timed out" },
+      { tipo: "fallida", clave: "t1:fallida", fila: "q1", hilo: "t1", minutos: 10, razon: "hook timed out" },
     ]);
-    expect(textoAviso(avisos[0]!)).toBe("El mensaje del hilo t1 lleva 10 min fallando: hook timed out");
+    expect(textoAviso(avisos[0]!)).toBe("El mensaje del hilo t1 lleva 10 min parado; último fallo: hook timed out");
+  });
+
+  it("una fila retenida y otra fallida del mismo hilo avisan las dos", () => {
+    const { avisos } = judge({
+      filas: [fila(), fila({ id: "q2", failureReason: "hook timed out" })],
+      health: INCIDENTE,
+      estado: { primeraVez: { q1: NOW - UMBRAL_MS, q2: NOW - UMBRAL_MS } },
+      ahora: NOW,
+    });
+    expect(avisos.map((a) => (a as { tipo?: string }).tipo)).toEqual([undefined, "fallida"]);
   });
 
   describe("retenida sin ninguna cuenta que pueda correrla", () => {
@@ -162,6 +172,16 @@ describe("judge", () => {
         }).avisos;
       expect(paso(NOW - REAVISO_SIN_DESTINO_MS + 1)).toEqual([]);
       expect(paso(NOW - REAVISO_SIN_DESTINO_MS)).toHaveLength(1);
+    });
+
+    it("sin nadie en ese caso olvida el aviso: el próximo que llegue no espera 6 horas", () => {
+      const { estado } = judge({
+        filas: [],
+        health: NADIE,
+        estado: { avisado: { "sin-destino": NOW - 60_000 } },
+        ahora: NOW,
+      });
+      expect(estado.avisado).toEqual({});
     });
 
     it("con una cuenta libre es el aviso de siempre, no este", () => {
@@ -416,6 +436,16 @@ describe("el script entero, con un bb de mentira", () => {
       const estado = JSON.parse(await readFile(join(r.dir, "canario-cola-estado.json"), "utf8"));
       expect(estado.avisado.t1).toBeUndefined();
     });
+  });
+
+  it("el aviso agrupado que no se entrega se repite en la pasada siguiente", async () => {
+    const salud = JSON.stringify({ cuentas: [cuenta("team2", { usable: false })] });
+    const r = await correr(
+      `case "$1" in thread) echo '${JSON.stringify([fila()])}';; claude-switcher) echo '${salud}';; plugin) exit 4;; esac`,
+      { primeraVez: { q1: Date.now() - SIN_DESTINO_MS - 60_000 } },
+    );
+    expect(r.code).toBe(1);
+    expect(JSON.parse(await readFile(join(r.dir, "canario-cola-estado.json"), "utf8")).avisado).toEqual({});
   });
 
   it("la primera pasada guarda cuándo vio la fila, y no avisa todavía", async () => {

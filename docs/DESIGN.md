@@ -84,8 +84,7 @@ so both tools pick the same account.
 3. Usable accounts are ranked by the **session quarter** (0-24 %,
    25-49 %, 50-74 %, 75-99 % of the 5-hour window), then the **closest
    deadline for the model** (the earlier of the weekly reset and the
-   model's own window reset; a Team seat, measured 2026-10-11, has no
-   general weekly window, only its model's), then the **lowest session
+   model's own window reset), then the **lowest session
    use**, then the **name**, never by the order in which they were
    measured. Within a quarter, spending the account whose window ends
    soonest first wastes the least quota; the quarter goes first because
@@ -96,7 +95,7 @@ so both tools pick the same account.
    does not spend Fable where it is still free; among the accounts that
    keep it, a Team seat without a window of its own for the turn's model
    comes before a Max account (`spendsWeekly`): an Opus turn there spends
-   only the 5-hour session, on a Max account the weekly window the
+   nothing Fable needs, on a Max account the weekly window the
    preferred model needs. The accounts already out of the preferred model
    keep their quarter and deadline order, Team seat or not.
 

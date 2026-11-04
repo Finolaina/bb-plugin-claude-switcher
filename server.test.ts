@@ -7310,7 +7310,7 @@ describe("the model a thread's turn runs on", () => {
         senderThreadId: null,
         systemMessageKind: "unlabeled",
         systemMessageSubject: null,
-        input: [{ type: "text", text: "o apuntaselo al optimizador", mentions: [] }],
+        input: [{ type: "text", text: "o apúntaselo al otro proyecto", mentions: [] }],
         target: { kind: "steer", expectedTurnId: "dae8f36cd7-t3" },
         request: { method: "turn/start", params: {} },
         execution: {
@@ -15015,7 +15015,7 @@ describe("seats: the cases the fourth inspection found (Astra SEATS-R4)", () => 
 });
 
 // Aitor 2026-11-03 («tengo mucha cola? necesitaría abrir más hilos»):
-// siloeads ran 4/4 with Gloria · SEO waiting 17 min while joytorm and
+// siloeads ran 4/4 with a thread waiting 17 min while joytorm and
 // others had 0/4 and quota; moved by hand, its message went at once.
 describe("a project whose account has its seats full moves to one with a free seat", () => {
   /** Every account runs Fable; work ranks first, then spare. */
@@ -15677,7 +15677,7 @@ describe("bb claude-switcher seats", () => {
 });
 
 // Aitor 2026-10-30, Añadido 2: bb greys out the composer of a project whose
-// account is at its limit (Mariscal · Web on ganaresenas, Fable at 100 %),
+// account is at its limit (Fable at 100 %),
 // so no turn reaches the checkpoint that would move it. Every refresh moves
 // such a project, and one on an account without a login, to the best
 // account with a free seat, whatever switchAheadPercent says.
@@ -15897,7 +15897,7 @@ describe("no project is left on an account out of the preferred model or without
   // Aitor 2026-11-03: the rescue judged every project for Fable, so a
   // project working in Opus left a Team seat (or a Max out of Fable) that
   // still ran Opus for a Max that keeps Fable, and the turns that skip the
-  // checkpoint spent that Max's weekly (viaulab → aitor, 2 Nov 18:23).
+  // checkpoint spent that Max's weekly (2 Nov 18:23).
   describe("a project whose latest turn was in another model is judged for that model", () => {
     const opusTurn = (h: Awaited<ReturnType<typeof host>>) =>
       h.harness.registrations.hooks["message.dispatch"]!(
@@ -17806,6 +17806,13 @@ describe("caminos 2026-11-04", () => {
       expect((await report(h)).atascos).toHaveLength(1);
     });
 
+    it("T14b a pick that confirms the account the project is on looks at what waits too", async () => {
+      const { h, at } = await stuck();
+      at(10 * 60_000);
+      await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-3", account: "main" });
+      await vi.waitFor(() => expect(lines(h)).toHaveLength(1));
+    });
+
     it("a look that only joins a running turn does not forget the wait", async () => {
       const { h, at } = await stuck();
       at(10 * 60_000);
@@ -18032,6 +18039,65 @@ describe("caminos 2026-11-04", () => {
     const seats = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
     expect(seats.seats?.spare?.external ?? []).toEqual([]);
     expect(seats.seats?.spare?.queued.map((q) => q.threadId)).toEqual(["t2"]);
+  });
+
+  describe("T15 an Ultra not read yet does not run Opus: its login says what it keeps", () => {
+    const OK = () => Response.json(payload(0, 2, 0));
+    const start = async (spare: () => Response, work: () => Response = OK, onSpare = true) => {
+      const h = await host(
+        { main: () => Response.json(payload(13, 10, 5)), spare, work },
+        {
+          settings: { ...FABLE, seatsTeam: 1 },
+          presetEnv: { "proj-1": on(onSpare ? "spare" : "work"), "proj-2": on("work") },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      h.files[`${ACCOUNTS}/spare/.claude.json`] = JSON.stringify({
+        oauthAccount: {
+          accountUuid: "uuid-spare",
+          emailAddress: "spare@example.com",
+          organizationType: "claude_max",
+          planDisplayName: "Ultra",
+        },
+      });
+      teamLogin(h, "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      return h;
+    };
+    const REFUSES = () => new Response(null, { status: 429 });
+    const PARTIAL = () =>
+      Response.json({
+        limits: [{ kind: "weekly_all", percent: 10, resets_at: new Date(NOW + 72 * 3_600_000).toISOString() }],
+        five_hour: { locked_reason: null },
+        seven_day: { locked_reason: null },
+      });
+
+    it.each([
+      ["its reads failing", REFUSES],
+      ["an answer without its windows", PARTIAL],
+    ])("with %s, the turn goes to the free Team seat", async (_, spare) => {
+      const h = await start(spare);
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    });
+
+    it("with every Team seat full it waits, and does not start on the Ultra", async () => {
+      const h = await start(REFUSES);
+      expect((await dispatch(h, "other", "proj-2", OPUS)).action).toBe("proceed");
+      const r = await dispatch(h, "t1", "proj-1", OPUS);
+      expect(r.action).toBe("wait");
+      expect(r.reason).toContain("the project is on spare, which keeps its weekly for Fable");
+    });
+
+    it("Fable, or a Team seat not read yet, starts as ever", async () => {
+      const fable = await start(REFUSES);
+      expect(await dispatch(fable, "t1", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      expect(fable.envSet).toEqual([]);
+      fable.harness.dispose();
+      const team = await start(OK, REFUSES, false);
+      expect(await dispatch(team, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(team.envSet).toEqual([]);
+    });
   });
 
   it("T3b a pick by hand of an Ultra with every Team seat full waits: it does not run Opus there", async () => {

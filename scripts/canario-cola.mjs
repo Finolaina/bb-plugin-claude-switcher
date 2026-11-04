@@ -3,7 +3,7 @@
 // `bb automation`), avisa si el plugin retiene un mensaje 10 minutos o más
 // con una cuenta usable y con plaza libre que podría correrlo; si lo retiene 2
 // horas o más sin ninguna que pueda («Esperar siempre» sigue esperando, pero no
-// en silencio); y si un mensaje lleva 10 minutos fallando.
+// en silencio); y si un mensaje que falla lleva 10 minutos parado.
 //
 // No usa la lógica del plugin: el fallo del 2026-11-03 fue justo que el plugin
 // daba por bueno su veto. Solo lee lo que bb enseña por fuera:
@@ -108,10 +108,13 @@ export function judge({ filas, health, estado, ahora }) {
     vista[fila.id] = ahora;
     if (ahora - desde < UMBRAL_MS) continue;
     if ((fila.failureReason ?? null) !== null) {
-      if (avisado[fila.threadId] !== undefined) continue;
-      avisado[fila.threadId] = ahora;
+      // Aparte del aviso de retenida: el mismo hilo puede tener una de cada.
+      const clave = `${fila.threadId}:fallida`;
+      if (avisado[clave] !== undefined) continue;
+      avisado[clave] = ahora;
       avisos.push({
         tipo: "fallida",
+        clave,
         fila: fila.id,
         hilo: fila.threadId,
         minutos: Math.floor((ahora - desde) / 60_000),
@@ -141,7 +144,9 @@ export function judge({ filas, health, estado, ahora }) {
         health.atascos?.some((a) => a.hilo === fila.threadId && a.proyectoOcupado) === true,
     });
   }
-  if (sinDestino.size > 0 && avisado[SIN_DESTINO] === undefined) {
+  // Sin nadie en ese caso, el próximo que llegue no espera las 6 horas.
+  if (sinDestino.size === 0) delete avisado[SIN_DESTINO];
+  else if (avisado[SIN_DESTINO] === undefined) {
     avisado[SIN_DESTINO] = ahora;
     const hilos = [...sinDestino.values()];
     avisos.push({
@@ -157,7 +162,7 @@ export function judge({ filas, health, estado, ahora }) {
 
 export function textoAviso(a) {
   if (a.tipo === "fallida")
-    return `El mensaje del hilo ${a.hilo} lleva ${a.minutos} min fallando: ${a.razon}`;
+    return `El mensaje del hilo ${a.hilo} lleva ${a.minutos} min parado; último fallo: ${a.razon}`;
   if (a.tipo === SIN_DESTINO)
     return `${a.hilos.length === 1 ? "1 hilo lleva" : `${a.hilos.length} hilos llevan hasta`} ${a.horas} h retenido${a.hilos.length === 1 ? "" : "s"} sin ninguna cuenta que pueda correrlo: ${a.hilos.map((h) => `${h.hilo} (${h.modelo})`).join(", ")}`;
   return `El switcher retiene el hilo ${a.hilo} (${a.modelo}) ${a.minutos} min con ${a.libres.join(", ")} libre${a.libres.length === 1 ? "" : "s"}${a.ocupado ? "; su proyecto tiene otro hilo en marcha y por eso no se mueve solo" : ""}`;
@@ -269,7 +274,7 @@ export async function main({ dir = process.cwd(), ahora = Date.now() } = {}) {
       await enviar(dir, {
         title:
           aviso.tipo === "fallida"
-            ? "Switcher: mensaje que falla"
+            ? "Switcher: mensaje parado"
             : "Switcher: hilo retenido",
         body: texto,
         threadId: aviso.hilo,
