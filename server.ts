@@ -629,8 +629,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // delegating session's default, not a measure.
     otherModelUpTo: {
       type: "number",
-      label:
-        "Other models on a Max or Ultra account that keeps the preferred one, up to (%)",
+      label: "Other models on a Max or Ultra account that keeps the preferred one, up to (%)",
       description:
         "A turn in another model (Opus while Fable is preferred) runs on a Max or Ultra account that can still run the preferred model only while that account's weekly and preferred-model windows are both at or under this share, and only when no Team seat is free. 0 = never: such a turn waits for a Team seat.",
       default: 50,
@@ -821,10 +820,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // The default is `~/.claude` whatever it is called: renamed, it keeps
     // the seats it has taken (Astra SEATS-R08).
     if (next.defaultAccountName !== current.defaultAccountName)
-      seatKeys.set(
-        next.defaultAccountName,
-        seatKey(current.defaultAccountName),
-      );
+      seatKeys.set(next.defaultAccountName, seatKey(current.defaultAccountName));
     current = next;
     // A Map visits no key deleted before its turn: the current one may go.
     if (!next.autoSwitch) {
@@ -926,11 +922,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const weeklyAbsent = usage?.weekly.absent === true;
     const sessionAbsent = usage?.session.absent === true;
     const base = capacityFor(kind, weeklyAbsent, current, sessionAbsent);
-    if (
-      current.seatsFollowLoad !== true ||
-      usage === null ||
-      usage === undefined
-    )
+    if (current.seatsFollowLoad !== true || usage === null || usage === undefined)
       return { capacity: base, why: null };
     const session = settle({ ...usage, name }, deps.now()).session;
     return seatCeiling(
@@ -951,14 +943,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const key = seatKey(name);
     const { capacity, why } = seatCapacity(key);
     // First measured: against the setting.
-    const previous =
-      ceilings.get(key) ??
-      capacityFor(
-        accounts.find((a) => a.name === name)?.kind,
-        collector.get(name)?.usage?.weekly.absent === true,
-        current,
-        collector.get(name)?.usage?.session.absent === true,
-      );
+    const previous = ceilings.get(key) ?? capacityFor(
+      accounts.find((a) => a.name === name)?.kind,
+      collector.get(name)?.usage?.weekly.absent === true,
+      current,
+      collector.get(name)?.usage?.session.absent === true,
+    );
     ceilings.set(key, capacity);
     if (capacity === previous) return;
     const reason = `Seats on ${name}: ${previous} → ${capacity}, ${why ?? "back to the setting"}`;
@@ -1079,10 +1069,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * starts. Measured from the log: half of the turns start within 1 s, 5 of
    * 242 past SEAT_TTL_MS (docs/revision-2026-11-04/PLAN.md).
    */
-  function siblingAdmitted(
-    projectId: string,
-    threadId?: string,
-  ): string | null {
+  function siblingAdmitted(projectId: string, threadId?: string): string | null {
     const now = deps.now();
     for (const [sibling, project] of seatProjects) {
       if (project !== projectId || sibling === threadId) continue;
@@ -1139,12 +1126,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     name: string,
     model: string,
     now: number,
-  ): {
-    kind: "stuck" | "crowded";
-    minutes: number;
-    wanted: number;
-    capacity: number;
-  } | null {
+  ):
+    | { kind: "stuck" | "crowded"; minutes: number; wanted: number; capacity: number }
+    | null {
     const limit = current.stuckMoveMinutes * 60_000;
     if (!(limit > 0) || !current.autoSwitch) return null;
     if (!reserving({ preferredModel: model, ...reserveOf() })) return null;
@@ -1396,10 +1380,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (reservedFor(name, model) && canRunHere(name, model))
       return `would spend ${current.preferredModel}'s weekly`;
     const known = measuredAccounts(model).find((a) => a.name === name);
-    if (
-      (known === undefined || known.unknown === true) &&
-      unreadKeepsReserve(name)
-    )
+    if ((known === undefined || known.unknown === true) && unreadKeepsReserve(name))
       return `is not read yet and may spend ${current.preferredModel}'s weekly`;
     return model === "" ? "is out of usage" : `cannot run ${model}`;
   }
@@ -1695,12 +1676,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const usage = collector.get(name)?.usage;
     if (usage === null || usage === undefined) return null;
     const now = deps.now();
-    return paceOf(
-      settle({ ...usage, name }, now).weekly,
-      paceDay[name],
-      now,
-      dayHour(),
-    );
+    return paceOf(settle({ ...usage, name }, now).weekly, paceDay[name], now, dayHour());
   }
   /**
    * The account is saved for the user (SPEC 2026-10-30 §2): its day's pace
@@ -1807,9 +1783,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return seriesWrites;
   }
   /** The day's first readings, to storage; a failure is logged, not thrown. */
-  async function storePaceDay(
-    snapshot: Record<string, DayStart>,
-  ): Promise<void> {
+  async function storePaceDay(snapshot: Record<string, DayStart>): Promise<void> {
     try {
       await bb.storage.kv.set(KV_PACE, snapshot);
     } catch (error) {
@@ -2351,7 +2325,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (!otherModel(model)) return false;
     const known = measuredAccounts(model).find((a) => a.name === name);
     if (known === undefined || known.unknown === true) return false;
-    const sendBy = Math.max(at, deps.now()) + RESET_BUFFER_MS + RESET_JITTER_MS;
+    const sendBy =
+      Math.max(at, deps.now()) + RESET_BUFFER_MS + RESET_JITTER_MS;
     return spendsReservedWeekly(settle(known, sendBy), {
       preferredModel: model,
       ...reserveOf(),
@@ -2506,11 +2481,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     if (toName !== (from.account ?? current.defaultAccountName))
       accountChangedAt.set(projectId, deps.now());
-    if (
-      options.byHand !== true &&
-      toName !== fromName &&
-      pins.delete(projectId)
-    )
+    if (options.byHand !== true && toName !== fromName && pins.delete(projectId))
       storePins();
     bb.realtime.publish(CHANGED, { at: deps.now() });
     return true;
@@ -2557,12 +2528,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       ];
       const elsewhere: string[] = [];
       for (const projectPath of paths) {
-        const result = await shareSessions({
-          projectPath,
-          target,
-          sources,
-          io,
-        });
+        const result = await shareSessions({ projectPath, target, sources, io });
         if (result.skipped === "no-project-dir") elsewhere.push(projectPath);
         if (result.linked > 0)
           bb.log.info(
@@ -2944,11 +2910,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         rows.some(
           (r) =>
             r.payload.kind === "retry" &&
-            retryKey(
-              threadId,
-              r.payload.retryOfTurnRequestId,
-              r.payload.attempt,
-            ) === key,
+            retryKey(threadId, r.payload.retryOfTurnRequestId, r.payload.attempt) ===
+              key,
         ),
       () => false,
     );
@@ -2963,7 +2926,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * waiting on the thread (the user sent a message by hand meanwhile): it is
    * skipped. bb allows one row per chain, so the first match is the one.
    */
-  async function queuedRetry(event: PluginTurnFailedEvent): Promise<{
+  async function queuedRetry(
+    event: PluginTurnFailedEvent,
+  ): Promise<{
     id: string;
     reason: string;
     sendAt: number | null;
@@ -2985,11 +2950,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         id: row.id,
         reason: payload.reason,
         sendAt: row.sendAt,
-        key: retryKey(
-          event.threadId,
-          payload.retryOfTurnRequestId,
-          payload.attempt,
-        ),
+        key: retryKey(event.threadId, payload.retryOfTurnRequestId, payload.attempt),
       };
     }
     return null;
@@ -3030,10 +2991,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * refuses ours (one retry per turn) and the row stays, so the turn is
    * never left without a retry (Codex BM-INSPECT-R3-001).
    */
-  async function replaceQueued(
-    threadId: string,
-    rowId: string,
-  ): Promise<boolean> {
+  async function replaceQueued(threadId: string, rowId: string): Promise<boolean> {
     try {
       await deleteOwn(threadId, rowId);
       return true;
@@ -3312,9 +3270,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const byProject = new Map<string, [string, AdviceBasis][]>();
     for (const [threadId, stored] of adviceBasis) {
       const basis =
-        stored.restored === true
-          ? await restoredHolds(threadId, stored)
-          : stored;
+        stored.restored === true ? await restoredHolds(threadId, stored) : stored;
       // A judgment of the thread that landed while the pass waited for that
       // check: its basis, and its banner, are its own (Sol B2-R7-001).
       if (basis === null || adviceBasis.get(threadId) !== basis) continue;
@@ -3402,10 +3358,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         unreadAccounts(),
         placementOf(projectId, FALLBACK_MODEL, now),
       );
-      showAdvice(
-        threadId,
-        on === null ? null : opusInsteadText(basis.model, on),
-      );
+      showAdvice(threadId, on === null ? null : opusInsteadText(basis.model, on));
     }
   }
 
@@ -3673,11 +3626,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return;
     }
     if (
-      !(await applyAccount(
-        projectId,
-        accountOrDefault(decision.account),
-        latest,
-      ))
+      !(await applyAccount(projectId, accountOrDefault(decision.account), latest))
     ) {
       bb.log.info(
         `thread ${thread.id}: not placed (the project's account changed meanwhile)`,
@@ -3881,14 +3830,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // Moved by something else while the sessions were shared: this
     // decision, taken on the account before, no longer holds.
     if (
-      !(await applyAccount(
-        projectId,
-        accountOrDefault(decision.account),
-        from,
-        {
-          forThread: thread.id,
-        },
-      ))
+      !(await applyAccount(projectId, accountOrDefault(decision.account), from, {
+        forThread: thread.id,
+      }))
     )
       return;
     await markHandled(projectId);
@@ -4080,7 +4024,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       noteProjectModel(projectId, model, started.activity);
     read();
     if (!stillLatest()) return;
-    if (!reserving({ preferredModel: model, ...reserveOf() })) return;
+    if (!reserving({ preferredModel: model, ...reserveOf() }))
+      return;
     await inProjectQueue(projectId, async () => {
       // Asked again: the setting, a move or a newer message may have come
       // while the log was read or the queue waited (Codex OPUS-004).
@@ -4121,15 +4066,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** The latest write failed: the next turn stores it again, also with no change (Codex IR-001). */
   let projectModelsUnsaved = false;
   /** Stored as it changes, without holding the turn back: a failed write is logged and tried again. */
-  function noteProjectModel(
-    projectId: string,
-    model: string,
-    at: number,
-  ): void {
+  function noteProjectModel(projectId: string, model: string, at: number): void {
     const before = projectModel.get(projectId)?.model;
     projectModel.set(projectId, { model, at });
-    if (!projectModelsRead || (before === model && !projectModelsUnsaved))
-      return;
+    if (!projectModelsRead || (before === model && !projectModelsUnsaved)) return;
     const snapshot = Object.fromEntries(
       [...projectModel].map(([id, known]) => [id, known.model]),
     );
@@ -4278,17 +4218,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const seen = activity.get(projectId) ?? 0;
     const ended = turnEnds.get(projectId) ?? 0;
     if (
-      !(await applyAccount(
-        projectId,
-        accountOrDefault(decision.account),
-        from,
-        {
-          stillValid: () =>
-            (activity.get(projectId) ?? 0) === seen &&
-            (turnEnds.get(projectId) ?? 0) === ended &&
-            modelOfProject(projectId) === model,
-        },
-      ))
+      !(await applyAccount(projectId, accountOrDefault(decision.account), from, {
+        stillValid: () =>
+          (activity.get(projectId) ?? 0) === seen &&
+          (turnEnds.get(projectId) ?? 0) === ended &&
+          modelOfProject(projectId) === model,
+      }))
     )
       return;
     await markHandled(projectId);
@@ -4366,10 +4301,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // keeps the project there (Codex PLAZAS-R2-003).
     if (thread.providerId === CLAUDE_CODE_PROVIDER) {
       turnsUnderWay.set(thread.id, thread.projectId);
-      turnsStarted.set(
-        thread.projectId,
-        (turnsStarted.get(thread.projectId) ?? 0) + 1,
-      );
+      turnsStarted.set(thread.projectId, (turnsStarted.get(thread.projectId) ?? 0) + 1);
     }
     if (
       thread.providerId !== CLAUDE_CODE_PROVIDER ||
@@ -4720,8 +4652,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         const known = measured.find((a) => a.name === login.name);
         // Measured, and left out because only the clock would free it: that
         // is a veto, not a seat never read (Astra FINAL-R8-003).
-        if (known === undefined)
-          return (collector.get(login.name)?.usage ?? null) === null;
+        if (known === undefined) return (collector.get(login.name)?.usage ?? null) === null;
         return known.unknown === true;
       })
       .map((login) => login.name);
@@ -4764,12 +4695,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     /** `held`: set when the turn must wait (see reserveWait). */
     turn: {
       abandoned: boolean;
-      held?: {
-        sendAt: number;
-        reason: string;
-        seatOn?: string;
-        seatWhy?: string;
-      };
+      held?: { sendAt: number; reason: string; seatOn?: string; seatWhy?: string };
       /** A Calor tick: it does not move the project; `refused` says what it would have done. */
       tick?: boolean;
       refused?: string;
@@ -4824,10 +4750,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             aheadThreshold: aheadThreshold(model),
             ...(busy === null
               ? {}
-              : {
-                  seatsWanted: busy.wanted,
-                  seatsWantedOnly: busy.kind === "crowded",
-                }),
+              : { seatsWanted: busy.wanted, seatsWantedOnly: busy.kind === "crowded" }),
           }
         : {}),
       pinned: pins.get(projectId) === fromName,
@@ -4917,19 +4840,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     } else noteMove(projectId, fromName, decision.account, model, before);
     const reason =
       busy !== null && decision.why === "current-full"
-        ? busyReason(
-            busy,
-            fromName,
-            decision.account,
-            roomThere,
-            fullHere,
-            model,
-          )
+        ? busyReason(busy, fromName, decision.account, roomThere, fullHere, model)
         : decision.why === "back-from-excursion"
-          ? `Moved back to account ${decision.account} before the turn: ${fromName} was an excursion for ${excursion?.model ?? "another model"}`
-          : decision.why === "current-full"
-            ? `Moved to account ${decision.account} before the turn: ${fromName} seats full (${fullHere.running + fullHere.reserved + (fullHere.external?.length ?? 0)}/${fullHere.capacity}), ${decision.account} had ${Number.isFinite(roomThere) ? roomThere : "unlimited"} free`
-            : `Moved to account ${decision.account} ${when === "after" ? `after a turn in ${model}` : "before the turn"}: ${fromName} ${whyOut(fromName, model)}`;
+        ? `Moved back to account ${decision.account} before the turn: ${fromName} was an excursion for ${excursion?.model ?? "another model"}`
+        : decision.why === "current-full"
+          ? `Moved to account ${decision.account} before the turn: ${fromName} seats full (${fullHere.running + fullHere.reserved + (fullHere.external?.length ?? 0)}/${fullHere.capacity}), ${decision.account} had ${Number.isFinite(roomThere) ? roomThere : "unlimited"} free`
+          : `Moved to account ${decision.account} ${when === "after" ? `after a turn in ${model}` : "before the turn"}: ${fromName} ${whyOut(fromName, model)}`;
     bb.log.info(`thread ${thread.id}: ${reason}`);
     await recordMove(
       {
@@ -4958,19 +4874,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     fromName: string,
     to: string,
     roomThere: number,
-    fullHere: {
-      running: number;
-      reserved: number;
-      capacity: number;
-      external?: readonly unknown[];
-    },
+    fullHere: { running: number; reserved: number; capacity: number; external?: readonly unknown[] },
     model: string,
   ): string {
-    const taken =
-      fullHere.running + fullHere.reserved + (fullHere.external?.length ?? 0);
-    const room = Number.isFinite(roomThere)
-      ? String(roomThere)
-      : "sin límite de";
+    const taken = fullHere.running + fullHere.reserved + (fullHere.external?.length ?? 0);
+    const room = Number.isFinite(roomThere) ? String(roomThere) : "sin límite de";
     const libres = roomThere === 1 ? "libre" : "libres";
     const why =
       busy.kind === "stuck"
@@ -5172,10 +5080,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (tick && (turn.refused !== undefined || turn.held !== undefined)) {
       const why = turn.refused ?? turn.held!.reason;
       bb.log.info(`thread ${thread.id}: Calor's tick refused: ${why}`);
-      return {
-        action: "reject",
-        message: `Claude Switcher: a Calor tick stays where its cache is: ${why}`,
-      };
+      return { action: "reject", message: `Claude Switcher: a Calor tick stays where its cache is: ${why}` };
     }
     if (turn.held !== undefined) {
       const { seatOn, seatWhy, ...held } = turn.held;
@@ -5183,10 +5088,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         // In that account's seat queue, first come first served, so later
         // arrivals there do not overtake it (Codex OPUS-R4-002); admitted,
         // its own seat lets the placement move the project there.
-        seatGenerations.set(
-          thread.id,
-          (seatGenerations.get(thread.id) ?? 0) + 1,
-        );
+        seatGenerations.set(thread.id, (seatGenerations.get(thread.id) ?? 0) + 1);
         const queued = seatWait(thread, seatOn, seatWhy);
         if (queued !== null) return queued;
         return {
@@ -5248,7 +5150,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       if (wait !== null) return wait;
     }
     const why =
-      login === "no" ? "has no login" : "has a login that could not be checked";
+      login === "no"
+        ? "has no login"
+        : "has a login that could not be checked";
     bb.log.warn(
       `thread ${thread.id}: refused: no account for project ${thread.projectId} and ${current.defaultAccountName} ${why}`,
     );
@@ -5276,7 +5180,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * null when anything of it could not be read, within STUCK_READ_LIMIT_MS:
    * «nothing stuck» is never said unread.
    */
-  async function atascos(rows?: readonly HeldRow[]): Promise<Atasco[] | null> {
+  async function atascos(
+    rows?: readonly HeldRow[],
+  ): Promise<Atasco[] | null> {
     const read = await within(
       readAtascos(rows),
       STUCK_READ_LIMIT_MS,
@@ -5351,9 +5257,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // once they are counted (Astra SEATS-R4-002).
     if (ctx.attempt === "start-turn" && !seatsReady) {
       seatsAwaited = true;
-      bb.log.info(
-        `thread ${thread.id}: its message waits (seats are being counted)`,
-      );
+      bb.log.info(`thread ${thread.id}: its message waits (seats are being counted)`);
       return {
         action: "wait",
         reason: "Claude Switcher: seats are being counted after a reload",
@@ -5446,8 +5350,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                 "the account it names is not among the accounts found",
               );
             if (still(writes)) return { account: seat, writes };
-            if (tries >= 1)
-              throw new Error("the project moved while it was read");
+            if (tries >= 1) throw new Error("the project moved while it was read");
           }
         };
         const read = await within(
@@ -5488,11 +5391,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           blockedWaits.set(thread.id, waited + 1);
           const reason = `Waiting to place ${model} again: the project is on ${at.account}, which ${whyOut(at.account, model)}`;
           bb.log.info(`thread ${thread.id}: its message waits (${reason})`);
-          return {
-            action: "wait",
-            reason,
-            sendAt: deps.now() + SEAT_RECHECK_MS,
-          };
+          return { action: "wait", reason, sendAt: deps.now() + SEAT_RECHECK_MS };
         }
         bb.log.warn(
           `thread ${thread.id}: starts on ${at.account}, which ${whyOut(at.account, model)}: its project could not be moved in ${BLOCKED_WAITS} tries`,
@@ -5532,10 +5431,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       if (at !== null && at.account !== null) {
         // A cancellation of an earlier message that is still looking at the
         // queue leaves this one's place alone (Astra SEATS-R4-003).
-        seatGenerations.set(
-          thread.id,
-          (seatGenerations.get(thread.id) ?? 0) + 1,
-        );
+        seatGenerations.set(thread.id, (seatGenerations.get(thread.id) ?? 0) + 1);
         const wait = seatWait(thread, at.account);
         if (wait !== null) return wait;
       }
@@ -5634,29 +5530,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       recent.graced.add(event.threadId);
       if (typeof started === "string" && isRefusal(event))
         markRefused(started, now, event);
-      const told = followsAdvice(
-        recent,
-        model,
-        now,
-        event,
-        started,
-        projectId,
-        background,
-      );
+      const told = followsAdvice(recent, model, now, event, started, projectId, background);
       const reason = `Retrying on account ${recent.to}${told === null ? "" : `. ${told}`}`;
       bb.log.info(
         `thread ${event.threadId}: ${reason} (switched ${now - recent.at} ms ago)`,
       );
       if (told !== null)
-        await noteAdvice(
-          event.threadId,
-          projectId,
-          recent.to,
-          reason,
-          turn,
-          now,
-          judgedIn,
-        );
+        await noteAdvice(event.threadId, projectId, recent.to, reason, turn, now, judgedIn);
       // Its queued retry says it now, or nothing is to be said.
       judgedAdvice(event.threadId, null, judgedIn, null);
       // The advice too only while the judgment's generation holds, as its
@@ -5698,29 +5578,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         const told =
           sendAt === undefined || recent === undefined
             ? null
-            : followsAdvice(
-                recent,
-                model,
-                now,
-                event,
-                started,
-                projectId,
-                background,
-              );
+            : followsAdvice(recent, model, now, event, started, projectId, background);
         const reason = `Retrying on account ${currentName}${told === null ? "" : `. ${told}`}`;
         bb.log.info(
           `thread ${event.threadId}: ${reason} (its turn started on ${started})`,
         );
         if (told !== null)
-          await noteAdvice(
-            event.threadId,
-            projectId,
-            currentName,
-            reason,
-            turn,
-            now,
-            judgedIn,
-          );
+          await noteAdvice(event.threadId, projectId, currentName, reason, turn, now, judgedIn);
         judgedAdvice(event.threadId, null, judgedIn, null);
         await retryTurn(
           event,
@@ -6013,15 +5877,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // Switched off meanwhile, noteAdvice writes nothing: the judgment's
       // generation ended (code-reviewer r4, N2).
       if (advice !== null)
-        await noteAdvice(
-          event.threadId,
-          projectId,
-          fromName,
-          advice,
-          turn,
-          now,
-          judgedIn,
-        );
+        await noteAdvice(event.threadId, projectId, fromName, advice, turn, now, judgedIn);
       return;
     }
     const reason =
@@ -6038,14 +5894,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (stuck && !current.autoSwitch) return;
     if (decision.account !== fromName) {
       if (
-        !(await applyAccount(
-          projectId,
-          accountOrDefault(decision.account),
-          from,
-          {
-            forThread: event.threadId,
-          },
-        ))
+        !(await applyAccount(projectId, accountOrDefault(decision.account), from, {
+          forThread: event.threadId,
+        }))
       ) {
         // Moved by a placement before a turn while the sessions were shared:
         // that move, decided later, stands. Nothing is recorded; the turn is
@@ -6106,15 +5957,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         graced: new Set(),
       });
       if (advice !== null)
-        await noteAdvice(
-          event.threadId,
-          projectId,
-          fromName,
-          reason,
-          turn,
-          now,
-          judgedIn,
-        );
+        await noteAdvice(event.threadId, projectId, fromName, reason, turn, now, judgedIn);
     } else {
       // Retried on the project's own account: it runs there from here, so
       // a failure of it within the grace of the project's latest move is
@@ -6526,15 +6369,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         here.unknown === true ||
         // With the reserve: a Max account that keeps the preferred model
         // never gets an Opus retry released on it (Codex BM-R1-005).
-        bestAccount(
-          [here],
-          model,
-          now,
-          current.preferredModel,
-          undefined,
-          undefined,
-          current.otherModelUpTo,
-        ) === fromName)
+        bestAccount([here], model, now, current.preferredModel, undefined, undefined, current.otherModelUpTo) === fromName)
     ) {
       // It waited on the account the project was on before.
       const changed = accountChangedAt.get(projectId);
@@ -6787,12 +6622,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const lastActive = new Map<string, number>();
     // Each project's activity as the threads are read: a message or a turn
     // since stops its move (Codex PLAZAS-004).
-    const seen = new Map(
-      s.projects.map((p) => [p.id, activity.get(p.id) ?? 0]),
-    );
-    const started = new Map(
-      s.projects.map((p) => [p.id, turnsStarted.get(p.id) ?? 0]),
-    );
+    const seen = new Map(s.projects.map((p) => [p.id, activity.get(p.id) ?? 0]));
+    const started = new Map(s.projects.map((p) => [p.id, turnsStarted.get(p.id) ?? 0]));
     for (const t of await claudeThreads()) {
       lastActive.set(
         t.projectId,
@@ -6819,10 +6650,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const names = new Set(ultra.map((a) => a.name));
     const countOf = (list: { account: string }[]) =>
       Object.fromEntries(
-        ultra.map((a) => [
-          a.name,
-          list.filter((p) => p.account === a.name).length,
-        ]),
+        ultra.map((a) => [a.name, list.filter((p) => p.account === a.name).length]),
       );
     const before = countOf(projects);
     const plan = planRebalance(ultra, projects, REBALANCE_SPREAD);
@@ -6849,10 +6677,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         await inProjectQueue(m.projectId, async () => {
           const mark = moveMark(m.projectId);
           const from = await projectAccount(m.projectId);
-          if (
-            from.external ||
-            (from.account ?? current.defaultAccountName) !== m.from
-          ) {
+          if (from.external || (from.account ?? current.defaultAccountName) !== m.from) {
             row.done = false;
             row.why = "moved meanwhile";
             return;
@@ -6906,15 +6731,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return {
       applied: apply,
       /** The most projects above the account with fewest, after the pass: above REBALANCE_SPREAD only when projects at work hold it there. */
-      spread:
-        counts.length === 0 ? 0 : Math.max(...counts) - Math.min(...counts),
+      spread: counts.length === 0 ? 0 : Math.max(...counts) - Math.min(...counts),
       accounts: ultra.map((a) => ({
         name: a.name,
         load: a.load,
         before: before[a.name]!,
         after: after[a.name]!,
-        atWork: projects.filter((p) => p.account === a.name && !p.movable)
-          .length,
+        atWork: projects.filter((p) => p.account === a.name && !p.movable).length,
       })),
       moves,
       leftOut: projects.filter((p) => !names.has(p.account)).length,
@@ -6934,9 +6757,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const taken = seatsState();
     // What the policy may choose, whatever the model (Codex ULTRA-R06): a
     // read it no longer trusts is no usable account here either.
-    const trusted = new Set(
-      collector.usable(maxReadAgeMs()).map((a) => a.name),
-    );
+    const trusted = new Set(collector.usable(maxReadAgeMs()).map((a) => a.name));
     const observed = accounts
       .map((a) => collector.get(a.name)?.observedAt ?? null)
       .filter((at): at is number => at !== null);
@@ -7033,14 +6854,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             id: {
               type: "string",
               required: true,
-              description:
-                "Who holds it: the same id renews the hold, unreserve ends it",
+              description: "Who holds it: the same id renews the hold, unreserve ends it",
             },
             until: {
               type: "string",
               required: true,
-              description:
-                "ISO 8601 with a zone (2026-10-31T07:00:00+01:00); never more than 12 h ahead",
+              description: "ISO 8601 with a zone (2026-10-31T07:00:00+01:00); never more than 12 h ahead",
             },
             json: JSON_OPTION,
           },
@@ -7104,8 +6923,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                   ? `--until ${options.until} is not ahead of now.`
                   : `No free seat on ${name}: ${occupancy(key)}.`,
                 {
-                  code:
-                    result.reason === "past" ? "until_past" : "no_free_seat",
+                  code: result.reason === "past" ? "until_past" : "no_free_seat",
                   exitCode: 1,
                 },
               );
@@ -7125,8 +6943,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                 now2.at === mine.at
               ) {
                 seats.releaseExternal(options.id);
-                if (before !== undefined)
-                  seats.restoreHolds([before], deps.now());
+                if (before !== undefined) seats.restoreHolds([before], deps.now());
                 void storeHolds();
                 admitWaiting();
               }
@@ -7252,10 +7069,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                 `${name}\tseats ${a.running + a.reserved + (a.external?.length ?? 0)}/${a.capacity === 0 ? "no limit" : a.capacity} (${a.running} running, ${a.reserved} reserved${a.external === undefined ? "" : `, ${a.external.length} held outside bb: ${a.external.map((e) => `${e.id} until ${isoInZone(e.until)}`).join(", ")}`})\t${a.queued.length} waiting`,
               );
             if (stuck === null)
-              lines.push(
-                "",
-                "The queue could not be read: stuck threads unknown.",
-              );
+              lines.push("", "The queue could not be read: stuck threads unknown.");
             else if (stuck.length > 0)
               lines.push("", ...stuck.map((a) => atascoLine(a)));
             const time = (at: number | null) =>
@@ -7272,15 +7086,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
               let used = 0;
               let seatHours = 0;
               samples.forEach((sample, i) => {
-                const [
-                  at,
-                  running,
-                  reserved,
-                  session,
-                  weekly,
-                  resets,
-                  weeklyResets,
-                ] = sample;
+                const [at, running, reserved, session, weekly, resets, weeklyResets] = sample;
                 const before = samples[i - 1];
                 let rate = "—";
                 if (
@@ -7289,9 +7095,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                   before[5] === resets &&
                   at > before[0]
                 ) {
-                  const hours =
-                    ((at - before[0]) / 3_600_000) *
-                    ((running + before[1]) / 2);
+                  const hours = ((at - before[0]) / 3_600_000) * ((running + before[1]) / 2);
                   if (hours > 0) {
                     used += session - before[3];
                     seatHours += hours;
@@ -7354,10 +7158,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           summary:
             "Spread the projects with no thread at work over the usable Ultra accounts by their weekly, none more than 10 projects above the one with fewest; prints the plan, moves only with --apply",
           options: {
-            apply: {
-              type: "boolean",
-              description: "Move the projects (without it, only the plan)",
-            },
+            apply: { type: "boolean", description: "Move the projects (without it, only the plan)" },
             json: JSON_OPTION,
           },
           async run({ options }) {
@@ -7370,8 +7171,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             const lines = [
               "account\tweekly\tbefore\tafter\tat work",
               ...r.accounts.map(
-                (a) =>
-                  `${a.name}\t${a.load} %\t${a.before}\t${a.after}\t${a.atWork}`,
+                (a) => `${a.name}\t${a.load} %\t${a.before}\t${a.after}\t${a.atWork}`,
               ),
               "",
               ...(r.moves.length === 0
@@ -7386,9 +7186,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                     `The projects at work keep one account ${r.spread} projects above the one with fewest; run it again once they are done.`,
                   ]
                 : []),
-              ...(r.applied
-                ? []
-                : ["", "Plan only: run with --apply to move them."]),
+              ...(r.applied ? [] : ["", "Plan only: run with --apply to move them."]),
             ];
             return { exitCode, stdout: `${lines.join("\n")}\n` };
           },
@@ -7450,10 +7248,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * within DISPATCH_LIMIT_MS (one that never answers is a failed try: Astra
    * SEATS-R2-001); the last failure is thrown.
    */
-  async function countTries<T>(
-    what: string,
-    read: () => Promise<T>,
-  ): Promise<T> {
+  async function countTries<T>(what: string, read: () => Promise<T>): Promise<T> {
     for (let attempt = 1; ; attempt += 1) {
       try {
         const got = await within(
@@ -7462,18 +7257,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           `${what} not read to count the seats`,
         );
         if (typeof got !== "object")
-          throw new Error(
-            got === "late" ? "no answer in time" : "the read failed",
-          );
+          throw new Error(got === "late" ? "no answer in time" : "the read failed");
         return got.value;
       } catch (error) {
         if (attempt >= SEAT_COUNT_TRIES) throw error;
         bb.log.warn(
           `${what} not read to count the seats (try ${attempt}): ${error instanceof Error ? error.message : String(error)}; trying again`,
         );
-        await new Promise((resolve) =>
-          setTimeout(resolve, SEAT_COUNT_RETRY_MS),
-        );
+        await new Promise((resolve) => setTimeout(resolve, SEAT_COUNT_RETRY_MS));
       }
     }
   }
@@ -7596,9 +7387,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       const taken = Object.entries(seats.snapshot())
         .map(([key, s]) => `${seatName(key)} ${s.running} running`)
         .join(", ");
-      bb.log.info(
-        `seats counted after loading: ${taken === "" ? "none taken" : taken}`,
-      );
+      bb.log.info(`seats counted after loading: ${taken === "" ? "none taken" : taken}`);
       if (seatsAwaited)
         void bb.experimental_hooks
           .recheck("message.dispatch")
