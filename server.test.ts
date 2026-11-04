@@ -17324,7 +17324,13 @@ describe("caminos 2026-11-04", () => {
       const h = await host(
         {
           main: () => Response.json(payload(13, 10, 5)),
-          spare: () => new Response(null, { status: 500 }),
+          // Answered without its windows: `unknown`, not out.
+          spare: () =>
+            Response.json({
+              limits: [{ kind: "weekly_all", percent: 10, resets_at: new Date(NOW + 72 * 3_600_000).toISOString() }],
+              five_hour: { locked_reason: null },
+              seven_day: { locked_reason: null },
+            }),
           work: () => Response.json(payload(0, 2, 0)),
         },
         { settings: FABLE, presetEnv: { "proj-1": on("spare") } },
