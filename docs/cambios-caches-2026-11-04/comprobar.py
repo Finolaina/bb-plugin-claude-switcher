@@ -45,4 +45,9 @@ team = [f for f in F if f["misma_org"] and f["hueco_min"] < 60 and f["clase"] in
 caso("entre organizaciones se pierde en más del 90 %", sum(f["clase"] == "mata" for f in otras) / len(otras) > 0.9)
 caso("entre Team se conserva en más del 80 %", sum(f["clase"] == "misma-org" for f in team) / len(team) > 0.8)
 caso("ninguna tanda sin su primera petición", r["sin_primera"] == 0)
+# NO DEBE contar como salvada al esperar el reset: última petición 13:09:54 UTC, reset 14:40 UTC, ya caducada (Astra CACHE-F-001).
+_m = importlib.util.spec_from_file_location("simular", os.path.join(AQUI, "simular.py"))
+sim = importlib.util.module_from_spec(_m)
+_m.loader.exec_module(sim)
+caso("esperar al reset no salva una caché que caduca antes", "thr_jwz544abwe" not in sim.simular()[0]["F_esperar_reset"]["60"]["hilos"])
 sys.exit(1 if fallos else 0)

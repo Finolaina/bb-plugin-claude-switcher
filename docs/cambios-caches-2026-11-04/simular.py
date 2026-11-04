@@ -266,9 +266,10 @@ def simular():
         salva = []
         for f in cuota:
             fin = est.fin_agotada(f["de"], f["familia"], f["at"])
-            if fin is not None and fin - f["at"] <= minutos * 60_000:
+            # Salva si el turno vuelve a arrancar tras el reset con la caché aún viva: 1 h desde su última petición.
+            if fin is not None and fin - f["at"] <= minutos * 60_000 and fin < f["fin_prev"] + HORA:
                 salva.append(f)
-        salida["F_esperar_reset"][str(minutos)] = resumen(salva)
+        salida["F_esperar_reset"][str(minutos)] = {**resumen(salva), "hilos": [f["hilo"] for f in salva]}
 
     # G · cadenas: dos cambios seguidos en 2 h, el segundo evitable eligiendo mejor el primero.
     cadena = []
