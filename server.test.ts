@@ -18406,28 +18406,30 @@ describe("caminos 2026-11-04", () => {
       expect(h.envSet).toEqual([]);
     });
 
-    it("a Team seat left out because only the clock would free it is no destination by its login", async () => {
+    const OUT_ONE_HOUR = {
+      kind: "weekly_scoped",
+      percent: 100,
+      resets_at: new Date(NOW + 3_600_000).toISOString(),
+      scope: { model: { display_name: "Opus" } },
+    };
+    it.each([
+      ["a full answer", (): unknown => ({
+        ...payload(5, 2, 0),
+        limits: [...(payload(5, 2, 0).limits as unknown[]), OUT_ONE_HOUR],
+      })],
+      ["an incomplete answer", (): unknown => ({
+        limits: [(payload(5, 2, 0).limits as unknown[])[1], OUT_ONE_HOUR],
+        five_hour: { locked_reason: null },
+        seven_day: { locked_reason: null },
+      })],
+    ])("a Team seat left out because only the clock would free it is no destination by its login: %s", async (_, body) => {
       let clock = NOW;
       let down = false;
       const h = await host(
         {
           main: () => Response.json(payload(13, 10, 5)),
           spare: () => Response.json(payload(13, 30, 40)),
-          work: () =>
-            down
-              ? new Response(null, { status: 429 })
-              : Response.json({
-                  ...payload(5, 2, 0),
-                  limits: [
-                    ...(payload(5, 2, 0).limits as unknown[]),
-                    {
-                      kind: "weekly_scoped",
-                      percent: 100,
-                      resets_at: new Date(NOW + 3_600_000).toISOString(),
-                      scope: { model: { display_name: "Opus" } },
-                    },
-                  ],
-                }),
+          work: () => (down ? new Response(null, { status: 429 }) : Response.json(body())),
         },
         {
           settings: { ...FABLE, seatsTeam: 1 },
