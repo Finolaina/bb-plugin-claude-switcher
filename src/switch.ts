@@ -467,6 +467,8 @@ export interface PlacementInput {
    * goes elsewhere, or waits at the checkpoint. Unset: nothing is known.
    */
   unreadKeepsReserve?: (account: string) => boolean;
+  /** Team seats by login with nothing measured: where such a turn may go when no measured account can take it. */
+  unreadTeams?: string[];
   /** The project has never been seen by this plugin (created after it was installed). */
   isNew: boolean;
   /** Every account with measured usage, the current one included. */
@@ -596,13 +598,32 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
       !holdsForReserve(options)
     )
       return { kind: "keep" };
-    const elsewhere = chooseSeated(
-      accounts.filter((a) => a.name !== input.currentAccount),
-      options,
-      input.freeSeats,
-    );
+    // A Team seat spends nothing the reserved model needs, read or not: all
+    // the reads down is no reason to wait with one free (code-reviewer r4).
+    const elsewhere =
+      chooseSeated(
+        accounts.filter((a) => a.name !== input.currentAccount),
+        options,
+        input.freeSeats,
+      ) ??
+      chooseSeated(
+        (input.unreadTeams ?? [])
+          .filter((name) => name !== input.currentAccount)
+          .map((name) => ({
+            name,
+            blocked: false,
+            session: { usedPercent: 0, resetsAt: null },
+            weekly: { usedPercent: 0, resetsAt: null },
+            models: {},
+            team: true as const,
+          })),
+        options,
+        input.freeSeats,
+      );
+    // Kept as one that would spend the reserve: it takes its place in a
+    // queue, and what comes later does not overtake it.
     return elsewhere === null
-      ? { kind: "keep" }
+      ? { kind: "keep", why: "current-reserved" }
       : { kind: "move", account: elsewhere.account, why: "current-reserved" };
   }
   const runs =

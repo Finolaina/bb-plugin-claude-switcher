@@ -1267,6 +1267,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (refusing(name)) return "refused a turn";
     if (reservedFor(name, model) && canRunHere(name, model))
       return `would spend ${current.preferredModel}'s weekly`;
+    const known = measuredAccounts(model).find((a) => a.name === name);
+    if (known === undefined || known.unknown === true)
+      return `is not read yet and may spend ${current.preferredModel}'s weekly`;
     return model === "" ? "is out of usage" : `cannot run ${model}`;
   }
   /** `name` is measured able to run `model`, the reserve apart. */
@@ -3348,9 +3351,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     model: string,
     measured: ReturnType<typeof measuredAccounts>,
     now: number,
+    /** The thread the turn is placed for: its own seat does not hold it back. */
+    threadId?: string,
   ): string | null | undefined {
     const excursion = excursions.get(projectId);
     if (excursion === undefined || otherModel(model)) return undefined;
+    // A sibling admitted here and not started yet would start on the account
+    // the way home leads to (code-reviewer r4). Its seat lapses by itself.
+    for (const [sibling, project] of seatProjects)
+      if (
+        project === projectId &&
+        sibling !== threadId &&
+        seats.seatOf(sibling)?.state === "reserved"
+      )
+        return null;
     const left = aheadLeft.get(projectId);
     const home = measured.find((a) => a.name === excursion.from);
     return left !== undefined &&
@@ -4327,7 +4341,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       accounts: measured,
       preferredModel: model,
       reserveModel: current.preferredModel,
-      excursionFrom: wayHome(projectId, model, measured, now),
+      excursionFrom: wayHome(projectId, model, measured, now, threadId),
       freeSeats:
         own === null
           ? freeSeats
@@ -4429,6 +4443,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const { plan } = planOf(login, null);
     return login.kind === "max" || plan === "ultra" || plan === "max";
   }
+  /** The Team seats by login, logged in, with nothing measured of them. */
+  function unreadTeams(model: string): string[] {
+    const measured = measuredAccounts(model);
+    return accounts
+      .filter(
+        (login) =>
+          planOf(login, null).plan === "team" &&
+          !loggedOut(login.name) &&
+          (measured.find((a) => a.name === login.name)?.unknown ?? true),
+      )
+      .map((login) => login.name);
+  }
   /**
    * A turn in `model` on `name` would spend the weekly the reserved model
    * needs, and `model` is held off such an account (see holdsForReserve),
@@ -4497,6 +4523,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const input: PlacementInput = {
       ...placementOf(projectId, model, now, isBackground(thread), thread.id),
       unreadKeepsReserve,
+      unreadTeams: unreadTeams(model),
       currentAccount: fromName,
       currentLoggedOut: unconfirmed(fromName),
       ...(seatsFull
