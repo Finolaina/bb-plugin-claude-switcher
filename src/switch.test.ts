@@ -13,6 +13,7 @@ import {
   opusInsteadText,
   placedOn,
   settle,
+  unreadTeamSeats,
   type PlacementInput,
   type SwitchInput,
 } from "./switch.js";
@@ -2136,5 +2137,43 @@ describe("decidePlacement with the current account's seats full", () => {
     expect(
       decidePlacement(full({ preferredModel: "Opus", reserveModel: "Fable" })),
     ).toMatchObject({ kind: "keep" });
+  });
+});
+
+describe("unreadTeamSeats", () => {
+  const seat = (read: AccountUsage) =>
+    unreadTeamSeats({
+      accounts: [read],
+      unreadTeams: [read.name],
+      currentAccount: "main",
+      now: NOW,
+    })[0];
+
+  it("keeps what an incomplete answer did say, and reads only what is missing as free", () => {
+    const weekly = { usedPercent: 40, resetsAt: NOW + HOUR };
+    const models = { Opus: { usedPercent: 30, resetsAt: NOW + HOUR } };
+    expect(
+      seat(
+        account("work", {
+          blocked: true,
+          unknown: true,
+          session: { usedPercent: 100, resetsAt: null, missing: true },
+          weekly,
+          models,
+        }),
+      ),
+    ).toEqual({
+      name: "work",
+      blocked: false,
+      session: { usedPercent: 0, resetsAt: null },
+      weekly,
+      models,
+      team: true,
+    });
+  });
+
+  it("a window full with no date of reset is not read as free", () => {
+    const full = { usedPercent: 100, resetsAt: null };
+    expect(seat(account("work", { unknown: true, weekly: full }))?.weekly).toEqual(full);
   });
 });

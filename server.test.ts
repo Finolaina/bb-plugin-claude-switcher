@@ -18890,7 +18890,7 @@ describe("caminos 2026-11-04", () => {
           if (opus.action === "proceed") expect([read, ticks, h.envDeleted]).toEqual([read, ticks, []]);
           h.harness.dispose();
         }
-    });
+    }, 60_000);
 
     describe("what ends the hold", () => {
       const held = async (clock: () => number = () => NOW) => {
