@@ -19637,6 +19637,22 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
       );
     });
 
+    it("the brake holds only on the account the project moved to: back on the Ultra, Team first applies at once (code-reviewer r3 medium)", async () => {
+      const { h, at, askUntil } = await start({ main: [40, 30], workBusy: false, settings: { seatsTeam: 2, seatsMax: 4, otherModelUpTo: 50 } });
+      await h.harness.behavior.runCli(["use", "proj-3", "spare"]);
+      expect((await dispatch(h, "x", "proj-3")).action).toBe("proceed");
+      await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "x", projectId: "proj-3" }) });
+      await askUntil(10 * MINUTE);
+      at(10 * MINUTE + 1);
+      expect(await dispatch(h, "b", "proj-1")).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("work");
+      expect((await h.harness.behavior.runCli(["release"])).exitCode).toBe(0);
+      expect(await where(h)).toBe("main");
+      at(12 * MINUTE);
+      expect(await dispatch(h, "c", "proj-1")).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("work");
+    });
+
     it("a pick by hand of the full account gives way, and the history says so (code-reviewer r2 low)", async () => {
       const { h } = await start({ main: [40, 30], settings: { seatsMax: 4, otherModelUpTo: 50 } });
       await h.harness.behavior.runCli(["use", "proj-1", "spare"]);

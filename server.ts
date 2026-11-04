@@ -1122,7 +1122,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return wanted;
   }
   /** When each project last moved for a crowded seat (see crowded): not again within stuckMoveMinutes. */
-  const crowdedMoves = new Map<string, number>();
+  const crowdedMoves = new Map<string, { at: number; to: string }>();
   /**
    * The thread's turn would wait for a seat on `name` while another thread
    * of its project is at work there, so seatsFullFor keeps the project
@@ -1158,7 +1158,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const ahead = queue.findIndex((q) => q.threadId === thread.id);
     if (seats.free(key) > (ahead === -1 ? queue.length : ahead)) return null;
     if (!projectSeated(thread.projectId, thread.id)) return null;
-    const last = crowdedMoves.get(thread.projectId);
+    const last = crowdedMoves.get(thread.projectId)?.at;
     if (last !== undefined && now - last <= limit) return null;
     const wanted = projectWants(thread, key);
     const capacity = seats.snapshot([key])[key]!.capacity;
@@ -4773,9 +4773,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         : {}),
       pinned: pins.get(projectId) === fromName,
       projectSeats: projectWants(thread, seatKey(fromName)),
+      // On the account the project moved to only (code-reviewer r3).
       justMovedHere:
-        now - (crowdedMoves.get(projectId) ?? -Infinity) <=
-        current.stuckMoveMinutes * 60_000,
+        crowdedMoves.get(projectId)?.to === fromName &&
+        now - crowdedMoves.get(projectId)!.at <=
+          current.stuckMoveMinutes * 60_000,
     };
     const decision = decidePlacement(input);
     if (decision.kind === "keep") {
@@ -4860,7 +4862,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // the way back to the full account goes (code-reviewer r1 H2).
     if (busy !== null && decision.why === "current-full") {
       if (excursions.get(projectId)?.from === fromName) excursions.delete(projectId);
-      crowdedMoves.set(projectId, now);
+      crowdedMoves.set(projectId, { at: now, to: decision.account });
     } else noteMove(projectId, fromName, decision.account, model, before);
     const reason =
       busy !== null && decision.why === "current-full"
