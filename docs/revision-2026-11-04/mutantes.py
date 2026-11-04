@@ -204,7 +204,7 @@ M = [
      "      { model, at: 0 },\n", "      { model, at: Number.MAX_SAFE_INTEGER },\n",
      "server.test.ts", "a turn seen only as it ends"),
     ("T5 agotada", "espera a una Ultra que guarda Fable", "server.ts",
-     "    const options = { preferredModel: model, reserveModel: current.preferredModel };\n    const measured = measuredAccounts(model);\n    return (\n      chooseAccount(\n        measured.filter((a) => a.name !== name)", "    const options = { preferredModel: model };\n    const measured = measuredAccounts(model);\n    return (\n      chooseAccount(\n        measured.filter((a) => a.name !== name)",
+     "    const options = { preferredModel: model, ...reserveOf() };\n    const measured = measuredAccounts(model);\n    return (\n      chooseAccount(\n        measured.filter((a) => a.name !== name)", "    const options = { preferredModel: model };\n    const measured = measuredAccounts(model);\n    return (\n      chooseAccount(\n        measured.filter((a) => a.name !== name)",
      "server.test.ts", "no other account can run it"),
     ("T5 agotada", "una cuenta desconocida cuenta como agotada", "server.ts",
      "    if (usage === undefined || usage.unknown === true) return false;\n    const settled", "    if (usage === undefined) return false;\n    const settled",
