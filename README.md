@@ -974,7 +974,9 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
 - **Installing over 0.2.38.** Nothing remembers yet which model each project
   ran, so the first pass judges each project as Fable, once per project: in a
   simulation with 16 projects and 4 threads at work, 8 moved, all to one Team
-  seat, with no turn cut and none to an Ultra.
+  seat, with no turn cut and none to an Ultra. The real install of 2026-11-04
+  moved 4 idle projects, all to one Ultra that had Fable left: their next Opus
+  turn goes to a Team seat, a Fable one stays.
 - **A model with an unusual name** (`default`, `opusplan`) is not held off the
   reserve; 0 of 81 turns used one when measured on 2026-11-04.
 
