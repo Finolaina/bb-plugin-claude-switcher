@@ -667,6 +667,22 @@ executable (`claude auth login`) as a child process of bb's server.
 
 </details>
 
+### Calor's ticks stay where their cache is
+
+If you also run the Calor plugin, its ticks keep a thread's prompt cache warm.
+A prompt cache belongs to the account's organization, so a tick that moved its
+project would rewrite the whole context on the new account to keep a cache that
+stayed behind. So a tick, in its first attempt, never moves its project: if the
+placement would move it or hold it, the tick is refused. Nothing is written or
+shown in the thread, and Calor tries again 5 minutes later, until the cache
+expires. The next real message is placed as usual.
+
+Known limits: a tick already in bb's queue is not refused (it would leave a
+failed row), and may still move its project when it is retried. A tick that
+starts and fails for a limit still switches like any turn. If the background
+refresh moves the project off an account that cannot run its model, the cache
+is lost anyway: Calor sees the new account and stops ticking.
+
 ## Safe by default
 
 - 🔒 **Only its own variables.** It changes a `CLAUDE_CONFIG_DIR` only if

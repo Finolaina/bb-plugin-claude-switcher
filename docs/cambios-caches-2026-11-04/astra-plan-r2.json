@@ -1,0 +1,17 @@
+{
+  "verdict": "APPROVED",
+  "summary": "The revised plan resolves T-001 and T-002 through explicit guards and regression cases. No material unresolved defects identified in this plan review.",
+  "findings": [],
+  "coverage": [
+    "Verified the plan matches SHA256 e94d7198ac6a4418bf0cf0499120a7a4583cad303496f9540c390c5678f9f805.",
+    "T-001: checked deferred activity and model annotations against persistence, rescue and after-turn consumers; reviewed proposed test 12.",
+    "T-002: traced beforeStart → placeNewProject → placeProject → applyAccount; reviewed the explicit bypass and proposed test 13.",
+    "Rechecked placement decisions, seat reservation ordering, wait/reject cleanup and final account checks.",
+    "Rechecked bb-app rejection handling and Calor send-error handling."
+  ],
+  "limitations": [
+    "Approval applies to the plan; the proposed implementation and new tests are not yet present.",
+    "Static inspection only: no edits, tests, simulations or delegation.",
+    "Live rejection behavior and historical savings remain unverified by execution."
+  ]
+}

@@ -1,0 +1,17 @@
+HEAD 97f8a587af123202db06fc421143c8f8dfbcb07c
+MUERE      placeTurn no sabe que es un tic: mueve · Tests  6 failed | 10 passed | 707 skipped (723)
+MUERE      un tic ya en cola también se rechaza · Tests  1 failed | 15 passed | 707 skipped (723)
+MUERE      se rechaza también lo que no movería · Tests  2 failed | 14 passed | 707 skipped (723)
+MUERE      lo que movería ya no se rechaza · Tests  6 failed | 10 passed | 707 skipped (723)
+MUERE      lo retenido no se rechaza y entra en cola · Tests  1 failed | 15 passed | 707 skipped (723)
+MUERE      el modelo se apunta antes de decidir (T-001) · Tests  1 failed | 15 passed | 707 skipped (723)
+MUERE      un tic que sigue no apunta su modelo · Tests  1 failed | 15 passed | 707 skipped (723)
+MUERE      un tic sin colocación no apunta su modelo · Tests  1 failed | 15 passed | 707 skipped (723)
+MUERE      un tic coloca un proyecto nuevo (T-002) · Tests  1 failed | 15 passed | 707 skipped (723)
+MUERE      el cierre de Calor cuenta como tic · Tests  1 failed | 15 passed | 707 skipped (723)
+MUERE      cualquier mensaje cuenta como tic · Tests  6 failed | 10 passed | 707 skipped (723)
+MUERE      la marca sin ancla casa en mitad de un texto · Tests  1 failed | 111 skipped (112)
+MUERE      la marca no exige el UUID · Tests  1 failed | 111 skipped (112)
+MUERE      la marca no distingue mayúsculas · Tests  1 failed | 111 skipped (112)
+SIN MUTAR  rc=0 · Tests  1227 passed | 1 skipped (1228)
+mutantes: 14, sin morir o sin aplicar: 0

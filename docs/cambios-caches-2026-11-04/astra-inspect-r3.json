@@ -1,0 +1,26 @@
+{
+  "verdict": "REVISE",
+  "summary": "One concrete defect remains in the option-F savings calculation. No material defect identified in the tick-rejection implementation.",
+  "findings": [
+    {
+      "id": "CACHE-F-001",
+      "severity": "medium",
+      "path": "docs/cambios-caches-2026-11-04/simular.py:269",
+      "evidence": "Option F counts a cache as saved whenever the reset falls within the allowed wait, without checking cache expiry. The reported 60-minute saving ($4.68, thr_jwz544abwe) demonstrates this: hilos.jsonl.gz records its last nonzero usage at 2026-11-02 13:09:54 UTC and its switch at 13:56:46; agotadas.jsonl.gz places joytorm's Fable reset at 14:40 UTC. Waiting roughly 43 minutes meets this condition, but the cache would already be about 90 minutes old. With the documented one-hour TTL, that rewrite is not saved.",
+      "fix": "Require the projected restart after reset to precede cache expiry, using fin_prev and TTL, including any restart buffer. Add this historical case as a regression and correct the option-F figures in the plan."
+    }
+  ],
+  "coverage": [
+    "Verified the supplied plan SHA256 and hashes of the changed production source and server bundle.",
+    "Reviewed manifest changes, documentation, analysis scripts, test additions and mutation evidence; parsed all ten compressed datasets and inspected bundle sections implementing T.",
+    "Traced dispatch through new-project placement, placement decisions, account writes, seat reservations, queues and rejection cleanup.",
+    "Traced shared activity/model state through persistence, after-turn placement, background rescue, failure recovery and rebalance.",
+    "Inspected Calor's literal tick, send-error handling, retry timing and account-change/expiry guards.",
+    "Inspected bb-app 0.48.1 rejection handling and dispatch ordering before message persistence."
+  ],
+  "limitations": [
+    "Read-only inspection: no files edited, tests, builds, mutations or repository simulations executed, and no delegation.",
+    "Historical totals were not independently recomputed; the finding uses source inspection and direct dataset records.",
+    "Live rejection behavior, realized savings and deployment outcomes remain unverified."
+  ]
+}

@@ -85,6 +85,7 @@ import {
   MAX_ATTEMPTS,
   mayAdviseOpus,
   measuredOut,
+  isCalorTick,
   modelFamily,
   fullestWindow,
   opusInstead,
@@ -4584,6 +4585,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     turn: {
       abandoned: boolean;
       held?: { sendAt: number; reason: string; seatOn?: string; seatWhy?: string };
+      /** A Calor tick: it does not move the project; `refused` says what it would have done. */
+      tick?: boolean;
+      refused?: string;
     },
     /** "after": placed as a turn of the thread ends, for its next one (see the thread.idle below). */
     when: "before" | "after" = "before",
@@ -4667,6 +4671,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             seatWhy: `${model}: ${fromName} ${whyOut(fromName, model)}`,
           };
       }
+      return { account: fromName, byDefault: !from.owned, writes };
+    }
+    if (turn.tick === true && decision.account !== fromName) {
+      turn.refused = `it would move its project from ${fromName} to ${decision.account}`;
       return { account: fromName, byDefault: !from.owned, writes };
     }
     if (turn.abandoned) return null;
@@ -4842,14 +4850,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     /** Set to where the turn was placed, when the placement said. */
     turnAt: { at?: TurnPlace },
     budget: Budget,
+    /** A Calor tick in its first attempt: refused rather than moved or held. */
+    tick: boolean,
   ): Promise<MessageDispatchHookDecision | null> {
-    const first = placeNewProject(thread);
-    const placed = await within(
-      first,
-      budget.limit(),
-      `thread ${thread.id}: its new project not placed before its first turn`,
-    );
-    if (placed === "late") {
+    // A project left unplaced is placed by its next real message, not by this.
+    const first = tick ? null : placeNewProject(thread);
+    const placed =
+      first === null
+        ? null
+        : await within(
+            first,
+            budget.limit(),
+            `thread ${thread.id}: its new project not placed before its first turn`,
+          );
+    if (first !== null && placed === "late") {
       const wait = startWait(
         thread.id,
         first,
@@ -4863,7 +4877,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const turnModel =
       model ??
       (unconfirmed(current.defaultAccountName) ? current.preferredModel : null);
-    const turn: Parameters<typeof placeTurn>[2] = { abandoned: false };
+    const turn: Parameters<typeof placeTurn>[2] = { abandoned: false, tick };
     const turnPlaced =
       turnModel === null
         ? null
@@ -4899,6 +4913,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
     }
     const done = turnPlaced === null ? null : await turnPlaced;
+    if (tick && (turn.refused !== undefined || turn.held !== undefined)) {
+      const why = turn.refused ?? turn.held!.reason;
+      bb.log.info(`thread ${thread.id}: Calor's tick refused: ${why}`);
+      return { action: "reject", message: `Claude Switcher: a Calor tick stays where its cache is: ${why}` };
+    }
     if (turn.held !== undefined) {
       const { seatOn, seatWhy, ...held } = turn.held;
       if (seatOn !== undefined) {
@@ -5082,23 +5101,30 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       };
     }
     const model = modelFamily(ctx.requestedExecution.model);
-    const seen = noteActivity(thread.projectId);
-    if (model !== null) {
-      threadModel.set(thread.id, model);
-      noteProjectModel(thread.projectId, model, seen);
-    }
+    // A tick that may be refused: refused, it never happened, and its model
+    // is not the project's for what is decided later (Astra T-001).
+    const tick = ctx.queuedMessages.length === 0 && isCalorTick(ctx.input.text);
+    const noteTurn = () => {
+      const seen = noteActivity(thread.projectId);
+      if (model !== null) {
+        threadModel.set(thread.id, model);
+        noteProjectModel(thread.projectId, model, seen);
+      }
+    };
+    if (!tick) noteTurn();
     const placed: { at?: TurnPlace } = {};
     if (current.autoSwitch && ctx.attempt === "start-turn") {
       // A message sent now, not a queued one asked again: its own waits
       // (Astra E44-R2-03).
       if (ctx.queuedMessages.length === 0) startWaits.delete(thread.id);
-      const decision = await beforeStart(thread, model, placed, budget);
+      const decision = await beforeStart(thread, model, placed, budget, tick);
+      if (tick && decision?.action !== "reject") noteTurn();
       if (decision !== null) {
         if (decision.action === "reject") startWaits.delete(thread.id);
         return decision;
       }
       startWaits.delete(thread.id);
-    }
+    } else if (tick) noteTurn();
     // A seat on the account the turn starts on, last: placed, the project
     // stays where it is, and a full account makes the thread wait there.
     // Not a turn under way joined, nor an account set outside this plugin.
