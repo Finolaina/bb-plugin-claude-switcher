@@ -221,7 +221,7 @@ def main() -> int:
             return None
         try:
             return json.loads(run(["bb", "thread", "show", thread, "--json"]))["thread"]["projectId"]
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001 (una pasada fallida se registra y no para las demás)
             log(f"{thread}: no se pudo leer su proyecto: {e}")
             return None
 
@@ -232,7 +232,7 @@ def main() -> int:
         if not args.dry_run:
             try:
                 run(["bb", "claude-switcher", "use", mv["proyecto"], mv["a"]])
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001 (una pasada fallida se registra y no para las demás)
                 log(f"falló mover {mv['proyecto']} a {mv['a']}: {e}")
                 continue
             at = dt.datetime.now().astimezone()

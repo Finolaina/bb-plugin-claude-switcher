@@ -943,20 +943,28 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
   project that asks for more seats at once than its account has (its
   threads at work or waiting there, and this one) moves at once, but only
   to an account with seats for all of them: `… el proyecto pide 3 plazas
-  a la vez y team5 tiene 2; viaulab tenía 5 libres …`. A project moved so
-  is not moved so again within the same minutes. 0 = never.
+  a la vez y team5 tiene 2; viaulab tenía 5 libres …`. A stuck thread
+  takes a Team seat for itself before an Ultra with room for the whole
+  project; only a crowded project needs seats for all. A project moved so
+  is not moved so again, nor taken back to a Team seat, within the same
+  minutes. These clocks live in memory: a reload of the plugin starts
+  them again. 0 = never.
 - **Opus on an Ultra with room** (`otherModelUpTo`, default 50, since
   0.2.41). A Max or Ultra account that keeps `preferredModel` takes a
   turn in another model while its weekly and its preferred-model window
   are both at or under this share; it comes after every Team seat with a
-  free seat, so it is used only when none has one, and a project on it
-  stays there for those turns. The history adds `y le queda margen de
+  free seat, so it is used only when none has one; a project on it goes
+  to a Team seat with room for all its threads there before such a turn
+  (`Movido a team3 antes del turno: viaulab guarda la semanal de Fable y
+  team3 es una Team con plaza (Team primero)`). The history adds `y le queda margen de
   Fable (semanal 0 %, Fable 0 %, tope 50 %)`. 0 = never: the turn waits
   for a Team seat, as before 0.2.41.
 - **A pick by hand holds** (since 0.2.41). After `use` or the picker, a
   turn in another model stays on the account picked, whatever it spends
   of `preferredModel`, until that account cannot run the turn; seats
-  still move it, and any automatic move ends the pick.
+  still move it (the history ends with `deja de valer el \`use\` a mano a
+  team2`), any automatic move ends the pick, and `release` forgets them
+  all.
 - **Otherwise seats steer the moves made for other reasons**: a new
   project, a move before a turn off an account that cannot run it, a
   move off a long wait and a switch ahead of the limit go only to an

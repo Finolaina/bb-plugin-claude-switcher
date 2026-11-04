@@ -19519,6 +19519,18 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
       );
     });
 
+    it("Team first: a Team seat for this thread alone beats an Ultra with room for the whole project (code-reviewer r2 high)", async () => {
+      // spare (2 seats) holds a and a thread of proj-3: b of proj-1 waits, not crowded (2 wanted, 2 seats).
+      const { h, at, askUntil } = await start({ main: [40, 30], workBusy: true, settings: { seatsTeam: 2, seatsMax: 4, otherModelUpTo: 50 } });
+      await h.harness.behavior.runCli(["use", "proj-3", "spare"]);
+      expect((await dispatch(h, "x", "proj-3")).action).toBe("proceed");
+      await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "x", projectId: "proj-3" }) });
+      expect((await askUntil(10 * MINUTE)).every((w) => w.action === "wait")).toBe(true);
+      at(10 * MINUTE + 1);
+      expect(await dispatch(h, "b", "proj-1")).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("work");
+    });
+
     it("with N+1 minutes too (the cut is past N, not at N+1)", async () => {
       const { h, askUntil } = await start({ settings: { seatsMax: 1, stuckMoveMinutes: 11 } });
       const answers = await askUntil(11 * MINUTE + 30_000);
@@ -19599,6 +19611,38 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
       );
       expect(fable).toEqual({ action: "proceed" });
       expect(await where(h)).toBe("main");
+    });
+
+    it("does not bounce back to a Team seat within stuckMoveMinutes; past it, Team first again, said in Spanish (code-reviewer r2 medium)", async () => {
+      const { h, at } = await start({ main: [40, 30], settings: { seatsMax: 4, otherModelUpTo: 50 } });
+      expect(await dispatch(h, "b", "proj-1")).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("main");
+      const after = moves(h).length;
+      // a and b end their turns: the project asks for one seat again.
+      for (const id of ["a", "b"]) {
+        await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id, projectId: "proj-1" }) });
+        await h.harness.behavior.emitThreadEvent("thread.idle", { thread: thread({ id, projectId: "proj-1" }) });
+      }
+      at(10 * MINUTE);
+      expect(await dispatch(h, "c", "proj-1")).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("main");
+      expect(moves(h).length).toBe(after);
+      await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "c", projectId: "proj-1" }) });
+      await h.harness.behavior.emitThreadEvent("thread.idle", { thread: thread({ id: "c", projectId: "proj-1" }) });
+      at(10 * MINUTE + 1);
+      expect(await dispatch(h, "d", "proj-1")).toEqual({ action: "proceed" });
+      expect(["spare", "work"]).toContain(await where(h));
+      expect((await history(h))[0]).toMatch(
+        /^Movido a (spare|work) antes del turno: main guarda la semanal de Fable y (spare|work) es una Team con plaza \(Team primero\)$/,
+      );
+    });
+
+    it("a pick by hand of the full account gives way, and the history says so (code-reviewer r2 low)", async () => {
+      const { h } = await start({ main: [40, 30], settings: { seatsMax: 4, otherModelUpTo: 50 } });
+      await h.harness.behavior.runCli(["use", "proj-1", "spare"]);
+      expect(await dispatch(h, "b", "proj-1")).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("main");
+      expect((await history(h))[0]).toMatch(/; deja de valer el `use` a mano a spare$/);
     });
 
     it("with no account with seats for all, it waits (the wait of (a) decides later)", async () => {

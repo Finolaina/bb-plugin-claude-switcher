@@ -4763,13 +4763,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                 ? 1
                 : seatRoom(name),
             aheadThreshold: aheadThreshold(model),
-            ...(busy === null
-              ? {}
-              : { seatsWanted: busy.wanted, seatsWantedOnly: busy.kind === "crowded" }),
+            // Seats for all only when the project asks for more than the
+            // account has (c); a thread stuck past the limit (a) takes a
+            // Team seat for itself first (code-reviewer r2 high).
+            ...(busy?.kind === "crowded"
+              ? { seatsWanted: busy.wanted, seatsWantedOnly: true }
+              : {}),
           }
         : {}),
       pinned: pins.get(projectId) === fromName,
       projectSeats: projectWants(thread, seatKey(fromName)),
+      justMovedHere:
+        now - (crowdedMoves.get(projectId) ?? -Infinity) <=
+        current.stuckMoveMinutes * 60_000,
     };
     const decision = decidePlacement(input);
     if (decision.kind === "keep") {
@@ -4858,9 +4864,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     } else noteMove(projectId, fromName, decision.account, model, before);
     const reason =
       busy !== null && decision.why === "current-full"
-        ? busyReason(busy, fromName, decision.account, roomThere, fullHere, model)
+        ? busyReason(busy, fromName, decision.account, roomThere, fullHere, model, input.pinned === true)
         : decision.why === "back-from-excursion"
         ? `Moved back to account ${decision.account} before the turn: ${fromName} was an excursion for ${excursion?.model ?? "another model"}`
+        : decision.why === "current-reserved" &&
+            when === "before" &&
+            measuredAccounts(model).some((a) => a.name === fromName && a.unknown !== true) &&
+            !reservedFor(fromName, model)
+          ? // Kept for Fable only by «Team primero», not out of its margin.
+            `Movido a ${decision.account} antes del turno: ${fromName} guarda la semanal de ${current.preferredModel} y ${decision.account} es una Team con plaza (Team primero)`
         : decision.why === "current-full"
           ? `Moved to account ${decision.account} before the turn: ${fromName} seats full (${fullHere.running + fullHere.reserved + (fullHere.external?.length ?? 0)}/${fullHere.capacity}), ${decision.account} had ${Number.isFinite(roomThere) ? roomThere : "unlimited"} free`
           : `Moved to account ${decision.account} ${when === "after" ? `after a turn in ${model}` : "before the turn"}: ${fromName} ${whyOut(fromName, model)}`;
@@ -4894,6 +4906,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     roomThere: number,
     fullHere: { running: number; reserved: number; capacity: number; external?: readonly unknown[] },
     model: string,
+    pinned: boolean,
   ): string {
     const taken = fullHere.running + fullHere.reserved + (fullHere.external?.length ?? 0);
     const room = Number.isFinite(roomThere) ? String(roomThere) : "sin límite de";
@@ -4919,7 +4932,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       spare === null
         ? ""
         : ` y le queda margen de ${current.preferredModel} (semanal ${Math.round(spare.weekly.usedPercent)} %, ${current.preferredModel} ${Math.round(modelWindow(spare, current.preferredModel)?.usedPercent ?? 0)} %, tope ${current.otherModelUpTo} %)`;
-    return `Movido a ${to} antes del turno: ${why}; ${to} tenía ${room} ${libres}${margin}`;
+    const pick = pinned ? `; deja de valer el \`use\` a mano a ${fromName}` : "";
+    return `Movido a ${to} antes del turno: ${why}; ${to} tenía ${room} ${libres}${margin}${pick}`;
   }
 
   // bb holds every message it asks about on this answer and fails the

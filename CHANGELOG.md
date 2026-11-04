@@ -23,10 +23,15 @@ project uses [Semantic Versioning](https://semver.org/).
   with a free seat. 0 restores «wait for a Team seat».
 - **A pick by hand holds** for turns in another model until the account
   cannot run them; until 0.2.40 an Opus turn moved the project off a
-  picked Max account within a second.
+  picked Max account within a second. A thread left in error on a picked
+  account retries there; `release` forgets every pick.
 - The history says the new moves in Spanish, with how long the thread
   waited or how many seats the project asked for, and the margin of the
   account it went to.
+- **Team first, without bouncing.** A stuck thread takes a free Team seat
+  before an Ultra with room; a project on an Ultra with room goes to a
+  Team seat with room for all its threads there, but not within
+  `stuckMoveMinutes` of a move for seats.
 
 ## [0.2.40] - 2026-11-04
 

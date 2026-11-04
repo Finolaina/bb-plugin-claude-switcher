@@ -579,6 +579,12 @@ export interface PlacementInput {
    */
   projectSeats?: number;
   /**
+   * The project moved to the current account for seats within
+   * stuckMoveMinutes: «Team primero» does not take it back yet, or it
+   * would bounce between the Team and the Ultra (code-reviewer r2 medium).
+   */
+  justMovedHere?: boolean;
+  /**
    * The project was put on the current account by hand: a turn that can run
    * there stays, whatever it spends of the reserve (Aitor 2026-11-05: a pick
    * holds until the account is out for real). Seats still move it.
@@ -691,6 +697,7 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   if (runs && (input.pinned === true || !spendsReservedWeekly(current, options))) {
     if (
       input.pinned !== true &&
+      input.justMovedHere !== true &&
       spendsReservedWeekly(current, { ...options, reserveSpareUpTo: 0 })
     ) {
       const wanted = input.projectSeats ?? 1;
