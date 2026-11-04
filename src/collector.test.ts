@@ -187,6 +187,44 @@ describe("UsageCollector", () => {
     await blocked.collect(ACCOUNT);
     expect(blocked.usable(10 * 60_000)).toEqual([]);
     expect(blocked.get("work")?.usage).not.toBeNull();
+    // An incomplete answer too: out of the model until only the clock frees it.
+    const incomplete = (limits: unknown[]) =>
+      new UsageCollector({
+        io: io([
+          () =>
+            Response.json({
+              limits,
+              five_hour: { locked_reason: null },
+              seven_day: { locked_reason: null },
+            }),
+          () => new Response("", { status: 429 }),
+        ]).credentialIo,
+        now: () => clock,
+      });
+    const partial = incomplete([
+      PAYLOAD.limits[1],
+      {
+        kind: "weekly_scoped",
+        percent: 100,
+        resets_at: "2026-09-29T10:30:00+00:00",
+        scope: { model: { display_name: "Opus" } },
+      },
+    ]);
+    clock = Date.parse("2026-09-29T10:00:00+00:00");
+    await partial.collect(ACCOUNT);
+    clock = Date.parse("2026-09-29T10:20:00+00:00");
+    await partial.collect(ACCOUNT);
+    expect(partial.usable(10 * 60_000, "Opus").map((a) => a.name)).toEqual(["work"]);
+    clock = Date.parse("2026-09-29T10:31:00+00:00");
+    expect(partial.usable(10 * 60_000, "Opus")).toEqual([]);
+    // Out of another model, or with nothing measured full: it says nothing.
+    expect(partial.usable(10 * 60_000, "Fable").map((a) => a.name)).toEqual(["work"]);
+    const nothing = incomplete([PAYLOAD.limits[1]]);
+    clock = Date.parse("2026-09-29T10:00:00+00:00");
+    await nothing.collect(ACCOUNT);
+    clock = Date.parse("2026-09-29T10:31:00+00:00");
+    await nothing.collect(ACCOUNT);
+    expect(nothing.usable(10 * 60_000, "Opus").map((a) => a.name)).toEqual(["work"]);
     // A model window at 100 % counts as blocked too: the policy may prefer
     // that model, and only the clock would say its reset has passed.
     const model = new UsageCollector({

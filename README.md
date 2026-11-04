@@ -308,7 +308,7 @@ starts on a fresh account runs without your settings, hooks and
 | **A Claude Code thread's header**                    | The project's account with its state as an icon (working, free, kept for you with `paceHoldsBackground` on, out), and a menu that opens on the account's card (a bar of what is spent per window, when it is back, the forecast of its window), to switch now to the best account or pick any other.                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | **The new-thread composer**                          | The same control for the project picked there, before the first message, with the best account beside it when it is another one. A pick there before you send, even of the account shown, keeps a new project from moving to the best account after its first turn. With automatic switching on, the rules that move any project still apply: your preferred model when the thread is created, the model a message is sent with, limits and refusals. Send after the pick is saved: a message sent in that moment can start on the old account. On a phone it shows once the composer is open. It hides while another provider is picked. |
 | **Settings → Claude Switcher**                       | The ten settings, a sentence on who works and who is kept for you, a row per account with a thin bar per window it has (5 h, week, the preferred model; never a week on a Team seat) filled with what is spent, green, amber from 70 % and red from 90 %, its state and when it is back, **Add account** and **Log in**, the account each project runs on (with a picker), **Refresh usage**, and the history of moves.                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| **Settings → Provider usage** (and its sidebar card) | Pick **Claude accounts** in the source menu to see every account's session, weekly and per-model windows (a Team seat has no weekly window: none is shown).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| **Settings → Provider usage** (and its sidebar card) | Pick **Claude accounts** in the source menu to see every account's session, weekly and per-model windows (a Team seat that reports no weekly window shows none).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | **A thread's retry reason**                          | `Switched to account <name>`, `Waiting for <name>` or `Retrying on account <name>`, wherever bb shows why a turn was retried; a wait for the preferred model with no account left that has it may end with `Sin <model> en ninguna cuenta: pasa este hilo a Opus con el selector de modelo; irá a <name>`.                                                                                                                                                                                                                                                                                                                              |
 | **A thread's composer**                              | When a failed turn in the preferred model is left with nothing queued (beyond the maximum wait, or no account will free) and an account can run Opus: a banner saying `Sin <model> en ninguna cuenta: pasa este hilo a Opus con el selector de modelo; irá a <name>`. It only shows: the switch is yours.                                                                                                                                                                                                                                                                                                                               |
 | **`bb plugin logs claude-switcher`**                 | Every switch, wait and decline, with its reason.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
@@ -389,7 +389,7 @@ flowchart TD
   account that still keeps Fable is no target for an Opus turn at all:
   its weekly window and Fable's reset together (measured 2026-10-13), so
   what Opus spends there is Fable's. A known project on such an account
-  moves to a Team seat (whose Opus turn spends only its 5-hour session)
+  moves to a Team seat (whose Opus turn spends nothing Fable needs)
   or to an account out of Fable before the Opus turn, and comes back
   before its next Fable turn: the plugin remembers, in memory, the
   account the project left for that (a reload forgets it, and the project
@@ -489,16 +489,15 @@ candidate.
 Usable accounts are ranked by the quarter their 5-hour session is in
 (0-24 %, 25-49 %, 50-74 %, 75-99 %), then by the closest deadline for the
 model the turn runs with (the earlier of the weekly reset and the model's
-own window reset: a Team seat has no general weekly window, only its
-model's), then by the lowest session use, then by name. Within a quarter,
+own window reset), then by the lowest session use, then by name. Within a quarter,
 what runs out first is spent first; the quarter keeps new sessions from
 piling on one account until its 5-hour window burns. With a preferred
 model, only accounts that can still run it are chosen; a thread sent
 with another model goes first to the accounts that can no longer run the
 preferred one, so it does not spend the preferred model's window where it
-is still free, then to the Team seats that keep it (no weekly window:
-only their session is spent). An account that
-keeps the preferred model AND has a weekly window (a Max account) is
+is still free, then to the Team seats that keep it (what a Team seat
+spends is not what the preferred model needs). A Max or Ultra account that
+keeps the preferred model is
 never chosen for another model, not even as the last resort: on a Max
 account the weekly and the preferred model's window reset together, so
 what the other model spends there is the preferred model's. A wait for a
@@ -770,7 +769,7 @@ bb claude-switcher list [--json]          # a line per account (ses, sem, prefer
 bb claude-switcher refresh [--json]       # query the usage endpoint now
 bb claude-switcher history [--json]       # every move of a project, latest first, and why
 bb claude-switcher seats [--json]         # seats of every account, who waits, and each usage sample with the seats taken then
-bb claude-switcher health [--json]        # a stable read for other threads and scripts (version 1): plan, 5-hour window, weekly, models, the day's pace, seats, usable
+bb claude-switcher health [--json]        # a stable read for other threads and scripts (version 1): plan, 5-hour window, weekly, models, the day's pace, seats, usable, threads stuck
 bb claude-switcher reserve <account> --id <x> --until <ISO with zone> [--json]   # hold a seat for a run outside bb (at most 12 h); fails with no free seat (exit 1), or with exit 75 while the seats are still being counted after a reload
 bb claude-switcher unreserve --id <x> [--json]   # end it; an id not held is no error
 bb claude-switcher use <project> <account | default>   # project id, or its name when unique
@@ -868,7 +867,10 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
   seat keeps `seatsTeam`.
 - **Which kind.** From `oauthAccount.organizationType` in the account's
   `.claude.json` (`claude_max`, `claude_team`). Anything else: Team when
-  the provider reports no general weekly window, Max otherwise.
+  the provider reports no general weekly window, Max otherwise. Since
+  November 2026 a Team seat reports a general weekly too, so the login is
+  what tells one: a seat with no `organizationType` that reports a weekly is
+  taken for a Max.
 - **Whose seats.** The seats are the login's (`oauthAccount.accountUuid`):
   two directories logged into the same account share them, and renaming
   the default account keeps the seats it has taken.
@@ -876,7 +878,14 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
   checkpoint), the turn needs a seat on the account its project runs on.
   With none free the message waits, bb shows «Waiting for a seat on
   team1: 2/2 threads running, 1 ahead in the queue», and asks again every
-  30 s. Every turn is checked, placed by the plugin or not (the automatic
+  30 s. A turn queued on another account's seat says why («Waiting for a
+  seat on team5 for Opus: main keeps its weekly for Fable; …»). A turn the
+  project's account cannot run (out of its model or of usage) waits in the
+  queue of an account that can, when another can; with none able, it starts
+  and fails, and that failure is what tells the user. A pick by hand asks
+  bb again at once. A thread held 10 minutes with another account free is
+  logged as `STUCK:` and listed in `atascos` (`health --json`, `seats
+  --json`; `null` when bb's queue could not be read). Every turn is checked, placed by the plugin or not (the automatic
   choice off, a model bb does not name, a placement that failed): when the
   project's account cannot be read, the message waits up to three times
   and then goes, with a warning in the log. When a turn ends (or fails,
@@ -884,6 +893,11 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
   first come, first served. A seat reserved for a turn that does not start
   within 90 s is freed; a thread that stops asking (its message was
   removed) leaves the line.
+- **A canary from outside the plugin** (`scripts/canario-cola.mjs`, a `bb
+  automation` every 10 minutes on bb's server) warns of a message held 10
+  minutes with another account free in two looks in a row (a seat just
+  freed is taken within 30 s), held 2 hours with none, or stopped by
+  a failure 10 minutes, and of not being able to look for 30 minutes.
 - **A full account sends the project to one with a free seat** (since
   0.2.37; Aitor, 2026-11-03: «necesitaría abrir más hilos»). With the
   automatic choice on, a turn that would wait for a seat moves its
@@ -942,6 +956,27 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
   over the week; `--json` gives the samples.
 
 ## Known limitations
+
+- **Between a turn told to start and its start.** The account belongs to the
+  whole project and a turn reads it as it starts, so no automatic move is
+  written during that time: 90 s from the first answer and, for a turn another
+  plugin holds and that is asked again, 10 s from each answer. A turn that
+  takes longer can start on the account a sibling moved the project to, and
+  a thread whose earlier turn never started has only the 10 s. A move by hand
+  is not held back. A thread held by this waits up to 30 s more,
+  and a move after a turn is tried once per turn.
+- **An incomplete answer that measured a window full** gives no date to wait
+  for: an Opus turn looks again every 5 minutes rather than at that window's
+  reset.
+- **With every usage read down at once,** a turn may try a Team seat by what
+  its login says; if that seat is out, the turn fails where you can see it and
+  stays in error until the reads come back.
+- **Installing over 0.2.38.** Nothing remembers yet which model each project
+  ran, so the first pass judges each project as Fable, once per project: in a
+  simulation with 16 projects and 4 threads at work, 8 moved, all to one Team
+  seat, with no turn cut and none to an Ultra.
+- **A model with an unusual name** (`default`, `opusplan`) is not held off the
+  reserve; 0 of 81 turns used one when measured on 2026-11-04.
 
 - **The day's pace needs a thread to tell background work.** With
   `paceHoldsBackground` on, background

@@ -17,7 +17,7 @@ import {
   type TokenNotes,
 } from "./credentials.js";
 import { canRunModel, isUsable, type AccountUsage } from "./policy.js";
-import { settle } from "./switch.js";
+import { measuredOut, settle } from "./switch.js";
 import { parseUsage, type ParsedUsage } from "./usage.js";
 
 export type Problem =
@@ -249,8 +249,12 @@ export class UsageCollector {
         measurement.problem?.kind === "error" &&
         measurement.observedAt !== null &&
         now - measurement.observedAt > maxAgeMs &&
-        !runnable(usage) &&
-        runnable(settle(usage, now))
+        // An incomplete answer stays not runnable however long it waits: what
+        // only the clock freed is what it measured full (Astra FINAL-R10-001).
+        (usage.unknown === true
+          ? measuredOut(usage, preferredModel, measurement.observedAt) &&
+            !measuredOut(usage, preferredModel, now)
+          : !runnable(usage) && runnable(settle(usage, now)))
       )
         continue;
       out.push(usage);

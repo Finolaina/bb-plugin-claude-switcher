@@ -311,6 +311,8 @@ interface QueuedRow {
         retryOfTurnRequestId: string;
       };
   sendAt: number | null;
+  /** bb's reason a row will not run (measured: "Thread is archived"). */
+  failureReason?: string | null;
   /** What the row waits on, as bb says it; a plugin's hold names the plugin. */
   waitingOn?: { kind: "time" } | { kind: "plugin"; pluginId: string; reason: string } | null;
   createdAt?: number;
@@ -2486,7 +2488,7 @@ describe("claude accounts plugin", () => {
 
   it("a move completed between the send of a turn and its announcement makes the start unknown: the refusal marks nobody", async () => {
     // Codex IR16-001: bb reads the account as it starts the turn and
-    // announces `thread.active` after; another thread's limit moved the
+    // announces `thread.active` after; a pick by hand moved the
     // project in between, so the announcement reads the new account, which
     // is not where the turn runs. Anchored to the project's state when bb
     // asked to send the message, the start is unknown: the new account is
@@ -2508,8 +2510,8 @@ describe("claude accounts plugin", () => {
         attempt: "start-turn",
       }),
     );
-    // thread-1's limit moves the project to work before bb announces thread-3.
-    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    // A pick by hand moves the project to work before bb announces thread-3.
+    await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "work" });
     expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
     await h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-3", projectId: "proj-1" }),
@@ -2528,7 +2530,7 @@ describe("claude accounts plugin", () => {
         rateLimits: null,
       }),
     );
-    expect(h.retries[1]).toEqual({
+    expect(h.retries.at(-1)).toEqual({
       threadId: "thread-3",
       turnRequestId: "creq_9",
       // The send named the model: the retry does too.
@@ -3529,7 +3531,7 @@ describe("claude accounts plugin", () => {
     const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
     expect(state.history.map((r) => [r.threadId, r.to])).toEqual([["thread-2", "work"]]);
     expect(h.retries.map((r) => [r.threadId, r.reason])).toEqual([
-      ["thread-1", "Retrying: the project's account changed meanwhile"],
+      ["thread-1", "Retrying: the project stays on its account for now"],
     ]);
   });
 
@@ -3553,7 +3555,7 @@ describe("claude accounts plugin", () => {
     const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
     expect(state.history).toEqual([]);
     expect(h.retries.map((r) => [r.threadId, r.reason])).toEqual([
-      ["thread-1", "Retrying: the project's account changed meanwhile"],
+      ["thread-1", "Retrying: the project stays on its account for now"],
     ]);
   });
 
@@ -5918,6 +5920,9 @@ describe("moving a project ahead of the limit for a thread in another model", ()
     await h.harness.behavior.callRpc("accounts_refresh", null);
     clock = NOW + 5 * 60_000;
     expect(await sent(h, "claude-opus-5-5")).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-1", projectId: "proj-1" }),
+    });
     // The Opus turn ends: main at 95% moves ahead to work, held in its sharing.
     const ahead = idle(h);
     await vi.waitFor(() => expect(order).toEqual(["link"]));
@@ -5939,6 +5944,47 @@ describe("moving a project ahead of the limit for a thread in another model", ()
     const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
     expect(state.history.map((r) => r.to)).toEqual(["spare"]);
     expect(state.projects.find((p) => p.id === "proj-1")?.account).toBe("spare");
+  });
+
+  it("T16 a sibling told to start while the sessions were shared: the move ahead is dropped", async () => {
+    let clock = NOW;
+    const order: string[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const h = await host(
+      {
+        main: () => Response.json(teamPayload(95, 100)),
+        work: () => Response.json(teamPayload(17, 100)),
+        spare: () => Response.json(teamPayload(60, 100)),
+      },
+      {
+        settings: { preferredModel: "Fable", switchAheadPercent: 0, switchAheadOtherPercent: 95 },
+        clock: () => clock,
+        sessionsIo: oneSessionIo(order, () => held),
+        environments: SITE,
+      },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + 5 * 60_000;
+    expect(await sent(h, "claude-opus-5-5")).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-1", projectId: "proj-1" }),
+    });
+    const ahead = idle(h);
+    await vi.waitFor(() => expect(order).toEqual(["link"]));
+    expect(
+      await h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id: "thread-2", projectId: "proj-1" }),
+          requestedExecution: { providerId: "claude-code", model: "claude-opus-5-5" },
+          attempt: "start-turn",
+        }),
+      ),
+    ).toEqual({ action: "proceed" });
+    release();
+    await ahead;
+    expect(h.envSet).toEqual([]);
   });
 
   it("leaves a Fable thread alone when switchAheadPercent is 0, whatever switchAheadOtherPercent says", async () => {
@@ -7098,7 +7144,10 @@ describe("the model a thread's turn runs on", () => {
       });
       const answer = dispatch(h, "claude-opus-5-5");
       await vi.advanceTimersByTimeAsync(3_000);
-      expect(await answer).toEqual({ action: "proceed" });
+      // Read for its seat: on main, out of Opus, with work able to run it:
+      // it waits and is placed again rather than start there to fail
+      // (revisión 2026-11-04).
+      expect(await answer).toMatchObject({ action: "wait" });
       await vi.advanceTimersByTimeAsync(3_000);
       // The placement's, given up, and the seat's (Astra SEATS-R01).
       expect(reads).toBe(2);
@@ -7305,7 +7354,7 @@ describe("the model a thread's turn runs on", () => {
         senderThreadId: null,
         systemMessageKind: "unlabeled",
         systemMessageSubject: null,
-        input: [{ type: "text", text: "o apuntaselo al optimizador", mentions: [] }],
+        input: [{ type: "text", text: "o apúntaselo al otro proyecto", mentions: [] }],
         target: { kind: "steer", expectedTurnId: "dae8f36cd7-t3" },
         request: { method: "turn/start", params: {} },
         execution: {
@@ -8543,6 +8592,28 @@ describe("a wait another account can end sooner", () => {
     expect(h.retries.map((r) => r.reason)).not.toContain(
       "Retrying on account spare",
     );
+  });
+
+  it("T14 a pick by hand releases a retry with a far time at once, with no refresh in between", async () => {
+    const h = await waitingHost(MAIN_OUT, [waiting("r1", "thread-1")]);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect(h.retries).toEqual([]);
+    const calls = h.usageCalls.length;
+    await h.harness.behavior.callRpc("project_set_account", {
+      projectId: "proj-1",
+      account: "spare",
+    });
+    await vi.waitFor(() =>
+      expect(h.retries).toEqual([
+        {
+          threadId: "thread-1",
+          turnRequestId: "creq_r1",
+          reason: "Retrying on account spare, where the project is now",
+        },
+      ]),
+    );
+    expect(h.usageCalls).toHaveLength(calls);
   });
 
   it("never retries a wait on a hand-picked account without a login: it moves to one that can run it, or keeps waiting", async () => {
@@ -10047,6 +10118,9 @@ describe("an Opus turn on a Max account that keeps Fable", () => {
     expect(await reasons(h)).toEqual([
       ["main", "work", "Moved to account work before the turn: main would spend Fable's weekly"],
     ]);
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-1", projectId: "proj-1" }),
+    });
     expect(await dispatch(h, "thread-2", FABLE_ID)).toEqual({ action: "proceed" });
     // main is the default account: back means no variable.
     expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-1"]);
@@ -10054,6 +10128,9 @@ describe("an Opus turn on a Max account that keeps Fable", () => {
       ["work", "main", "Moved back to account main before the turn: work was an excursion for Opus"],
       ["main", "work", "Moved to account work before the turn: main would spend Fable's weekly"],
     ]);
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-2", projectId: "proj-1" }),
+    });
     // And again: the excursion is per turn, not once.
     expect(await dispatch(h, "thread-1", OPUS_ID)).toEqual({ action: "proceed" });
     expect(h.envSet.map((e) => e.note)).toEqual([ownNote("work"), ownNote("work")]);
@@ -10201,6 +10278,9 @@ describe("an Opus turn on a Max account that keeps Fable", () => {
     expect(await send("thread-2", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
     // main is the default account: there means no variable.
     expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-1"]);
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-2", projectId: "proj-1" }),
+    });
     // proj-2's turn ends: work's seat goes to thread-1, which moves there.
     await h.harness.behavior.emitThreadEvent("thread.idle", {
       thread: thread({ id: "thread-9", projectId: "proj-2" }),
@@ -10271,7 +10351,8 @@ describe("an Opus turn on a Max account that keeps Fable", () => {
     // proj-1's Opus turn, on main, is held in work's queue.
     expect(await send("thread-1", "proj-1", OPUS_ID)).toMatchObject({
       action: "wait",
-      reason: "Waiting for a seat on work: 1/1 threads running, 0 ahead in the queue",
+      reason:
+        "Waiting for a seat on work for Opus: main keeps its weekly for Fable; 1/1 threads running, 0 ahead in the queue",
     });
     // A later message of proj-2, already on work, comes behind it.
     expect(await send("thread-8", "proj-2", OPUS_ID)).toMatchObject({
@@ -10441,6 +10522,9 @@ describe("an Opus turn on a Max account that keeps Fable", () => {
       dispose = () => h.harness.dispose();
       await h.harness.behavior.callRpc("accounts_refresh", null);
       expect(await dispatch(h, "thread-2", FABLE_ID)).toEqual({ action: "proceed" });
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "thread-2", projectId: "proj-1" }),
+      });
       await turn(h);
       expect(h.envSet.map((e) => e.note)).toEqual([ownNote("work")]);
     });
@@ -10686,6 +10770,7 @@ describe("an Opus turn never retried, released or placed on a Max account that k
       expect(await dispatch(h, "thread-2", FABLE_ID)).toEqual({ action: "proceed" });
       expect(notes(h)).toEqual([ownNote("work")]);
       expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-1"]);
+      await active(h, "thread-2");
       return h;
     }
 
@@ -10824,6 +10909,9 @@ describe("an Opus turn never retried, released or placed on a Max account that k
         action: "proceed",
       });
       expect(notes(h)).toEqual([ownNote("spare"), ownNote("work")]);
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "thread-1", projectId: "proj-1" }),
+      });
       // thread-2 (Fable) takes it home: the variable says spare, the recorded move still says work.
       hold.arm();
       const home = dispatch(h, "thread-2", FABLE_ID);
@@ -10962,6 +11050,7 @@ describe("an Opus turn never retried, released or placed on a Max account that k
         ownNote("work"),
         ownNote("spare"),
       ]);
+      await active(h, "thread-2");
       gate.release();
       expect((await failed).errors).toEqual([]);
       // Not sent as it is (an explicit send skips the checkpoint and would
@@ -11049,6 +11138,9 @@ describe("an Opus turn never retried, released or placed on a Max account that k
       action: "proceed",
     });
     expect(notes(h)).toEqual([ownNote("spare"), ownNote("work")]);
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-1", projectId: "proj-1" }),
+    });
     // The seat runs out; a new thread is created: placed back home (spare),
     // not on main, which measures better.
     workSession = 100;
@@ -11216,8 +11308,14 @@ describe("an Opus turn never retried, released or placed on a Max account that k
       await h.harness.behavior.callRpc("accounts_refresh", null);
       // thread-2 (Opus) goes out to work; thread-3 (Fable) brings the project home after the row was queued.
       expect(await dispatch(h, "thread-2", OPUS_ID)).toEqual({ action: "proceed" });
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "thread-2", projectId: "proj-1" }),
+      });
       expect(await dispatch(h, "thread-3", FABLE_ID)).toEqual({ action: "proceed" });
       expect(notes(h)).toEqual([ownNote("work")]);
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "thread-3", projectId: "proj-1" }),
+      });
       await onePass(h);
       expect(notes(h)).toEqual([ownNote("work"), ownNote("work")]);
       expect(h.retries).toEqual([
@@ -11242,6 +11340,9 @@ describe("an Opus turn never retried, released or placed on a Max account that k
       await h.harness.behavior.callRpc("accounts_refresh", null);
       expect(await dispatch(h, "thread-1", OPUS_ID)).toEqual({ action: "proceed" });
       expect(notes(h)).toEqual([ownNote("work")]);
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "thread-1", projectId: "proj-1" }),
+      });
       return h;
     }
     /** After the race the project sits on spare with no excursion: the next Fable turn stays, even with work free again. */
@@ -11309,6 +11410,9 @@ describe("an Opus turn never retried, released or placed on a Max account that k
       await gate.reached;
       expect(await dispatch(h, "thread-3", FABLE_ID)).toEqual({ action: "proceed" });
       expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-1"]);
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "thread-3", projectId: "proj-1" }),
+      });
       gate.release();
       expect(await opus).toEqual({ action: "proceed" });
       workSession = 17;
@@ -14668,7 +14772,7 @@ describe("seats: the cases the third inspection found (Astra SEATS-R3)", () => {
     expect(await opus(h, "thr-2", "proj-2")).toEqual({ action: "proceed" });
     const set = h.bb.storage.kv.set.bind(h.bb.storage.kv);
     h.bb.storage.kv.set = async (key: string, value: unknown) => {
-      if (hold) {
+      if (hold && key === "switch-history") {
         hold = false;
         gate.captured();
         await gate.held;
@@ -14942,9 +15046,14 @@ describe("seats: the cases the fourth inspection found (Astra SEATS-R4)", () => 
     placeGate.release();
     const got = await answer;
     expect((await seatsOf(h))?.work).toMatchObject({ running: 0, reserved: 0 });
-    // Read again: on spare, where the project is.
-    expect(got).toEqual({ action: "proceed" });
-    expect((await seatsOf(h))?.spare).toMatchObject({ reserved: 1 });
+    // Read again: on spare, where the project is and it cannot run, with
+    // work able to: it waits and is placed again (T5, 2026-11-04), instead
+    // of starting there to fail.
+    expect(got.action).toBe("wait");
+    expect((await seatsOf(h))?.spare).toMatchObject({ reserved: 0 });
+    expect(await opus(h, "t1")).toEqual({ action: "proceed" });
+    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", value: `${ACCOUNTS}/work` });
+    expect((await seatsOf(h))?.work).toMatchObject({ reserved: 1 });
   });
 
   it("R4-003: a message of the thread sent while its cancellation reads the queue keeps the seat it reserved", async () => {
@@ -14982,7 +15091,7 @@ describe("seats: the cases the fourth inspection found (Astra SEATS-R4)", () => 
 });
 
 // Aitor 2026-11-03 («tengo mucha cola? necesitaría abrir más hilos»):
-// siloeads ran 4/4 with Gloria · SEO waiting 17 min while joytorm and
+// siloeads ran 4/4 with a thread waiting 17 min while joytorm and
 // others had 0/4 and quota; moved by hand, its message went at once.
 describe("a project whose account has its seats full moves to one with a free seat", () => {
   /** Every account runs Fable; work ranks first, then spare. */
@@ -15268,6 +15377,37 @@ describe("bb claude-switcher rebalance", () => {
       "thr-3": { projectId: "p3", status: "idle" as const, updatedAt: NOW - 24 * HOUR },
     },
   };
+
+  it("T11 a project with a thread in a seat's queue stays, with the rest moved", async () => {
+    const h = await host(USAGE, {
+      ...opts,
+      settings: { preferredModel: "Fable", seatsMax: 1 },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const until = new Date(NOW + HOUR).toISOString().replace("Z", "+00:00");
+    for (const name of ["main", "work"])
+      expect(
+        (await h.harness.behavior.runCli(["reserve", name, "--id", `h-${name}`, "--until", until])).exitCode,
+      ).toBe(0);
+    const r = (await h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: "q3", projectId: "p3" }),
+        requestedExecution: { providerId: "claude-code", model: "claude-fable-5-1" },
+        attempt: "start-turn",
+      }),
+    )) as { action: string; reason?: string };
+    expect(r.action).toBe("wait");
+    expect(r.reason).toContain("Waiting for a seat on spare");
+    for (const name of ["main", "work"])
+      await h.harness.behavior.runCli(["unreserve", name, "--id", `h-${name}`]);
+    const { exitCode } = await h.harness.behavior.runCli(["rebalance", "--apply"]);
+    expect(exitCode).toBe(0);
+    const moved = [...h.envSet, ...h.envDeleted].map((e) => e.projectId);
+    expect(moved).not.toContain("p3");
+    expect(moved).toContain("p4");
+    expect(moved).not.toContain("proj-1");
+  });
 
   it("prints the plan and moves nothing without --apply", async () => {
     const h = await host(USAGE, opts);
@@ -15613,7 +15753,7 @@ describe("bb claude-switcher seats", () => {
 });
 
 // Aitor 2026-10-30, Añadido 2: bb greys out the composer of a project whose
-// account is at its limit (Mariscal · Web on ganaresenas, Fable at 100 %),
+// account is at its limit (Fable at 100 %),
 // so no turn reaches the checkpoint that would move it. Every refresh moves
 // such a project, and one on an account without a login, to the best
 // account with a free seat, whatever switchAheadPercent says.
@@ -15647,6 +15787,32 @@ describe("no project is left on an account out of the preferred model or without
     h.harness.logEntries
       .filter((e) => e.level === level)
       .map((e) => e.message);
+
+  it("an incomplete answer that says the account is out of Fable moves the project off it too", async () => {
+    const h = await host(
+      {
+        ...MAIN_OUT_OF_FABLE,
+        main: () =>
+          Response.json({
+            limits: [
+              { kind: "weekly_all", percent: 10, resets_at: new Date(NOW + 72 * 3_600_000).toISOString() },
+              {
+                kind: "weekly_scoped",
+                percent: 100,
+                resets_at: new Date(NOW + 4 * 3_600_000).toISOString(),
+                scope: { model: { display_name: "Fable" } },
+              },
+            ],
+            five_hour: { locked_reason: null },
+            seven_day: { locked_reason: null },
+          }),
+      },
+      OPTIONS,
+    );
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([["proj-1", `${ACCOUNTS}/work`]]);
+  });
 
   it("moves a project off an account out of Fable to the best account, with switchAheadPercent at 0", async () => {
     const h = await host(MAIN_OUT_OF_FABLE, OPTIONS);
@@ -15833,7 +15999,7 @@ describe("no project is left on an account out of the preferred model or without
   // Aitor 2026-11-03: the rescue judged every project for Fable, so a
   // project working in Opus left a Team seat (or a Max out of Fable) that
   // still ran Opus for a Max that keeps Fable, and the turns that skip the
-  // checkpoint spent that Max's weekly (viaulab → aitor, 2 Nov 18:23).
+  // checkpoint spent that Max's weekly (2 Nov 18:23).
   describe("a project whose latest turn was in another model is judged for that model", () => {
     const opusTurn = (h: Awaited<ReturnType<typeof host>>) =>
       h.harness.registrations.hooks["message.dispatch"]!(
@@ -15878,6 +16044,9 @@ describe("no project is left on an account out of the preferred model or without
       );
       dispose = () => h.harness.dispose();
       expect(await opusTurn(h)).toEqual({ action: "proceed" });
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "thr-1", projectId: "proj-1" }),
+      });
       await onePass(h);
       expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
         ["proj-1", `${ACCOUNTS}/work`],
@@ -17099,5 +17268,1880 @@ describe("bb claude-switcher reserve / unreserve: a seat held from outside bb", 
     expect((await ask(h, "t1")).action).toBe("wait");
     clock = NOW + HOUR;
     expect((await ask(h, "t1")).action).toBe("proceed");
+  });
+});
+
+// The state of 2026-11-03 23:10 (docs/revision-2026-11-04/PLAN.md), through
+// the real parser: every Team seat reports a weekly_all by then, so its login
+// is what makes it Team. `main` is an Ultra that keeps Fable, `spare` the only
+// Team out of Fable, full; `work` a free Team with Fable left.
+describe("caminos 2026-11-04", () => {
+  const FABLE = { preferredModel: "Fable" };
+  const OPUS = "claude-opus-5-5";
+  const FABLE_ID = "claude-fable-5-1";
+  const teamLogin = (h: Awaited<ReturnType<typeof host>>, ...names: string[]) => {
+    for (const name of names)
+      h.files[`${ACCOUNTS}/${name}/.claude.json`] = JSON.stringify({
+        oauthAccount: {
+          accountUuid: `uuid-${name}`,
+          emailAddress: `${name}@example.com`,
+          organizationType: "claude_team",
+        },
+      });
+  };
+  const INCIDENT = {
+    main: () => Response.json(payload(13, 88, 98)),
+    spare: () => Response.json(payload(81, 48, 100)),
+    work: () => Response.json(payload(0, 2, 0)),
+  };
+  const dispatch = (
+    h: Awaited<ReturnType<typeof host>>,
+    threadId: string,
+    projectId: string,
+    model: string | null,
+    queued = false,
+  ) =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: threadId, projectId }),
+        requestedExecution: { providerId: "claude-code", model },
+        attempt: "start-turn",
+        ...(queued ? { queuedMessages: [{ id: `queued_${threadId}` }] as never } : {}),
+      }),
+    ) as Promise<{ action: string; reason?: string; sendAt?: number }>;
+  const on = (name: string) => [
+    { name: ENV_VAR, note: ownNote(name), secret: true, value: null },
+  ];
+  /** Team seats by login, measured; `spare`'s one seat taken by another project's Opus thread. */
+  const incident = async (
+    usage: Record<string, () => Response> = INCIDENT,
+    options: HostOptions = {},
+  ) => {
+    const h = await host(usage, {
+      ...options,
+      settings: { ...FABLE, seatsTeam: 1, ...options.settings },
+      presetEnv: { "proj-2": on("spare"), ...options.presetEnv },
+    });
+    dispose = () => h.harness.dispose();
+    teamLogin(h, "spare", "work");
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect((await dispatch(h, "other", "proj-2", OPUS)).action).toBe("proceed");
+    return h;
+  };
+
+  it("T1 reserve: an Opus turn on an Ultra goes to the free Team seat with Fable left, not to the queue of the only Team out of Fable", async () => {
+    const h = await incident();
+    expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    const seats = await h.harness.behavior.callRpc("accounts_list", null) as State;
+    expect(seats.seats?.spare?.queued).toEqual([]);
+    expect(seats.seats?.work?.reserved).toBe(1);
+  });
+
+  it("T6 wait always: with every Team seat full an Opus turn waits, and never runs on an Ultra with a free seat", async () => {
+    const h = await incident();
+    expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("proceed");
+    const r = await dispatch(h, "t2", "proj-3", OPUS);
+    expect(r.action).toBe("wait");
+    // The wait says why it is on an account the project is not on.
+    expect(r.reason).toBe(
+      "Waiting for a seat on spare for Opus: main keeps its weekly for Fable; 1/1 threads running, 0 ahead in the queue",
+    );
+    expect(h.envSet.filter((e) => e.projectId === "proj-3")).toEqual([]);
+  });
+
+  it("T7 a Team seat with its weekly at 100 % is no target, whatever its Fable", async () => {
+    const h = await incident({
+      ...INCIDENT,
+      work: () => Response.json(payload(0, 100, 0)),
+    });
+    expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("wait");
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("T9b a sibling at work does not hold an Opus turn back: the project goes to the Team seat as since 0.2.35", async () => {
+    const h = await incident();
+    expect((await dispatch(h, "busy", "proj-1", FABLE_ID)).action).toBe("proceed");
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "busy", projectId: "proj-1" }),
+    });
+    expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+  });
+
+  it("T8 a model named by its alias is that model: `--model opus` is an Opus turn, placed and held like one", async () => {
+    const h = await incident();
+    expect(await dispatch(h, "t1", "proj-1", "opus")).toEqual({ action: "proceed" });
+    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    // Every Team seat full now: it waits, it does not slip through on the Ultra.
+    const r = await dispatch(h, "t2", "proj-1", "opus");
+    expect(r.action).toBe("wait");
+  });
+
+  describe("T5 an account out of the model takes no new turn while another can run it", () => {
+    it("a bb that fails every write does not hold the turn for ever: 10 tries, then it starts, says so, and fails where the user is told", async () => {
+      let clock = NOW;
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 88, 100)),
+          spare: () => Response.json(payload(81, 48, 100)),
+          work: () => Response.json(payload(0, 2, 0)),
+        },
+        {
+          clock: () => clock,
+          settings: FABLE,
+          presetEnv: { "proj-1": on("spare") },
+          failSet: ["proj-1"],
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      const seen: string[] = [];
+      for (let i = 0; i < 12; i++) {
+        const r = await dispatch(h, "t1", "proj-1", FABLE_ID, true);
+        seen.push(r.action);
+        if (r.action !== "wait") break;
+        clock += SEAT_RECHECK_MS;
+      }
+      expect(seen).toEqual([...Array(10).fill("wait"), "proceed"]);
+      expect(h.harness.logEntries.map((e) => e.message)).toContainEqual(
+        expect.stringContaining("could not be moved in 10 tries"),
+      );
+      // The next message has its own 10 tries.
+      expect((await dispatch(h, "t1", "proj-1", FABLE_ID, true)).action).toBe("wait");
+    });
+
+    it("no other account can run it but an Ultra that keeps Fable: an Opus turn does not wait for that one, it starts and fails", async () => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 10, 5)),
+          spare: () => Response.json(payload(100, 48, 100)),
+          work: () => Response.json(payload(100, 2, 0)),
+        },
+        { settings: FABLE, presetEnv: { "proj-1": on("spare") } },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("an account unknown for now is not an account out of the model: the turn is not held off it", async () => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 10, 5)),
+          // Answered without its windows: `unknown`, not out.
+          spare: () =>
+            Response.json({
+              limits: [{ kind: "weekly_all", percent: 10, resets_at: new Date(NOW + 72 * 3_600_000).toISOString() }],
+              five_hour: { locked_reason: null },
+              seven_day: { locked_reason: null },
+            }),
+          work: () => Response.json(payload(0, 2, 0)),
+        },
+        { settings: FABLE, presetEnv: { "proj-1": on("spare") } },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "t1", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+    });
+
+    it("a message cancelled by hand leaves the next one its own 10 tries", async () => {
+      let clock = NOW;
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 88, 100)),
+          spare: () => Response.json(payload(81, 48, 100)),
+          work: () => Response.json(payload(0, 2, 0)),
+        },
+        {
+          clock: () => clock,
+          settings: FABLE,
+          presetEnv: { "proj-1": on("spare") },
+          failSet: ["proj-1"],
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      for (let i = 0; i < 9; i++) {
+        expect((await dispatch(h, "t1", "proj-1", FABLE_ID, true)).action).toBe("wait");
+        clock += SEAT_RECHECK_MS;
+      }
+      await h.harness.behavior.emitThreadEvent("message.cancelled", {
+        entry: { id: "row-1", threadId: "t1", payload: { kind: "message" } } as never,
+      });
+      for (let i = 0; i < 10; i++) {
+        expect((await dispatch(h, "t1", "proj-1", FABLE_ID, true)).action).toBe("wait");
+        clock += SEAT_RECHECK_MS;
+      }
+      expect((await dispatch(h, "t1", "proj-1", FABLE_ID, true)).action).toBe("proceed");
+    });
+
+    it("admitted, with the capacity lowered since: its seat is its own, and it does not ask bb again for ever", async () => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 88, 100)),
+          spare: () => Response.json(payload(81, 48, 100)),
+          work: () => Response.json(payload(0, 2, 0)),
+        },
+        {
+          settings: { ...FABLE, seatsTeam: 2 },
+          presetEnv: { "proj-1": on("spare"), "proj-2": on("work"), "proj-3": on("work") },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect((await dispatch(h, "a", "proj-2", FABLE_ID)).action).toBe("proceed");
+      expect((await dispatch(h, "b", "proj-3", FABLE_ID)).action).toBe("proceed");
+      expect((await dispatch(h, "t1", "proj-1", FABLE_ID)).action).toBe("wait");
+      await h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: thread({ id: "b", projectId: "proj-3" }),
+        lastAssistantText: null,
+      });
+      await h.harness.behavior.setSettings({ seatsTeam: 1 });
+      expect(await dispatch(h, "t1", "proj-1", FABLE_ID, true)).toEqual({ action: "proceed" });
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    });
+
+    /** proj-1 on spare, out of Fable with its seat free; work runs Fable, its one seat taken; main out of Fable. */
+    const out = async (usage: Record<string, () => Response> = {}) => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 88, 100)),
+          spare: () => Response.json(payload(81, 48, 100)),
+          work: () => Response.json(payload(0, 2, 0)),
+          ...usage,
+        },
+        {
+          settings: { ...FABLE, seatsTeam: 1 },
+          presetEnv: { "proj-1": on("spare"), "proj-2": on("work") },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect((await dispatch(h, "other", "proj-2", FABLE_ID)).action).toBe("proceed");
+      return h;
+    };
+    const seatsNow = async (h: Awaited<ReturnType<typeof host>>) =>
+      ((await h.harness.behavior.callRpc("accounts_list", null)) as State).seats!;
+
+    it("waits in the queue of the account that can run it, without starting where it cannot", async () => {
+      const h = await out();
+      const r = await dispatch(h, "t1", "proj-1", FABLE_ID);
+      expect(r.action).toBe("wait");
+      expect(r.reason).toBe(
+        "Waiting for a seat on work for Fable: spare cannot run Fable; 1/1 threads running, 0 ahead in the queue",
+      );
+      expect(r.sendAt).toBe(NOW + SEAT_RECHECK_MS);
+      const seats = await seatsNow(h);
+      expect(seats.spare).toMatchObject({ reserved: 0, running: 0 });
+      expect(seats.work?.queued.map((q) => q.threadId)).toEqual(["t1"]);
+      expect(h.envSet.filter((e) => e.projectId === "proj-1")).toEqual([]);
+    });
+
+    it("goes there when that seat frees, and asks bb again", async () => {
+      const h = await out();
+      expect((await dispatch(h, "t1", "proj-1", FABLE_ID)).action).toBe("wait");
+      await h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: thread({ id: "other", projectId: "proj-2" }),
+        lastAssistantText: null,
+      });
+      expect(await dispatch(h, "t1", "proj-1", FABLE_ID, true)).toEqual({ action: "proceed" });
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    });
+
+    it("with a seat free on the other it moves at once, as before", async () => {
+      const h = await out({ main: () => Response.json(payload(13, 88, 40)) });
+      expect(await dispatch(h, "t1", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      // main is the default account: moved there, the project's variable goes.
+      expect(h.harness.logEntries.map((e) => e.message)).toContainEqual(
+        expect.stringContaining("Moved to account main before the turn: spare cannot run Fable"),
+      );
+    });
+
+    it("with no account able to run it the turn starts and fails: that failure is what tells the user", async () => {
+      const h = await out({ work: () => Response.json(payload(0, 2, 100)) });
+      expect(await dispatch(h, "t1", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      expect(h.envSet.filter((e) => e.projectId === "proj-1")).toEqual([]);
+    });
+
+    it("a turn queued on an account that runs out then follows the one that can run it", async () => {
+      let workFable = 0;
+      let mainFable = 100;
+      const h = await out({
+        main: () => Response.json(payload(13, 88, mainFable)),
+        work: () => Response.json(payload(0, 2, workFable)),
+      });
+      expect((await dispatch(h, "t1", "proj-1", FABLE_ID)).action).toBe("wait");
+      workFable = 100;
+      mainFable = 10;
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "t1", "proj-1", FABLE_ID, true)).toEqual({ action: "proceed" });
+      expect(h.harness.logEntries.map((e) => e.message)).toContainEqual(
+        expect.stringContaining("Moved to account main before the turn: spare cannot run Fable"),
+      );
+      expect((await seatsNow(h)).work?.queued).toEqual([]);
+    });
+  });
+
+  describe("T4 a reload does not forget the model of a project's latest turn", () => {
+    const USAGE = {
+      main: () => Response.json(payload(13, 10, 5)),
+      spare: () => Response.json(payload(20, 48, 100)),
+      work: () => Response.json(payload(0, 2, 100)),
+    };
+    const start = async (kvPreset?: Record<string, unknown>) => {
+      const h = await host(USAGE, {
+        settings: FABLE,
+        presetEnv: { "proj-1": on("spare") },
+        ...(kvPreset === undefined ? {} : { kvPreset }),
+      });
+      teamLogin(h, "spare", "work");
+      return h;
+    };
+    const stored = (h: Awaited<ReturnType<typeof host>>) =>
+      h.bb.storage.kv.get<Record<string, string>>("project-models");
+    /** One pass of the refresh, whose rescue judges every project. */
+    const pass = async (h: Awaited<ReturnType<typeof host>>) => {
+      const before = h.usageCalls.length;
+      const run = h.harness.behavior.runService("usage-refresh");
+      await vi.waitFor(() => expect(h.usageCalls).toHaveLength(before + 3));
+      run.controller.abort();
+      await run.done;
+    };
+    const log = (h: Awaited<ReturnType<typeof host>>) =>
+      h.harness.logEntries.map((e) => e.message).join("\n");
+
+    it("the rescue leaves a project working in Opus on its Team seat out of Fable, with no refresh between its turn and the reload", async () => {
+      const before = await start();
+      await before.harness.behavior.callRpc("accounts_refresh", null);
+      expect((await dispatch(before, "t1", "proj-1", OPUS)).action).toBe("proceed");
+      await vi.waitFor(async () => expect((await stored(before))?.["proj-1"]).toBe("Opus"));
+      const models = await stored(before);
+      before.harness.dispose();
+      const h = await start({ "project-models": models });
+      dispose = () => h.harness.dispose();
+      await pass(h);
+      expect(log(h)).not.toMatch(/moved from spare/i);
+      expect(h.envDeleted).toEqual([]);
+    });
+
+    it("a project with no model stored is judged for the preferred one, as before", async () => {
+      const h = await start();
+      dispose = () => h.harness.dispose();
+      await pass(h);
+      expect(log(h)).toMatch(/moved from spare \(exhausted for Fable/);
+      expect(h.envDeleted).toEqual([{ projectId: "proj-1", name: ENV_VAR }]);
+    });
+
+    it("the store follows every change, and a new turn beats what a reload brought", async () => {
+      const before = await start();
+      await before.harness.behavior.callRpc("accounts_refresh", null);
+      await dispatch(before, "t1", "proj-1", OPUS);
+      await before.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: thread({ id: "t1", projectId: "proj-1" }),
+        lastAssistantText: null,
+      });
+      await dispatch(before, "t2", "proj-1", FABLE_ID);
+      await vi.waitFor(async () => expect((await stored(before))?.["proj-1"]).toBe("Fable"));
+      before.harness.dispose();
+      const h = await start({ "project-models": { "proj-1": "Opus" } });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      await dispatch(h, "t3", "proj-1", FABLE_ID);
+      await vi.waitFor(async () => expect((await stored(h))?.["proj-1"]).toBe("Fable"));
+    });
+
+    it("a turn seen only as it ends names the project's model, over what a reload brought", async () => {
+      const h = await host(USAGE, {
+        settings: FABLE,
+        presetEnv: { "proj-1": on("work") },
+        kvPreset: { "project-models": { "proj-1": "Fable" } },
+        threadEvents: {
+          t1: [
+            {
+              id: "evt_1",
+              scope: { kind: "thread" },
+              threadId: "t1",
+              seq: 1,
+              createdAt: NOW - 60_000,
+              type: "client/turn/requested",
+              data: { requestId: "creq_1", execution: { model: OPUS } },
+            },
+          ],
+        },
+      });
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      const t1 = { thread: thread({ id: "t1", projectId: "proj-1" }) };
+      await h.harness.behavior.emitThreadEvent("thread.active", t1);
+      await h.harness.behavior.emitThreadEvent("thread.idle", { ...t1, lastAssistantText: null });
+      await vi.waitFor(async () => expect((await stored(h))?.["proj-1"]).toBe("Opus"));
+    });
+
+    it("a write that failed is tried again on the next turn, also of the same model", async () => {
+      const h = await host(USAGE, {
+        settings: FABLE,
+        presetEnv: { "proj-1": on("work") },
+        kvPreset: { "project-models": { "proj-1": "Fable" } },
+      });
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      const set = h.bb.storage.kv.set.bind(h.bb.storage.kv);
+      let failing = true;
+      h.bb.storage.kv.set = async (key: string, value: unknown) => {
+        if (key === "project-models" && failing) throw new Error("storage down");
+        return set(key, value);
+      };
+      await dispatch(h, "t1", "proj-1", OPUS);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(await stored(h)).toEqual({ "proj-1": "Fable" });
+      failing = false;
+      await dispatch(h, "t1", "proj-1", OPUS, true);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(await stored(h)).toEqual({ "proj-1": "Opus" });
+    });
+
+    it("a store that could not be read is not written over, for a later load to find", async () => {
+      const h = await host(USAGE, {
+        settings: FABLE,
+        presetEnv: { "proj-1": on("spare") },
+        kvPreset: { "project-models": { "proj-8": "Opus" } },
+        kvReadError: "storage is down",
+      });
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("proceed");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(await stored(h)).toEqual({ "proj-8": "Opus" });
+    });
+
+    it("what is stored in another shape is left out", async () => {
+      const h = await start({ "project-models": "junk" });
+      dispose = () => h.harness.dispose();
+      await pass(h);
+      expect(log(h)).toMatch(/moved from spare \(exhausted for Fable/);
+    });
+  });
+
+  it("T2 a pin to a free Team seat delivers the message waiting on a full account: bb is asked again at once, well within 2 minutes", async () => {
+    const h = await incident();
+    expect(h.harness.recheckCount).toBe(0);
+    // work full too: the message waits on spare's queue, its project on the Ultra.
+    expect((await dispatch(h, "busy", "proj-3", OPUS)).action).toBe("proceed");
+    const r = await dispatch(h, "t1", "proj-1", OPUS);
+    expect(r.action).toBe("wait");
+    // A seat frees on work, and the user pins the project there.
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "busy", projectId: "proj-3" }),
+      lastAssistantText: null,
+    });
+    const asked = h.harness.recheckCount;
+    await h.harness.behavior.runCli(["use", "proj-1", "work"]);
+    await vi.waitFor(() => expect(h.harness.recheckCount).toBeGreaterThan(asked));
+    expect(r.sendAt! - NOW).toBeLessThanOrEqual(2 * 60_000);
+    expect(await dispatch(h, "t1", "proj-1", OPUS, true)).toEqual({ action: "proceed" });
+    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    const seats = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(seats.seats?.spare?.queued).toEqual([]);
+    expect(seats.seats?.work?.reserved).toBe(1);
+  });
+
+  it("T2 a pin, the literal case: A full and out of the model, the project pinned to B with a free seat, the queued message delivered on B within 2 minutes", async () => {
+    let clock = NOW;
+    const h = await host(
+      {
+        main: () => Response.json(payload(13, 88, 98)),
+        spare: () => Response.json(payload(100, 48, 100)),
+        work: () => Response.json(payload(0, 2, 0)),
+      },
+      {
+        settings: { ...FABLE, seatsTeam: 1 },
+        presetEnv: { "proj-1": on("spare"), "proj-2": on("spare"), "proj-3": on("work") },
+        clock: () => clock,
+      },
+    );
+    dispose = () => h.harness.dispose();
+    teamLogin(h, "spare", "work");
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // A (spare) is full and out of its session; B (work) is full for now.
+    for (const [id, projectId] of [["a", "proj-2"], ["b", "proj-3"]] as const) {
+      await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id, projectId }) });
+    }
+    expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("wait");
+    // B frees a seat, and the user pins the project there.
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "b", projectId: "proj-3" }),
+      lastAssistantText: null,
+    });
+    const asked = h.harness.recheckCount;
+    await h.harness.behavior.runCli(["use", "proj-1", "work"]);
+    await vi.waitFor(() => expect(h.harness.recheckCount).toBeGreaterThan(asked));
+    // bb answers a recheck by asking again about the row it holds.
+    clock = NOW + 1_000;
+    expect(await dispatch(h, "t1", "proj-1", OPUS, true)).toEqual({ action: "proceed" });
+    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "t1", projectId: "proj-1" }),
+    });
+    const seats = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(seats.seats?.work?.running).toBe(1);
+    expect(clock - NOW).toBeLessThanOrEqual(2 * 60_000);
+  });
+
+  describe("T13 a thread held 10 minutes with another account free is said to be stuck", () => {
+    const held = (over: Partial<QueuedRow> = {}): QueuedRow => ({
+      id: "q-t2",
+      threadId: "t2",
+      payload: { kind: "inline" },
+      sendAt: NOW + 30_000,
+      waitingOn: { kind: "plugin", pluginId: "claude-switcher", reason: "seat" },
+      // Queued an hour ago, held only from the dispatch below.
+      createdAt: NOW - HOUR,
+      model: "opus",
+      failureReason: null,
+      ...over,
+    });
+    /** t2 queued on spare, every Team seat full; then work's seat frees and nobody asks again. */
+    const stuck = async (row: QueuedRow = held(), options: HostOptions = {}) => {
+      let clock = NOW;
+      const h = await incident(INCIDENT, {
+        queued: [row],
+        clock: () => clock,
+        threads: { t2: { projectId: "proj-3" } },
+        ...options,
+      });
+      // spare's one seat stays taken: a turn under way, no reservation that expires.
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "other", projectId: "proj-2" }),
+      });
+      expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("proceed");
+      expect((await dispatch(h, "t2", "proj-3", OPUS)).action).toBe("wait");
+      await h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: thread({ id: "t1", projectId: "proj-1" }),
+        lastAssistantText: null,
+      });
+      return { h, at: (ms: number) => (clock = NOW + ms) };
+    };
+    const report = async (h: Awaited<ReturnType<typeof host>>) =>
+      JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout) as {
+        atascos: { hilo: string; cuenta: string; modelo: string; minutos: number; libres: string[]; proyectoOcupado: boolean }[] | null;
+      };
+    const lines = (h: Awaited<ReturnType<typeof host>>) =>
+      h.harness.logEntries.filter((e) => e.message.startsWith("STUCK")).map((e) => e.message);
+    const pass = async (h: Awaited<ReturnType<typeof host>>) => {
+      const before = h.usageCalls.length;
+      const run = h.harness.behavior.runService("usage-refresh");
+      await vi.waitFor(() => expect(h.usageCalls.length).toBeGreaterThan(before));
+      run.controller.abort();
+      await run.done;
+    };
+
+    it("from when the plugin began to hold it, not from when bb queued it: 9:59 no, 10:00 yes", async () => {
+      const { h, at } = await stuck();
+      at(10 * 60_000 - 1);
+      expect((await report(h)).atascos).toEqual([]);
+      at(10 * 60_000);
+      expect((await report(h)).atascos).toEqual([
+        { hilo: "t2", cuenta: "spare", modelo: "Opus", minutos: 10, libres: ["work"], proyectoOcupado: false },
+      ]);
+    });
+
+    it("`seats` says it too, in its text and its JSON", async () => {
+      const { h, at } = await stuck();
+      at(12 * 60_000);
+      const text = await h.harness.behavior.runCli(["seats"]);
+      expect(text.stdout).toContain("STUCK: spare holds thread t2 (Opus) 12 min, work is free");
+      const json = JSON.parse((await h.harness.behavior.runCli(["seats", "--json"])).stdout);
+      expect(json.atascos).toHaveLength(1);
+    });
+
+    it("says it once per 10 minutes in the log", async () => {
+      const { h, at } = await stuck();
+      at(10 * 60_000);
+      await pass(h);
+      // Not asked again for 10 min here (in bb, every 30 s), its place in the
+      // queue has lapsed: the holder said is then the project's account.
+      expect(lines(h)).toEqual(["STUCK: main holds thread t2 (Opus) 10 min, work is free"]);
+      at(19 * 60_000);
+      await pass(h);
+      expect(lines(h)).toHaveLength(1);
+      at(20 * 60_000);
+      await pass(h);
+      expect(lines(h)).toHaveLength(2);
+    });
+
+    it("with no other account free it waits as it must: Team full and only Ultras free is «Esperar siempre»", async () => {
+      const { h, at } = await stuck();
+      expect((await dispatch(h, "t3", "proj-4", OPUS)).action).toBe("proceed");
+      at(10 * 60_000);
+      expect((await report(h)).atascos).toEqual([]);
+    });
+
+    it("a row bb says has failed is not stuck", async () => {
+      const { h, at } = await stuck(held({ failureReason: "Thread is archived" }));
+      at(10 * 60_000);
+      expect((await report(h)).atascos).toEqual([]);
+    });
+
+    it("a hold with no seat queue counts on the project's account", async () => {
+      let workSession = 100;
+      let spareSession = 100;
+      let clock = NOW;
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 88, 98)),
+          spare: () => Response.json(payload(spareSession, 48, 100)),
+          work: () => Response.json(payload(workSession, 2, 0)),
+        },
+        {
+          settings: { ...FABLE, seatsTeam: 1 },
+          clock: () => clock,
+          queued: [held({ threadId: "t1", id: "q-t1" })],
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      // No Team can take it for now: held off main, no seat in any queue.
+      const r = await dispatch(h, "t1", "proj-1", OPUS);
+      expect(r.action).toBe("wait");
+      const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+      expect(state.seats?.work?.queued).toEqual([]);
+      workSession = 0;
+      spareSession = 100;
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      clock = NOW + 10 * 60_000;
+      const stuckNow = (await report(h)).atascos!;
+      expect(stuckNow.map((a) => [a.cuenta, a.libres])).toEqual([["main", ["work"]]]);
+    });
+
+    it("a thread with another of its project at work says so", async () => {
+      const { h, at } = await stuck();
+      expect((await dispatch(h, "t9", "proj-3", FABLE_ID)).action).toBe("proceed");
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "t9", projectId: "proj-3" }),
+      });
+      at(10 * 60_000);
+      const [a] = (await report(h)).atascos!;
+      expect(a?.proyectoOcupado).toBe(true);
+    });
+
+    it("the wait is forgotten once it goes: the next one counts from zero", async () => {
+      const { h, at } = await stuck();
+      at(10 * 60_000);
+      expect((await dispatch(h, "t2", "proj-3", OPUS, true)).action).toBe("proceed");
+      await h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: thread({ id: "t2", projectId: "proj-3" }),
+        lastAssistantText: null,
+      });
+      expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("proceed");
+      expect((await dispatch(h, "t2", "proj-3", OPUS)).action).toBe("wait");
+      // spare's seat frees: t2 could run there, and has only just begun to wait.
+      await h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: thread({ id: "other", projectId: "proj-2" }),
+        lastAssistantText: null,
+      });
+      expect((await report(h)).atascos).toEqual([]);
+      at(20 * 60_000);
+      expect((await report(h)).atascos).toHaveLength(1);
+    });
+
+    it("T14b a pick that confirms the account the project is on looks at what waits too", async () => {
+      const { h, at } = await stuck();
+      at(10 * 60_000);
+      await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-3", account: "main" });
+      await vi.waitFor(() => expect(lines(h)).toHaveLength(1));
+    });
+
+    it("a look that only joins a running turn does not forget the wait", async () => {
+      const { h, at } = await stuck();
+      at(10 * 60_000);
+      await h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id: "t2", projectId: "proj-3" }),
+          requestedExecution: { providerId: "claude-code", model: OPUS },
+          attempt: "join-turn",
+        }),
+      );
+      expect((await report(h)).atascos).toHaveLength(1);
+    });
+
+    it("a turn that starts (a message sent with «Send now») ends the wait, and so does the thread going", async () => {
+      const running = await stuck();
+      running.at(10 * 60_000);
+      await running.h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "t2", projectId: "proj-3" }),
+      });
+      expect((await report(running.h)).atascos).toEqual([]);
+      running.h.harness.dispose();
+      const gone = await stuck();
+      gone.at(10 * 60_000);
+      await gone.h.harness.behavior.emitThreadEvent("thread.archived", {
+        thread: thread({ id: "t2", projectId: "proj-3" }),
+      });
+      expect((await report(gone.h)).atascos).toEqual([]);
+    });
+
+    it("a row whose attempt failed still counts; one of an archived thread does not", async () => {
+      const failed = await stuck(held({ failureReason: "hook timed out" }));
+      failed.at(10 * 60_000);
+      expect((await report(failed.h)).atascos).toHaveLength(1);
+      failed.h.harness.dispose();
+      const archived = await stuck(held({ failureReason: "Thread is archived" }));
+      archived.at(10 * 60_000);
+      expect((await report(archived.h)).atascos).toEqual([]);
+    });
+
+    it("a project set by hand since is not this plugin's to place: not stuck", async () => {
+      const mine = on("spare");
+      const { h, at } = await stuck(held(), { presetEnv: { "proj-3": mine } });
+      at(10 * 60_000);
+      await pass(h);
+      expect((await report(h)).atascos).toHaveLength(1);
+      mine[0]!.note = "set by hand";
+      expect((await report(h)).atascos).toEqual([]);
+    });
+
+    it("the last held message cancelled by hand: the next one's wait counts from zero, and with another still held it keeps its age", async () => {
+      const { h, at } = await stuck();
+      const rows = h.queued.splice(0);
+      at(10 * 60_000);
+      await h.harness.behavior.emitThreadEvent("message.cancelled", { entry: rows[0] as never });
+      h.queued.push(...rows);
+      expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("proceed");
+      expect((await dispatch(h, "t2", "proj-3", OPUS)).action).toBe("wait");
+      await h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: thread({ id: "t1", projectId: "proj-1" }),
+        lastAssistantText: null,
+      });
+      expect((await report(h)).atascos).toEqual([]);
+      at(20 * 60_000);
+      expect((await report(h)).atascos).toHaveLength(1);
+      await h.harness.behavior.emitThreadEvent("message.cancelled", {
+        entry: { ...(rows[0] as object), id: "another" } as never,
+      });
+      expect((await report(h)).atascos).toHaveLength(1);
+    });
+
+    it("a row bb hides while it asks again keeps its age; gone 10 minutes with no ask, the wait is over", async () => {
+      const { h, at } = await stuck();
+      const rows = [...h.queued];
+      h.queued.splice(0);
+      at(5 * 60_000);
+      await pass(h);
+      h.queued.push(...rows);
+      at(10 * 60_000);
+      expect((await report(h)).atascos).toHaveLength(1);
+      h.queued.splice(0);
+      at(10 * 60_000 + 10 * 60_000 + 1);
+      await pass(h);
+      h.queued.push(...rows);
+      expect((await report(h)).atascos).toEqual([]);
+    });
+
+    it("a thread whose read never answers makes the look `null` within its limit, not a wait", async () => {
+      const { h, at } = await stuck();
+      at(10 * 60_000);
+      vi.useFakeTimers();
+      try {
+        h.harness.sdk.stub("threads.get", () => new Promise(() => {}));
+        const answer = report(h);
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect((await answer).atascos).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("health marks a model's window only the clock frees, with the queries failing, and the rest as they are", async () => {
+      let failing = false;
+      let clock = NOW;
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 10, 5)),
+          spare: () => Response.json(payload(20, 48, 100)),
+          work: () =>
+            failing
+              ? new Response(null, { status: 500 })
+              : Response.json(payload(0, 2, 100)),
+        },
+        { settings: FABLE, clock: () => clock },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      failing = true;
+      // Past the window's reset (payload: +4 h) and the age the policy trusts.
+      clock = NOW + 5 * HOUR;
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      const out = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout) as {
+        cuentas: { nombre: string; modelos: Record<string, { sinConfirmar?: boolean }> }[];
+      };
+      expect(out.cuentas.find((c) => c.nombre === "work")?.modelos.Fable?.sinConfirmar).toBe(true);
+    });
+
+    it("an unreadable queue is `null`, never «nothing stuck»", async () => {
+      const { h } = await stuck();
+      h.harness.sdk.stub("threads.queue.list", async () => {
+        throw new Error("bb is down");
+      });
+      expect((await report(h)).atascos).toBeNull();
+      const text = await h.harness.behavior.runCli(["seats"]);
+      expect(text.stdout).toContain("stuck threads unknown");
+    });
+  });
+
+  it("C9 an account dir named as the default account is said once per load: 2373 of the 10000 lines the log keeps were this one, and they erased the evidence", async () => {
+    const h = await host(INCIDENT, {
+      settings: FABLE,
+      dirs: () => ["spare", "work", "main"],
+    });
+    dispose = () => h.harness.dispose();
+    h.files[`${ACCOUNTS}/main/.claude.json`] = h.files[`${ACCOUNTS}/spare/.claude.json`]!;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const said = h.harness.logEntries.filter((e) => e.message.includes("collides"));
+    expect(said).toHaveLength(1);
+  });
+
+  describe("T9 seats full", () => {
+    const start = async () => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 40, 30)),
+          spare: () => Response.json(payload(81, 48, 100)),
+          work: () => Response.json(payload(0, 2, 0)),
+        },
+        {
+          settings: { ...FABLE, seatsMax: 1, seatsTeam: 1 },
+          presetEnv: { "proj-1": on("main"), "proj-2": on("main") },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      // Another project's turn holds main's only seat.
+      expect((await dispatch(h, "busy", "proj-2", FABLE_ID)).action).toBe("proceed");
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "busy", projectId: "proj-2" }),
+      });
+      return h;
+    };
+
+    it("a Fable turn on a full Ultra moves to the account with a seat, as in 0.2.37", async () => {
+      const h = await start();
+      expect(await dispatch(h, "t1", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    });
+
+    it("with a thread of its project at work it stays and waits: a move would take that thread's project away", async () => {
+      const h = await start();
+      const r = await dispatch(h, "t1", "proj-2", FABLE_ID);
+      expect(r.action).toBe("wait");
+      expect(r.reason).toContain("Waiting for a seat on main");
+      expect(h.envSet).toEqual([]);
+    });
+  });
+
+  it("T10 a Fable turn with no Fable anywhere is told to pass to Opus, and told the Team seat with room", async () => {
+    const h = await host(
+      {
+        // The project's account, out of session and of Fable.
+        main: () => Response.json(payload(100, 88, 100)),
+        spare: () => Response.json(payload(81, 48, 100)),
+        work: () => Response.json(payload(0, 2, 100)),
+      },
+      {
+        settings: { ...FABLE, seatsTeam: 1 },
+        presetEnv: { "proj-2": on("spare") },
+      },
+    );
+    dispose = () => h.harness.dispose();
+    teamLogin(h, "spare", "work");
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect((await dispatch(h, "other", "proj-2", OPUS)).action).toBe("proceed");
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "other", projectId: "proj-2" }),
+    });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    expect(h.retries.at(-1)?.reason).toContain(
+      "pasa este hilo a Opus con el selector de modelo; irá a work",
+    );
+  });
+
+  it("T12 a seat held from outside bb is refused on a full Team seat, and overtakes no thread waiting", async () => {
+    const h = await incident();
+    expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("proceed");
+    expect((await dispatch(h, "t2", "proj-3", OPUS)).action).toBe("wait");
+    const until = new Date(NOW + HOUR).toISOString().replace("Z", "+00:00");
+    const r = await h.harness.behavior.runCli(["reserve", "spare", "--id", "night", "--until", until]);
+    expect(r.exitCode).not.toBe(0);
+    expect(`${r.stdout}${r.stderr}`).toMatch(/no free seat|no_free_seat/i);
+    const seats = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(seats.seats?.spare?.external ?? []).toEqual([]);
+    expect(seats.seats?.spare?.queued.map((q) => q.threadId)).toEqual(["t2"]);
+  });
+
+  describe("T17 an incomplete answer that measured the account out of the model", () => {
+    const OK = () => Response.json(payload(0, 2, 0));
+    const answer = (windows: Record<string, unknown>[]) => () =>
+      Response.json({
+        limits: windows,
+        five_hour: { locked_reason: null },
+        seven_day: { locked_reason: null },
+      });
+    const OUT_FOR = (resetsIn: number) =>
+      answer([
+        { kind: "weekly_all", percent: 10, resets_at: new Date(NOW + 72 * 3_600_000).toISOString() },
+        {
+          kind: "weekly_scoped",
+          percent: 100,
+          resets_at: new Date(NOW + resetsIn).toISOString(),
+          scope: { model: { display_name: "Opus" } },
+        },
+      ]);
+    const OUT = OUT_FOR(4 * 3_600_000);
+    const start = async (
+      first: () => Response,
+      spare: () => Response = OK,
+      clock: () => number = () => NOW,
+    ) => {
+      let work = first;
+      const h = await host(
+        { main: () => Response.json(payload(13, 10, 5)), spare, work: () => work() },
+        {
+          clock,
+          settings: { ...FABLE, seatsTeam: 1 },
+          presetEnv: { "proj-1": on("work"), "proj-2": on("work") },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "work", "spare");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      return {
+        h,
+        read: async (then: () => Response) => {
+          work = then;
+          await h.harness.behavior.callRpc("accounts_refresh", null);
+        },
+      };
+    };
+
+    it("with a seat free where it is, the turn goes where it runs and does not start where it fails", async () => {
+      const { h } = await start(OUT);
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("spare") });
+    });
+
+    it("with its seats full, the turn does not wait behind them either", async () => {
+      const { h, read } = await start(OK);
+      expect((await dispatch(h, "x", "proj-2", OPUS)).action).toBe("proceed");
+      await read(OUT);
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("spare") });
+    });
+
+    it("with no other that can run it, the turn starts and fails to the view, as with a full answer", async () => {
+      const { h } = await start(OUT, OUT);
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("out of the preferred model only: a pick by hand onto it is not undone by the failure of a turn in another", async () => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 10, 5)),
+          spare: OK,
+          work: answer([
+            { kind: "weekly_all", percent: 10, resets_at: new Date(NOW + 72 * 3_600_000).toISOString() },
+            {
+              kind: "weekly_scoped",
+              percent: 100,
+              resets_at: new Date(NOW + 4 * 3_600_000).toISOString(),
+              scope: { model: { display_name: "Fable" } },
+            },
+          ]),
+        },
+        { settings: { ...FABLE, seatsTeam: 2 }, presetEnv: { "proj-1": on("spare") } },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "work", "spare");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "t1", projectId: "proj-1" }),
+      });
+      await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "work" });
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "t1" }));
+      expect(h.retries.at(-1)?.reason).toBe("Retrying on account work");
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    });
+
+    it("an account out of another model, in an incomplete answer, is still only unknown", async () => {
+      const { h } = await start(
+        answer([
+          { kind: "weekly_all", percent: 10, resets_at: new Date(NOW + 72 * 3_600_000).toISOString() },
+          {
+            kind: "weekly_scoped",
+            percent: 100,
+            resets_at: new Date(NOW + 4 * 3_600_000).toISOString(),
+            scope: { model: { display_name: "Fable" } },
+          },
+        ]),
+      );
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("only missing windows: still unknown, the turn stays", async () => {
+      const { h } = await start(
+        answer([{ kind: "weekly_all", percent: 10, resets_at: new Date(NOW + 72 * 3_600_000).toISOString() }]),
+      );
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("once the window that was full resets, what is left of the answer says nothing: the turn stays", async () => {
+      let clock = NOW;
+      const { h } = await start(OUT_FOR(60_000), OK, () => clock);
+      clock = NOW + 61_000;
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet).toEqual([]);
+    });
+  });
+
+  describe("T15 an Ultra not read yet does not run Opus: its login says what it keeps", () => {
+    const OK = () => Response.json(payload(0, 2, 0));
+    const start = async (
+      spare: () => Response,
+      work: () => Response = OK,
+      onSpare = true,
+      plan: Record<string, string> = { planDisplayName: "Ultra" },
+    ) => {
+      const h = await host(
+        { main: () => Response.json(payload(13, 10, 5)), spare, work },
+        {
+          settings: { ...FABLE, seatsTeam: 1 },
+          presetEnv: { "proj-1": on(onSpare ? "spare" : "work"), "proj-2": on("work") },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      h.files[`${ACCOUNTS}/spare/.claude.json`] = JSON.stringify({
+        oauthAccount: {
+          accountUuid: "uuid-spare",
+          emailAddress: "spare@example.com",
+          organizationType: "claude_max",
+          ...plan,
+        },
+      });
+      teamLogin(h, "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      return h;
+    };
+    const REFUSES = () => new Response(null, { status: 429 });
+    const PARTIAL = () =>
+      Response.json({
+        limits: [{ kind: "weekly_all", percent: 10, resets_at: new Date(NOW + 72 * 3_600_000).toISOString() }],
+        five_hour: { locked_reason: null },
+        seven_day: { locked_reason: null },
+      });
+
+    it.each([
+      ["its reads failing", REFUSES],
+      ["an answer without its windows", PARTIAL],
+    ])("with %s, the turn goes to the free Team seat", async (_, spare) => {
+      const h = await start(spare);
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    });
+
+    it("with every Team seat full it waits, and does not start on the Ultra", async () => {
+      const h = await start(REFUSES);
+      expect((await dispatch(h, "other", "proj-2", OPUS)).action).toBe("proceed");
+      const r = await dispatch(h, "t1", "proj-1", OPUS);
+      expect(r.action).toBe("wait");
+      expect(r.reason).toContain("spare keeps its weekly for Fable");
+      // In the queue: what comes later does not overtake it.
+      const seats = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+      expect(seats.seats?.work?.queued.map((q) => q.threadId)).toEqual(["t1"]);
+    });
+
+    it("with the reads of both down and the Team seat full, it takes its place in that queue", async () => {
+      const h = await start(REFUSES, REFUSES);
+      expect((await dispatch(h, "other", "proj-2", OPUS)).action).toBe("proceed");
+      expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("wait");
+      await dispatch(h, "later", "proj-2", OPUS);
+      const seats = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+      expect(seats.seats?.work?.queued.map((q) => q.threadId)).toEqual(["t1", "later"]);
+    });
+
+    it("a Team seat whose incomplete answer says it is out of the model is no destination", async () => {
+      const OUT = () =>
+        Response.json({
+          limits: [
+            { kind: "weekly_all", percent: 10, resets_at: new Date(NOW + 72 * 3_600_000).toISOString() },
+            {
+              kind: "weekly_scoped",
+              percent: 100,
+              resets_at: new Date(NOW + 4 * 3_600_000).toISOString(),
+              scope: { model: { display_name: "Opus" } },
+            },
+          ],
+          five_hour: { locked_reason: null },
+          seven_day: { locked_reason: null },
+        });
+      const h = await start(REFUSES, OUT);
+      expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("wait");
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("on an Ultra out of its session with the Team seat not read and full, it takes its place in that queue", async () => {
+      const h = await start(() => Response.json(payload(100, 30, 40)), REFUSES);
+      expect((await dispatch(h, "other", "proj-2", OPUS)).action).toBe("proceed");
+      expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("wait");
+      const seats = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+      expect(seats.seats?.work?.queued.map((q) => q.threadId)).toEqual(["t1"]);
+    });
+
+    it("a Team seat whose incomplete answer has a session out whose reset passed takes the turn", async () => {
+      const h = await start(REFUSES, () =>
+        Response.json({
+          limits: [{ kind: "session", percent: 100, resets_at: new Date(NOW - 3_600_000).toISOString() }],
+          five_hour: { locked_reason: null },
+          seven_day: { locked_reason: null },
+        }),
+      );
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    });
+
+    it("a Team seat whose incomplete answer says its session is out, with no reset, is no destination", async () => {
+      const OUT = () =>
+        Response.json({
+          limits: [{ kind: "session", percent: 100, resets_at: null }],
+          five_hour: { locked_reason: null },
+          seven_day: { locked_reason: null },
+        });
+      const h = await start(REFUSES, OUT);
+      expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("wait");
+      expect(h.envSet).toEqual([]);
+    });
+
+    const OUT_ONE_HOUR = {
+      kind: "weekly_scoped",
+      percent: 100,
+      resets_at: new Date(NOW + 3_600_000).toISOString(),
+      scope: { model: { display_name: "Opus" } },
+    };
+    it.each([
+      ["a full answer", (): unknown => ({
+        ...payload(5, 2, 0),
+        limits: [...(payload(5, 2, 0).limits as unknown[]), OUT_ONE_HOUR],
+      })],
+      ["an incomplete answer", (): unknown => ({
+        limits: [(payload(5, 2, 0).limits as unknown[])[1], OUT_ONE_HOUR],
+        five_hour: { locked_reason: null },
+        seven_day: { locked_reason: null },
+      })],
+    ])("a Team seat left out because only the clock would free it is no destination by its login: %s", async (_, body) => {
+      let clock = NOW;
+      let down = false;
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 10, 5)),
+          spare: () => Response.json(payload(13, 30, 40)),
+          work: () => (down ? new Response(null, { status: 429 }) : Response.json(body())),
+        },
+        {
+          settings: { ...FABLE, seatsTeam: 1 },
+          presetEnv: { "proj-1": on("spare"), "proj-2": on("work") },
+          clock: () => clock,
+        },
+      );
+      dispose = () => h.harness.dispose();
+      h.files[`${ACCOUNTS}/spare/.claude.json`] = JSON.stringify({
+        oauthAccount: {
+          accountUuid: "uuid-spare",
+          emailAddress: "spare@example.com",
+          organizationType: "claude_max",
+          planDisplayName: "Ultra",
+        },
+      });
+      teamLogin(h, "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      down = true;
+      clock = NOW + 3 * 3_600_000;
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("wait");
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("a full Team seat whose answer came incomplete gives a place in its queue too", async () => {
+      const h = await start(REFUSES, PARTIAL);
+      expect((await dispatch(h, "other", "proj-2", OPUS)).action).toBe("proceed");
+      expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("wait");
+      await dispatch(h, "later", "proj-2", OPUS);
+      const seats = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+      expect(seats.seats?.work?.queued.map((q) => q.threadId)).toEqual(["t1", "later"]);
+    });
+
+    it("with its Ultra read and the Team seat not, the turn goes to the free Team seat", async () => {
+      const h = await start(() => Response.json(payload(13, 30, 40)), REFUSES);
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    });
+
+    it("before the first reads no Team seat is taken by its login, and those reads ask the wait again", async () => {
+      let open!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      const read = (body: unknown) => async () => {
+        await gate;
+        return Response.json(body);
+      };
+      const h = await host(
+        {
+          main: read(payload(13, 10, 5)),
+          spare: read(payload(13, 30, 40)),
+          work: read(payload(0, 2, 0)),
+        },
+        { settings: { ...FABLE, seatsTeam: 1 }, presetEnv: { "proj-1": on("spare") } },
+      );
+      dispose = () => h.harness.dispose();
+      h.files[`${ACCOUNTS}/spare/.claude.json`] = JSON.stringify({
+        oauthAccount: {
+          accountUuid: "uuid-spare",
+          emailAddress: "spare@example.com",
+          organizationType: "claude_max",
+          planDisplayName: "Ultra",
+        },
+      });
+      teamLogin(h, "work");
+      // The logins are looked at; the first reads are under way.
+      const refresh = h.harness.behavior.callRpc("accounts_refresh", null);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("wait");
+      expect(h.envSet).toEqual([]);
+      const asked = h.harness.recheckCount;
+      open();
+      await refresh;
+      expect(h.harness.recheckCount).toBeGreaterThan(asked);
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    });
+
+    it.each([
+      ["out of its session", () => Response.json(payload(100, 2, 0))],
+      [
+        "locked",
+        () =>
+          Response.json({
+            ...payload(5, 2, 0),
+            five_hour: { locked_reason: "seat_disabled" },
+          }),
+      ],
+    ])("a Team seat measured and %s is no destination by its login", async (_, work) => {
+      const h = await start(REFUSES, work);
+      expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("wait");
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("a Team seat not read that refused a turn is no destination by its login", async () => {
+      const h = await start(REFUSES, REFUSES);
+      expect((await dispatch(h, "other", "proj-2", OPUS)).action).toBe("proceed");
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "other", projectId: "proj-2" }),
+      });
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({
+          threadId: "other",
+          requestId: "creq_t15",
+          errorInfo: {
+            category: "unauthorized",
+            providerCode: null,
+            httpStatusCode: 403,
+          },
+          rateLimits: null,
+        }),
+      );
+      expect(h.harness.logEntries.map((e) => e.message).join("\n")).toContain(
+        "account work refused a turn",
+      );
+      const written = h.envSet.length;
+      expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("wait");
+      expect(h.envSet.slice(written).filter((e) => e.projectId === "proj-1")).toEqual([]);
+    });
+
+    it("a login that says no more than Max or Ultra is enough: to the Team seat, or it waits", async () => {
+      const free = await start(REFUSES, OK, true, {});
+      expect(await dispatch(free, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(free.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+      free.harness.dispose();
+      const full = await start(REFUSES, OK, true, {});
+      expect((await dispatch(full, "other", "proj-2", OPUS)).action).toBe("proceed");
+      expect((await dispatch(full, "t1", "proj-1", OPUS)).action).toBe("wait");
+    });
+
+    it("with its project's account not read either, it keeps waiting past the read retries", async () => {
+      const options: HostOptions = {
+        settings: { ...FABLE, seatsTeam: 1 },
+        presetEnv: { "proj-1": on("spare") },
+      };
+      const h = await host(
+        {
+          main: () => Response.json(teamPayload(10, 100)),
+          spare: REFUSES,
+          work: () => Response.json(teamPayload(10, 100)),
+        },
+        options,
+      );
+      dispose = () => h.harness.dispose();
+      h.files[`${ACCOUNTS}/spare/.claude.json`] = JSON.stringify({
+        oauthAccount: {
+          accountUuid: "uuid-spare",
+          emailAddress: "spare@example.com",
+          organizationType: "claude_max",
+          planDisplayName: "Ultra",
+        },
+      });
+      teamLogin(h, "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      options.failEnvRead = ["proj-1"];
+      for (let i = 0; i < 12; i++)
+        expect((await dispatch(h, "t1", "proj-1", OPUS, i > 0)).action).toBe("wait");
+    });
+
+    it("with all the reads down and a Team seat free by its login, the turn goes there", async () => {
+      const h = await start(REFUSES, REFUSES);
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+      expect(h.harness.logEntries.map((e) => e.message).join("\n")).toContain("spare is not read yet");
+    });
+
+    it("Fable, or a Team seat not read yet, starts as ever", async () => {
+      const fable = await start(REFUSES);
+      expect(await dispatch(fable, "t1", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      expect(fable.envSet).toEqual([]);
+      fable.harness.dispose();
+      const team = await start(OK, REFUSES, false);
+      expect(await dispatch(team, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(team.envSet).toEqual([]);
+    });
+  });
+
+  describe("T16 a sibling admitted to its Team seat and not started keeps the project there", () => {
+    const admitted = async () => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 88, 50)),
+          spare: () => Response.json(payload(81, 48, 100)),
+          work: () => Response.json(payload(0, 2, 0)),
+        },
+        { settings: { ...FABLE, seatsTeam: 1 } },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "c1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("spare") });
+      return h;
+    };
+
+    it("a sibling's Fable turn does not take it back to the Ultra", async () => {
+      const h = await admitted();
+      const written = h.envSet.length;
+      const r = await dispatch(h, "f1", "proj-1", FABLE_ID);
+      expect(r.action).toBe("wait");
+      expect(r.reason).toContain("about to start on spare");
+      expect(h.envDeleted).toEqual([]);
+      expect(h.envSet.length).toBe(written);
+    });
+
+    // No Team seat with Fable: the only account that runs it is the Ultra.
+    const noFable = async (ultra: "main" | "work", teams: string[]) => {
+      const fable = (name: string) => (teams.includes(name) ? 100 : 40);
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 30, fable("main"))),
+          spare: () => Response.json(payload(13, 30, fable("spare"))),
+          work: () => Response.json(payload(13, 30, fable("work"))),
+        },
+        { settings: { ...FABLE, seatsTeam: 2 }, presetEnv: { "proj-1": on("spare") } },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, ...teams);
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "c1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      return h;
+    };
+
+    it.each([
+      ["the default account: its variable deleted", "main", ["spare", "work"]],
+      ["a named one: its variable written", "work", ["main", "spare"]],
+    ] as const)("with no Team running Fable, a Fable turn does not move it to the Ultra, %s", async (_, ultra, teams) => {
+      const h = await noFable(ultra, [...teams]);
+      const set = h.envSet.length;
+      const deleted = h.envDeleted.length;
+      const r = await dispatch(h, "f1", "proj-1", FABLE_ID);
+      expect(r.action).toBe("wait");
+      expect(r.reason).toContain("about to start on");
+      expect(h.envSet.length).toBe(set);
+      expect(h.envDeleted.length).toBe(deleted);
+      // Once the sibling runs, the Fable turn goes where Fable runs.
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "c1", projectId: "proj-1" }),
+      });
+      expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("proceed");
+      if (ultra === "main") expect(h.envDeleted.length).toBe(deleted + 1);
+      else expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    });
+
+    it("a new sibling with no Team running Fable does not move it either", async () => {
+      const h = await noFable("main", ["spare", "work"]);
+      const set = h.envSet.length;
+      await h.harness.behavior.emitThreadEvent("thread.created", {
+        thread: thread({ id: "c2", projectId: "proj-1" }),
+      });
+      await vi.waitFor(() =>
+        expect(h.harness.logEntries.map((e) => e.message).join("\n")).toContain("thread c2: not placed"),
+      );
+      expect(h.envSet.length).toBe(set);
+      expect(h.envDeleted).toEqual([]);
+    });
+
+    describe("a sibling another plugin keeps holding, asked again and again", () => {
+      const asked = async (clock: () => number) => {
+        const h = await host(
+          {
+            main: () => Response.json(payload(13, 30, 40)),
+            spare: () => Response.json(payload(13, 30, 100)),
+            work: () => Response.json(payload(13, 30, 100)),
+          },
+          { settings: { ...FABLE, seatsTeam: 2 }, presetEnv: { "proj-1": on("spare") }, clock },
+        );
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "spare", "work");
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        return h;
+      };
+
+      it("ties the project for the 90 s of a seat, not for as long as it is asked", async () => {
+        let clock = NOW;
+        const h = await asked(() => clock);
+        for (let t = 0; t <= 90_000; t += 30_000) {
+          clock = NOW + t;
+          expect((await dispatch(h, "c1", "proj-1", OPUS)).action).toBe("proceed");
+        }
+        // Past that, its last answer is 10 s old: the project goes.
+        clock = NOW + 100_000;
+        expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("proceed");
+        expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-1"]);
+      });
+
+      it.each([
+        ["past the 90 s", 120_000, 120_000],
+        ["right before them", 85_000, 91_000],
+      ])("the answer the turn goes on ties it too: %s", async (_, lastAsked, sibling) => {
+        let clock = NOW;
+        const h = await asked(() => clock);
+        expect((await dispatch(h, "c1", "proj-1", OPUS)).action).toBe("proceed");
+        clock = NOW + lastAsked;
+        expect((await dispatch(h, "c1", "proj-1", OPUS)).action).toBe("proceed");
+        clock = NOW + sibling;
+        expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("wait");
+        expect(h.envDeleted).toEqual([]);
+      });
+
+      it("10 s after that answer it no longer does", async () => {
+        let clock = NOW;
+        const h = await asked(() => clock);
+        expect((await dispatch(h, "c1", "proj-1", OPUS)).action).toBe("proceed");
+        clock = NOW + 120_000;
+        expect((await dispatch(h, "c1", "proj-1", OPUS)).action).toBe("proceed");
+        clock = NOW + 129_999;
+        expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("wait");
+        clock = NOW + 130_000;
+        expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("proceed");
+      });
+    });
+
+    it("two siblings only admitted from a queue do not hold each other: the account ran out, both leave at once", async () => {
+      let out = false;
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 30, 40)),
+          spare: () => Response.json(out ? payload(100, 100, 100) : payload(13, 30, 40)),
+          work: () => Response.json(payload(13, 30, 40)),
+        },
+        {
+          settings: { ...FABLE, seatsMax: 2 },
+          presetEnv: { "proj-1": on("spare"), "proj-2": on("spare"), "proj-3": on("work"), "proj-4": on("main") },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      const run = async (id: string, projectId: string) => {
+        expect((await dispatch(h, id, projectId, FABLE_ID)).action).toBe("proceed");
+        await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id, projectId }) });
+      };
+      const end = (id: string, projectId: string) =>
+        h.harness.behavior.emitThreadEvent("thread.idle", { thread: thread({ id, projectId }) });
+      for (const [id, projectId] of [["s1", "proj-2"], ["s2", "proj-2"], ["w1", "proj-3"], ["w2", "proj-3"], ["m1", "proj-4"], ["m2", "proj-4"]] as const)
+        await run(id, projectId);
+      expect((await dispatch(h, "a1", "proj-1", FABLE_ID)).action).toBe("wait");
+      expect((await dispatch(h, "a2", "proj-1", FABLE_ID)).action).toBe("wait");
+      out = true;
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      await end("w1", "proj-3");
+      await end("w2", "proj-3");
+      await end("s1", "proj-2");
+      await end("s2", "proj-2");
+      expect((await dispatch(h, "a1", "proj-1", FABLE_ID)).action).toBe("proceed");
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+      expect((await dispatch(h, "a2", "proj-1", FABLE_ID)).action).toBe("proceed");
+    });
+
+    it("a new project keeps its placement for the next thread when a sibling was about to start", async () => {
+      let up = false;
+      const usage = () => (up ? Response.json(payload(5, 5, 5)) : new Response(null, { status: 500 }));
+      const h = await host(
+        {
+          main: () => (up ? Response.json(payload(90, 90, 90)) : new Response(null, { status: 500 })),
+          spare: usage,
+          work: usage,
+        },
+        { settings: FABLE, projectCreatedAt: { "proj-9": NOW + 1_000 } },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect((await dispatch(h, "x", "proj-9", FABLE_ID)).action).toBe("proceed");
+      up = true;
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      await h.harness.behavior.emitThreadEvent("thread.created", {
+        thread: thread({ id: "y", projectId: "proj-9" }),
+      });
+      await vi.waitFor(() =>
+        expect(h.harness.logEntries.map((e) => e.message).join("\n")).toContain("thread y: not placed"),
+      );
+      expect(h.envSet).toEqual([]);
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "x", projectId: "proj-9" }),
+      });
+      await h.harness.behavior.emitThreadEvent("thread.created", {
+        thread: thread({ id: "z", projectId: "proj-9" }),
+      });
+      await vi.waitFor(() =>
+        expect(h.envSet.filter((e) => e.projectId === "proj-9")).toHaveLength(1),
+      );
+    });
+
+    it("a move dropped for a sibling does not make that sibling's start unknown: its refusal is marked", async () => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(100, 40)),
+          spare: () => Response.json(payload(10, 60)),
+          work: () => Response.json(payload(5, 20)),
+        },
+        {},
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id: "thread-3", projectId: "proj-1" }),
+          requestedExecution: { providerId: "claude-code", model: "claude-fable-5-1" },
+          attempt: "start-turn",
+        }),
+      );
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "thread-3", projectId: "proj-1" }),
+      });
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({
+          threadId: "thread-3",
+          requestId: "creq_t16",
+          errorInfo: { category: "unauthorized", providerCode: null, httpStatusCode: 403 },
+          rateLimits: null,
+        }),
+      );
+      expect(h.harness.logEntries.map((e) => e.message).join("\n")).toContain("account main refused a turn");
+    });
+
+    it("a sibling's move cannot land between a turn's seat and its proceed, whatever the timing", async () => {
+      for (let read = 1; read <= 3; read += 1)
+        for (let ticks = 0; ticks <= 24; ticks += 1) {
+          let open!: () => void;
+          const gate = new Promise<void>((resolve) => {
+            open = resolve;
+          });
+          let reads = 0;
+          let armed = false;
+          const h = await host(
+            {
+              main: () => Response.json(payload(13, 30, 40)),
+              spare: () => Response.json(payload(13, 30, 100)),
+              work: () => Response.json(payload(13, 30, 100)),
+            },
+            {
+              settings: { ...FABLE, seatsTeam: 2 },
+              presetEnv: { "proj-1": on("spare") },
+              afterEnvRead: async () => {
+                if (!armed) return;
+                reads += 1;
+                // The sibling's read waits; each of the turn's reads may let it go.
+                if (reads === 1) return gate;
+                if (reads - 1 !== read) return;
+                void (async () => {
+                  for (let i = 0; i < ticks; i += 1) await Promise.resolve();
+                  open();
+                })();
+              },
+            },
+          );
+          teamLogin(h, "spare", "work");
+          await h.harness.behavior.callRpc("accounts_refresh", null);
+          armed = true;
+          const fable = dispatch(h, "f1", "proj-1", FABLE_ID);
+          await vi.waitFor(() => expect(reads).toBe(1));
+          const opus = await dispatch(h, "c1", "proj-1", OPUS);
+          open();
+          await fable;
+          // Told to start on its Team seat, it must still start there.
+          if (opus.action === "proceed") expect([read, ticks, h.envDeleted]).toEqual([read, ticks, []]);
+          h.harness.dispose();
+        }
+    }, 60_000);
+
+    describe("what ends the hold", () => {
+      const held = async (clock: () => number = () => NOW) => {
+        const h = await host(
+          {
+            main: () => Response.json(payload(13, 30, 40)),
+            spare: () => Response.json(payload(13, 30, 100)),
+            work: () => Response.json(payload(13, 30, 100)),
+          },
+          { settings: { ...FABLE, seatsTeam: 2 }, presetEnv: { "proj-1": on("spare") }, clock },
+        );
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "spare", "work");
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        expect((await dispatch(h, "c1", "proj-1", OPUS)).action).toBe("proceed");
+        expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("wait");
+        return h;
+      };
+
+      it("its message cancelled: the project goes at the next look", async () => {
+        const h = await held();
+        await h.harness.behavior.emitThreadEvent("message.cancelled" as never, {
+          entry: { id: "row-c1", threadId: "c1", payload: { kind: "message" } },
+        } as never);
+        expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("proceed");
+      });
+
+      it.each([
+        ["cancelled", (h: Awaited<ReturnType<typeof host>>) =>
+          h.harness.behavior.emitThreadEvent("message.cancelled" as never, {
+            entry: { id: "row-c1", threadId: "c1", payload: { kind: "message" } },
+          } as never)],
+        ["failed before it started", (h: Awaited<ReturnType<typeof host>>) =>
+          h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "c1", requestId: "creq_c1" }))],
+      ])("its message %s: a new one of that thread, past the 90 s, holds again", async (_, gone) => {
+        let clock = NOW;
+        const h = await held(() => clock);
+        await gone(h);
+        clock = NOW + 120_000;
+        expect((await dispatch(h, "c1", "proj-1", OPUS)).action).toBe("proceed");
+        // Past its 10 s too: only a count that started anew still holds.
+        clock = NOW + 135_000;
+        const set = h.envSet.length;
+        const deleted = h.envDeleted.length;
+        expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("wait");
+        expect(h.envSet.length).toBe(set);
+        expect(h.envDeleted.length).toBe(deleted);
+      });
+
+      describe("a message queued behind a running turn", () => {
+        const queuedBehind = async (h: Awaited<ReturnType<typeof host>>) => {
+          await h.harness.behavior.emitThreadEvent("thread.active", {
+            thread: thread({ id: "c1", projectId: "proj-1" }),
+          });
+          expect(
+            await h.harness.registrations.hooks["message.dispatch"]!(
+              makeMessageDispatchHookContext({
+                thread: thread({ id: "c1", projectId: "proj-1", status: "active" }),
+                requestedExecution: { providerId: "claude-code", model: OPUS },
+                attempt: "start-turn",
+              }),
+            ),
+          ).toEqual({ action: "proceed" });
+        };
+
+        it("does not hold the project while that turn runs", async () => {
+          const h = await held();
+          await queuedBehind(h);
+          expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("proceed");
+        });
+
+        it("does not leave the real start without its hold, 10 minutes later", async () => {
+          let clock = NOW;
+          const h = await held(() => clock);
+          await queuedBehind(h);
+          clock = NOW + 600_000;
+          await h.harness.behavior.emitThreadEvent("thread.idle", {
+            thread: thread({ id: "c1", projectId: "proj-1" }),
+          });
+          expect((await dispatch(h, "c1", "proj-1", OPUS)).action).toBe("proceed");
+          const set = h.envSet.length;
+          const deleted = h.envDeleted.length;
+          expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("wait");
+          expect(h.envSet.length).toBe(set);
+          expect(h.envDeleted.length).toBe(deleted);
+        });
+      });
+
+      it("its next turn holds again: the hold is counted from each turn, not the thread's first", async () => {
+        let clock = NOW;
+        const h = await held(() => clock);
+        await h.harness.behavior.emitThreadEvent("thread.active", {
+          thread: thread({ id: "c1", projectId: "proj-1" }),
+        });
+        await h.harness.behavior.emitThreadEvent("thread.idle", {
+          thread: thread({ id: "c1", projectId: "proj-1" }),
+        });
+        clock = NOW + 120_000;
+        expect((await dispatch(h, "c1", "proj-1", OPUS)).action).toBe("proceed");
+        expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("wait");
+      });
+    });
+
+    it("a seat that lapses without its turn starting lets the project go", async () => {
+      let clock = NOW;
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 30, 40)),
+          spare: () => Response.json(payload(13, 30, 100)),
+          work: () => Response.json(payload(13, 30, 100)),
+        },
+        { settings: { ...FABLE, seatsTeam: 2 }, presetEnv: { "proj-1": on("spare") }, clock: () => clock },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "c1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("wait");
+      clock = NOW + 91_000;
+      expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("proceed");
+      expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-1"]);
+    });
+
+    it("a sibling admitted to a seat on another account does not hold the project", async () => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 30, 40)),
+          spare: () => Response.json(payload(13, 30, 0)),
+          work: () => Response.json(payload(13, 30, 0)),
+        },
+        {
+          settings: { ...FABLE, seatsTeam: 1 },
+          presetEnv: { "proj-1": on("main"), "proj-2": on("spare"), "proj-3": on("work") },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      const run = async (id: string, projectId: string) => {
+        expect((await dispatch(h, id, projectId, OPUS)).action).toBe("proceed");
+        await h.harness.behavior.emitThreadEvent("thread.active", {
+          thread: thread({ id, projectId }),
+        });
+      };
+      const end = (id: string, projectId: string) =>
+        h.harness.behavior.emitThreadEvent("thread.idle", {
+          thread: thread({ id, projectId }),
+        });
+      await run("o1", "proj-2");
+      await run("o2", "proj-3");
+      expect((await dispatch(h, "a1", "proj-1", OPUS)).action).toBe("wait");
+      await end("o1", "proj-2");
+      const seats = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+      expect(seats.seats?.spare?.queued ?? []).toEqual([]);
+      await end("o2", "proj-3");
+      // a1 holds its seat on spare, the project is on main: another turn may leave main.
+      expect((await dispatch(h, "a2", "proj-1", OPUS)).action).toBe("proceed");
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    });
+
+    it("a failed turn of a sibling is retried where the project is, and does not carry the admitted one away", async () => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(100, 40)),
+          spare: () => Response.json(payload(10, 60)),
+          work: () => Response.json(payload(5, 20)),
+        },
+        {},
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id: "thread-3", projectId: "proj-1" }),
+          requestedExecution: { providerId: "claude-code", model: "claude-fable-5-1" },
+          attempt: "start-turn",
+        }),
+      );
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(h.envSet).toEqual([]);
+      expect(h.retries.map((r) => r.reason)).toEqual([
+        "Retrying: the project stays on its account for now",
+      ]);
+    });
+
+    it("a new sibling does not take it back either", async () => {
+      const h = await admitted();
+      await h.harness.behavior.emitThreadEvent("thread.created", {
+        thread: thread({ id: "c2", projectId: "proj-1" }),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(h.envDeleted).toEqual([]);
+    });
+
+    it("once it runs, the way home is open again", async () => {
+      const h = await admitted();
+      expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("wait");
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "c1", projectId: "proj-1" }),
+      });
+      expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("proceed");
+      expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-1"]);
+    });
+  });
+
+  it("T3b a pick by hand of an Ultra with every Team seat full waits: it does not run Opus there", async () => {
+    const h = await incident(INCIDENT, { presetEnv: { "proj-1": on("work") } });
+    expect((await dispatch(h, "t1", "proj-3", OPUS)).action).toBe("proceed");
+    await h.harness.behavior.runCli(["use", "proj-1", "main"]);
+    expect(h.envDeleted.at(-1)).toMatchObject({ projectId: "proj-1" });
+    const r = await dispatch(h, "t2", "proj-1", OPUS);
+    expect(r.action).toBe("wait");
+    expect(r.reason).toContain("main keeps its weekly for Fable");
+  });
+
+  it("T3 a pick by hand of an Ultra does not make it run Opus: «Esperar siempre» holds, and the turn goes to the Team seat", async () => {
+    const h = await incident(INCIDENT, { presetEnv: { "proj-1": on("work") } });
+    await h.harness.behavior.runCli(["use", "proj-1", "main"]);
+    expect(h.envDeleted.at(-1)).toMatchObject({ projectId: "proj-1" });
+    expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
   });
 });

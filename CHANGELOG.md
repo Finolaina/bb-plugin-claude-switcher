@@ -4,6 +4,73 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.39] - 2026-11-04
+
+### Fixed
+
+- **A Team seat is a Team seat also once it reports a weekly.** Team seats
+  report a general weekly since November 2026, and the rule that keeps a
+  Max account's weekly for Fable took that as «this is a Max account»: only
+  the Team seats already out of Fable could take an Opus turn, and one of
+  them held up to 8 threads while the others stood free (2026-11-03,
+  `docs/revision-2026-11-04/PLAN.md`).
+- **A turn told to start keeps its project where it is until it starts.** A
+  turn reads the project's account as it starts, and the account belongs to
+  the whole project: a sibling's move in between could start an Opus turn on
+  an Ultra. No automatic move is written during that time (90 s from the
+  first answer and, for a turn another plugin holds and that is asked again,
+  10 s from each answer); the turn that wanted to move waits 30 s. A move by
+  hand is not held back.
+- **An incomplete usage answer that measured a window full is out.** It used
+  to read as unknown: a turn stayed on an account known to fail, a stuck
+  project was not rescued, and the veto on what only the clock frees did not
+  reach it. What is merely missing still says nothing.
+- **`--model opus` is an Opus turn.** A model named by its alias (`opus`,
+  `fable`, `sonnet`, `haiku`, with or without `[1m]`) was read as no model:
+  it skipped the reserve and, with the default account without a login, was
+  placed as Fable.
+- **An account out of the model takes no new turn while another can run
+  it.** The turn used to start there and fail; now it waits in the seat
+  queue of the account that can run it, and the checkpoint looks again just
+  before reserving. With no account able to run it the turn still starts
+  and fails: that failure is what tells the user and applies the longest
+  wait.
+- **A pick by hand takes effect at once**: bb is asked again for the
+  messages the plugin holds (up to 5 minutes otherwise), and the retries
+  with a far time are looked at without waiting for the refresh. A pick of
+  an Ultra still does not run Opus there («Esperar siempre», Aitor,
+  2026-11-03).
+- **A reload does not forget the model of a project's latest turn**
+  (`project-models` in storage): the rescue took a project working in Opus
+  off a Team seat out of Fable, for a Fable it did not need.
+
+### Added
+
+- **A thread held 10 minutes with another account free is said to be
+  stuck**: a `STUCK:` line in the log at most every 10 minutes per thread,
+  and `atascos` in `health --json` and `seats --json` (`null` when bb's
+  queue could not be read, never an empty list). `health` also gives
+  `pctExacto`, the unrounded percentage (99.6 % rounds to 100 and still
+  runs).
+- **`scripts/canario-cola.mjs`**, a canary from outside the plugin, every
+  10 minutes as a `bb automation` on bb's server. It warns when the plugin
+  holds a message 10 minutes with a usable account with a free seat that
+  could run it, seen in two looks in a row (a seat just freed is taken within
+  30 s); when it holds one 2 hours with none that could (one grouped
+  warning every 6 hours: the rule still waits, not in silence); and when a
+  failed message has been stopped 10 minutes. A failed read, or a `bb` that
+  hangs, exits 1, and warns after 30 minutes in a row.
+- **An account not read yet, whose login says Max or Ultra, runs no Opus**:
+  just after a reload, or with its reads failing, the turn goes to a free
+  Team seat or waits.
+- **The wait says why**: `Waiting for a seat on team5 for Opus: main keeps
+  its weekly for Fable; 2/2 threads running, 0 ahead in the queue`.
+
+### Changed
+
+- An account directory named as the default account is said once per load:
+  that line was 2373 of the 10000 the log keeps, and erased the evidence.
+
 ## [0.2.38] - 2026-11-03
 
 ### Changed
@@ -77,7 +144,7 @@ project uses [Semantic Versioning](https://semver.org/).
   of the preferred model judged every project for Fable, so a project
   whose threads run Opus left a Team seat (or a Max account out of
   Fable) that still ran Opus for a Max account that keeps Fable
-  (measured 2026-11-02 18:23: viaulab → aitor). It now judges each
+  (measured 2026-11-02 18:23). It now judges each
   project for the model of its latest turn, and moves one in Opus only
   where Opus spends no weekly Fable needs.
 - **After a turn in Opus that ran on a Max account that keeps Fable, the

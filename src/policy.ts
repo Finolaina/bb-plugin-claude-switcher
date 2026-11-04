@@ -19,6 +19,8 @@ export interface UsageWindow {
    * absent, it is empty until the next measurement.
    */
   absent?: true;
+  /** The answer left this window out: its 100 % is what is not known, not a measure. */
+  missing?: true;
 }
 
 export interface AccountUsage {
@@ -31,6 +33,13 @@ export interface AccountUsage {
   weekly: UsageWindow;
   /** Per-model weekly windows keyed by display name ("Fable", "Opus"...). */
   models: Record<string, UsageWindow>;
+  /**
+   * The login is a Team seat, whatever windows it reports: since November
+   * 2026 a Team seat reports a general weekly too (`list --json`, 2026-11-03),
+   * so `weekly.absent` no longer tells one. Set where the login is known
+   * (measuredAccounts).
+   */
+  team?: true;
 }
 
 export interface ChoiceOptions {
@@ -107,14 +116,15 @@ function deadline(account: AccountUsage, model: string): number {
 }
 
 /**
- * Whether a turn with `model` on this account counts against no weekly
- * window: the account has no general weekly at all (a Team seat) and no
- * window of the model's own. Only its 5-hour session is spent. A window of
- * the model that exists, settled or not, counts as spent.
+ * Whether a turn with `model` on this account spends no weekly the reserved
+ * model needs: a Team seat, or an account with no general weekly at all, and
+ * no window of the model's own. A window of the model that exists, settled
+ * or not, counts as spent.
  */
 export function spendsNoWeekly(account: AccountUsage, model: string): boolean {
   return (
-    account.weekly.absent === true && modelWindow(account, model) === undefined
+    (account.team === true || account.weekly.absent === true) &&
+    modelWindow(account, model) === undefined
   );
 }
 
@@ -132,12 +142,15 @@ export function reserving(options: ChoiceOptions): boolean {
  * Whether a turn with `preferredModel` on this account would spend a weekly
  * window the reserved model still needs: the account keeps the reserved
  * model (its window under 100 %, or no window of it: then it counts against
- * the general weekly) and has a general weekly window at all (a Max
- * account; a Team seat has none, measured 2026-10-11). On a Max account the
+ * the general weekly) and is a Max account: a Team seat spends nothing the
+ * reserved model needs, whether it reports a weekly or not (it reports one
+ * since November 2026). On a Max account the
  * general weekly and Fable's window reset together (measured 2026-10-13),
  * so what another model spends there is Fable's. Such an account is never
  * chosen for another model, not even as the last resort: the turn waits or
- * stays where it is ("the Max accounts are Fable's", 2026-10-13).
+ * stays where it is ("the Max accounts are Fable's", 2026-10-13). A Team seat
+ * never keeps it, also once it reports a weekly: it is where those turns go
+ * (Aitor 2026-11-03, «Esperar siempre»: the first free Team seat).
  */
 export function spendsReservedWeekly(
   account: AccountUsage,
@@ -146,6 +159,7 @@ export function spendsReservedWeekly(
   return (
     reserving(options) &&
     canRunModel(account, options.reserveModel!) &&
+    account.team !== true &&
     account.weekly.absent !== true
   );
 }

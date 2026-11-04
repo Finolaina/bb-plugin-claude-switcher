@@ -22,11 +22,20 @@ import {
   defineCli,
   defineRpcContract,
   type BbPluginApi,
+  type MessageDispatchHookContext,
   type MessageDispatchHookDecision,
   type PluginThreadEventPayloads,
   type PluginTurnFailedEvent,
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import {
+  STUCK_WAIT_MS,
+  atascoLine,
+  heldBy,
+  heldLong,
+  type Atasco,
+  type HeldRow,
+} from "./src/atascos.js";
 import {
   discoverAccounts,
   expandHome,
@@ -75,12 +84,14 @@ import {
   isRefusal,
   MAX_ATTEMPTS,
   mayAdviseOpus,
+  measuredOut,
   modelFamily,
   fullestWindow,
   opusInstead,
   opusInsteadText,
   RESET_BUFFER_MS,
   reserveWait,
+  unreadTeamSeats,
   RESET_JITTER_MS,
   settle,
   type PlacementInput,
@@ -88,6 +99,7 @@ import {
 } from "./src/switch.js";
 import {
   canRunModel,
+  chooseAccount,
   holdsForReserve,
   isUsable,
   modelWindow,
@@ -174,6 +186,22 @@ export const REBALANCE_SPREAD = 10;
  * measurement may free an account before the reset it waits for.
  */
 export const RESERVE_RECHECK_MS = 5 * 60_000;
+/**
+ * A turn told to start starts within this long nearly always, measured: half
+ * within 1 s, 90 % within 6 s (cuenta nuestra, docs/revision-2026-11-04/PLAN.md).
+ */
+const STARTING_MS = 10_000;
+/** Not asked again in this long, and no row held: that wait is over (every hold is asked again within RESERVE_RECHECK_MS). */
+const WAIT_FORGOTTEN_MS = 2 * RESERVE_RECHECK_MS;
+/** How long looking for stuck threads may take: it is only a look, and health and the refresh wait for it. */
+const STUCK_READ_LIMIT_MS = 15_000;
+/**
+ * Times a turn waits, SEAT_RECHECK_MS apart, on an account that cannot run it
+ * with another that can, before it starts anyway: the placement should have
+ * moved it, so a bb that fails every write would hold it for ever with no
+ * failure to see (code-reviewer r1). Started, it fails where the user is told.
+ */
+const BLOCKED_WAITS = 10;
 /** A seat reserved for a turn that has not started within this long is freed. */
 export const SEAT_TTL_MS = 90_000;
 /** Times a message waits because its project's account could not be read for its seat; then it goes (Astra SEATS-R01). */
@@ -240,6 +268,10 @@ const KV_SERIES = "usage-series";
 const KV_PACE = "pace-day";
 /** Seats held from outside bb (`reserve`): a reload must not lose them. */
 const KV_EXTERNAL = "external-seats";
+/** This plugin as bb names it in a queued row's `waitingOn`. */
+const PLUGIN_ID = "claude-switcher";
+/** The model of each project's latest turn (see projectModel). */
+const KV_PROJECT_MODELS = "project-models";
 const externalHoldSchema = z.object({
   id: z.string(),
   account: z.string(),
@@ -791,6 +823,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     },
     warn: (message) => bb.log.warn(message),
   });
+  /** What the accounts' look skips is said once per load: 2373 of the 10000 lines the log keeps were one such message (2026-11-03). */
+  const skipsSaid = new Set<string>();
+  const warnOnce = (message: string) => {
+    if (skipsSaid.has(message)) return;
+    skipsSaid.add(message);
+    bb.log.warn(message);
+  };
   let accounts: Account[] = [];
   /**
    * Each account's seat budget by name, kept while the accounts are looked
@@ -989,6 +1028,35 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         return true;
     return false;
   }
+  /**
+   * When each thread was told to start, first and last, until it starts, loses
+   * its seat or is told to wait. Another plugin may hold a turn this one lets
+   * go, asked again and again: that ties the project for SEAT_TTL_MS from the
+   * first time, then only for STARTING_MS from each, the time the turn that
+   * goes starts in (code-reviewer r6, r8).
+   */
+  const toldToStart = new Map<string, { first: number; last: number }>();
+  /**
+   * Another thread of the project told to start and not started. A turn reads the project's variable as it starts:
+   * moving the project now would start it on another account, one that may
+   * keep the reserve or not run its model (Astra IR5-001). A seat only
+   * admitted from a queue does not count: its turn is placed again before it
+   * starts. Measured from the log: half of the turns start within 1 s, 5 of
+   * 242 past SEAT_TTL_MS (docs/revision-2026-11-04/PLAN.md).
+   */
+  function siblingAdmitted(projectId: string, threadId?: string): string | null {
+    const now = deps.now();
+    for (const [sibling, project] of seatProjects) {
+      if (project !== projectId || sibling === threadId) continue;
+      const told = toldToStart.get(sibling);
+      if (
+        told !== undefined &&
+        (now - told.first < SEAT_TTL_MS || now - told.last < STARTING_MS)
+      )
+        return sibling;
+    }
+    return null;
+  }
   /** A thread of the project holds a seat or waits for one. */
   function projectAtSeats(projectId: string): boolean {
     for (const [threadId, project] of seatProjects)
@@ -1113,6 +1181,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function releaseSeat(threadId: string, why: string): void {
     seatTitles.delete(threadId);
     seatProjects.delete(threadId);
+    toldToStart.delete(threadId);
     unseated.delete(threadId);
     endedWhileCounting?.add(threadId);
     const key = seats.release(threadId);
@@ -1168,6 +1237,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function seatWait(
     thread: ThreadResponse,
     account: string,
+    /** Why this account and not the project's, for a turn queued elsewhere: what the log and the thread say. */
+    why?: string,
   ): MessageDispatchHookDecision | null {
     admitWaiting();
     const now = deps.now();
@@ -1185,7 +1256,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     seatTitles.set(thread.id, thread.title ?? null);
     const s = seats.snapshot([key])[key]!;
     const ahead = (seats.position(thread.id)?.position ?? 1) - 1;
-    const reason = `Waiting for a seat on ${account}: ${s.running + s.reserved + (s.external?.length ?? 0)}/${s.capacity} threads running, ${ahead} ahead in the queue`;
+    const taken = `${s.running + s.reserved + (s.external?.length ?? 0)}/${s.capacity} threads running, ${ahead} ahead in the queue`;
+    const reason =
+      why === undefined
+        ? `Waiting for a seat on ${account}: ${taken}`
+        : `Waiting for a seat on ${account} for ${why}; ${taken}`;
     bb.log.info(`thread ${thread.id}: ${reason}`);
     return { action: "wait", reason, sendAt: now + SEAT_RECHECK_MS };
   }
@@ -1229,6 +1304,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (refusing(name)) return "refused a turn";
     if (reservedFor(name, model) && canRunHere(name, model))
       return `would spend ${current.preferredModel}'s weekly`;
+    const known = measuredAccounts(model).find((a) => a.name === name);
+    if ((known === undefined || known.unknown === true) && unreadKeepsReserve(name))
+      return `is not read yet and may spend ${current.preferredModel}'s weekly`;
     return model === "" ? "is out of usage" : `cannot run ${model}`;
   }
   /** `name` is measured able to run `model`, the reserve apart. */
@@ -1409,6 +1487,21 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   } catch (error) {
     bb.log.warn(
       `could not read the seats held from outside bb; they are not counted: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  // The model of each project's latest turn (see projectModel). Not read:
+  // nothing is written over what it holds, for a later load to find.
+  let storedProjectModels: Record<string, string> = {};
+  let projectModelsRead = true;
+  try {
+    const parsed = z
+      .record(z.string(), z.string())
+      .safeParse(await bb.storage.kv.get<unknown>(KV_PROJECT_MODELS));
+    if (parsed.success) storedProjectModels = parsed.data;
+  } catch (error) {
+    projectModelsRead = false;
+    bb.log.warn(
+      `could not read the projects' models; the preferred model judges them, and they are not stored until a reload: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
   // The seat samples kept; one of another shape (before 0.2.31's second
@@ -1841,7 +1934,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     accounts = await discoverAccounts(deps.accountsIo, {
       accountsDir: current.accountsDir,
       defaultAccountName: current.defaultAccountName,
-      warn: (message) => bb.log.warn(message),
+      warn: warnOnce,
     });
     noteSeatKeys();
     // A measurement of an account that is gone must never be chosen.
@@ -1872,6 +1965,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * code-reviewer r7, CR-L1).
    */
   let refreshes = 0;
+  /** A turn was held off the reserve before the first reads: they ask it again. */
+  let firstReadsAwaited = false;
   function askBannersAgain(): void {
     passAgain = true;
     bannerPass ??= (async () => {
@@ -1899,9 +1994,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       await recordSamples();
       bb.realtime.publish(CHANGED, { at: deps.now() });
     } finally {
+      const first = refreshes === 0;
       refreshes += 1;
       // Seats reserved for turns that never started are freed with it.
       admitWaiting();
+      // What waited on the accounts not read yet does not wait a full recheck.
+      if (first && firstReadsAwaited)
+        void bb.experimental_hooks
+          .recheck("message.dispatch")
+          .catch((error: unknown) =>
+            bb.log.warn(
+              `bb not asked again after the first reads: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          );
       // Also when the refresh fails: the reads it left grow old, and a
       // banner on reads older than two refreshes must go (Sol B2-R5-001).
       askBannersAgain();
@@ -2146,6 +2251,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     options: {
       byHand?: boolean;
       share?: boolean;
+      /** The thread the move is for: its own seat does not hold the project back (see siblingAdmitted). */
+      forThread?: string;
       /** Asked with the other checks after the sessions are shared: false drops the move (Codex OPUS-R5-002). */
       stillValid?: () => boolean;
     } = {},
@@ -2156,6 +2263,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
     }
     const toName = account === null ? current.defaultAccountName : account.name;
+    const fromName = from.account ?? current.defaultAccountName;
+    // Every automatic move, whatever its reason (Astra IR5-001).
+    const siblingHolds = (): boolean => {
+      if (options.byHand === true || toName === fromName) return false;
+      const admitted = siblingAdmitted(projectId, options.forThread);
+      if (admitted === null) return false;
+      bb.log.info(
+        `project ${projectId}: not moved to ${toName}: thread ${admitted} was told to start where it is and has not`,
+      );
+      return true;
+    };
+    // Dropped here it is no move: a sibling's start stays known.
+    if (siblingHolds()) return false;
     // A move for real (another account name): counted before the write
     // starts and once it is over, landed or not.
     const move =
@@ -2205,6 +2325,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           return false;
         }
       }
+      // Again after the sessions were shared: nothing is awaited between
+      // this look and the write.
+      if (siblingHolds()) return false;
       if (move !== null) {
         move.writes += 1;
         wrote = true;
@@ -2328,9 +2451,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
 
   /** Measurements recent enough to decide on (see maxReadAgeMs). */
   function measuredAccounts(model = current.preferredModel) {
-    // A refusing account is out, whatever its numbers say.
-    return collector.usable(maxReadAgeMs(), model).map((a) => {
-      if (!refusing(a.name)) return a;
+    // A refusing account is out, whatever its numbers say; so is one whose
+    // answer, incomplete, still says it is full.
+    return collector.usable(maxReadAgeMs(), model).map((measured) => {
+      const login = accounts.find((account) => account.name === measured.name);
+      const a =
+        login !== undefined && planOf(login, measured).plan === "team"
+          ? { ...measured, team: true as const }
+          : measured;
+      if (!refusing(a.name) && !measuredOut(a, model, deps.now())) return a;
       const { unknown: _, ...known } = a;
       return { ...known, blocked: true };
     });
@@ -2447,12 +2576,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   /**
    * No login, or MEASURED unable to run any model: a turn sent there would
-   * fail. Not measured yet, an incomplete answer, or no preferred model left
-   * do not count: those accounts may still run it.
+   * fail. Not measured yet, an incomplete answer with nothing measured full
+   * for every model, or no preferred model left do not count: those accounts
+   * may still run it.
    */
   function cannotRun(name: string): boolean {
     if (loggedOut(name)) return true;
-    const known = measuredAccounts().find((a) => a.name === name);
+    const known = measuredAccounts("").find((a) => a.name === name);
     return (
       known !== undefined &&
       known.unknown !== true &&
@@ -2497,6 +2627,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // that applied nothing (refused, or failed before): that read would clear
     // the error Settings shows for it.
     let applied = false;
+    let measuredPick = false;
     try {
       await inProjectQueue(projectId, async () => {
         await discover();
@@ -2512,6 +2643,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         await markHandled(projectId);
         const fromName = from.account ?? current.defaultAccountName;
         const toName = to?.name ?? current.defaultAccountName;
+        measuredPick = collector.get(toName) !== undefined;
         if (toName === fromName) return;
         bb.log.info(
           `project ${projectId}: picked by hand, ${fromName} → ${toName}`,
@@ -2546,7 +2678,28 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         else recentSwitches.delete(projectId);
       });
     } finally {
-      if (applied) bb.realtime.publish(CHANGED, { at: deps.now() });
+      if (applied) {
+        bb.realtime.publish(CHANGED, { at: deps.now() });
+        // What waits for this project is looked at now, not at its next
+        // ask (up to RESERVE_RECHECK_MS) or refresh: outside the project's
+        // queue, which the reads below enter themselves. recheck asks for
+        // the rows held by a plugin; the retries with a time are revisited.
+        void bb.experimental_hooks
+          .recheck("message.dispatch")
+          .catch((error: unknown) =>
+            bb.log.warn(
+              `bb not asked again after a pick: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          );
+        // An account never measured (just after a load) may have no login:
+        // nothing is released on it before the refresh looks at it.
+        if (measuredPick)
+          void revisitWaits().catch((error: unknown) =>
+            bb.log.warn(
+              `the waiting turns were not looked at again after a pick: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          );
+      }
     }
   }
 
@@ -3354,6 +3507,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       await markHandled(projectId);
       return;
     }
+    // Not its placement yet: the next thread of a new project is placed.
+    if (siblingAdmitted(projectId) !== null) {
+      bb.log.info(
+        `thread ${thread.id}: not placed (another thread is about to start on ${fromName})`,
+      );
+      return;
+    }
     if (
       !(await applyAccount(projectId, accountOrDefault(decision.account), latest))
     ) {
@@ -3558,7 +3718,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (decision.kind === "keep") return;
     // Moved by something else while the sessions were shared: this
     // decision, taken on the account before, no longer holds.
-    if (!(await applyAccount(projectId, accountOrDefault(decision.account), from)))
+    if (
+      !(await applyAccount(projectId, accountOrDefault(decision.account), from, {
+        forThread: thread.id,
+      }))
+    )
       return;
     await markHandled(projectId);
     noteMove(projectId, fromName, decision.account, model, before);
@@ -3746,7 +3910,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // ended first: Codex OPUS-R4-001); a move or a pick meanwhile stops
     // only the move below (Codex OPUS-R3-002).
     if ((projectModel.get(projectId)?.at ?? 0) < started.activity)
-      projectModel.set(projectId, { model, at: started.activity });
+      noteProjectModel(projectId, model, started.activity);
     read();
     if (!stillLatest()) return;
     if (!reserving({ preferredModel: model, reserveModel: current.preferredModel }))
@@ -3773,13 +3937,43 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   // ---- No project left where a turn cannot run ---------------------------
   /**
    * The model of each project's latest turn, as its checkpoint or the end
-   * of the turn named it (in memory: a reload forgets it, and the preferred
-   * model decides again). Aitor 2026-11-03: the rescue judged every project
+   * of the turn named it, kept over a reload (with `at: 0`, so any new turn
+   * beats it: measured 2026-11-03 17:59Z, a reload that forgot it made the
+   * rescue move 7 projects). Aitor 2026-11-03: the rescue judged every project
    * for the preferred model, and moved one working in Opus off a Team seat
    * (or a Max account out of Fable) that still ran Opus, to a Max account
-   * whose weekly Fable needs (viaulab → aitor, 2 Nov 18:23).
+   * whose weekly Fable needs (2 Nov 18:23).
    */
-  const projectModel = new Map<string, { model: string; at: number }>();
+  const projectModel = new Map<string, { model: string; at: number }>(
+    Object.entries(storedProjectModels).map(([id, model]) => [
+      id,
+      { model, at: 0 },
+    ]),
+  );
+  /** Writes in order (see storeHolds). */
+  let projectModelWrites: Promise<void> = Promise.resolve();
+  /** The latest write failed: the next turn stores it again, also with no change (Codex IR-001). */
+  let projectModelsUnsaved = false;
+  /** Stored as it changes, without holding the turn back: a failed write is logged and tried again. */
+  function noteProjectModel(projectId: string, model: string, at: number): void {
+    const before = projectModel.get(projectId)?.model;
+    projectModel.set(projectId, { model, at });
+    if (!projectModelsRead || (before === model && !projectModelsUnsaved)) return;
+    const snapshot = Object.fromEntries(
+      [...projectModel].map(([id, known]) => [id, known.model]),
+    );
+    projectModelWrites = projectModelWrites.then(async () => {
+      try {
+        await bb.storage.kv.set(KV_PROJECT_MODELS, snapshot);
+        projectModelsUnsaved = false;
+      } catch (error) {
+        projectModelsUnsaved = true;
+        bb.log.warn(
+          `could not store the projects' models (a reload forgets them): ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    });
+  }
   /** The model a project's next turn is judged for: its latest turn's, else the preferred one. */
   function modelOfProject(projectId: string): string {
     return projectModel.get(projectId)?.model ?? current.preferredModel;
@@ -3808,7 +4002,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * on an exhausted account or one without a login without moving by
    * itself, respecting the seats»): bb greys out the composer of a project
    * whose account is at its limit, so the dispatch checkpoint never gets to
-   * move it (Mariscal · Web on ganaresenas, Fable at 100 %). Each project
+   * move it (Fable at 100 %). Each project
    * this plugin may move (not external) whose account cannot run the
    * preferred model goes to the best account with a free seat, as a
    * placement would choose it, whatever switchAheadPercent says. With none,
@@ -3973,9 +4167,25 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     starting.delete(threadId);
     dispatchEpoch.delete(threadId);
   }
+  /** Since when this plugin holds each thread's message: answered "wait", until it goes (see src/atascos.ts). */
+  const waitSince = new Map<string, number>();
+  /** When bb last heard "wait" for each of them: bb hides a row while it asks again (Codex R1-001), so a row missing from a read is not yet a wait over. */
+  const waitAsked = new Map<string, number>();
+  /** When each thread was last said to be stuck. */
+  const stuckSaid = new Map<string, number>();
+  /** How many times each thread waited in a row at the last look (see BLOCKED_WAITS). */
+  const blockedWaits = new Map<string, number>();
+  function forgetWait(threadId: string): void {
+    waitSince.delete(threadId);
+    waitAsked.delete(threadId);
+    blockedWaits.delete(threadId);
+  }
   bb.events.on("thread.active", async ({ thread }) => {
-    // A turn of it runs: the advice of its last failure is over.
+    // A turn of it runs: the advice of its last failure is over, and whatever
+    // it waited for (a message sent with "Send now" is never asked about).
     adviceOver(thread.id);
+    forgetWait(thread.id);
+    toldToStart.delete(thread.id);
     // A hidden thread's turn too: it runs on the project's account, and
     // keeps the project there (Codex PLAZAS-R2-003).
     if (thread.providerId === CLAUDE_CODE_PROVIDER) {
@@ -4087,6 +4297,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     startWaits.delete(thread.id);
     threadModel.delete(thread.id);
     adviceOver(thread.id);
+    forgetWait(thread.id);
+    toldToStart.delete(thread.id);
+    stuckSaid.delete(thread.id);
     // Forgotten in storage too, or the stored list only grows (Codex r8,
     // IR8-004).
     if (cancelled.delete(thread.id)) await storeCancelled(thread.id);
@@ -4203,7 +4416,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       freeSeats:
         own === null
           ? freeSeats
-          : (name) => freeSeats(name) + (seatKey(name) === own.account ? 1 : 0),
+          : (name) =>
+              // Its own seat is one whatever the rest: with the capacity
+              // lowered since it was admitted, free is below zero.
+              seatKey(name) === own.account
+                ? Math.max(freeSeats(name), 0) + 1
+                : freeSeats(name),
       ...paceFilter(background),
       now,
     };
@@ -4220,8 +4438,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     now: number,
     /** Why the turn does not run where the project is. */
     here: string,
-  ): { sendAt: number; reason: string; seatOn?: string } {
+  ): { sendAt: number; reason: string; seatOn?: string; seatWhy?: string } {
     const reserve = current.preferredModel;
+    if (refreshes === 0) firstReadsAwaited = true;
     const free = reserveWait(input);
     if (free === null)
       return {
@@ -4233,22 +4452,111 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         sendAt: now + SEAT_RECHECK_MS,
         reason: `Waiting for a free seat for ${model} on ${free.account}: ${here}`,
         seatOn: free.account,
+        seatWhy: `${model}: ${here}`,
       };
     return {
       sendAt: Math.min(free.at + RESET_BUFFER_MS, now + RESERVE_RECHECK_MS),
       reason: `Waiting for ${model} on ${free.account}, free from ${isoInZone(free.at).slice(0, 16).replace("T", " ")}: ${here}`,
     };
   }
+  /** The accounts other than `name` that could take a turn in `model` now: a free seat no queue is ahead for, and the reserve spared. */
+  function freeElsewhere(name: string, model: string): string[] {
+    const now = deps.now();
+    return measuredAccounts(model)
+      .filter((a) => a.name !== name)
+      .map((a) => settle(a, now))
+      .filter(
+        (a) =>
+          chooseAccount([a], {
+            preferredModel: model,
+            reserveModel: current.preferredModel,
+            freeSeats: seatRoom,
+          }) !== null,
+      )
+      .map((a) => a.name);
+  }
+  /**
+   * The best account other than `name` that can run `model` now, its seats
+   * aside and without spending the reserve; null when none can.
+   */
+  function otherThatRuns(name: string, model: string): string | null {
+    const now = deps.now();
+    const options = { preferredModel: model, reserveModel: current.preferredModel };
+    const measured = measuredAccounts(model);
+    return (
+      chooseAccount(
+        measured.filter((a) => a.name !== name).map((a) => settle(a, now)),
+        options,
+      )?.account ??
+      // A Team seat known by its login, for what the reserve is kept from.
+      (holdsForReserve(options)
+        ? chooseAccount(
+            unreadTeamSeats({
+              accounts: measured,
+              unreadTeams: unreadTeams(model),
+              currentAccount: name,
+              now,
+            }),
+            options,
+          )?.account
+        : null) ??
+      null
+    );
+  }
+  /**
+   * A turn in `model` on `name` could not run there, as measured now, and
+   * another account can: it waits and is placed again, rather than start
+   * where it fails (a pick by hand that crossed its placement).
+   */
+  function blockedOff(name: string, model: string): boolean {
+    const usage = measuredAccounts(model).find((a) => a.name === name);
+    if (usage === undefined || usage.unknown === true) return false;
+    const settled = settle(usage, deps.now());
+    if (isUsable(settled) && canRunModel(settled, model)) return false;
+    return otherThatRuns(name, model) !== null;
+  }
+  /**
+   * With nothing measured of `name`, its login still says what it is: a Max
+   * or an Ultra keeps the reserved model's weekly until a read says otherwise
+   * (just after a reload, or with its reads failing: code-reviewer r3), also
+   * when the login says no more than that it is one of the two (Astra
+   * IR4-001). A Team seat, or a login that says nothing, starts as ever.
+   */
+  function unreadKeepsReserve(name: string): boolean {
+    const login = accounts.find((a) => a.name === name);
+    if (login === undefined) return false;
+    const { plan } = planOf(login, null);
+    return login.kind === "max" || plan === "ultra" || plan === "max";
+  }
+  /** The Team seats by login, logged in, not refusing, with nothing measured of them. */
+  function unreadTeams(model: string): string[] {
+    // Nothing read yet because nothing was asked yet: the first reads are
+    // seconds away, and they ask the waits again (code-reviewer r5).
+    if (refreshes === 0) return [];
+    const measured = measuredAccounts(model);
+    return accounts
+      .filter((login) => {
+        if (planOf(login, null).plan !== "team") return false;
+        if (loggedOut(login.name) || refusing(login.name)) return false;
+        const known = measured.find((a) => a.name === login.name);
+        // Measured, and left out because only the clock would free it: that
+        // is a veto, not a seat never read (Astra FINAL-R8-003).
+        if (known === undefined) return (collector.get(login.name)?.usage ?? null) === null;
+        return known.unknown === true;
+      })
+      .map((login) => login.name);
+  }
   /**
    * A turn in `model` on `name` would spend the weekly the reserved model
    * needs, and `model` is held off such an account (see holdsForReserve),
-   * as measured now; false when nothing is known of it.
+   * as measured now or, unmeasured, as its login says.
    */
   function heldOff(name: string, model: string): boolean {
     const options = { preferredModel: model, reserveModel: current.preferredModel };
     if (!holdsForReserve(options)) return false;
     const usage = measuredAccounts(model).find((a) => a.name === name);
-    if (usage === undefined || usage.unknown === true) return false;
+    if (usage === undefined || usage.unknown === true)
+      return unreadKeepsReserve(name);
     // Where the turn cannot run anyway it fails there, and the failure
     // moves it: only a turn that would run and spend the reserve is held.
     const settled = settle(usage, deps.now());
@@ -4275,7 +4583,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     /** `held`: set when the turn must wait (see reserveWait). */
     turn: {
       abandoned: boolean;
-      held?: { sendAt: number; reason: string; seatOn?: string };
+      held?: { sendAt: number; reason: string; seatOn?: string; seatWhy?: string };
     },
     /** "after": placed as a turn of the thread ends, for its next one (see the thread.idle below). */
     when: "before" | "after" = "before",
@@ -4305,6 +4613,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     const input: PlacementInput = {
       ...placementOf(projectId, model, now, isBackground(thread), thread.id),
+      unreadKeepsReserve,
+      unreadTeams: unreadTeams(model),
       currentAccount: fromName,
       currentLoggedOut: unconfirmed(fromName),
       ...(seatsFull
@@ -4343,9 +4653,35 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             ? `${fromName} has no login`
             : `${fromName} keeps its weekly for ${current.preferredModel}`,
         );
+      // Kept where it cannot run because no other has a free seat: it waits
+      // in the queue of one that can run it instead of taking a seat here
+      // to fail. With none able to run it, it starts: the failure is what
+      // tells the user and applies the longest wait (revisión 2026-11-04).
+      else if (decision.why === "current-blocked") {
+        const other = otherThatRuns(fromName, model);
+        if (other !== null)
+          turn.held = {
+            sendAt: now + SEAT_RECHECK_MS,
+            reason: `Waiting for a free seat for ${model} on ${other}: ${fromName} ${whyOut(fromName, model)}`,
+            seatOn: other,
+            seatWhy: `${model}: ${fromName} ${whyOut(fromName, model)}`,
+          };
+      }
       return { account: fromName, byDefault: !from.owned, writes };
     }
     if (turn.abandoned) return null;
+    // Its move would carry along a sibling about to start: asked again soon.
+    const admitted =
+      decision.account === fromName
+        ? null
+        : siblingAdmitted(projectId, thread.id);
+    if (admitted !== null) {
+      turn.held = {
+        sendAt: now + SEAT_RECHECK_MS,
+        reason: `Waiting to move to ${decision.account}: thread ${admitted} of this project is about to start on ${fromName}`,
+      };
+      return { account: fromName, byDefault: !from.owned, writes };
+    }
     // Read before the move: what the seats were as it was decided.
     const fullHere = seats.snapshot([seatKey(fromName)])[seatKey(fromName)]!;
     const roomThere = seatRoom(decision.account);
@@ -4362,7 +4698,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     const to = accountOrDefault(decision.account);
     // The sessions are not waited for: see applyAccount (Fable, 2026-10-29).
-    await applyAccount(projectId, to, from, { share: false });
+    await applyAccount(projectId, to, from, {
+      share: false,
+      forThread: thread.id,
+    });
     await markHandled(projectId);
     noteMove(projectId, fromName, decision.account, model, before);
     const reason =
@@ -4561,13 +4900,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     const done = turnPlaced === null ? null : await turnPlaced;
     if (turn.held !== undefined) {
-      const { seatOn, ...held } = turn.held;
+      const { seatOn, seatWhy, ...held } = turn.held;
       if (seatOn !== undefined) {
         // In that account's seat queue, first come first served, so later
         // arrivals there do not overtake it (Codex OPUS-R4-002); admitted,
         // its own seat lets the placement move the project there.
         seatGenerations.set(thread.id, (seatGenerations.get(thread.id) ?? 0) + 1);
-        const queued = seatWait(thread, seatOn);
+        const queued = seatWait(thread, seatOn, seatWhy);
         if (queued !== null) return queued;
         return {
           action: "wait",
@@ -4641,6 +4980,86 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
 
   bb.experimental_hooks.on("message.dispatch", async (ctx) => {
+    const decision = await dispatchDecision(ctx);
+    if (decision.action === "wait") {
+      const now = deps.now();
+      if (!waitSince.has(ctx.thread.id)) waitSince.set(ctx.thread.id, now);
+      waitAsked.set(ctx.thread.id, now);
+      toldToStart.delete(ctx.thread.id);
+    } else if (ctx.attempt === "start-turn") {
+      forgetWait(ctx.thread.id);
+      if (decision.action !== "proceed") toldToStart.delete(ctx.thread.id);
+    }
+    return decision;
+  });
+  /**
+   * The threads held long with another account free, as bb's queue stands;
+   * null when anything of it could not be read, within STUCK_READ_LIMIT_MS:
+   * «nothing stuck» is never said unread.
+   */
+  async function atascos(
+    rows?: readonly HeldRow[],
+  ): Promise<Atasco[] | null> {
+    const read = await within(
+      readAtascos(rows),
+      STUCK_READ_LIMIT_MS,
+      "the stuck threads could not be read",
+    );
+    return typeof read === "object" ? read.value : null;
+  }
+  async function readAtascos(rows?: readonly HeldRow[]): Promise<Atasco[]> {
+    const all = rows ?? (await bb.sdk.threads.queue.list());
+    const out: Atasco[] = [];
+    const now = deps.now();
+    for (const held of heldLong(all, PLUGIN_ID, waitSince, now)) {
+      const queued = seats.position(held.threadId)?.account;
+      const known = await bb.sdk.threads.get({ threadId: held.threadId });
+      let account: string;
+      if (queued !== undefined) account = seatName(queued);
+      else {
+        const read = await projectAccount(known.projectId);
+        if (read.external) continue;
+        account = read.account ?? current.defaultAccountName;
+      }
+      const modelo = modelFamily(held.model) ?? current.preferredModel;
+      const libres = freeElsewhere(account, modelo);
+      if (libres.length === 0) continue;
+      out.push({
+        hilo: held.threadId,
+        cuenta: account,
+        modelo,
+        minutos: Math.floor((now - held.since) / 60_000),
+        libres,
+        proyectoOcupado: projectSeated(known.projectId, held.threadId),
+      });
+    }
+    return out;
+  }
+  /** Says each stuck thread once per STUCK_WAIT_MS, and forgets the threads bb no longer holds. */
+  async function sayStuck(
+    rows: readonly HeldRow[],
+    readAt: number,
+  ): Promise<void> {
+    for (const [threadId, asked] of waitAsked)
+      if (
+        readAt - asked > WAIT_FORGOTTEN_MS &&
+        !rows.some((row) => row.threadId === threadId && heldBy(row, PLUGIN_ID))
+      ) {
+        forgetWait(threadId);
+      }
+    const stuck = (await atascos(rows)) ?? [];
+    const now = deps.now();
+    for (const a of stuck) {
+      if (now - (stuckSaid.get(a.hilo) ?? -Infinity) < STUCK_WAIT_MS) continue;
+      stuckSaid.set(a.hilo, now);
+      bb.log.warn(atascoLine(a));
+    }
+    for (const threadId of stuckSaid.keys())
+      if (!waitSince.has(threadId)) stuckSaid.delete(threadId);
+  }
+  async function dispatchDecision(
+    ctx: MessageDispatchHookContext,
+  ): Promise<MessageDispatchHookDecision> {
     const { thread } = ctx;
     if (
       // Queued behind a turn: bb asks again when it sends the message.
@@ -4666,7 +5085,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const seen = noteActivity(thread.projectId);
     if (model !== null) {
       threadModel.set(thread.id, model);
-      projectModel.set(thread.projectId, { model, at: seen });
+      noteProjectModel(thread.projectId, model, seen);
     }
     const placed: { at?: TurnPlace } = {};
     if (current.autoSwitch && ctx.attempt === "start-turn") {
@@ -4770,6 +5189,24 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         bb.log.info(`thread ${thread.id}: its message waits (${reason})`);
         return { action: "wait", reason, sendAt: deps.now() + SEAT_RECHECK_MS };
       }
+      if (
+        current.autoSwitch &&
+        model !== null &&
+        at !== null &&
+        at.account !== null &&
+        blockedOff(at.account, model)
+      ) {
+        const waited = blockedWaits.get(thread.id) ?? 0;
+        if (waited < BLOCKED_WAITS) {
+          blockedWaits.set(thread.id, waited + 1);
+          const reason = `Waiting to place ${model} again: the project is on ${at.account}, which ${whyOut(at.account, model)}`;
+          bb.log.info(`thread ${thread.id}: its message waits (${reason})`);
+          return { action: "wait", reason, sendAt: deps.now() + SEAT_RECHECK_MS };
+        }
+        bb.log.warn(
+          `thread ${thread.id}: starts on ${at.account}, which ${whyOut(at.account, model)}: its project could not be moved in ${BLOCKED_WAITS} tries`,
+        );
+      }
       if (at === null) {
         // Unknown where it starts: it waits, and is asked again, a few
         // times; then it goes, as every wait of this plugin does, for bb
@@ -4782,7 +5219,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         const mayBeHeld =
           current.autoSwitch &&
           model !== null &&
-          measuredAccounts(model).some((a) => heldOff(a.name, model));
+          [...measuredAccounts(model), ...accounts].some((a) =>
+            heldOff(a.name, model),
+          );
         if (waited < SEAT_READ_WAITS || mayBeHeld) {
           seatReadWaits.set(thread.id, waited + 1);
           return {
@@ -4809,8 +5248,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     // Where the project stands as the turn is sent, for `thread.active`.
     dispatchEpoch.set(thread.id, movesOf(thread.projectId).epoch);
+    // With its seat, nothing awaited in between: a sibling's move cannot land
+    // between the two (Astra FINAL-R8-001). A message queued behind a running
+    // turn does not get here: that turn comes later, and is asked about again
+    // (code-reviewer r7).
+    if (ctx.attempt === "start-turn") {
+      const at = deps.now();
+      toldToStart.set(thread.id, {
+        first: toldToStart.get(thread.id)?.first ?? at,
+        last: at,
+      });
+    }
     return { action: "proceed" };
-  });
+  }
 
   // ---- Automatic switch on subscription limit ---------------------------
   /** `name` refused a turn (no login): chosen for nothing for a while. */
@@ -5004,8 +5454,27 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return;
     }
     await leaveSeatQueue(entry.threadId);
+    await forgetCancelledWait(entry.threadId);
     await cancelledByHand(entry);
   });
+
+  /**
+   * The user cancelled the thread's last held message: the next one's wait
+   * counts from zero, not from this one's (Codex IR-002). Unread, or with
+   * another of it held or asked for meanwhile, the wait stands.
+   */
+  async function forgetCancelledWait(threadId: string): Promise<void> {
+    const asked = waitAsked.get(threadId);
+    if (asked === undefined) return;
+    const rows = await within(
+      bb.sdk.threads.queuedMessages.list({ threadId }),
+      DISPATCH_LIMIT_MS,
+      `thread ${threadId}: its queued messages not read after a cancellation`,
+    );
+    if (typeof rows !== "object" || rows.value.length > 0) return;
+    if (waitAsked.get(threadId) !== asked) return;
+    forgetWait(threadId);
+  }
 
   /**
    * The user cancelled the thread's last message waiting for a seat: its
@@ -5235,7 +5704,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (stuck && !current.autoSwitch) return;
     if (decision.account !== fromName) {
       if (
-        !(await applyAccount(projectId, accountOrDefault(decision.account), from))
+        !(await applyAccount(projectId, accountOrDefault(decision.account), from, {
+          forThread: event.threadId,
+        }))
       ) {
         // Moved by a placement before a turn while the sessions were shared:
         // that move, decided later, stands. Nothing is recorded; the turn is
@@ -5246,7 +5717,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         );
         await retryTurn(
           event,
-          "Retrying: the project's account changed meanwhile",
+          "Retrying: the project stays on its account for now",
           undefined,
           stuck,
         );
@@ -5400,7 +5871,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // Marks made while bb reads are kept: its snapshot may predate them
     // (Codex Sol 0.2.18 r1, R0218-CODEX-002).
     const marksBefore = putBackMarks;
+    const readAt = deps.now();
     const all = await bb.sdk.threads.queue.list();
+    // Beside the pass, not before it: a slow read of a thread that may be
+    // stuck does not hold a retry back (Codex R1-002).
+    const looked = sayStuck(all, readAt).catch((error: unknown) =>
+      bb.log.warn(
+        `the stuck threads were not looked for: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+    );
     for (const [key, mark] of putBack)
       if (
         mark <= marksBefore &&
@@ -5432,6 +5911,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       }
     }
     await rescueStuck(all);
+    await looked;
   }
 
   /**
@@ -5737,7 +6217,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     // Moved by something else while the sessions were shared: the wait
     // stays as it is, and fires on its own.
-    if (!(await applyAccount(projectId, accountOrDefault(to), from))) return;
+    if (
+      !(await applyAccount(projectId, accountOrDefault(to), from, {
+        forThread: threadId,
+      }))
+    )
+      return;
     await markHandled(projectId);
     noteMove(projectId, fromName, to, model, before);
     const reason = `Moved to account ${to}, which can run the waiting turn now: ${fromName} ${noLogin ? "is not logged in" : whyOut(fromName, model)}`;
@@ -6086,6 +6571,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       .map((a) => collector.get(a.name)?.observedAt ?? null)
       .filter((at): at is number => at !== null);
     return healthReport({
+      atascos: await atascos(),
       measured: observed.length === 0 ? now : Math.max(...observed),
       dayStartHour: dayHour(),
       holdsBackground: current.paceHoldsBackground === true,
@@ -6097,6 +6583,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             : settle({ ...m.usage, name: account.name }, now);
         const unconfirmed =
           usage !== null && !trusted.has(account.name) && m?.observedAt != null;
+        // The same per model: a window out at the last good read, its reset
+        // past, with the queries failing since (Codex R1-003).
+        const unconfirmedModels =
+          usage === null || m?.observedAt == null
+            ? []
+            : Object.keys(usage.models).filter(
+                (model) =>
+                  !collector
+                    .usable(maxReadAgeMs(), model)
+                    .some((a) => a.name === account.name),
+              );
         return {
           name: account.name,
           plan: planOf(account, m?.usage ?? null),
@@ -6111,6 +6608,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                   external: taken[account.name]!.external ?? [],
                 },
           ...(unconfirmed ? { unconfirmedSince: m!.observedAt! } : {}),
+          ...(unconfirmedModels.length > 0 ? { unconfirmedModels } : {}),
           usable:
             usage !== null &&
             !unconfirmed &&
@@ -6367,17 +6865,22 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           options: { json: JSON_OPTION },
           async run({ options }) {
             const taken = seatsState();
+            const stuck = await atascos();
             pruneSeatSamples();
             if (options.json)
               return {
                 exitCode: 0,
-                stdout: `${JSON.stringify({ seats: taken, samples: seatSamples }, null, 2)}\n`,
+                stdout: `${JSON.stringify({ seats: taken, atascos: stuck, samples: seatSamples }, null, 2)}\n`,
               };
             const lines: string[] = [];
             for (const [name, a] of Object.entries(taken))
               lines.push(
                 `${name}\tseats ${a.running + a.reserved + (a.external?.length ?? 0)}/${a.capacity === 0 ? "no limit" : a.capacity} (${a.running} running, ${a.reserved} reserved${a.external === undefined ? "" : `, ${a.external.length} held outside bb: ${a.external.map((e) => `${e.id} until ${isoInZone(e.until)}`).join(", ")}`})\t${a.queued.length} waiting`,
               );
+            if (stuck === null)
+              lines.push("", "The queue could not be read: stuck threads unknown.");
+            else if (stuck.length > 0)
+              lines.push("", ...stuck.map((a) => atascoLine(a)));
             const time = (at: number | null) =>
               at === null ? "" : new Date(at).toISOString();
             lines.push(
