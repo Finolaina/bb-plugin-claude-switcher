@@ -57,6 +57,17 @@ describe("chooseAccount", () => {
 });
 
 describe("spendsNoWeekly", () => {
+  it("a Team seat that reports a weekly and no window of the model goes first, as one that reports none", () => {
+    const seat = (name: string, session: number, models: AccountUsage["models"]) =>
+      account(name, { session: { usedPercent: session, resetsAt: NOW + 2 * HOUR }, models, team: true });
+    expect(
+      chooseAccount(
+        [seat("withOpus", 0, { Opus: { usedPercent: 5, resetsAt: null }, Fable: { usedPercent: 5, resetsAt: null } }), seat("noOpus", 60, { Fable: { usedPercent: 5, resetsAt: null } })],
+        { preferredModel: "Opus", reserveModel: "Fable" },
+      )?.account,
+    ).toBe("noOpus");
+  });
+
   it("is true only for an absent weekly with no window of the model", () => {
     const seat = account("team1", {
       weekly: { usedPercent: 0, resetsAt: null, absent: true },

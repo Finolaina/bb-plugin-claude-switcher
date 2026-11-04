@@ -6,6 +6,7 @@
 // version.
 import type { PlanInfo } from "./accounts.js";
 import { DAY_ZONE, zoneOffsetMs, type Pace } from "./pace.js";
+import type { Atasco } from "./atascos.js";
 import type { AccountUsage, UsageWindow } from "./policy.js";
 
 export const HEALTH_VERSION = 1;
@@ -34,13 +35,19 @@ export interface HealthAccount {
    * queries have failed for too long since. When that read was taken.
    */
   unconfirmedSince?: number;
+  /** The same for a model's window alone: the policy does not trust the account for these. */
+  unconfirmedModels?: readonly string[];
   /** It can run a turn now: logged in, measured whole, unlocked, session and weekly under 100 %, and a read the policy trusts. */
   usable: boolean;
 }
 
 interface Point {
   pct: number;
+  /** Unrounded: 99.6 % is `pct` 100 and still runs a turn. */
+  pctExacto: number;
   vuelve: string | null;
+  /** Its reset passed with the queries failing: only the clock says it is free, and the policy does not trust it. Only when so. */
+  sinConfirmar?: true;
 }
 
 export interface HealthReport {
@@ -49,6 +56,8 @@ export interface HealthReport {
   inicioDia: number;
   /** The day's pace holds background work back (the plugin's paceHoldsBackground; off by default). */
   freno: boolean;
+  /** Threads this plugin holds 10 min or more with another account free; null when the queue could not be read. */
+  atascos: Atasco[] | null;
   cuentas: Array<{
     nombre: string;
     plan: "ultra" | "max" | "team" | "desconocido";
@@ -91,6 +100,7 @@ export function isoInZone(ms: number, timeZone: string = DAY_ZONE): string {
 function point(w: UsageWindow): Point {
   return {
     pct: Math.round(w.usedPercent),
+    pctExacto: w.usedPercent,
     vuelve: w.resetsAt === null ? null : isoInZone(w.resetsAt),
   };
 }
@@ -123,6 +133,8 @@ export function healthReport(input: {
   dayStartHour: number;
   /** The brake is on: an account past 90 % of its day takes no background work. */
   holdsBackground: boolean;
+  /** See HealthReport.atascos. */
+  atascos: Atasco[] | null;
   accounts: HealthAccount[];
 }): HealthReport {
   return {
@@ -130,6 +142,7 @@ export function healthReport(input: {
     medido: isoInZone(input.measured),
     inicioDia: input.dayStartHour,
     freno: input.holdsBackground,
+    atascos: input.atascos,
     cuentas: input.accounts.map((a) => {
       const u = a.usage;
       const whole = u !== null && u.unknown !== true;
@@ -142,7 +155,12 @@ export function healthReport(input: {
         semana: whole && u.weekly.absent !== true ? point(u.weekly) : null,
         // Only the windows the usage API reports: no model is made up.
         modelos: Object.fromEntries(
-          Object.entries(u?.models ?? {}).map(([m, w]) => [m, point(w)]),
+          Object.entries(u?.models ?? {}).map(([m, w]) => [
+            m,
+            a.unconfirmedModels?.includes(m) === true
+              ? { ...point(w), sinConfirmar: true as const }
+              : point(w),
+          ]),
         ),
         ritmo:
           a.pace === null
@@ -196,6 +214,12 @@ export function healthText(report: HealthReport): string {
   return [
     `medido ${report.medido} · el día empieza a las ${report.inicioDia}:00 · freno de fondo ${report.freno ? "encendido" : "apagado"}`,
     ...lines,
+    ...(report.atascos === null
+      ? ["atascos: la cola no se pudo leer"]
+      : report.atascos.map(
+          (a) =>
+            `atasco: ${a.cuenta} retiene ${a.hilo} (${a.modelo}) ${a.minutos} min; libres: ${a.libres.join(", ")}${a.proyectoOcupado ? "; proyecto con otro hilo en marcha" : ""}`,
+        )),
     "",
   ].join("\n");
 }

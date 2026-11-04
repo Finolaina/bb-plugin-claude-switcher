@@ -51,7 +51,7 @@ function toWindow(limit: z.infer<typeof limitSchema>): UsageWindow {
 }
 
 /** A window we know nothing about: treated as exhausted so it is never chosen. */
-const UNKNOWN: UsageWindow = { usedPercent: 100, resetsAt: null };
+const UNKNOWN: UsageWindow = { usedPercent: 100, resetsAt: null, missing: true };
 
 export function parseUsage(payload: unknown): ParsedUsage {
   const parsed = usagePayloadSchema.safeParse(payload);

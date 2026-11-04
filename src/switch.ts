@@ -131,10 +131,16 @@ export function declineReason(
 /**
  * The usage API's name for the model a bb model id runs
  * ("claude-opus-5-5" → "Opus"), or null when the id is not a Claude model id
- * (none resolved yet, an alias): the preferred model decides then.
+ * (none resolved yet): the preferred model decides then. An alias is that
+ * model: `bb thread tell --model opus` keeps `opus` on its row, and read as
+ * no model it ran past the reserve on the project's account (2026-11-03,
+ * `bb thread queue list --json`).
  */
 export function modelFamily(modelId: string | null): string | null {
-  const family = /^claude-([a-z]+)-/.exec(modelId ?? "")?.[1];
+  const id = modelId ?? "";
+  const family =
+    /^claude-([a-z]+)-/.exec(id)?.[1] ??
+    /^(fable|opus|sonnet|haiku)(?:\[[^\]]*\])?$/i.exec(id)?.[1]?.toLowerCase();
   return family === undefined
     ? null
     : family[0]!.toUpperCase() + family.slice(1);
@@ -154,6 +160,21 @@ export function settle(account: AccountUsage, now: number): AccountUsage {
       Object.entries(account.models).map(([m, w]) => [m, window(w)]),
     ),
   };
+}
+
+/**
+ * An incomplete answer that still measured a window full, with nothing to free
+ * it yet: what it is missing does not change that the account cannot run
+ * `model` now (Astra FINAL-R9-001). Any other incomplete answer says nothing.
+ */
+export function measuredOut(account: AccountUsage, model: string, now: number): boolean {
+  if (account.unknown !== true) return false;
+  const settled = settle(account, now);
+  return [
+    settled.session,
+    settled.weekly,
+    model === "" ? undefined : modelWindow(settled, model),
+  ].some((w) => w !== undefined && w.missing !== true && w.usedPercent >= 100);
 }
 
 /** When the account can run `model` again, or null if unknown or locked. */
@@ -433,8 +454,12 @@ export function opusInsteadText(model: string, account: string): string {
 }
 
 export type PlacementDecision =
-  /** `why`: kept although its account spends the reserve, because no account spares it. */
-  | { kind: "keep"; why?: "current-reserved" }
+  /**
+   * `why`: kept although its account spends the reserve, because no account
+   * spares it (`current-reserved`), or although it is measured unable to run
+   * the turn, because no other with a free seat can (`current-blocked`).
+   */
+  | { kind: "keep"; why?: "current-reserved" | "current-blocked" }
   | {
       kind: "move";
       account: string;
@@ -451,6 +476,14 @@ export type PlacementDecision =
 
 export interface PlacementInput {
   currentAccount: string;
+  /**
+   * With nothing measured of an account, whether its login says it keeps the
+   * reserved model's weekly (a Max or an Ultra): a turn held off the reserve
+   * goes elsewhere, or waits at the checkpoint. Unset: nothing is known.
+   */
+  unreadKeepsReserve?: (account: string) => boolean;
+  /** Team seats by login with nothing measured: where such a turn may go when no measured account can take it. */
+  unreadTeams?: string[];
   /** The project has never been seen by this plugin (created after it was installed). */
   isNew: boolean;
   /** Every account with measured usage, the current one included. */
@@ -527,7 +560,7 @@ export function bestAccount(
  * account (the same choice a switch makes); a known one is moved only when
  * its account is MEASURED unable to run, so a project the user pinned by
  * hand stays put while it works. An unmeasured account (or one whose answer
- * lacked a window), or no other account able to run, keeps the project: the
+ * lacked a window and measured none full), or no other account able to run, keeps the project: the
  * failure path then decides, exactly as before this check existed.
  *
  * With a reserved model (2026-10-13), "able to run" a turn in another model
@@ -574,8 +607,27 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   }
   const loggedOut = input.currentLoggedOut === true;
   const current = accounts.find((a) => a.name === input.currentAccount);
-  if (!loggedOut && (current === undefined || current.unknown === true))
-    return { kind: "keep" };
+  if (!loggedOut && (current === undefined || current.unknown === true)) {
+    if (
+      input.unreadKeepsReserve?.(input.currentAccount) !== true ||
+      !holdsForReserve(options)
+    )
+      return { kind: "keep" };
+    // A Team seat spends nothing the reserved model needs, read or not: all
+    // the reads down is no reason to wait with one free (code-reviewer r4).
+    const elsewhere =
+      chooseSeated(
+        accounts.filter((a) => a.name !== input.currentAccount),
+        options,
+        input.freeSeats,
+      ) ??
+      chooseSeated(unreadTeamSeats(input), options, input.freeSeats);
+    // Kept as one that would spend the reserve: it takes its place in a
+    // queue, and what comes later does not overtake it.
+    return elsewhere === null
+      ? { kind: "keep", why: "current-reserved" }
+      : { kind: "move", account: elsewhere.account, why: "current-reserved" };
+  }
   const runs =
     !loggedOut &&
     current !== undefined &&
@@ -599,6 +651,11 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   const others = accounts.filter((a) => a.name !== input.currentAccount);
   const choice =
     chooseSeated(others, options, input.freeSeats) ??
+    // The reads of a Team seat down are no reason to wait with one free,
+    // whatever is known of this account (code-reviewer r5).
+    (holdsForReserve(options)
+      ? chooseSeated(unreadTeamSeats(input), options, input.freeSeats)
+      : null) ??
     // Without a login a turn kept here fails for sure: the reserve gives
     // way, but not for a model held off it (Codex OPUS-001): that turn
     // waits at the checkpoint, and the rescue leaves the project.
@@ -613,7 +670,11 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
         )
       : null);
   if (choice === null)
-    return runs ? { kind: "keep", why: "current-reserved" } : { kind: "keep" };
+    return runs
+      ? { kind: "keep", why: "current-reserved" }
+      : loggedOut
+        ? { kind: "keep" }
+        : { kind: "keep", why: "current-blocked" };
   return {
     kind: "move",
     account: choice.account,
@@ -633,15 +694,51 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
  * than spend a Max account's weekly the reserved model and the Opus work
  * inside its threads need.
  */
+/**
+ * The Team seats not fully measured, as accounts: nothing they spend is what
+ * the reserve needs. What an incomplete answer did say still counts (Astra
+ * FINAL-002, FINAL-R8-002); only a window it left out reads as free.
+ */
+export function unreadTeamSeats(
+  input: Pick<PlacementInput, "accounts" | "unreadTeams" | "currentAccount" | "now">,
+): AccountUsage[] {
+  const known = (window: UsageWindow | undefined): UsageWindow =>
+    window === undefined || window.missing === true
+      ? { usedPercent: 0, resetsAt: null }
+      : window;
+  return (input.unreadTeams ?? [])
+    .filter((name) => name !== input.currentAccount)
+    .map((name) => {
+      const found = input.accounts.find((a) => a.name === name);
+      const read = found === undefined ? undefined : settle(found, input.now);
+      return {
+        name,
+        blocked: false,
+        session: known(read?.session),
+        weekly: known(read?.weekly),
+        models: read?.models ?? {},
+        team: true as const,
+      };
+    });
+}
+
 export function reserveWait(
   input: PlacementInput,
 ): { account: string; at: number } | null {
+  const known = new Set(
+    input.accounts.filter((a) => a.unknown !== true).map((a) => a.name),
+  );
   const options = {
     preferredModel: input.preferredModel,
     reserveModel: input.reserveModel,
   };
   let earliest: { account: string; at: number } | null = null;
-  for (const raw of input.accounts) {
+  // A Team seat known by its login only is one to wait for too: in its queue,
+  // what comes later does not overtake the turn (Astra IR5-002).
+  for (const raw of [
+    ...input.accounts,
+    ...unreadTeamSeats(input).filter((a) => !known.has(a.name)),
+  ]) {
     if (raw.name === input.currentAccount) continue;
     const account = settle(raw, input.now);
     const at = freeAt(account, input.preferredModel);

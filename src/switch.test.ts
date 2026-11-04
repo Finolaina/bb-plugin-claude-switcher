@@ -13,6 +13,7 @@ import {
   opusInsteadText,
   placedOn,
   settle,
+  unreadTeamSeats,
   type PlacementInput,
   type SwitchInput,
 } from "./switch.js";
@@ -849,7 +850,7 @@ describe("decidePlacement", () => {
         preferredModel: "Fable",
         now: NOW,
       }),
-    ).toEqual({ kind: "keep" });
+    ).toEqual({ kind: "keep", why: "current-blocked" });
     expect(
       decidePlacement({
         currentAccount: "main",
@@ -1192,12 +1193,31 @@ describe("modelFamily", () => {
     expect(modelFamily("claude-haiku-4-5-20251001")).toBe("Haiku");
   });
 
-  it("names nothing for a model bb has not resolved, an alias or another provider's model", () => {
+  // `bb thread tell --model opus` queues the alias as is (`queue list --json`,
+  // 2026-11-03): read as "no model" it skipped the reserve and ran as Fable.
+  it.each([
+    ["claude-opus-5-5", "Opus"],
+    ["claude-opus-5-5[1m]", "Opus"],
+    ["claude-fable-5-1", "Fable"],
+    ["opus", "Opus"],
+    ["OPUS", "Opus"],
+    ["opus[1m]", "Opus"],
+    ["fable", "Fable"],
+    ["sonnet", "Sonnet"],
+    ["haiku", "Haiku"],
+    ["default", null],
+    ["opusplan", null],
+    ["", null],
+    [null, null],
+  ])("%s is %s", (id, family) => {
+    expect(modelFamily(id)).toBe(family);
+  });
+
+  it("names nothing for a model bb has not resolved or another provider's model", () => {
     for (const id of [
       null,
       "",
       "opusplan",
-      "opus",
       "gpt-6-astra",
       "claude-",
       "claude-opus",
@@ -1827,7 +1847,8 @@ describe("seats steer where a project goes, and never move one by themselves", (
         freeSeats,
       }),
     ).toEqual({ kind: "move", account: "spare", why: "current-blocked" });
-    // No seat free anywhere: it stays, and its thread waits there.
+    // No seat free anywhere: it stays, and says it cannot run here (its
+    // thread waits for a seat where it can: see placeTurn).
     expect(
       decidePlacement({
         currentAccount: "main",
@@ -1837,7 +1858,7 @@ describe("seats steer where a project goes, and never move one by themselves", (
         now: NOW,
         freeSeats: () => 0,
       }),
-    ).toEqual({ kind: "keep" });
+    ).toEqual({ kind: "keep", why: "current-blocked" });
   });
 
   it("a wait released elsewhere goes only to an account with a free seat (Astra SEATS-R05)", () => {
@@ -2116,5 +2137,43 @@ describe("decidePlacement with the current account's seats full", () => {
     expect(
       decidePlacement(full({ preferredModel: "Opus", reserveModel: "Fable" })),
     ).toMatchObject({ kind: "keep" });
+  });
+});
+
+describe("unreadTeamSeats", () => {
+  const seat = (read: AccountUsage) =>
+    unreadTeamSeats({
+      accounts: [read],
+      unreadTeams: [read.name],
+      currentAccount: "main",
+      now: NOW,
+    })[0];
+
+  it("keeps what an incomplete answer did say, and reads only what is missing as free", () => {
+    const weekly = { usedPercent: 40, resetsAt: NOW + HOUR };
+    const models = { Opus: { usedPercent: 30, resetsAt: NOW + HOUR } };
+    expect(
+      seat(
+        account("work", {
+          blocked: true,
+          unknown: true,
+          session: { usedPercent: 100, resetsAt: null, missing: true },
+          weekly,
+          models,
+        }),
+      ),
+    ).toEqual({
+      name: "work",
+      blocked: false,
+      session: { usedPercent: 0, resetsAt: null },
+      weekly,
+      models,
+      team: true,
+    });
+  });
+
+  it("a window full with no date of reset is not read as free", () => {
+    const full = { usedPercent: 100, resetsAt: null };
+    expect(seat(account("work", { unknown: true, weekly: full }))?.weekly).toEqual(full);
   });
 });
