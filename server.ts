@@ -90,6 +90,7 @@ import {
   opusInsteadText,
   RESET_BUFFER_MS,
   reserveWait,
+  unreadTeamSeats,
   RESET_JITTER_MS,
   settle,
   type PlacementInput,
@@ -184,6 +185,11 @@ export const REBALANCE_SPREAD = 10;
  * measurement may free an account before the reset it waits for.
  */
 export const RESERVE_RECHECK_MS = 5 * 60_000;
+/**
+ * A turn told to start starts within this long nearly always, measured: half
+ * within 1 s, 90 % within 6 s (cuenta nuestra, docs/revision-2026-11-04/PLAN.md).
+ */
+const STARTING_MS = 10_000;
 /** Not asked again in this long, and no row held: that wait is over (every hold is asked again within RESERVE_RECHECK_MS). */
 const WAIT_FORGOTTEN_MS = 2 * RESERVE_RECHECK_MS;
 /** How long looking for stuck threads may take: it is only a look, and health and the refresh wait for it. */
@@ -1022,11 +1028,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return false;
   }
   /**
-   * When each thread was first told to start, until it starts, loses its seat
-   * or is told to wait. Not renewed: another plugin may hold a turn this one lets
-   * go, asked again and again (code-reviewer r6).
+   * When each thread was told to start, first and last, until it starts, loses
+   * its seat or is told to wait. Another plugin may hold a turn this one lets
+   * go, asked again and again: that ties the project for SEAT_TTL_MS from the
+   * first time, then only for STARTING_MS from each, the time the turn that
+   * goes starts in (code-reviewer r6, r8).
    */
-  const toldToStart = new Map<string, number>();
+  const toldToStart = new Map<string, { first: number; last: number }>();
   /**
    * Another thread of the project told to start and not started. A turn reads the project's variable as it starts:
    * moving the project now would start it on another account, one that may
@@ -1040,7 +1048,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     for (const [sibling, project] of seatProjects) {
       if (project !== projectId || sibling === threadId) continue;
       const told = toldToStart.get(sibling);
-      if (told !== undefined && now - told < SEAT_TTL_MS) return sibling;
+      if (
+        told !== undefined &&
+        (now - told.first < SEAT_TTL_MS || now - told.last < STARTING_MS)
+      )
+        return sibling;
     }
     return null;
   }
@@ -4466,13 +4478,26 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   function otherThatRuns(name: string, model: string): string | null {
     const now = deps.now();
+    const options = { preferredModel: model, reserveModel: current.preferredModel };
+    const measured = measuredAccounts(model);
     return (
       chooseAccount(
-        measuredAccounts(model)
-          .filter((a) => a.name !== name)
-          .map((a) => settle(a, now)),
-        { preferredModel: model, reserveModel: current.preferredModel },
-      )?.account ?? null
+        measured.filter((a) => a.name !== name).map((a) => settle(a, now)),
+        options,
+      )?.account ??
+      // A Team seat known by its login, for what the reserve is kept from.
+      (holdsForReserve(options)
+        ? chooseAccount(
+            unreadTeamSeats({
+              accounts: measured,
+              unreadTeams: unreadTeams(model),
+              currentAccount: name,
+              now,
+            }),
+            options,
+          )?.account
+        : null) ??
+      null
     );
   }
   /**
@@ -4511,7 +4536,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         if (planOf(login, null).plan !== "team") return false;
         if (loggedOut(login.name) || refusing(login.name)) return false;
         const known = measured.find((a) => a.name === login.name);
-        return known === undefined || known.unknown === true;
+        // Measured, and left out because only the clock would free it: that
+        // is a veto, not a seat never read (Astra FINAL-R8-003).
+        if (known === undefined) return (collector.get(login.name)?.usage ?? null) === null;
+        return known.unknown === true;
       })
       .map((login) => login.name);
   }
@@ -4958,13 +4986,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     } else if (ctx.attempt === "start-turn") {
       forgetWait(ctx.thread.id);
       if (decision.action !== "proceed") toldToStart.delete(ctx.thread.id);
-      // Asked as a message is queued behind a running turn, it is not told
-      // to start: that turn comes later, and is asked about again (code-reviewer r7).
-      else if (
-        !TURN_UNDER_WAY.has(ctx.thread.status) &&
-        !toldToStart.has(ctx.thread.id)
-      )
-        toldToStart.set(ctx.thread.id, deps.now());
     }
     return decision;
   });
@@ -5224,6 +5245,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     // Where the project stands as the turn is sent, for `thread.active`.
     dispatchEpoch.set(thread.id, movesOf(thread.projectId).epoch);
+    // With its seat, nothing awaited in between: a sibling's move cannot land
+    // between the two (Astra FINAL-R8-001). Asked as a message is queued
+    // behind a running turn, it is not told to start: that turn comes later,
+    // and is asked about again (code-reviewer r7).
+    if (ctx.attempt === "start-turn" && !TURN_UNDER_WAY.has(thread.status)) {
+      const at = deps.now();
+      toldToStart.set(thread.id, {
+        first: toldToStart.get(thread.id)?.first ?? at,
+        last: at,
+      });
+    }
     return { action: "proceed" };
   }
 
