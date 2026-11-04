@@ -5246,10 +5246,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // Where the project stands as the turn is sent, for `thread.active`.
     dispatchEpoch.set(thread.id, movesOf(thread.projectId).epoch);
     // With its seat, nothing awaited in between: a sibling's move cannot land
-    // between the two (Astra FINAL-R8-001). Asked as a message is queued
-    // behind a running turn, it is not told to start: that turn comes later,
-    // and is asked about again (code-reviewer r7).
-    if (ctx.attempt === "start-turn" && !TURN_UNDER_WAY.has(thread.status)) {
+    // between the two (Astra FINAL-R8-001). A message queued behind a running
+    // turn does not get here: that turn comes later, and is asked about again
+    // (code-reviewer r7).
+    if (ctx.attempt === "start-turn") {
       const at = deps.now();
       toldToStart.set(thread.id, {
         first: toldToStart.get(thread.id)?.first ?? at,
