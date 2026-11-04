@@ -513,6 +513,15 @@ export interface PlacementInput {
    */
   seatsFull?: boolean;
   /**
+   * Another thread of the project has a turn under way or holds a seat:
+   * the way home is taken only when the account the project is on cannot
+   * run the turn. A move now carries that thread's next turn along, and a
+   * new thread, judged before its model is known, took a project home
+   * under two Opus turns at work (bb server log, 2026-11-04 10:49; the
+   * decision of 2026-11-03 not to move a project with a thread at work).
+   */
+  siblingAtWork?: boolean;
+  /**
    * The switch-ahead share for the turn's model (see decideAhead), 0 = off:
    * a move for a seat goes only to an account below it in every window.
    */
@@ -588,9 +597,19 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   // BM-INSPECT-006). Home with no free seat is no way back yet (Astra
   // SEATS-R2-004): what follows decides, as with no excursion. So does
   // home saved for the user, for background work (Codex ULTRA-R01): it is
-  // then a last resort, as in any other choice.
+  // then a last resort, as in any other choice. So does a sibling at work
+  // on an account that runs the turn (see siblingAtWork).
+  const loggedOut = input.currentLoggedOut === true;
+  const current = accounts.find((a) => a.name === input.currentAccount);
+  const runsHere =
+    !loggedOut &&
+    current !== undefined &&
+    current.unknown !== true &&
+    isUsable(current) &&
+    canRunModel(current, input.preferredModel);
   if (
     !reserving(options) &&
+    !(input.siblingAtWork === true && runsHere) &&
     typeof input.excursionFrom === "string" &&
     input.excursionFrom !== input.currentAccount &&
     input.savedForUser?.(input.excursionFrom) !== true
@@ -605,8 +624,6 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     )
       return { kind: "move", account: home.name, why: "back-from-excursion" };
   }
-  const loggedOut = input.currentLoggedOut === true;
-  const current = accounts.find((a) => a.name === input.currentAccount);
   if (!loggedOut && (current === undefined || current.unknown === true)) {
     if (
       input.unreadKeepsReserve?.(input.currentAccount) !== true ||
