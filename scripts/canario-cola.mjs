@@ -73,7 +73,8 @@ export function puedeCorrer(cuenta, modelo) {
 }
 
 /**
- * El juicio, puro. `estado`: { primeraVez: {fila: ms}, vista: {fila: ms}, avisado: {hilo: ms} }.
+ * El juicio, puro. `estado`: { primeraVez: {fila: ms}, vista: {fila: ms}, avisado: {hilo: ms},
+ * conLibre: {hilo: ms} }.
  * Devuelve los avisos de esta pasada y el estado siguiente.
  */
 export function judge({ filas, health, estado, ahora }) {
@@ -90,6 +91,7 @@ export function judge({ filas, health, estado, ahora }) {
   const primeraVez = {};
   const avisado = {};
   const vista = {};
+  const conLibre = {};
   const avisos = [];
   // Las que bb no enseña en esta lectura, un rato: siguen con su antigüedad.
   for (const [id, cuando] of Object.entries(estado.vista ?? {}))
@@ -106,8 +108,14 @@ export function judge({ filas, health, estado, ahora }) {
     const desde = estado.primeraVez?.[fila.id] ?? ahora;
     primeraVez[fila.id] = desde;
     vista[fila.id] = ahora;
+    const fallida = (fila.failureReason ?? null) !== null;
+    const modelo = familia(fila.model);
+    const libres = health.cuentas
+      .filter((c) => puedeCorrer(c, modelo))
+      .map((c) => c.nombre);
+    if (!fallida && libres.length > 0) conLibre[fila.threadId] = ahora;
     if (ahora - desde < UMBRAL_MS) continue;
-    if ((fila.failureReason ?? null) !== null) {
+    if (fallida) {
       // Aparte del aviso de retenida: el mismo hilo puede tener una de cada.
       const clave = `${fila.threadId}:fallida`;
       if (avisado[clave] !== undefined) continue;
@@ -122,15 +130,14 @@ export function judge({ filas, health, estado, ahora }) {
       });
       continue;
     }
-    const modelo = familia(fila.model);
-    const libres = health.cuentas
-      .filter((c) => puedeCorrer(c, modelo))
-      .map((c) => c.nombre);
     if (libres.length === 0) {
       if (ahora - desde >= SIN_DESTINO_MS && !sinDestino.has(fila.threadId))
         sinDestino.set(fila.threadId, { hilo: fila.threadId, modelo, desde });
       continue;
     }
+    // Una plaza que acaba de soltarse no es un atasco: quien espera vuelve a
+    // preguntar en 30 s. Con la cola saturada, una sola foto la vería a menudo.
+    if (estado.conLibre?.[fila.threadId] === undefined) continue;
     if (avisado[fila.threadId] !== undefined) continue;
     avisado[fila.threadId] = ahora;
     avisos.push({
@@ -144,11 +151,12 @@ export function judge({ filas, health, estado, ahora }) {
         health.atascos?.some((a) => a.hilo === fila.threadId && a.proyectoOcupado) === true,
     });
   }
-  // Sin nadie en ese caso, el próximo que llegue no espera las 6 horas. Una
-  // fila que bb oculta un momento mientras la reevalúa sigue en el caso.
+  // Sin nadie que lleve ese tiempo, el próximo que llegue no espera las 6
+  // horas. Quien lo lleva sigue en el caso aunque bb lo oculte un momento o
+  // en esta pasada se vea una plaza suelta.
   if (sinDestino.size === 0) {
-    const ocultas = Object.keys(primeraVez).some((id) => !vivas.some((f) => f.id === id));
-    if (!ocultas) delete avisado[SIN_DESTINO];
+    if (!Object.values(primeraVez).some((desde) => ahora - desde >= SIN_DESTINO_MS))
+      delete avisado[SIN_DESTINO];
   } else if (avisado[SIN_DESTINO] === undefined) {
     avisado[SIN_DESTINO] = ahora;
     const hilos = [...sinDestino.values()];
@@ -160,7 +168,7 @@ export function judge({ filas, health, estado, ahora }) {
       horas: Math.floor((ahora - Math.min(...hilos.map((h) => h.desde))) / (60 * 60_000)),
     });
   }
-  return { avisos, estado: { primeraVez, avisado, vista }, retenidas: vivas.length };
+  return { avisos, estado: { primeraVez, avisado, vista, conLibre }, retenidas: vivas.length };
 }
 
 export function textoAviso(a) {
