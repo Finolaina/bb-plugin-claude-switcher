@@ -19515,7 +19515,7 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
       expect(await dispatch(h, "b", "proj-1")).toEqual({ action: "proceed" });
       expect(moves(h).at(-1)).toMatchObject({ note: ownNote("work") });
       expect((await history(h))[0]).toBe(
-        "Movido a work antes del turno: el hilo llevaba 10 min esperando plaza en spare (1/1) con otro hilo de su proyecto trabajando; work tenía 1 libre",
+        "Movido a work antes del turno: el hilo llevaba 10 min esperando plaza, ahora en spare (1/1 ocupadas), con otro hilo de su proyecto trabajando; work tenía 1 libre",
       );
     });
 
@@ -19548,6 +19548,29 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
       at(10 * MINUTE + 1);
       expect((await dispatch(h, "b", "proj-1")).action).toBe("wait");
       expect(moves(h)).toEqual([]);
+    });
+    it("keeps the way home of Fable when the full account was itself an excursion (code-reviewer r1 H2)", async () => {
+      // Fable's home is main, over the threshold: Opus goes out to the Team seat spare.
+      const { h, at, askUntil } = await start({ preset: "main", main: [60, 30], settings: { seatsMax: 1, otherModelUpTo: 50 } });
+      expect(await dispatch(h, "a", "proj-1")).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("spare");
+      await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "a", projectId: "proj-1" }) });
+      // b waits on spare past the limit: the project goes to work.
+      await askUntil(10 * MINUTE);
+      at(10 * MINUTE + 1);
+      expect(await dispatch(h, "b", "proj-1")).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("work");
+      await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "b", projectId: "proj-1" }) });
+      // The next Fable turn still goes home.
+      const fable = await h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id: "f", projectId: "proj-1" }),
+          requestedExecution: { providerId: "claude-code", model: "claude-fable-5-1" },
+          attempt: "start-turn",
+        }),
+      );
+      expect(fable).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("main");
     });
   });
 
@@ -19585,6 +19608,31 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
     });
   });
 
+  describe("Team first, also for a project already on the Ultra with room", () => {
+    const fable = (h: Awaited<ReturnType<typeof host>>, threadId: string) =>
+      h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id: threadId, projectId: "proj-1" }),
+          requestedExecution: { providerId: "claude-code", model: "claude-fable-5-1" },
+          attempt: "start-turn",
+        }),
+      ) as Promise<{ action: string }>;
+
+    it("a project alone on the Ultra goes to the free Team seat for its Opus turn", async () => {
+      const { h } = await start({ preset: "main", settings: { otherModelUpTo: 50 } });
+      expect(await dispatch(h, "t1", "proj-1")).toEqual({ action: "proceed" });
+      expect(["spare", "work"]).toContain(await where(h));
+    });
+
+    it("with a Fable thread of it at work there and Team seats for one, its Opus turn stays on the Ultra", async () => {
+      const { h } = await start({ preset: "main", settings: { otherModelUpTo: 50 } });
+      expect(await fable(h, "f")).toEqual({ action: "proceed" });
+      await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "f", projectId: "proj-1" }) });
+      expect(await dispatch(h, "t1", "proj-1")).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("main");
+    });
+  });
+
   describe("(b) a pick by hand", () => {
     it("holds an Opus turn on the Ultra picked, also with the threshold off", async () => {
       const { h } = await start({ preset: "spare", settings: { otherModelUpTo: 0 } });
@@ -19604,6 +19652,14 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
     it("an Ultra picked that cannot run the turn does not hold it: it moves", async () => {
       const { h } = await start({ preset: "spare", main: [100, 100], settings: { otherModelUpTo: 0 } });
       await h.harness.behavior.runCli(["use", "proj-1", "main"]);
+      expect(await dispatch(h, "t1", "proj-1")).toEqual({ action: "proceed" });
+      expect(moves(h).at(-1)).toMatchObject({ note: ownNote("spare") });
+    });
+
+    it("release forgets the pick: the next Opus turn on the default Ultra leaves it (code-reviewer r1 L2)", async () => {
+      const { h } = await start({ preset: "spare", settings: { otherModelUpTo: 0 } });
+      await h.harness.behavior.runCli(["use", "proj-1", "main"]);
+      expect((await h.harness.behavior.runCli(["release"])).exitCode).toBe(0);
       expect(await dispatch(h, "t1", "proj-1")).toEqual({ action: "proceed" });
       expect(moves(h).at(-1)).toMatchObject({ note: ownNote("spare") });
     });

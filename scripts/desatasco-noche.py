@@ -198,7 +198,12 @@ def main() -> int:
     if args.now_ms is None and now > dt.datetime.fromisoformat(args.until):
         return off(f"pasada la hora de corte {args.until}")
     version = plugin_version(read(args.plugins_file, ["bb", "plugin", "list"]))
-    if version is not None and version >= OFF_VERSION:
+    if version is None:
+        # Without the installed version a move could fight a plugin that
+        # already moves stuck projects itself (code-reviewer r1 L1).
+        log("pasada: sin versión del plugin en `bb plugin list`; no muevo nada")
+        return 0
+    if version >= OFF_VERSION:
         return off(f"el plugin instalado es {'.'.join(map(str, version))}: ya mueve él los proyectos atascados")
 
     stuck = parse_stuck(read(args.log_file, ["bb", "plugin", "logs", "claude-switcher", "-n", "3000"]), now_ms)

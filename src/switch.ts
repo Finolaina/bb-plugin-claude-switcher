@@ -66,6 +66,12 @@ export interface SwitchInput {
   /** See ChoiceOptions.reserveSpareUpTo. */
   reserveSpareUpTo?: number;
   /**
+   * The project was put on the current account by hand: a thread left in
+   * error is retried there whenever the account runs the model, whatever it
+   * spends of the reserve (Aitor 2026-11-05; code-reviewer r1 M1).
+   */
+  pinned?: boolean;
+  /**
    * Seats free on an account (see src/seats.ts). The switch goes to an
    * account with one, and only with none anywhere by quota alone (Astra
    * SEATS-R05); seats never move a project by themselves.
@@ -242,7 +248,10 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
   // on its measurements (code-reviewer r15).
   if (stuck || failedOn === null) {
     const own = accounts.filter((a) => a.name === input.currentAccount);
-    const here = chooseAccount(own, options);
+    const here = chooseAccount(
+      own,
+      input.pinned === true ? { ...options, reserveModel: undefined } : options,
+    );
     if (here !== null) {
       return {
         kind: "retry",
@@ -561,6 +570,15 @@ export interface PlacementInput {
   seatsWanted?: number;
   seatsWantedOnly?: boolean;
   /**
+   * The seats the project holds or waits for on the current account, this
+   * turn's included (1 when unset). A turn in another model on an account
+   * that keeps the reserved model only by its margin (reserveSpareUpTo)
+   * goes to a Team seat first, but only to one with seats for all of them:
+   * else the project would bounce between the two (Aitor 2026-11-05, «Team
+   * primero»; code-reviewer r1 H1).
+   */
+  projectSeats?: number;
+  /**
    * The project was put on the current account by hand: a turn that can run
    * there stays, whatever it spends of the reserve (Aitor 2026-11-05: a pick
    * holds until the account is out for real). Seats still move it.
@@ -671,6 +689,24 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     isUsable(current) &&
     canRunModel(current, input.preferredModel);
   if (runs && (input.pinned === true || !spendsReservedWeekly(current, options))) {
+    if (
+      input.pinned !== true &&
+      spendsReservedWeekly(current, { ...options, reserveSpareUpTo: 0 })
+    ) {
+      const wanted = input.projectSeats ?? 1;
+      const free = input.freeSeats;
+      const team = chooseSeated(
+        accounts.filter(
+          (a) => a.name !== input.currentAccount && a.unknown !== true,
+        ),
+        { ...options, reserveSpareUpTo: 0 },
+        free === undefined
+          ? undefined
+          : (name) => (free(name) >= wanted ? free(name) : 0),
+      );
+      if (team !== null)
+        return { kind: "move", account: team.account, why: "current-reserved" };
+    }
     if (input.seatsFull !== true) return { kind: "keep" };
     const threshold = input.aheadThreshold ?? 0;
     const roomy = accounts.filter(

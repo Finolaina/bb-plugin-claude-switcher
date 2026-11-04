@@ -709,8 +709,9 @@ describe("chooseAccount for background work (SPEC 2026-10-30 §2)", () => {
 // keeps the reserved model while its weekly and the reserved model's window
 // are at or under `reserveSpareUpTo`; never above it.
 describe("reserveSpareUpTo", () => {
+  // "a-ultra" sorts before "team": the Team goes first by rank, not by name.
   const ultra = (weekly: number, fable: number) =>
-    account("ultra", {
+    account("a-ultra", {
       weekly: { usedPercent: weekly, resetsAt: NOW + 48 * HOUR },
       models: { Fable: { usedPercent: fable, resetsAt: NOW + 48 * HOUR } },
     });
@@ -734,9 +735,9 @@ describe("reserveSpareUpTo", () => {
 
   it("a Team seat with a free seat still goes first; the Ultra only when no Team has one", () => {
     const seats = (free: Record<string, number>) => ({ ...opus(50), freeSeats: (a: string) => free[a] ?? 0 });
-    expect(chooseAccount([ultra(0, 0), team], seats({ ultra: 5, team: 1 }))?.account).toBe("team");
-    expect(chooseAccount([ultra(0, 0), team], seats({ ultra: 5, team: 0 }))?.account).toBe("ultra");
-    expect(chooseAccount([ultra(51, 0), team], seats({ ultra: 5, team: 0 }))).toBeNull();
+    expect(chooseAccount([ultra(0, 0), team], seats({ "a-ultra": 5, team: 1 }))?.account).toBe("team");
+    expect(chooseAccount([ultra(0, 0), team], seats({ "a-ultra": 5, team: 0 }))?.account).toBe("a-ultra");
+    expect(chooseAccount([ultra(51, 0), team], seats({ "a-ultra": 5, team: 0 }))).toBeNull();
   });
 
   it("does not change where the reserved model itself runs", () => {

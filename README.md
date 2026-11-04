@@ -936,8 +936,10 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
   Ultras idle). A thread in a model other than `preferredModel` that has
   waited more than that many minutes for a seat moves its project, other
   threads at work or not, to an account with a seat: `Movido a team3
-  antes del turno: el hilo llevaba 12 min esperando plaza en team2 (2/2)
-  con otro hilo de su proyecto trabajando; team3 tenía 1 libre`. A
+  antes del turno: el hilo llevaba 12 min esperando plaza, ahora en team2
+  (2/2 ocupadas), con otro hilo de su proyecto trabajando; team3 tenía 1
+  libre` («a punto de arrancar» instead of «trabajando» when the other
+  thread was told to start but has not started yet). A
   project that asks for more seats at once than its account has (its
   threads at work or waiting there, and this one) moves at once, but only
   to an account with seats for all of them: `… el proyecto pide 3 plazas

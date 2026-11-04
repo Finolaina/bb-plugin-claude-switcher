@@ -12,4 +12,6 @@ out2="$(/usr/bin/python3 "$S" "${common[@]}" --log-file "$D/log-sin-stuck.txt")"
 grep -q "sin STUCK" <<<"$out2" && ! grep -q "movido" <<<"$out2" || { echo "CANARIO 2 ROJO: sin STUCK no debía mover nada"; exit 1; }
 out3="$(/usr/bin/python3 "$S" "${common[@]}" --log-file "$D/log-stuck.txt" --plugins-file <(echo 'claude-switcher@0.2.41  running'))"; echo "$out3"
 grep -q "apagado: el plugin instalado es 0.2.41" <<<"$out3" || { echo "CANARIO 3 ROJO: con la 0.2.41 instalada debía apagarse"; exit 1; }
+out4="$(/usr/bin/python3 "$S" "${common[@]}" --log-file "$D/log-stuck.txt" --plugins-file <(echo 'bb: no se pudo conectar'))"; echo "$out4"
+grep -q "sin versión del plugin" <<<"$out4" && ! grep -q "movido" <<<"$out4" || { echo "CANARIO 4 ROJO: sin versión leída no debía mover nada (code-reviewer r1 L1)"; exit 1; }
 echo "CANARIOS VERDES"

@@ -1108,6 +1108,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       !projectSeated(thread.projectId, thread.id)
     );
   }
+  /** The seats the thread's project holds or waits for on the seat budget `key`, the thread's own included. */
+  function projectWants(thread: ThreadResponse, key: string): number {
+    let wanted = 1;
+    for (const [threadId, project] of seatProjects)
+      if (
+        project === thread.projectId &&
+        threadId !== thread.id &&
+        (seats.seatOf(threadId)?.account === key ||
+          seats.position(threadId)?.account === key)
+      )
+        wanted += 1;
+    return wanted;
+  }
   /** When each project last moved for a crowded seat (see crowded): not again within stuckMoveMinutes. */
   const crowdedMoves = new Map<string, number>();
   /**
@@ -1127,7 +1140,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     model: string,
     now: number,
   ):
-    | { kind: "stuck" | "crowded"; minutes: number; wanted: number; capacity: number }
+    | {
+        kind: "stuck" | "crowded";
+        minutes: number;
+        wanted: number;
+        capacity: number;
+        /** A sibling's turn is under way, not only told to start. */
+        working: boolean;
+      }
     | null {
     const limit = current.stuckMoveMinutes * 60_000;
     if (!(limit > 0) || !current.autoSwitch) return null;
@@ -1140,22 +1160,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (!projectSeated(thread.projectId, thread.id)) return null;
     const last = crowdedMoves.get(thread.projectId);
     if (last !== undefined && now - last <= limit) return null;
-    let wanted = 1;
-    for (const [threadId, project] of seatProjects)
-      if (
-        project === thread.projectId &&
-        threadId !== thread.id &&
-        (seats.seatOf(threadId)?.account === key ||
-          seats.position(threadId)?.account === key)
-      )
-        wanted += 1;
+    const wanted = projectWants(thread, key);
     const capacity = seats.snapshot([key])[key]!.capacity;
     const since = seats.waitingSince(thread.id);
     const minutes = since === null ? 0 : Math.floor((now - since) / 60_000);
+    let working = false;
+    for (const [threadId, project] of turnsUnderWay)
+      if (project === thread.projectId && threadId !== thread.id) working = true;
     if (since !== null && now - since > limit)
-      return { kind: "stuck", minutes, wanted, capacity };
+      return { kind: "stuck", minutes, wanted, capacity, working };
     if (capacity > 0 && wanted > capacity)
-      return { kind: "crowded", minutes, wanted, capacity };
+      return { kind: "crowded", minutes, wanted, capacity, working };
     return null;
   }
   /**
@@ -4754,6 +4769,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           }
         : {}),
       pinned: pins.get(projectId) === fromName,
+      projectSeats: projectWants(thread, seatKey(fromName)),
     };
     const decision = decidePlacement(input);
     if (decision.kind === "keep") {
@@ -4834,8 +4850,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // A move for a crowded seat is a new home, not an excursion: a turn in
     // the preferred model going back would take the project to the full
     // account again, where the threads of another model would queue anew.
+    // An excursion that left another account (Fable's home) is kept: only
+    // the way back to the full account goes (code-reviewer r1 H2).
     if (busy !== null && decision.why === "current-full") {
-      excursions.delete(projectId);
+      if (excursions.get(projectId)?.from === fromName) excursions.delete(projectId);
       crowdedMoves.set(projectId, now);
     } else noteMove(projectId, fromName, decision.account, model, before);
     const reason =
@@ -4882,7 +4900,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const libres = roomThere === 1 ? "libre" : "libres";
     const why =
       busy.kind === "stuck"
-        ? `el hilo llevaba ${busy.minutes} min esperando plaza en ${fromName} (${taken}/${busy.capacity}) con otro hilo de su proyecto trabajando`
+        ? `el hilo llevaba ${busy.minutes} min esperando plaza, ahora en ${fromName} (${taken}/${busy.capacity} ocupadas), con otro hilo de su proyecto ${busy.working ? "trabajando" : "a punto de arrancar"}`
         : `el proyecto pide ${busy.wanted} plazas a la vez y ${fromName} tiene ${busy.capacity}`;
     const options = { preferredModel: model, ...reserveOf() };
     const there = measuredAccounts(model).find((a) => a.name === to);
@@ -5827,6 +5845,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       now,
       random: deps.random(),
       stuck,
+      pinned: pins.get(projectId) === fromName,
       freeSeats,
       ...paceFilter(background),
     };
@@ -6369,7 +6388,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         here.unknown === true ||
         // With the reserve: a Max account that keeps the preferred model
         // never gets an Opus retry released on it (Codex BM-R1-005).
-        bestAccount([here], model, now, current.preferredModel, undefined, undefined, current.otherModelUpTo) === fromName)
+        // A pick by hand holds while the account runs the model (code-reviewer r1 M1).
+        (pins.get(projectId) === fromName
+          ? bestAccount([here], model, now)
+          : bestAccount([here], model, now, current.preferredModel, undefined, undefined, current.otherModelUpTo)) === fromName)
     ) {
       // It waited on the account the project was on before.
       const changed = accountChangedAt.get(projectId);
@@ -7211,6 +7233,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                     });
                     recentSwitches.delete(p.id);
                     excursions.delete(p.id);
+                    if (pins.delete(p.id)) storePins();
                     movesOf(p.id).picks += 1;
                   });
                   lines.push(
@@ -7228,6 +7251,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                 // but nothing to come back from either (Codex
                 // BM-INSPECT-005).
                 excursions.delete(p.id);
+                if (pins.delete(p.id)) storePins();
                 movesOf(p.id).picks += 1;
               }
             }

@@ -2219,3 +2219,32 @@ describe("isCalorTick", () => {
     expect(isCalorTick("")).toBe(false);
   });
 });
+
+// Aitor 2026-11-05: a pick by hand holds until the account cannot run the
+// turn. A thread left in error on a picked Max account that still runs Opus
+// is retried there, not moved to a Team seat (code-reviewer r1 M1).
+describe("a thread left in error on an account picked by hand", () => {
+  const fable = { Fable: { usedPercent: 70, resetsAt: NOW + 48 * HOUR } };
+  const stuckOn = (pinned: boolean) =>
+    decideSwitch(
+      input({
+        stuck: true,
+        currentAccount: "main",
+        accounts: [
+          account("main", { weekly: { usedPercent: 70, resetsAt: NOW + 48 * HOUR }, models: fable }),
+          account("seat", { team: true }),
+        ],
+        preferredModel: "Opus",
+        reserveModel: "Fable",
+        ...(pinned ? { pinned: true } : {}),
+      }),
+    );
+
+  it("is retried on the picked account when it can run the model", () => {
+    expect(stuckOn(true)).toMatchObject({ kind: "retry", account: "main" });
+  });
+
+  it("without the pick it leaves the account that keeps Fable, as before", () => {
+    expect(stuckOn(false)).toMatchObject({ account: "seat" });
+  });
+});
