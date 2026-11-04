@@ -14,6 +14,12 @@ project uses [Semantic Versioning](https://semver.org/).
   the Team seats already out of Fable could take an Opus turn, and one of
   them held up to 8 threads while the others stood free (2026-11-03,
   `docs/revision-2026-11-04/PLAN.md`).
+- **A turn told to start keeps its project where it is until it starts.** A
+  turn reads the project's account as it starts, and the account belongs to
+  the whole project: a sibling's move in between could start an Opus turn on
+  an Ultra. No automatic move is written during that time (90 s at most from
+  the first time it was told); the turn that wanted to move waits 30 s. A
+  move by hand is not held back.
 - **`--model opus` is an Opus turn.** A model named by its alias (`opus`,
   `fable`, `sonnet`, `haiku`, with or without `[1m]`) was read as no model:
   it skipped the reserve and, with the default account without a login, was
