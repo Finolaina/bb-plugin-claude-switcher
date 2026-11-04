@@ -87,7 +87,7 @@ M = [
      "(before === model && !projectModelsUnsaved)", "before === model",
      "server.test.ts", "a write that failed"),
     ("T5 agotada", "cancelar no devuelve los intentos", "server.ts",
-     "    blockedWaits.delete(entry.threadId);\n    const own = ownDeletes.get(entry.id);", "    const own = ownDeletes.get(entry.id);",
+     "    await forgetCancelledWait(entry.threadId);\n", "",
      "server.test.ts", "a message cancelled by hand"),
     ("T5 agotada", "espera sin tope si bb falla al escribir", "server.ts",
      "if (waited < BLOCKED_WAITS) {", "if (waited >= 0) {",

@@ -5282,7 +5282,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // The message that waited for its account to be read is gone: the
     // next one waits on its own count (Astra SEATS-R2-005).
     seatReadWaits.delete(entry.threadId);
-    blockedWaits.delete(entry.threadId);
     const own = ownDeletes.get(entry.id);
     if (own !== undefined) {
       if (own.done) ownDeletes.delete(entry.id);
