@@ -1,0 +1,9 @@
+aitor	seats 0/3 (0 running, 0 reserved)	0 waiting
+joytorm	seats 0/5 (0 running, 0 reserved)	0 waiting
+team2	seats 2/2 (2 running, 0 reserved)	2 waiting
+team3	seats 0/2 (0 running, 0 reserved)	0 waiting
+team4	seats 1/2 (1 running, 0 reserved)	0 waiting
+team5	seats 2/2 (2 running, 0 reserved)	0 waiting
+viaulab	seats 0/5 (0 running, 0 reserved)	0 waiting
+
+time	account	running

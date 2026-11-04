@@ -1,0 +1,8 @@
+medido 2026-11-05T00:00:35+01:00 · el día empieza a las 9:00 · freno de fondo apagado
+aitor        Ultra · sin tope de 5 h · sem 100% · Fable 65% · ritmo 438% (fondo sí) · plazas 0/3 · no usable: agotada hasta 2026-11-08T18:00:00+01:00
+joytorm      Ultra · 5 h hasta que Anthropic la verifique · ses 0% · sem 26% · Fable 23% · ritmo 0% (fondo sí) · plazas 0/5 · usable
+team2        Team · ses 18% · sem 6% · Fable 0% · ritmo 32% (fondo sí) · plazas 2/2 · usable
+team3        Team · ses 2% · sem 25% · Fable 4% · ritmo 71% (fondo sí) · plazas 0/2 · usable
+team4        Team · ses 2% · sem 23% · Fable 4% · ritmo 110% (fondo sí) · plazas 1/2 · usable
+team5        Team · ses 60% · sem 73% · Fable 100% · ritmo 46% (fondo sí) · plazas 2/2 · usable
+viaulab      Ultra · sin tope de 5 h · sem 0% · Fable 0% · ritmo 0% (fondo sí) · plazas 0/5 · usable
