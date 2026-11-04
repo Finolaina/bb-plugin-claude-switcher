@@ -76,9 +76,10 @@ Efecto de un rechazo, leído en el código y no probado todavía en un rechazo r
 1. **La marca cambia en Calor.** T deja de saltar y todo sigue como hoy, sin avería. El test usa el texto literal de Calor.
 2. **Un humano escribe el texto exacto con un UUID válido.** Se le rechaza con un mensaje que explica el motivo. No es un caso real.
 3. **Reintento en cola.** Un tic ya encolado (`queuedMessages` no vacío) se trata como hoy, porque rechazarlo dejaría una fila fallida y el vigilante avisaría. Si su reintento mueve el proyecto, pagará igual que hoy. Queda como límite y sale en el registro como cualquier movimiento.
-4. **`noteActivity`.** Un tic rechazado cuenta como actividad del proyecto, igual que hoy cuenta uno enviado, con más frecuencia (cada 5 min en vez de 24). Esto solo influye en marcas internas que invalidan una decisión en curso. Se comprueba en la implementación si alguna regla (la «actividad en la última hora» de `rebalance` se lee de los hilos, no de este contador) se apoya en él; si alguna lo hace, el tic rechazado no cuenta.
-5. **Espera ya en curso.** Las esperas que no vienen de la colocación (asientos sin contar tras una recarga, plaza llena en la propia cuenta, `heldOff`/`blockedOff` en el punto de control) quedan como hoy: el tic espera y luego pasa por el caso 3. Son del camino de plazas, y convertirlas en rechazo exigiría deshacer entradas de la cola de plazas por un ahorro que no está medido.
-6. **Un tic que falla por límite.** El camino de `decideSwitch` no cambia: un tic que arranca y falla puede cambiar de cuenta como hoy. No hay caso medido en los 5 que T evita.
+4. **Un tic rechazado no deja huella (Astra T-001).** Hoy `dispatchDecision` apunta el modelo del hilo y del proyecto (`threadModel`, `noteProjectModel`) y la actividad (`noteActivity`) antes de colocar el turno. Un tic rechazado no ha ocurrido: si dejara su modelo, el proyecto se juzgaría después por ese modelo y `rescueStranded` podría moverlo con todos sus hilos. Para un tic elegible, esas tres anotaciones se hacen solo cuando la decisión no es un rechazo. No se guarda ni se restaura nada, así que lo que apunte un mensaje real mientras tanto se conserva.
+5. **Tampoco coloca un proyecto nuevo (Astra T-002).** `beforeStart` llama a `placeNewProject` antes de `placeTurn`, y esa colocación también escribe la cuenta: un proyecto que quedó sin colocar porque las lecturas fallaron podría moverse con su primer tic. Un tic elegible no la llama; el proyecto se coloca con su siguiente mensaje real.
+6. **Espera ya en curso.** Las esperas que no vienen de la colocación (asientos sin contar tras una recarga, plaza llena en la propia cuenta, `heldOff`/`blockedOff` en el punto de control) quedan como hoy: el tic espera y luego pasa por el caso 3. Son del camino de plazas, y convertirlas en rechazo exigiría deshacer entradas de la cola de plazas por un ahorro que no está medido.
+7. **Un tic que falla por límite.** El camino de `decideSwitch` no cambia: un tic que arranca y falla puede cambiar de cuenta como hoy. No hay caso medido en los 5 que T evita.
 
 ## Límites
 
@@ -88,7 +89,7 @@ Efecto de un rechazo, leído en el código y no probado todavía en un rechazo r
 
 ## Interfaces y pruebas (TDD)
 
-Interfaces: `isCalorTick(text: string): boolean` (pura, `src/switch.ts`), que casa `/^\s*calor: tic de caché #<uuid>\./`; `placeTurn` recibe en su parámetro `turn` un `tick: boolean` y devuelve en él `refused?: string`; `beforeStart` lo convierte en `{action: "reject"}`.
+Interfaces: `isCalorTick(text: string): boolean` (pura, `src/switch.ts`), que casa `/^\s*calor: tic de caché #<uuid>\./`; `placeTurn` recibe en su parámetro `turn` un `tick: boolean` y devuelve en él `refused?: string`; `beforeStart` lo convierte en `{action: "reject"}` y, con un tic elegible, no llama a `placeNewProject`; `dispatchDecision` calcula si el tic es elegible al principio y aplaza `noteActivity`, `threadModel.set` y `noteProjectModel` hasta saber que no se rechaza.
 
 Costuras donde se prueba (ninguna más):
 
@@ -108,8 +109,10 @@ Pruebas, con el estado real de cada caso del registro:
 9. Tic con `attempt: "join-turn"` → `proceed`.
 10. `autoSwitch: false` → `proceed`.
 11. Rechazado un tic, el siguiente mensaje normal se coloca y mueve sin arrastrar nada.
+12. Proyecto de Opus en una Team con Fable agotada; un tic de Fable de otro hilo parado se rechaza; tras refrescar la cuota (`rescueStranded`) el modelo guardado sigue siendo Opus, la cuenta no cambia y el historial está vacío.
+13. Proyecto sin colocar, con un hilo con caché en la cuenta por defecto y las lecturas ya recuperadas a favor de otra cuenta: su tic no escribe la variable. El siguiente mensaje real sí coloca el proyecto.
 
-Mutantes (al estilo de `docs/revision-2026-11-04/mutantes.py`; cada uno debe romper una prueba): quitar el flag al llamar a `placeTurn`, quitar la guarda de `queuedMessages`, quitar la de `attempt`, relajar la marca para que case el cierre, rechazar también cuando no movería, mover antes de comprobar el flag, no convertir `turn.held` en rechazo.
+Mutantes (al estilo de `docs/revision-2026-11-04/mutantes.py`; cada uno debe romper una prueba): quitar el flag al llamar a `placeTurn`, quitar la guarda de `queuedMessages`, quitar la de `attempt`, relajar la marca para que case el cierre, rechazar también cuando no movería, mover antes de comprobar el flag, no convertir `turn.held` en rechazo, anotar el modelo antes de decidir, llamar a `placeNewProject` también con un tic.
 
 ## Llegada
 
