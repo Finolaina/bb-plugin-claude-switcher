@@ -290,7 +290,7 @@ describe("familia", () => {
 
 describe("el script entero, con un bb de mentira", () => {
   const SCRIPT = fileURLToPath(new URL("./canario-cola.mjs", import.meta.url));
-  const correr = async (fake: string, estado?: unknown, fallo?: unknown) => {
+  const correr = async (fake: string, estado?: unknown, fallo?: unknown, env: Record<string, string> = {}) => {
     const dir = await mkdtemp(join(tmpdir(), "canario-"));
     if (estado !== undefined)
       await writeFile(join(dir, "canario-cola-estado.json"), JSON.stringify(estado));
@@ -302,7 +302,7 @@ describe("el script entero, con un bb de mentira", () => {
     try {
       const salida = await promisify(execFile)(process.execPath, [SCRIPT], {
         cwd: dir,
-        env: { ...process.env, BB_CLI: binario },
+        env: { ...process.env, BB_CLI: binario, ...env },
       });
       return { code: 0, ...salida, dir };
     } catch (error) {
@@ -354,6 +354,13 @@ describe("el script entero, con un bb de mentira", () => {
     const rota = `case "$1" in plugin) echo "$@" > "$PWD/llamada"; cp "$6" "$PWD/entrada"; echo '{"ok":true,"channels":["web"]}';; *) exit 3;; esac`;
     const hay = (dir: string, fichero: string) => readFile(join(dir, fichero), "utf8").then(() => true, () => false);
 
+    it("un bb colgado es no poder mirar: sale 1 y apunta desde cuándo", async () => {
+      const r = await correr("exec sleep 30", undefined, undefined, { CANARIO_BB_MS: "200" });
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("lectura fallida");
+      expect(await hay(r.dir, "canario-cola-fallo.json")).toBe(true);
+    });
+
     it("un fallo suelto sale 1, sin aviso, y apunta desde cuándo", async () => {
       const r = await correr(rota);
       expect(r.code).toBe(1);
@@ -401,8 +408,9 @@ describe("el script entero, con un bb de mentira", () => {
     it.each([
       ["falla", "exit 4"],
       ["no llega a nadie", `echo '{"ok":true,"channels":[]}'`],
+      ["se cuelga", "exec sleep 30"],
     ])("si el aviso %s sale 1 y lo repite en la pasada siguiente", async (_, push) => {
-      const r = await correr(bbFalso(push), viejo());
+      const r = await correr(bbFalso(push), viejo(), undefined, { CANARIO_BB_MS: "2000" });
       expect(r.code).toBe(1);
       expect(r.stderr).toContain("aviso no entregado");
       const estado = JSON.parse(await readFile(join(r.dir, "canario-cola-estado.json"), "utf8"));

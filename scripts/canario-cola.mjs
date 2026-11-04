@@ -29,6 +29,8 @@ export const SIN_DESTINO_MS = 2 * 60 * 60_000;
 export const REAVISO_SIN_DESTINO_MS = 6 * 60 * 60_000;
 /** El vigilante lleva este rato sin poder mirar: avisa. Un fallo suelto solo queda en `bb automation runs`. */
 export const FALLO_MS = 30 * 60_000;
+/** Lo que puede tardar cada llamada a bb: colgada, el vigilante no podría decir que no ve (Astra IR3-001). */
+const BB_MS = Number(process.env.CANARIO_BB_MS ?? 60_000);
 const SIN_DESTINO = "sin-destino";
 const PLUGIN = "claude-switcher";
 /** Lo único por lo que una fila fallida no espera nada (cola real del servidor, 2026-11-04). */
@@ -172,7 +174,13 @@ async function bb(args) {
   let ultimo;
   for (const binario of candidatos) {
     try {
-      return (await run(binario, args, { maxBuffer: 64 * 1024 * 1024 })).stdout;
+      return (
+        await run(binario, args, {
+          maxBuffer: 64 * 1024 * 1024,
+          timeout: BB_MS,
+          killSignal: "SIGKILL",
+        })
+      ).stdout;
     } catch (error) {
       ultimo = error;
       // Solo se prueba el siguiente si este binario no existe.
