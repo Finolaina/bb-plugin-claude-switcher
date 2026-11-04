@@ -18305,8 +18305,18 @@ describe("caminos 2026-11-04", () => {
       expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
     });
 
-    it("a Team seat measured and out is no destination by its login", async () => {
-      const h = await start(REFUSES, () => Response.json(payload(100, 2, 0)));
+    it.each([
+      ["out of its session", () => Response.json(payload(100, 2, 0))],
+      [
+        "locked",
+        () =>
+          Response.json({
+            ...payload(5, 2, 0),
+            five_hour: { locked_reason: "seat_disabled" },
+          }),
+      ],
+    ])("a Team seat measured and %s is no destination by its login", async (_, work) => {
+      const h = await start(REFUSES, work);
       expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("wait");
       expect(h.envSet).toEqual([]);
     });
