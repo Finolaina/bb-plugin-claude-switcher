@@ -1040,8 +1040,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     for (const [sibling, project] of seatProjects) {
       if (project !== projectId || sibling === threadId) continue;
       const told = toldToStart.get(sibling);
-      if (told === undefined || now - told >= SEAT_TTL_MS) continue;
-      if (seats.seatOf(sibling)?.state === "reserved") return sibling;
+      if (told !== undefined && now - told < SEAT_TTL_MS) return sibling;
     }
     return null;
   }
