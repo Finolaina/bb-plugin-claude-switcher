@@ -6,8 +6,11 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import {
+  FALLO_MS,
   OLVIDO_MS,
   REAVISO_MS,
+  REAVISO_SIN_DESTINO_MS,
+  SIN_DESTINO_MS,
   UMBRAL_MS,
   familia,
   judge,
@@ -109,6 +112,62 @@ describe("judge", () => {
     ]);
     expect(avisos).toEqual([]);
     expect(retenidas).toBe(0);
+  });
+
+  it("una fila que falla por otra cosa avisa a los 10 minutos, tenga o no quien la retiene", () => {
+    const filas = [fila({ failureReason: "hook timed out", waitingOn: null })];
+    expect(juzga(INCIDENTE, filas, NOW - UMBRAL_MS + 1).avisos).toEqual([]);
+    const { avisos, retenidas } = juzga(INCIDENTE, filas);
+    expect(retenidas).toBe(1);
+    expect(avisos).toEqual([
+      { tipo: "fallida", fila: "q1", hilo: "t1", minutos: 10, razon: "hook timed out" },
+    ]);
+    expect(textoAviso(avisos[0]!)).toBe("El mensaje del hilo t1 lleva 10 min fallando: hook timed out");
+  });
+
+  describe("retenida sin ninguna cuenta que pueda correrla", () => {
+    const NADIE = { cuentas: [cuenta("team2", { usable: false }), INCIDENTE.cuentas[2]] };
+
+    it("1:59 no avisa; 2:00 sí, y dice a quién", () => {
+      expect(juzga(NADIE, undefined, NOW - SIN_DESTINO_MS + 1).avisos).toEqual([]);
+      const { avisos } = juzga(NADIE, undefined, NOW - SIN_DESTINO_MS);
+      expect(avisos).toHaveLength(1);
+      expect(textoAviso(avisos[0]!)).toBe(
+        "1 hilo lleva 2 h retenido sin ninguna cuenta que pueda correrlo: t1 (Opus)",
+      );
+    });
+
+    it("varios hilos son un solo aviso, con la mayor espera", () => {
+      const { avisos } = judge({
+        filas: [fila(), fila({ id: "q2" }), fila({ id: "q3", threadId: "t2" })],
+        health: NADIE,
+        estado: {
+          primeraVez: { q1: NOW - SIN_DESTINO_MS, q2: NOW - 5 * SIN_DESTINO_MS, q3: NOW - 39 * SIN_DESTINO_MS },
+        },
+        ahora: NOW,
+      });
+      expect(avisos).toHaveLength(1);
+      expect(textoAviso(avisos[0]!)).toBe(
+        "2 hilos llevan hasta 78 h retenidos sin ninguna cuenta que pueda correrlo: t1 (Opus), t2 (Opus)",
+      );
+    });
+
+    it("se repite cada 6 horas, no cada hora", () => {
+      const paso = (avisado: number) =>
+        judge({
+          filas: [fila()],
+          health: NADIE,
+          estado: { primeraVez: { q1: NOW - 10 * REAVISO_SIN_DESTINO_MS }, vista: {}, avisado: { "sin-destino": avisado } },
+          ahora: NOW,
+        }).avisos;
+      expect(paso(NOW - REAVISO_SIN_DESTINO_MS + 1)).toEqual([]);
+      expect(paso(NOW - REAVISO_SIN_DESTINO_MS)).toHaveLength(1);
+    });
+
+    it("con una cuenta libre es el aviso de siempre, no este", () => {
+      const { avisos } = juzga(INCIDENTE, undefined, NOW - SIN_DESTINO_MS);
+      expect(avisos.map((a) => (a as { tipo?: string }).tipo)).toEqual([undefined]);
+    });
   });
 
   it("las filas de otro plugin o de hilo ocupado no cuentan", () => {
@@ -231,10 +290,12 @@ describe("familia", () => {
 
 describe("el script entero, con un bb de mentira", () => {
   const SCRIPT = fileURLToPath(new URL("./canario-cola.mjs", import.meta.url));
-  const correr = async (fake: string, estado?: unknown) => {
+  const correr = async (fake: string, estado?: unknown, fallo?: unknown) => {
     const dir = await mkdtemp(join(tmpdir(), "canario-"));
     if (estado !== undefined)
       await writeFile(join(dir, "canario-cola-estado.json"), JSON.stringify(estado));
+    if (fallo !== undefined)
+      await writeFile(join(dir, "canario-cola-fallo.json"), JSON.stringify(fallo));
     const binario = join(dir, "bb-falso");
     await writeFile(binario, `#!/bin/sh\n${fake}\n`);
     await chmod(binario, 0o755);
@@ -278,6 +339,41 @@ describe("el script entero, con un bb de mentira", () => {
     const r = await correr(`case "$1" in thread) echo '[]';; *) echo '{"cuentas":[]}';; esac`);
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("0 retenidas");
+  });
+
+  it.each([
+    ["sin cuentas", '{"cuentas":[]}'],
+    ["cuentas sin el campo usable", '{"cuentas":[{"nombre":"team2","plan":"team"}]}'],
+  ])("con filas retenidas y %s sale 1: no ha podido juzgarlas", async (_, salud) => {
+    const r = await correr(`case "$1" in thread) echo '${JSON.stringify([fila()])}';; *) echo '${salud}';; esac`);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("no enseña cuentas");
+  });
+
+  describe("sin poder mirar", () => {
+    const rota = `case "$1" in plugin) echo "$@" > "$PWD/llamada"; cp "$6" "$PWD/entrada"; echo '{"ok":true,"channels":["web"]}';; *) exit 3;; esac`;
+    const hay = (dir: string, fichero: string) => readFile(join(dir, fichero), "utf8").then(() => true, () => false);
+
+    it("un fallo suelto sale 1, sin aviso, y apunta desde cuándo", async () => {
+      const r = await correr(rota);
+      expect(r.code).toBe(1);
+      expect(await hay(r.dir, "llamada")).toBe(false);
+      expect(JSON.parse(await readFile(join(r.dir, "canario-cola-fallo.json"), "utf8")).desde).toBeGreaterThan(0);
+    });
+
+    it("media hora seguida avisa, una vez por hora", async () => {
+      const r = await correr(rota, undefined, { desde: Date.now() - FALLO_MS - 60_000 });
+      expect(r.code).toBe(1);
+      expect(JSON.parse(await readFile(join(r.dir, "entrada"), "utf8")).title).toBe("Switcher: el vigilante no ve la cola");
+      const otra = await correr(rota, undefined, { desde: Date.now() - 2 * FALLO_MS, avisado: Date.now() - REAVISO_MS + 60_000 });
+      expect(await hay(otra.dir, "llamada")).toBe(false);
+    });
+
+    it("en cuanto vuelve a mirar, la cuenta empieza de cero", async () => {
+      const r = await correr(`case "$1" in thread) echo '[]';; *) echo '{"cuentas":[]}';; esac`, undefined, { desde: 1 });
+      expect(r.code).toBe(0);
+      expect(await hay(r.dir, "canario-cola-fallo.json")).toBe(false);
+    });
   });
 
   describe("un aviso de verdad", () => {

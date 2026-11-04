@@ -33,12 +33,12 @@ export interface Atasco {
   proyectoOcupado: boolean;
 }
 
-/** Whether bb's row is held by `pluginId` and still alive: a failed row (an archived thread) waits for nothing. */
+/** Whether bb's row is held by `pluginId` and still alive: the row of an archived thread waits for nothing; one whose attempt failed still does (code-reviewer r2). */
 export function heldBy(row: HeldRow, pluginId: string): boolean {
   return (
     row.waitingOn?.kind === "plugin" &&
     row.waitingOn.pluginId === pluginId &&
-    (row.failureReason ?? null) === null
+    row.failureReason !== "Thread is archived"
   );
 }
 

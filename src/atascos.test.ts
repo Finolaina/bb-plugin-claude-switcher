@@ -27,6 +27,7 @@ describe("heldBy", () => {
     expect(heldBy(row({ waitingOn: null }), "claude-switcher")).toBe(false);
     // Measured in bb's queue, 2026-11-03: an archived thread's row.
     expect(heldBy(row({ failureReason: "Thread is archived" }), "claude-switcher")).toBe(false);
+    expect(heldBy(row({ failureReason: "hook timed out" }), "claude-switcher")).toBe(true);
   });
 });
 

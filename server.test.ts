@@ -17300,6 +17300,39 @@ describe("caminos 2026-11-04", () => {
       expect(h.harness.logEntries.map((e) => e.message)).toContainEqual(
         expect.stringContaining("could not be moved in 10 tries"),
       );
+      // The next message has its own 10 tries.
+      expect((await dispatch(h, "t1", "proj-1", FABLE_ID, true)).action).toBe("wait");
+    });
+
+    it("no other account can run it but an Ultra that keeps Fable: an Opus turn does not wait for that one, it starts and fails", async () => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 10, 5)),
+          spare: () => Response.json(payload(100, 48, 100)),
+          work: () => Response.json(payload(100, 2, 0)),
+        },
+        { settings: FABLE, presetEnv: { "proj-1": on("spare") } },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("an account unknown for now is not an account out of the model: the turn is not held off it", async () => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 10, 5)),
+          spare: () => new Response(null, { status: 500 }),
+          work: () => Response.json(payload(0, 2, 0)),
+        },
+        { settings: FABLE, presetEnv: { "proj-1": on("spare") } },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "t1", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
     });
 
     it("a message cancelled by hand leaves the next one its own 10 tries", async () => {
@@ -17509,6 +17542,34 @@ describe("caminos 2026-11-04", () => {
       await h.harness.behavior.callRpc("accounts_refresh", null);
       await dispatch(h, "t3", "proj-1", FABLE_ID);
       await vi.waitFor(async () => expect((await stored(h))?.["proj-1"]).toBe("Fable"));
+    });
+
+    it("a turn seen only as it ends names the project's model, over what a reload brought", async () => {
+      const h = await host(USAGE, {
+        settings: FABLE,
+        presetEnv: { "proj-1": on("work") },
+        kvPreset: { "project-models": { "proj-1": "Fable" } },
+        threadEvents: {
+          t1: [
+            {
+              id: "evt_1",
+              scope: { kind: "thread" },
+              threadId: "t1",
+              seq: 1,
+              createdAt: NOW - 60_000,
+              type: "client/turn/requested",
+              data: { requestId: "creq_1", execution: { model: OPUS } },
+            },
+          ],
+        },
+      });
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      const t1 = { thread: thread({ id: "t1", projectId: "proj-1" }) };
+      await h.harness.behavior.emitThreadEvent("thread.active", t1);
+      await h.harness.behavior.emitThreadEvent("thread.idle", { ...t1, lastAssistantText: null });
+      await vi.waitFor(async () => expect((await stored(h))?.["proj-1"]).toBe("Opus"));
     });
 
     it("a write that failed is tried again on the next turn, also of the same model", async () => {
@@ -17727,6 +17788,64 @@ describe("caminos 2026-11-04", () => {
         thread: thread({ id: "t2", projectId: "proj-3" }),
         lastAssistantText: null,
       });
+      expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("proceed");
+      expect((await dispatch(h, "t2", "proj-3", OPUS)).action).toBe("wait");
+      // spare's seat frees: t2 could run there, and has only just begun to wait.
+      await h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: thread({ id: "other", projectId: "proj-2" }),
+        lastAssistantText: null,
+      });
+      expect((await report(h)).atascos).toEqual([]);
+      at(20 * 60_000);
+      expect((await report(h)).atascos).toHaveLength(1);
+    });
+
+    it("a look that only joins a running turn does not forget the wait", async () => {
+      const { h, at } = await stuck();
+      at(10 * 60_000);
+      await h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id: "t2", projectId: "proj-3" }),
+          requestedExecution: { providerId: "claude-code", model: OPUS },
+          attempt: "join-turn",
+        }),
+      );
+      expect((await report(h)).atascos).toHaveLength(1);
+    });
+
+    it("a turn that starts (a message sent with «Send now») ends the wait, and so does the thread going", async () => {
+      const running = await stuck();
+      running.at(10 * 60_000);
+      await running.h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "t2", projectId: "proj-3" }),
+      });
+      expect((await report(running.h)).atascos).toEqual([]);
+      running.h.harness.dispose();
+      const gone = await stuck();
+      gone.at(10 * 60_000);
+      await gone.h.harness.behavior.emitThreadEvent("thread.archived", {
+        thread: thread({ id: "t2", projectId: "proj-3" }),
+      });
+      expect((await report(gone.h)).atascos).toEqual([]);
+    });
+
+    it("a row whose attempt failed still counts; one of an archived thread does not", async () => {
+      const failed = await stuck(held({ failureReason: "hook timed out" }));
+      failed.at(10 * 60_000);
+      expect((await report(failed.h)).atascos).toHaveLength(1);
+      failed.h.harness.dispose();
+      const archived = await stuck(held({ failureReason: "Thread is archived" }));
+      archived.at(10 * 60_000);
+      expect((await report(archived.h)).atascos).toEqual([]);
+    });
+
+    it("a project set by hand since is not this plugin's to place: not stuck", async () => {
+      const mine = on("spare");
+      const { h, at } = await stuck(held(), { presetEnv: { "proj-3": mine } });
+      at(10 * 60_000);
+      await pass(h);
+      expect((await report(h)).atascos).toHaveLength(1);
+      mine[0]!.note = "set by hand";
       expect((await report(h)).atascos).toEqual([]);
     });
 
@@ -17910,17 +18029,19 @@ describe("caminos 2026-11-04", () => {
   });
 
   it("T3b a pick by hand of an Ultra with every Team seat full waits: it does not run Opus there", async () => {
-    const h = await incident();
+    const h = await incident(INCIDENT, { presetEnv: { "proj-1": on("work") } });
     expect((await dispatch(h, "t1", "proj-3", OPUS)).action).toBe("proceed");
     await h.harness.behavior.runCli(["use", "proj-1", "main"]);
+    expect(h.envDeleted.at(-1)).toMatchObject({ projectId: "proj-1" });
     const r = await dispatch(h, "t2", "proj-1", OPUS);
     expect(r.action).toBe("wait");
     expect(r.reason).toContain("main keeps its weekly for Fable");
   });
 
   it("T3 a pick by hand of an Ultra does not make it run Opus: «Esperar siempre» holds, and the turn goes to the Team seat", async () => {
-    const h = await incident();
+    const h = await incident(INCIDENT, { presetEnv: { "proj-1": on("work") } });
     await h.harness.behavior.runCli(["use", "proj-1", "main"]);
+    expect(h.envDeleted.at(-1)).toMatchObject({ projectId: "proj-1" });
     expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
     expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
   });
