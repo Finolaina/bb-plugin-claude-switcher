@@ -1,6 +1,6 @@
 # Revisión del switcher tras «cuenta agotada retiene hilos» (0.2.39): plan para Astra
 
-Repo público: aquí no van nombres de proyectos ni títulos de hilos; la evidencia con nombres está en el almacenamiento externo del hilo.
+Repo público: aquí no van nombres de proyectos ni títulos de hilos; la evidencia con nombres está en el almacenamiento externo del hilo. `REVISION.md` es la página para Aitor y está también fuera de este repo; los límites técnicos están en «Known limitations» del `README.md`.
 
 ## Palabras literales
 
@@ -141,3 +141,5 @@ Evidencia externa de «hecho»: suite y mutantes en verde; veredicto de Astra; e
 - **T16, ampliado (ronda 5):** la raíz de los tres high seguidos en `server.ts` es que la cuenta es de todo el proyecto y cada turno la lee al arrancar. El arreglo está en un solo punto, justo antes de escribir la variable (`applyAccount`), para todo movimiento automático; `placeTurn` hace esperar 30 s al turno que quería mover. Una plaza en otra cuenta no ata al proyecto, para que dos hermanos admitidos en cuentas distintas no se bloqueen entre sí.
 - **T15, ampliado (ronda 5):** una Team sin leer también da cola y sirve con la Ultra leída; una Team leída o que rechazó no cuenta como sin leer; antes de las primeras lecturas no se usa ninguna a ciegas, y esas lecturas vuelven a preguntar.
 - **T16, ronda 6:** solo ata al proyecto el hilo al que se dijo que arrancara, no el admitido de una cola, porque ese se vuelve a colocar antes de arrancar; y como mucho 90 s desde la primera vez, sin renovarse, porque otro plugin puede retenerlo. Medido (cuenta nuestra; `bb plugin logs claude-switcher -n 10000` en el NUC, 2026-11-04 02:18, 36 h, plugin 0.2.38): del reparto al arranque, mediana 0,9 s, p90 6 s, 5 de 242 pasan de 90 s.
+- **T16, rondas 7 y 8:** la marca se pone con la plaza, sin nada esperado en medio, solo si el turno no está ya en marcha, y se borra con la plaza; el `proceed` con el que un turno retenido por otro plugin arranca también ata, 10 s.
+- **T15, rondas 7 y 8:** una respuesta incompleta conserva lo que dijo, y solo una ventana que falta se lee como libre; una Team vetada por el reloj no cuenta como sin leer; una cuenta agotada también espera en la cola de una Team sin leer.

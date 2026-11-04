@@ -91,6 +91,7 @@ describe("parseUsage", () => {
     expect(parseUsage(partial).session).toEqual({
       usedPercent: 100,
       resetsAt: null,
+      missing: true,
     });
     expect(parseUsage(partial).unknown).toBe(true);
   });
@@ -104,6 +105,7 @@ describe("parseUsage", () => {
     expect(parseUsage(partial).weekly).toEqual({
       usedPercent: 100,
       resetsAt: null,
+      missing: true,
     });
     expect(parseUsage(partial).unknown).toBe(true);
   });

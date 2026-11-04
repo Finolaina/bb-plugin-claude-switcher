@@ -682,17 +682,20 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
 /**
  * The Team seats not fully measured, as accounts: nothing they spend is what
  * the reserve needs. What an incomplete answer did say still counts (Astra
- * FINAL-002); a window it left out reads as 100 % with no reset (src/usage.ts).
+ * FINAL-002, FINAL-R8-002); only a window it left out reads as free.
  */
-function unreadTeamSeats(input: PlacementInput): AccountUsage[] {
+export function unreadTeamSeats(
+  input: Pick<PlacementInput, "accounts" | "unreadTeams" | "currentAccount" | "now">,
+): AccountUsage[] {
   const known = (window: UsageWindow | undefined): UsageWindow =>
-    window === undefined || (window.usedPercent >= 100 && window.resetsAt === null)
+    window === undefined || window.missing === true
       ? { usedPercent: 0, resetsAt: null }
       : window;
   return (input.unreadTeams ?? [])
     .filter((name) => name !== input.currentAccount)
     .map((name) => {
-      const read = input.accounts.find((a) => a.name === name);
+      const found = input.accounts.find((a) => a.name === name);
+      const read = found === undefined ? undefined : settle(found, input.now);
       return {
         name,
         blocked: false,

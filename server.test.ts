@@ -18250,6 +18250,85 @@ describe("caminos 2026-11-04", () => {
       expect(h.envSet).toEqual([]);
     });
 
+    it("on an Ultra out of its session with the Team seat not read and full, it takes its place in that queue", async () => {
+      const h = await start(() => Response.json(payload(100, 30, 40)), REFUSES);
+      expect((await dispatch(h, "other", "proj-2", OPUS)).action).toBe("proceed");
+      expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("wait");
+      const seats = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+      expect(seats.seats?.work?.queued.map((q) => q.threadId)).toEqual(["t1"]);
+    });
+
+    it("a Team seat whose incomplete answer has a session out whose reset passed takes the turn", async () => {
+      const h = await start(REFUSES, () =>
+        Response.json({
+          limits: [{ kind: "session", percent: 100, resets_at: new Date(NOW - 3_600_000).toISOString() }],
+          five_hour: { locked_reason: null },
+          seven_day: { locked_reason: null },
+        }),
+      );
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    });
+
+    it("a Team seat whose incomplete answer says its session is out, with no reset, is no destination", async () => {
+      const OUT = () =>
+        Response.json({
+          limits: [{ kind: "session", percent: 100, resets_at: null }],
+          five_hour: { locked_reason: null },
+          seven_day: { locked_reason: null },
+        });
+      const h = await start(REFUSES, OUT);
+      expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("wait");
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("a Team seat left out because only the clock would free it is no destination by its login", async () => {
+      let clock = NOW;
+      let down = false;
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 10, 5)),
+          spare: () => Response.json(payload(13, 30, 40)),
+          work: () =>
+            down
+              ? new Response(null, { status: 429 })
+              : Response.json({
+                  ...payload(5, 2, 0),
+                  limits: [
+                    ...(payload(5, 2, 0).limits as unknown[]),
+                    {
+                      kind: "weekly_scoped",
+                      percent: 100,
+                      resets_at: new Date(NOW + 3_600_000).toISOString(),
+                      scope: { model: { display_name: "Opus" } },
+                    },
+                  ],
+                }),
+        },
+        {
+          settings: { ...FABLE, seatsTeam: 1 },
+          presetEnv: { "proj-1": on("spare"), "proj-2": on("work") },
+          clock: () => clock,
+        },
+      );
+      dispose = () => h.harness.dispose();
+      h.files[`${ACCOUNTS}/spare/.claude.json`] = JSON.stringify({
+        oauthAccount: {
+          accountUuid: "uuid-spare",
+          emailAddress: "spare@example.com",
+          organizationType: "claude_max",
+          planDisplayName: "Ultra",
+        },
+      });
+      teamLogin(h, "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      down = true;
+      clock = NOW + 3 * 3_600_000;
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("wait");
+      expect(h.envSet).toEqual([]);
+    });
+
     it("a full Team seat whose answer came incomplete gives a place in its queue too", async () => {
       const h = await start(REFUSES, PARTIAL);
       expect((await dispatch(h, "other", "proj-2", OPUS)).action).toBe("proceed");
@@ -18485,28 +18564,60 @@ describe("caminos 2026-11-04", () => {
       expect(h.envDeleted).toEqual([]);
     });
 
-    it("a sibling another plugin keeps holding ties the project no longer than a seat lasts", async () => {
-      let clock = NOW;
-      const h = await host(
-        {
-          main: () => Response.json(payload(13, 30, 40)),
-          spare: () => Response.json(payload(13, 30, 100)),
-          work: () => Response.json(payload(13, 30, 100)),
-        },
-        { settings: { ...FABLE, seatsTeam: 2 }, presetEnv: { "proj-1": on("spare") }, clock: () => clock },
-      );
-      dispose = () => h.harness.dispose();
-      teamLogin(h, "spare", "work");
-      await h.harness.behavior.callRpc("accounts_refresh", null);
-      for (let t = 0; t <= 60_000; t += 30_000) {
-        clock = NOW + t;
+    describe("a sibling another plugin keeps holding, asked again and again", () => {
+      const asked = async (clock: () => number) => {
+        const h = await host(
+          {
+            main: () => Response.json(payload(13, 30, 40)),
+            spare: () => Response.json(payload(13, 30, 100)),
+            work: () => Response.json(payload(13, 30, 100)),
+          },
+          { settings: { ...FABLE, seatsTeam: 2 }, presetEnv: { "proj-1": on("spare") }, clock },
+        );
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "spare", "work");
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        return h;
+      };
+
+      it("ties the project for the 90 s of a seat, not for as long as it is asked", async () => {
+        let clock = NOW;
+        const h = await asked(() => clock);
+        for (let t = 0; t <= 90_000; t += 30_000) {
+          clock = NOW + t;
+          expect((await dispatch(h, "c1", "proj-1", OPUS)).action).toBe("proceed");
+        }
+        // Past that, its last answer is 10 s old: the project goes.
+        clock = NOW + 100_000;
+        expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("proceed");
+        expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-1"]);
+      });
+
+      it.each([
+        ["past the 90 s", 120_000, 120_000],
+        ["right before them", 85_000, 91_000],
+      ])("the answer the turn goes on ties it too: %s", async (_, lastAsked, sibling) => {
+        let clock = NOW;
+        const h = await asked(() => clock);
         expect((await dispatch(h, "c1", "proj-1", OPUS)).action).toBe("proceed");
+        clock = NOW + lastAsked;
+        expect((await dispatch(h, "c1", "proj-1", OPUS)).action).toBe("proceed");
+        clock = NOW + sibling;
         expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("wait");
-      }
-      clock = NOW + 90_000;
-      expect((await dispatch(h, "c1", "proj-1", OPUS)).action).toBe("proceed");
-      expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("proceed");
-      expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-1"]);
+        expect(h.envDeleted).toEqual([]);
+      });
+
+      it("10 s after that answer it no longer does", async () => {
+        let clock = NOW;
+        const h = await asked(() => clock);
+        expect((await dispatch(h, "c1", "proj-1", OPUS)).action).toBe("proceed");
+        clock = NOW + 120_000;
+        expect((await dispatch(h, "c1", "proj-1", OPUS)).action).toBe("proceed");
+        clock = NOW + 129_999;
+        expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("wait");
+        clock = NOW + 130_000;
+        expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("proceed");
+      });
     });
 
     it("two siblings only admitted from a queue do not hold each other: the account ran out, both leave at once", async () => {
@@ -18610,6 +18721,51 @@ describe("caminos 2026-11-04", () => {
         }),
       );
       expect(h.harness.logEntries.map((e) => e.message).join("\n")).toContain("account main refused a turn");
+    });
+
+    it("a sibling's move cannot land between a turn's seat and its proceed, whatever the timing", async () => {
+      for (let read = 1; read <= 3; read += 1)
+        for (let ticks = 0; ticks <= 24; ticks += 1) {
+          let open!: () => void;
+          const gate = new Promise<void>((resolve) => {
+            open = resolve;
+          });
+          let reads = 0;
+          let armed = false;
+          const h = await host(
+            {
+              main: () => Response.json(payload(13, 30, 40)),
+              spare: () => Response.json(payload(13, 30, 100)),
+              work: () => Response.json(payload(13, 30, 100)),
+            },
+            {
+              settings: { ...FABLE, seatsTeam: 2 },
+              presetEnv: { "proj-1": on("spare") },
+              afterEnvRead: async () => {
+                if (!armed) return;
+                reads += 1;
+                // The sibling's read waits; each of the turn's reads may let it go.
+                if (reads === 1) return gate;
+                if (reads - 1 !== read) return;
+                void (async () => {
+                  for (let i = 0; i < ticks; i += 1) await Promise.resolve();
+                  open();
+                })();
+              },
+            },
+          );
+          teamLogin(h, "spare", "work");
+          await h.harness.behavior.callRpc("accounts_refresh", null);
+          armed = true;
+          const fable = dispatch(h, "f1", "proj-1", FABLE_ID);
+          await vi.waitFor(() => expect(reads).toBe(1));
+          const opus = await dispatch(h, "c1", "proj-1", OPUS);
+          open();
+          await fable;
+          // Told to start on its Team seat, it must still start there.
+          if (opus.action === "proceed") expect([read, ticks, h.envDeleted]).toEqual([read, ticks, []]);
+          h.harness.dispose();
+        }
     });
 
     describe("what ends the hold", () => {

@@ -19,6 +19,8 @@ export interface UsageWindow {
    * absent, it is empty until the next measurement.
    */
   absent?: true;
+  /** The answer left this window out: its 100 % is what is not known, not a measure. */
+  missing?: true;
 }
 
 export interface AccountUsage {
@@ -140,8 +142,9 @@ export function reserving(options: ChoiceOptions): boolean {
  * Whether a turn with `preferredModel` on this account would spend a weekly
  * window the reserved model still needs: the account keeps the reserved
  * model (its window under 100 %, or no window of it: then it counts against
- * the general weekly) and has a general weekly window at all (a Max
- * account; a Team seat has none, measured 2026-10-11). On a Max account the
+ * the general weekly) and is a Max account: a Team seat spends nothing the
+ * reserved model needs, whether it reports a weekly or not (it reports one
+ * since November 2026). On a Max account the
  * general weekly and Fable's window reset together (measured 2026-10-13),
  * so what another model spends there is Fable's. Such an account is never
  * chosen for another model, not even as the last resort: the turn waits or
