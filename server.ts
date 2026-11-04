@@ -104,6 +104,7 @@ import {
   holdsForReserve,
   isUsable,
   modelWindow,
+  reserveToSpare,
   reserving,
   spendsReservedWeekly,
 } from "./src/policy.js";
@@ -305,6 +306,8 @@ const KV_INSTALLED_AT = "installed-at";
 const KV_HANDLED_PROJECTS = "handled-projects";
 /** What each declined thread's banner is asked on (see adviceBasis), by thread. */
 const KV_ADVICE = "advice-bases";
+/** The account each project was put on by hand (see pins), by project. */
+const KV_PINS = "pins";
 /** A stored basis of a banner (see adviceBasis). */
 const storedBasisSchema = z.object({
   projectId: z.string(),
@@ -622,6 +625,22 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         "A thread whose turn is about to start waits when the project's account already runs this many; it starts as soon as one of them ends, first come first served. With the automatic choice on, a project with no turn under way moves to another account with a free seat rather than wait. 0 = no limit.",
       default: 2,
     },
+    // Aitor 2026-11-05 («hay cuota de claude … Tenemos opus!»); 50 is the
+    // delegating session's default, not a measure.
+    otherModelUpTo: {
+      type: "number",
+      label: "Other models on a Max or Ultra account that keeps the preferred one, up to (%)",
+      description:
+        "A turn in another model (Opus while Fable is preferred) runs on a Max or Ultra account that can still run the preferred model only while that account's weekly and preferred-model windows are both at or under this share, and only when no Team seat is free. 0 = never: such a turn waits for a Team seat.",
+      default: 50,
+    },
+    stuckMoveMinutes: {
+      type: "number",
+      label: "Move a project whose thread waits for a seat (minutes)",
+      description:
+        "A thread that has waited this long for a seat on its project's account moves the project to another account with a free seat, also while other threads of the project are at work (their next turns run there). A project with more threads asking than its account has seats moves at once to one with seats for all of them. Needs the automatic choice. 0 = never: a project with a thread at work stays.",
+      default: 10,
+    },
     // On by default (Aitor, 2026-11-03: «que no sea un "máximo 4"»).
     seatsFollowLoad: {
       type: "boolean",
@@ -784,6 +803,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     bb.realtime.publish(ADVICE_CHANGED, { threadId });
   }
   let current = await settings.get();
+  /** The reserved model and how much of it a turn in another model may spend (see ChoiceOptions.reserveSpareUpTo). */
+  const reserveOf = () => ({
+    reserveModel: current.preferredModel,
+    reserveSpareUpTo: current.otherModelUpTo,
+  });
   settings.onChange((next) => {
     const moved =
       next.accountsDir !== current.accountsDir ||
@@ -1083,6 +1107,56 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       seats.free(key) <= (ahead === -1 ? queue.length : ahead) &&
       !projectSeated(thread.projectId, thread.id)
     );
+  }
+  /** When each project last moved for a crowded seat (see crowded): not again within stuckMoveMinutes. */
+  const crowdedMoves = new Map<string, number>();
+  /**
+   * The thread's turn would wait for a seat on `name` while another thread
+   * of its project is at work there, so seatsFullFor keeps the project
+   * (Aitor 2026-11-05, «hay demasiadas cosas atascadas … Tenemos opus!»):
+   * it moves anyway, its siblings' next turns with it, when the thread has
+   * waited more than stuckMoveMinutes ("stuck"), or at once when the
+   * project asks for more seats than the account has ("crowded": only to
+   * an account with seats for all). For a model other than the reserved one
+   * only: where the reserved model's turns run is not this rule's. Null:
+   * neither, or stuckMoveMinutes is 0, or the project moved so within it.
+   */
+  function crowded(
+    thread: ThreadResponse,
+    name: string,
+    model: string,
+    now: number,
+  ):
+    | { kind: "stuck" | "crowded"; minutes: number; wanted: number; capacity: number }
+    | null {
+    const limit = current.stuckMoveMinutes * 60_000;
+    if (!(limit > 0) || !current.autoSwitch) return null;
+    if (!reserving({ preferredModel: model, ...reserveOf() })) return null;
+    const key = seatKey(name);
+    if (seats.seatOf(thread.id)?.account === key) return null;
+    const queue = seats.queue(key);
+    const ahead = queue.findIndex((q) => q.threadId === thread.id);
+    if (seats.free(key) > (ahead === -1 ? queue.length : ahead)) return null;
+    if (!projectSeated(thread.projectId, thread.id)) return null;
+    const last = crowdedMoves.get(thread.projectId);
+    if (last !== undefined && now - last <= limit) return null;
+    let wanted = 1;
+    for (const [threadId, project] of seatProjects)
+      if (
+        project === thread.projectId &&
+        threadId !== thread.id &&
+        (seats.seatOf(threadId)?.account === key ||
+          seats.position(threadId)?.account === key)
+      )
+        wanted += 1;
+    const capacity = seats.snapshot([key])[key]!.capacity;
+    const since = seats.waitingSince(thread.id);
+    const minutes = since === null ? 0 : Math.floor((now - since) / 60_000);
+    if (since !== null && now - since > limit)
+      return { kind: "stuck", minutes, wanted, capacity };
+    if (capacity > 0 && wanted > capacity)
+      return { kind: "crowded", minutes, wanted, capacity };
+    return null;
   }
   /**
    * Whose seat a turn of a project on `at` takes (Astra SEATS-R3-001): its
@@ -1489,6 +1563,37 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     bb.log.warn(
       `could not read the seats held from outside bb; they are not counted: ${error instanceof Error ? error.message : String(error)}`,
     );
+  }
+  /**
+   * The account each project was put on by hand, until an automatic move
+   * takes it elsewhere or another pick replaces it (Aitor 2026-11-05: a pick
+   * holds until the account is out for real; see PlacementInput.pinned).
+   */
+  const pins = new Map<string, string>();
+  try {
+    const parsed = z
+      .record(z.string(), z.string())
+      .safeParse(await bb.storage.kv.get<unknown>(KV_PINS));
+    if (parsed.success)
+      for (const [projectId, name] of Object.entries(parsed.data))
+        pins.set(projectId, name);
+  } catch (error) {
+    bb.log.warn(
+      `could not read the projects picked by hand; their next Opus turn is placed as any: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  let pinsWrites: Promise<void> = Promise.resolve();
+  function storePins(): void {
+    const snapshot = Object.fromEntries(pins);
+    pinsWrites = pinsWrites.then(async () => {
+      try {
+        await bb.storage.kv.set(KV_PINS, snapshot);
+      } catch (error) {
+        bb.log.warn(
+          `could not store the projects picked by hand: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    });
   }
   // The model of each project's latest turn (see projectModel). Not read:
   // nothing is written over what it holds, for a later load to find.
@@ -2168,7 +2273,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function otherModel(model: string): boolean {
     return reserving({
       preferredModel: model,
-      reserveModel: current.preferredModel,
+      ...reserveOf(),
     });
   }
   /**
@@ -2224,7 +2329,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       Math.max(at, deps.now()) + RESET_BUFFER_MS + RESET_JITTER_MS;
     return spendsReservedWeekly(settle(known, sendBy), {
       preferredModel: model,
-      reserveModel: current.preferredModel,
+      ...reserveOf(),
     });
   }
 
@@ -2376,6 +2481,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     if (toName !== (from.account ?? current.defaultAccountName))
       accountChangedAt.set(projectId, deps.now());
+    if (options.byHand !== true && toName !== fromName && pins.delete(projectId))
+      storePins();
     bb.realtime.publish(CHANGED, { at: deps.now() });
     return true;
   }
@@ -2640,6 +2747,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         // confirms the account the project is on; and it outranks an
         // automatic move whose answer is still pending (see noteMove).
         excursions.delete(projectId);
+        // Any pick, the default account's too: it is the user's choice.
+        pins.set(projectId, to?.name ?? current.defaultAccountName);
+        storePins();
         movesOf(projectId).picks += 1;
         await markHandled(projectId);
         const fromName = from.account ?? current.defaultAccountName;
@@ -3123,7 +3233,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         failedAccount: typeof started === "string" ? started : null,
         accounts: measuredAccounts(model),
         preferredModel: model,
-        reserveModel: current.preferredModel,
+        ...reserveOf(),
         now,
       },
       unreadAccounts(),
@@ -3170,7 +3280,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           {
             accounts: measuredAccounts(basis.model),
             preferredModel: basis.model,
-            reserveModel: current.preferredModel,
+            ...reserveOf(),
             now: deps.now(),
           },
           unreadAccounts(),
@@ -3241,7 +3351,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           currentAccount: at.account ?? current.defaultAccountName,
           accounts: measuredAccounts(basis.model),
           preferredModel: basis.model,
-          reserveModel: current.preferredModel,
+          ...reserveOf(),
           now,
           stuck: true,
         },
@@ -3710,7 +3820,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       currentAccount: fromName,
       accounts: aheadTargets(projectId, fromName, model, now),
       preferredModel: model,
-      reserveModel: current.preferredModel,
+      ...reserveOf(),
       threshold,
       freeSeats,
       ...paceFilter(isBackground(thread)),
@@ -3914,7 +4024,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       noteProjectModel(projectId, model, started.activity);
     read();
     if (!stillLatest()) return;
-    if (!reserving({ preferredModel: model, reserveModel: current.preferredModel }))
+    if (!reserving({ preferredModel: model, ...reserveOf() }))
       return;
     await inProjectQueue(projectId, async () => {
       // Asked again: the setting, a move or a newer message may have come
@@ -4089,7 +4199,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       isNew: false,
       accounts: aheadTargets(projectId, fromName, model, now),
       preferredModel: model,
-      reserveModel: current.preferredModel,
+      ...reserveOf(),
       freeSeats,
       now,
       currentLoggedOut: loggedOut(fromName),
@@ -4412,7 +4522,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       isNew: false,
       accounts: measured,
       preferredModel: model,
-      reserveModel: current.preferredModel,
+      ...reserveOf(),
       excursionFrom: wayHome(projectId, model, measured, now),
       freeSeats:
         own === null
@@ -4470,7 +4580,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         (a) =>
           chooseAccount([a], {
             preferredModel: model,
-            reserveModel: current.preferredModel,
+            ...reserveOf(),
             freeSeats: seatRoom,
           }) !== null,
       )
@@ -4482,7 +4592,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   function otherThatRuns(name: string, model: string): string | null {
     const now = deps.now();
-    const options = { preferredModel: model, reserveModel: current.preferredModel };
+    const options = { preferredModel: model, ...reserveOf() };
     const measured = measuredAccounts(model);
     return (
       chooseAccount(
@@ -4552,9 +4662,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * needs, and `model` is held off such an account (see holdsForReserve),
    * as measured now or, unmeasured, as its login says.
    */
-  function heldOff(name: string, model: string): boolean {
-    const options = { preferredModel: model, reserveModel: current.preferredModel };
+  function heldOff(name: string, model: string, projectId?: string): boolean {
+    const options = { preferredModel: model, ...reserveOf() };
     if (!holdsForReserve(options)) return false;
+    if (projectId !== undefined && pins.get(projectId) === name) return false;
     const usage = measuredAccounts(model).find((a) => a.name === name);
     if (usage === undefined || usage.unknown === true)
       return unreadKeepsReserve(name);
@@ -4615,6 +4726,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       admitWaiting();
       seatsFull = seatsFullFor(thread, fromName);
     }
+    const busy =
+      when === "before" && !seatsFull && turn.tick !== true
+        ? crowded(thread, fromName, model, now)
+        : null;
+    if (busy !== null) seatsFull = true;
     const input: PlacementInput = {
       ...placementOf(projectId, model, now, isBackground(thread), thread.id),
       unreadKeepsReserve,
@@ -4632,8 +4748,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                 ? 1
                 : seatRoom(name),
             aheadThreshold: aheadThreshold(model),
+            ...(busy === null
+              ? {}
+              : { seatsWanted: busy.wanted, seatsWantedOnly: busy.kind === "crowded" }),
           }
         : {}),
+      pinned: pins.get(projectId) === fromName,
     };
     const decision = decidePlacement(input);
     if (decision.kind === "keep") {
@@ -4646,7 +4766,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // holdsForReserve).
       const loggedOutHere = input.currentLoggedOut === true;
       if (
-        holdsForReserve({ preferredModel: model, reserveModel: current.preferredModel }) &&
+        holdsForReserve({ preferredModel: model, ...reserveOf() }) &&
         (decision.why === "current-reserved" || loggedOutHere)
       )
         turn.held = reserveHold(
@@ -4712,8 +4832,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     });
     await markHandled(projectId);
     noteMove(projectId, fromName, decision.account, model, before);
+    if (busy !== null && decision.why === "current-full")
+      crowdedMoves.set(projectId, now);
     const reason =
-      decision.why === "back-from-excursion"
+      busy !== null && decision.why === "current-full"
+        ? busyReason(busy, fromName, decision.account, roomThere, fullHere, model)
+        : decision.why === "back-from-excursion"
         ? `Moved back to account ${decision.account} before the turn: ${fromName} was an excursion for ${excursion?.model ?? "another model"}`
         : decision.why === "current-full"
           ? `Moved to account ${decision.account} before the turn: ${fromName} seats full (${fullHere.running + fullHere.reserved + (fullHere.external?.length ?? 0)}/${fullHere.capacity}), ${decision.account} had ${Number.isFinite(roomThere) ? roomThere : "unlimited"} free`
@@ -4738,6 +4862,42 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // other.
       writes: writes + (decision.account === fromName ? 0 : 2),
     };
+  }
+
+  /** What the history says of a move for a crowded seat (see crowded), in plain Spanish for whoever reads it. */
+  function busyReason(
+    busy: NonNullable<ReturnType<typeof crowded>>,
+    fromName: string,
+    to: string,
+    roomThere: number,
+    fullHere: { running: number; reserved: number; capacity: number; external?: readonly unknown[] },
+    model: string,
+  ): string {
+    const taken = fullHere.running + fullHere.reserved + (fullHere.external?.length ?? 0);
+    const room = Number.isFinite(roomThere) ? String(roomThere) : "sin límite de";
+    const libres = roomThere === 1 ? "libre" : "libres";
+    const why =
+      busy.kind === "stuck"
+        ? `el hilo llevaba ${busy.minutes} min esperando plaza en ${fromName} (${taken}/${busy.capacity}) con otro hilo de su proyecto trabajando`
+        : `el proyecto pide ${busy.wanted} plazas a la vez y ${fromName} tiene ${busy.capacity}`;
+    const options = { preferredModel: model, ...reserveOf() };
+    const there = measuredAccounts(model).find((a) => a.name === to);
+    const spare =
+      there === undefined
+        ? null
+        : (() => {
+            const settled = settle(there, deps.now());
+            return settled.team !== true &&
+              canRunModel(settled, current.preferredModel) &&
+              reserveToSpare(settled, options)
+              ? settled
+              : null;
+          })();
+    const margin =
+      spare === null
+        ? ""
+        : ` y le queda margen de ${current.preferredModel} (semanal ${Math.round(spare.weekly.usedPercent)} %, ${current.preferredModel} ${Math.round(modelWindow(spare, current.preferredModel)?.usedPercent ?? 0)} %, tope ${current.otherModelUpTo} %)`;
+    return `Movido a ${to} antes del turno: ${why}; ${to} tenía ${room} ${libres}${margin}`;
   }
 
   // bb holds every message it asks about on this answer and fails the
@@ -5209,7 +5369,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         model !== null &&
         at !== null &&
         at.account !== null &&
-        heldOff(at.account, model)
+        heldOff(at.account, model, thread.projectId)
       ) {
         const reason = `Waiting to place ${model} again: the project is on ${at.account}, which keeps its weekly for ${current.preferredModel}`;
         bb.log.info(`thread ${thread.id}: its message waits (${reason})`);
@@ -5246,7 +5406,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           current.autoSwitch &&
           model !== null &&
           [...measuredAccounts(model), ...accounts].some((a) =>
-            heldOff(a.name, model),
+            heldOff(a.name, model, thread.projectId),
           );
         if (waited < SEAT_READ_WAITS || mayBeHeld) {
           seatReadWaits.set(thread.id, waited + 1);
@@ -5655,7 +5815,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       failedAccount: failedOn,
       accounts: measuredAccounts(model),
       preferredModel: model,
-      reserveModel: current.preferredModel,
+      ...reserveOf(),
       maximumWaitMs:
         current.maximumWaitHours > 0
           ? current.maximumWaitHours * 3_600_000
@@ -6205,7 +6365,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         here.unknown === true ||
         // With the reserve: a Max account that keeps the preferred model
         // never gets an Opus retry released on it (Codex BM-R1-005).
-        bestAccount([here], model, now, current.preferredModel) === fromName)
+        bestAccount([here], model, now, current.preferredModel, undefined, undefined, current.otherModelUpTo) === fromName)
     ) {
       // It waited on the account the project was on before.
       const changed = accountChangedAt.get(projectId);
@@ -6232,6 +6392,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       current.preferredModel,
       freeSeats,
       paceFilter(isBackground(thread)).savedForUser,
+      current.otherModelUpTo,
     );
     if (to === null) {
       // Nothing to release it on; the wait fires on its own at sendAt and

@@ -63,6 +63,8 @@ export interface SwitchInput {
   preferredModel: string;
   /** The model kept for its own threads; see ChoiceOptions.reserveModel. */
   reserveModel?: string;
+  /** See ChoiceOptions.reserveSpareUpTo. */
+  reserveSpareUpTo?: number;
   /**
    * Seats free on an account (see src/seats.ts). The switch goes to an
    * account with one, and only with none anywhere by quota alone (Astra
@@ -230,6 +232,7 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
   const options = {
     preferredModel: input.preferredModel,
     reserveModel: input.reserveModel,
+    reserveSpareUpTo: input.reserveSpareUpTo,
     savedForUser: input.savedForUser,
   };
   // A failure just reported rules its account out. Left in error, the thread
@@ -505,6 +508,8 @@ export interface PlacementInput {
   preferredModel: string;
   /** The model kept for its own threads; see ChoiceOptions.reserveModel. */
   reserveModel?: string;
+  /** See ChoiceOptions.reserveSpareUpTo. */
+  reserveSpareUpTo?: number;
   /**
    * The account the project left for a turn in another model (its excursion),
    * for a turn in the reserved model to go back to; null when the caller
@@ -546,6 +551,21 @@ export interface PlacementInput {
    * (E44: the default `~/.claude` of a machine nobody logged in on).
    */
   currentLoggedOut?: boolean;
+  /**
+   * With `seatsFull`: the seats the project asks for at once (its threads at
+   * work or waiting on its account, and this one). An account with that many
+   * free goes first; with `seatsWantedOnly`, only such an account is a
+   * target (Aitor 2026-11-05: a project with more threads than its account
+   * has seats goes to one with seats for all).
+   */
+  seatsWanted?: number;
+  seatsWantedOnly?: boolean;
+  /**
+   * The project was put on the current account by hand: a turn that can run
+   * there stays, whatever it spends of the reserve (Aitor 2026-11-05: a pick
+   * holds until the account is out for real). Seats still move it.
+   */
+  pinned?: boolean;
 }
 
 /** The account a project would best run on now, for the thread header. */
@@ -558,11 +578,13 @@ export function bestAccount(
   freeSeats?: (account: string) => number,
   /** Set for background work (see ChoiceOptions.savedForUser). */
   savedForUser?: (account: string) => boolean,
+  /** See ChoiceOptions.reserveSpareUpTo. */
+  reserveSpareUpTo?: number,
 ): string | null {
   return (
     chooseSeated(
       accounts.map((a) => settle(a, now)),
-      { preferredModel, reserveModel, savedForUser },
+      { preferredModel, reserveModel, savedForUser, reserveSpareUpTo },
       freeSeats,
     )?.account ?? null
   );
@@ -588,6 +610,7 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   const options = {
     preferredModel: input.preferredModel,
     reserveModel: input.reserveModel,
+    reserveSpareUpTo: input.reserveSpareUpTo,
     savedForUser: input.savedForUser,
   };
   if (input.isNew) {
@@ -622,6 +645,7 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   const current = accounts.find((a) => a.name === input.currentAccount);
   if (!loggedOut && (current === undefined || current.unknown === true)) {
     if (
+      input.pinned === true ||
       input.unreadKeepsReserve?.(input.currentAccount) !== true ||
       !holdsForReserve(options)
     )
@@ -646,7 +670,7 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     current !== undefined &&
     isUsable(current) &&
     canRunModel(current, input.preferredModel);
-  if (runs && !spendsReservedWeekly(current, options)) {
+  if (runs && (input.pinned === true || !spendsReservedWeekly(current, options))) {
     if (input.seatsFull !== true) return { kind: "keep" };
     const threshold = input.aheadThreshold ?? 0;
     const roomy = accounts.filter(
@@ -656,7 +680,17 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
         (threshold <= 0 ||
           fullestWindow(a, input.preferredModel).used < threshold),
     );
-    const choice = chooseSeated(roomy, options, input.freeSeats);
+    const wanted = input.seatsWanted ?? 1;
+    const free = input.freeSeats;
+    const forAll =
+      wanted > 1 && free !== undefined
+        ? chooseSeated(roomy, options, (name) => (free(name) >= wanted ? free(name) : 0))
+        : null;
+    const choice =
+      forAll ??
+      (input.seatsWantedOnly === true && wanted > 1
+        ? null
+        : chooseSeated(roomy, options, input.freeSeats));
     return choice === null
       ? { kind: "keep" }
       : { kind: "move", account: choice.account, why: "current-full" };
@@ -744,6 +778,7 @@ export function reserveWait(
   const options = {
     preferredModel: input.preferredModel,
     reserveModel: input.reserveModel,
+    reserveSpareUpTo: input.reserveSpareUpTo,
   };
   let earliest: { account: string; at: number } | null = null;
   // A Team seat known by its login only is one to wait for too: in its queue,
@@ -788,6 +823,7 @@ export function placedOn(input: PlacementInput): string | null {
       {
         preferredModel: input.preferredModel,
         reserveModel: input.reserveModel,
+        reserveSpareUpTo: input.reserveSpareUpTo,
       },
     )?.account ?? null
   );
@@ -805,6 +841,8 @@ export interface AheadInput {
   preferredModel: string;
   /** The model kept for its own threads; see ChoiceOptions.reserveModel. */
   reserveModel?: string;
+  /** See ChoiceOptions.reserveSpareUpTo. */
+  reserveSpareUpTo?: number;
   /** Share of a window (session, weekly or the preferred model's) at which the project moves ahead of the limit. */
   threshold: number;
   /** Seats free on an account: ahead of the limit, only an account with one is a target. */
@@ -854,6 +892,7 @@ export function decideAhead(input: AheadInput): AheadDecision {
   const choice = chooseAccount(roomy, {
     preferredModel: input.preferredModel,
     reserveModel: input.reserveModel,
+    reserveSpareUpTo: input.reserveSpareUpTo,
     freeSeats: input.freeSeats,
     savedForUser: input.savedForUser,
   });

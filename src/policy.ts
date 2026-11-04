@@ -65,6 +65,15 @@ export interface ChoiceOptions {
    * the pace does not count (the user's own threads).
    */
   savedForUser?: (account: string) => boolean;
+  /**
+   * An account that keeps the reserved model still takes a turn in another
+   * model while its general weekly and the reserved model's window are both
+   * at or under this share (Aitor 2026-11-05, «hay cuota de claude … Tenemos
+   * opus!»): it then ranks after every Team seat, so it is used only when
+   * none has a free seat. Unset or 0 = never (Aitor 2026-11-03, «Esperar
+   * siempre»).
+   */
+  reserveSpareUpTo?: number;
 }
 
 export interface Choice {
@@ -160,7 +169,24 @@ export function spendsReservedWeekly(
     reserving(options) &&
     canRunModel(account, options.reserveModel!) &&
     account.team !== true &&
-    account.weekly.absent !== true
+    account.weekly.absent !== true &&
+    !reserveToSpare(account, options)
+  );
+}
+
+/**
+ * The account keeps enough of the reserved model's weekly for a turn in
+ * another model to run there (see ChoiceOptions.reserveSpareUpTo).
+ */
+export function reserveToSpare(
+  account: AccountUsage,
+  options: ChoiceOptions,
+): boolean {
+  const upTo = options.reserveSpareUpTo ?? 0;
+  return (
+    upTo > 0 &&
+    account.weekly.usedPercent <= upTo &&
+    (modelWindow(account, options.reserveModel ?? "")?.usedPercent ?? 0) <= upTo
   );
 }
 

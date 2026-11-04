@@ -469,6 +469,11 @@ async function host(
       // Off here: the tests of the seats count them as set; those of the
       // seats by load turn it on.
       seatsFollowLoad: false,
+      // Off here: the tests before 0.2.41 judge the reserve as «Esperar
+      // siempre» and a busy project as staying; the tests of each rule turn
+      // it on.
+      otherModelUpTo: 0,
+      stuckMoveMinutes: 0,
       ...options.settings,
     },
     sdk: {
@@ -860,12 +865,14 @@ describe("claude accounts plugin", () => {
       "defaultAccountName",
       "loginPrivateWindow",
       "maximumWaitHours",
+      "otherModelUpTo",
       "paceHoldsBackground",
       "preferredModel",
       "refreshMinutes",
       "seatsFollowLoad",
       "seatsMax",
       "seatsTeam",
+      "stuckMoveMinutes",
       "switchAheadOtherPercent",
       "switchAheadPercent",
     ]);
@@ -10888,19 +10895,16 @@ describe("an Opus turn never retried, released or placed on a Max account that k
           spare: () => Response.json(payload(10, 10, spareFable)),
           work: () => Response.json(teamPayload(workSession, 42)),
         },
-        { ...FABLE, afterSet: hold.afterSet },
+        { ...FABLE, afterSet: hold.afterSet, presetEnv: { "proj-1": [{ name: ENV_VAR, note: ownNote("spare"), secret: true, value: null }] } },
       );
       dispose = () => h.harness.dispose();
       await h.harness.behavior.callRpc("accounts_refresh", null);
-      // The project lives on spare by hand, out of Fable: thread-3 (Opus) starts there.
-      expect(
-        (await h.harness.behavior.runCli(["use", "Website", "spare"])).exitCode,
-      ).toBe(0);
+      // The project lives on spare (set before, not picked: a pick holds, see «noche 2026-11-05»), out of Fable: thread-3 (Opus) starts there.
       expect(await dispatch(h, "thread-3", OPUS_ID)).toEqual({
         action: "proceed",
       });
       await active(h, "thread-3");
-      expect(notes(h)).toEqual([ownNote("spare")]);
+      expect(notes(h)).toEqual([]);
       // A seat frees: thread-1 (Opus) takes the project out to work.
       workSession = 17;
       spareFable = 5;
@@ -10908,7 +10912,7 @@ describe("an Opus turn never retried, released or placed on a Max account that k
       expect(await dispatch(h, "thread-1", OPUS_ID)).toEqual({
         action: "proceed",
       });
-      expect(notes(h)).toEqual([ownNote("spare"), ownNote("work")]);
+      expect(notes(h)).toEqual([ownNote("work")]);
       await h.harness.behavior.emitThreadEvent("thread.active", {
         thread: thread({ id: "thread-1", projectId: "proj-1" }),
       });
@@ -11125,19 +11129,14 @@ describe("an Opus turn never retried, released or placed on a Max account that k
         main: () => Response.json(payload(10, 10, 2)),
         spare: () => Response.json(payload(10, 10, 5)),
         work: () => Response.json(teamPayload(workSession, 42)),
-      },
-      FABLE,
-    );
+      }, { ...FABLE, presetEnv: { "proj-1": [{ name: ENV_VAR, note: ownNote("spare"), secret: true, value: null }] } });
     dispose = () => h.harness.dispose();
     await h.harness.behavior.callRpc("accounts_refresh", null);
-    expect(
-      (await h.harness.behavior.runCli(["use", "Website", "spare"])).exitCode,
-    ).toBe(0);
     // thread-1 (Opus) takes the project out to the seat.
     expect(await dispatch(h, "thread-1", OPUS_ID)).toEqual({
       action: "proceed",
     });
-    expect(notes(h)).toEqual([ownNote("spare"), ownNote("work")]);
+    expect(notes(h)).toEqual([ownNote("work")]);
     await h.harness.behavior.emitThreadEvent("thread.active", {
       thread: thread({ id: "thread-1", projectId: "proj-1" }),
     });
@@ -11148,11 +11147,7 @@ describe("an Opus turn never retried, released or placed on a Max account that k
     await h.harness.behavior.emitThreadEvent("thread.created", {
       thread: thread({ id: "thr-new", projectId: "proj-1" }),
     });
-    expect(notes(h)).toEqual([
-      ownNote("spare"),
-      ownNote("work"),
-      ownNote("spare"),
-    ]);
+    expect(notes(h)).toEqual([ownNote("work"), ownNote("spare")]);
     expect(h.harness.logEntries.map((e) => e.message)).toContainEqual(
       expect.stringContaining(
         "Moved back to account spare before the turn: work was an excursion for Opus",
@@ -11162,7 +11157,7 @@ describe("an Opus turn never retried, released or placed on a Max account that k
     expect(await dispatch(h, "thread-2", FABLE_ID)).toEqual({
       action: "proceed",
     });
-    expect(notes(h)).toHaveLength(3);
+    expect(notes(h)).toHaveLength(2);
   });
 
   describe("what forgets an excursion (Codex BM-R1-003)", () => {
@@ -11201,14 +11196,9 @@ describe("an Opus turn never retried, released or placed on a Max account that k
           main: () => Response.json(teamPayload(17, 42)),
           spare: () => Response.json(payload(10, 10, 5)),
           work: () => Response.json(payload(10, 10, 7)),
-        },
-        FABLE,
-      );
+        }, { ...FABLE, presetEnv: { "proj-1": [{ name: ENV_VAR, note: ownNote("spare"), secret: true, value: null }] } });
       dispose = () => h.harness.dispose();
       await h.harness.behavior.callRpc("accounts_refresh", null);
-      expect(
-        (await h.harness.behavior.runCli(["use", "Website", "spare"])).exitCode,
-      ).toBe(0);
       expect(await dispatch(h, "thread-1", OPUS_ID)).toEqual({
         action: "proceed",
       });
@@ -11217,20 +11207,19 @@ describe("an Opus turn never retried, released or placed on a Max account that k
       expect(await dispatch(h, "thread-2", FABLE_ID)).toEqual({
         action: "proceed",
       });
-      expect(notes(h)).toEqual([ownNote("spare")]);
+      expect(notes(h)).toEqual([]);
     });
 
     it("release: the Fable turn stays on the default account, not back on the Max the excursion left", async () => {
-      const h = await host(MAX_AND_SEAT, FABLE);
+      const h = await host(MAX_AND_SEAT, { ...FABLE, presetEnv: { "proj-1": [{ name: ENV_VAR, note: ownNote("spare"), secret: true, value: null }] } });
       dispose = () => h.harness.dispose();
       await h.harness.behavior.callRpc("accounts_refresh", null);
-      expect((await h.harness.behavior.runCli(["use", "Website", "spare"])).exitCode).toBe(0);
       expect(await dispatch(h, "thread-1", OPUS_ID)).toEqual({ action: "proceed" });
-      expect(notes(h)).toEqual([ownNote("spare"), ownNote("work")]);
+      expect(notes(h)).toEqual([ownNote("work")]);
       expect((await h.harness.behavior.runCli(["release"])).exitCode).toBe(0);
       expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-1"]);
       expect(await dispatch(h, "thread-2", FABLE_ID)).toEqual({ action: "proceed" });
-      expect(notes(h)).toEqual([ownNote("spare"), ownNote("work")]);
+      expect(notes(h)).toEqual([ownNote("work")]);
     });
   });
 
@@ -19127,22 +19116,25 @@ describe("caminos 2026-11-04", () => {
     });
   });
 
-  it("T3b a pick by hand of an Ultra with every Team seat full waits: it does not run Opus there", async () => {
+  // T3 and T3b said, until 0.2.40, that a pick by hand of an Ultra does not
+  // make it run Opus. Since 0.2.41 a pick holds until the account cannot run
+  // the turn (encargo of 2026-11-05: «un `use` explícito de un proyecto se
+  // respete hasta que esa cuenta se agote de verdad»).
+  it("T3b a pick by hand of an Ultra with every Team seat full runs the Opus turn there (0.2.41)", async () => {
     const h = await incident(INCIDENT, { presetEnv: { "proj-1": on("work") } });
     expect((await dispatch(h, "t1", "proj-3", OPUS)).action).toBe("proceed");
     await h.harness.behavior.runCli(["use", "proj-1", "main"]);
     expect(h.envDeleted.at(-1)).toMatchObject({ projectId: "proj-1" });
-    const r = await dispatch(h, "t2", "proj-1", OPUS);
-    expect(r.action).toBe("wait");
-    expect(r.reason).toContain("main keeps its weekly for Fable");
+    expect(await dispatch(h, "t2", "proj-1", OPUS)).toEqual({ action: "proceed" });
+    expect(h.envSet.filter((e) => e.projectId === "proj-1")).toEqual([]);
   });
 
-  it("T3 a pick by hand of an Ultra does not make it run Opus: «Esperar siempre» holds, and the turn goes to the Team seat", async () => {
+  it("T3 a pick by hand of an Ultra holds the Opus turn there, a Team seat free or not (0.2.41)", async () => {
     const h = await incident(INCIDENT, { presetEnv: { "proj-1": on("work") } });
     await h.harness.behavior.runCli(["use", "proj-1", "main"]);
     expect(h.envDeleted.at(-1)).toMatchObject({ projectId: "proj-1" });
     expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
-    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    expect(h.envSet.filter((e) => e.projectId === "proj-1")).toEqual([]);
   });
 
   describe("T-tic a Calor tick does not move its project (docs/plan-cambio-en-pausas.md)", () => {
@@ -19421,6 +19413,182 @@ describe("caminos 2026-11-04", () => {
       expect(h.envSet.filter((e) => e.projectId === "proj-3")).toEqual([
         expect.objectContaining({ projectId: "proj-3", note: ownNote("work") }),
       ]);
+    });
+  });
+});
+
+// Aitor 2026-11-05 00:20 («hay demasiadas cosas atascadas … Tenemos opus!»):
+// a thread of a busy project waited hours in a full Team seat with Ultras
+// idle. Three rules: (a) a thread that waits more than stuckMoveMinutes moves
+// its project even with siblings at work, to a Team seat first, else to an
+// Ultra at or under otherModelUpTo; (b) a pick by hand holds for Opus until
+// the account cannot run; (c) a project asking for more seats than its
+// account has moves at once to one with seats for all.
+describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
+  const OPUS = "claude-opus-5-5";
+  const MINUTE = 60_000;
+  const teamLogin = (h: Awaited<ReturnType<typeof host>>, ...names: string[]) => {
+    for (const name of names)
+      h.files[`${ACCOUNTS}/${name}/.claude.json`] = JSON.stringify({
+        oauthAccount: {
+          accountUuid: `uuid-${name}`,
+          emailAddress: `${name}@example.com`,
+          organizationType: "claude_team",
+        },
+      });
+  };
+  const on = (name: string) => [
+    { name: ENV_VAR, note: ownNote(name), secret: true, value: null },
+  ];
+  const dispatch = (h: Awaited<ReturnType<typeof host>>, threadId: string, projectId: string) =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: threadId, projectId }),
+        requestedExecution: { providerId: "claude-code", model: OPUS },
+        attempt: "start-turn",
+      }),
+    ) as Promise<{ action: string; reason?: string; sendAt?: number }>;
+  /**
+   * proj-1 on the Team seat `spare` (1 seat), its thread `a` at work there;
+   * `work` is a Team seat too, `main` an Ultra that keeps Fable.
+   */
+  const start = async (
+    o: { main?: [number, number]; settings?: Record<string, unknown>; workBusy?: boolean; preset?: string } = {},
+  ) => {
+    let clock = NOW;
+    const [weekly, fable] = o.main ?? [40, 30];
+    const h = await host(
+      {
+        main: () => Response.json(payload(5, weekly, fable)),
+        spare: () => Response.json(payload(0, 2, 0)),
+        work: () => Response.json(payload(0, 2, 0)),
+      },
+      {
+        clock: () => clock,
+        settings: { preferredModel: "Fable", seatsTeam: 1, seatsMax: 4, stuckMoveMinutes: 10, ...o.settings },
+        presetEnv: { "proj-1": on(o.preset ?? "spare"), "proj-2": on("work") },
+      },
+    );
+    dispose = () => h.harness.dispose();
+    teamLogin(h, "spare", "work");
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    if (o.workBusy === true) {
+      expect((await dispatch(h, "busy", "proj-2")).action).toBe("proceed");
+      await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "busy", projectId: "proj-2" }) });
+    }
+    if (o.preset === undefined) {
+      expect((await dispatch(h, "a", "proj-1")).action).toBe("proceed");
+      await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "a", projectId: "proj-1" }) });
+    }
+    return {
+      h,
+      at: (ms: number) => (clock = NOW + ms),
+      /** Thread b asks every 30 s, as a held message does, until `ms`; the answers. */
+      askUntil: async (ms: number) => {
+        const answers: { action: string; reason?: string }[] = [];
+        for (let t = clock - NOW; t <= ms; t += 30_000) {
+          clock = NOW + t;
+          answers.push(await dispatch(h, "b", "proj-1"));
+        }
+        return answers;
+      },
+    };
+  };
+  const moves = (h: Awaited<ReturnType<typeof host>>) => h.envSet.filter((e) => e.projectId === "proj-1");
+  const history = async (h: Awaited<ReturnType<typeof host>>) =>
+    ((await h.harness.behavior.callRpc("accounts_list", null)) as State).history.map((r) => r.reason);
+  /** Where proj-1 is now, as the plugin lists it (main is the default account: no variable). */
+  const where = async (h: Awaited<ReturnType<typeof host>>) =>
+    {
+      const p = ((await h.harness.behavior.callRpc("accounts_list", null)) as State).projects.find((p) => p.id === "proj-1");
+      return p === undefined ? undefined : (p.account ?? "main");
+    };
+
+  describe("(a) a thread that waits more than stuckMoveMinutes", () => {
+    it("waits at exactly 10 min; one ms later the project goes to the free Team seat, and the history says why", async () => {
+      const { h, at, askUntil } = await start({ settings: { seatsMax: 1 } });
+      const waits = await askUntil(10 * MINUTE);
+      expect(waits.every((w) => w.action === "wait")).toBe(true);
+      expect(waits.at(-1)?.reason).toContain("Waiting for a seat on spare");
+      expect(moves(h)).toEqual([]);
+      at(10 * MINUTE + 1);
+      expect(await dispatch(h, "b", "proj-1")).toEqual({ action: "proceed" });
+      expect(moves(h).at(-1)).toMatchObject({ note: ownNote("work") });
+      expect((await history(h))[0]).toBe(
+        "Movido a work antes del turno: el hilo llevaba 10 min esperando plaza en spare (1/1) con otro hilo de su proyecto trabajando; work tenía 1 libre",
+      );
+    });
+
+    it("with N+1 minutes too (the cut is past N, not at N+1)", async () => {
+      const { h, askUntil } = await start({ settings: { seatsMax: 1, stuckMoveMinutes: 11 } });
+      const answers = await askUntil(11 * MINUTE + 30_000);
+      expect(answers.slice(0, -1).every((w) => w.action === "wait")).toBe(true);
+      expect(answers.at(-1)).toEqual({ action: "proceed" });
+      expect(moves(h).at(-1)).toMatchObject({ note: ownNote("work") });
+    });
+
+    it("0 = never: the project with a thread at work stays, as before", async () => {
+      const { h, askUntil } = await start({ settings: { seatsMax: 1, stuckMoveMinutes: 0 } });
+      expect((await askUntil(30 * MINUTE)).every((w) => w.action === "wait")).toBe(true);
+      expect(moves(h)).toEqual([]);
+    });
+
+    it("with no Team seat free it goes to the Ultra at the threshold (50 % weekly and Fable)", async () => {
+      const { h, at, askUntil } = await start({ main: [50, 50], workBusy: true, settings: { seatsMax: 1, otherModelUpTo: 50 } });
+      await askUntil(10 * MINUTE);
+      at(10 * MINUTE + 1);
+      expect(await dispatch(h, "b", "proj-1")).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("main");
+      expect((await history(h))[0]).toContain("; main tenía 1 libre y le queda margen de Fable (semanal 50 %, Fable 50 %, tope 50 %)");
+    });
+
+    it("an Ultra one point over the threshold is no target: it keeps waiting", async () => {
+      const { h, at, askUntil } = await start({ main: [51, 10], workBusy: true, settings: { seatsMax: 1, otherModelUpTo: 50 } });
+      await askUntil(10 * MINUTE);
+      at(10 * MINUTE + 1);
+      expect((await dispatch(h, "b", "proj-1")).action).toBe("wait");
+      expect(moves(h)).toEqual([]);
+    });
+  });
+
+  describe("(c) a project asking for more seats than its account has", () => {
+    it("moves at once to the account with seats for all of them", async () => {
+      const { h } = await start({ settings: { otherModelUpTo: 50 } });
+      expect(await dispatch(h, "b", "proj-1")).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("main");
+      expect((await history(h))[0]).toMatch(
+        /^Movido a main antes del turno: el proyecto pide 2 plazas a la vez y spare tiene 1; main tenía 4 libres y le queda margen de Fable/,
+      );
+    });
+
+    it("with no account with seats for all, it waits (the wait of (a) decides later)", async () => {
+      const { h } = await start({ main: [51, 10], settings: { otherModelUpTo: 50 } });
+      expect((await dispatch(h, "b", "proj-1")).action).toBe("wait");
+      expect(moves(h)).toEqual([]);
+    });
+  });
+
+  describe("(b) a pick by hand", () => {
+    it("holds an Opus turn on the Ultra picked, also with the threshold off", async () => {
+      const { h } = await start({ preset: "spare", settings: { otherModelUpTo: 0 } });
+      await h.harness.behavior.runCli(["use", "proj-1", "main"]);
+      expect(await where(h)).toBe("main");
+      expect(await dispatch(h, "t1", "proj-1")).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("main");
+      expect(moves(h)).toEqual([]);
+    });
+
+    it("without the pick the same turn leaves the Ultra for the Team seat, as before", async () => {
+      const { h } = await start({ preset: "main", settings: { otherModelUpTo: 0 } });
+      expect(await dispatch(h, "t1", "proj-1")).toEqual({ action: "proceed" });
+      expect(moves(h).at(-1)).toMatchObject({ note: ownNote("spare") });
+    });
+
+    it("an Ultra picked that cannot run the turn does not hold it: it moves", async () => {
+      const { h } = await start({ preset: "spare", main: [100, 100], settings: { otherModelUpTo: 0 } });
+      await h.harness.behavior.runCli(["use", "proj-1", "main"]);
+      expect(await dispatch(h, "t1", "proj-1")).toEqual({ action: "proceed" });
+      expect(moves(h).at(-1)).toMatchObject({ note: ownNote("spare") });
     });
   });
 });
