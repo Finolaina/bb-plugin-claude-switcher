@@ -606,20 +606,7 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
         options,
         input.freeSeats,
       ) ??
-      chooseSeated(
-        (input.unreadTeams ?? [])
-          .filter((name) => name !== input.currentAccount)
-          .map((name) => ({
-            name,
-            blocked: false,
-            session: { usedPercent: 0, resetsAt: null },
-            weekly: { usedPercent: 0, resetsAt: null },
-            models: {},
-            team: true as const,
-          })),
-        options,
-        input.freeSeats,
-      );
+      chooseSeated(unreadTeamSeats(input), options, input.freeSeats);
     // Kept as one that would spend the reserve: it takes its place in a
     // queue, and what comes later does not overtake it.
     return elsewhere === null
@@ -649,6 +636,11 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   const others = accounts.filter((a) => a.name !== input.currentAccount);
   const choice =
     chooseSeated(others, options, input.freeSeats) ??
+    // The reads of a Team seat down are no reason to wait with one free,
+    // whatever is known of this account (code-reviewer r5).
+    (holdsForReserve(options)
+      ? chooseSeated(unreadTeamSeats(input), options, input.freeSeats)
+      : null) ??
     // Without a login a turn kept here fails for sure: the reserve gives
     // way, but not for a model held off it (Codex OPUS-001): that turn
     // waits at the checkpoint, and the rescue leaves the project.
@@ -687,15 +679,35 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
  * than spend a Max account's weekly the reserved model and the Opus work
  * inside its threads need.
  */
+/** The Team seats with nothing measured, as accounts: nothing they spend is what the reserve needs. */
+function unreadTeamSeats(input: PlacementInput): AccountUsage[] {
+  return (input.unreadTeams ?? [])
+    .filter((name) => name !== input.currentAccount)
+    .map((name) => ({
+      name,
+      blocked: false,
+      session: { usedPercent: 0, resetsAt: null },
+      weekly: { usedPercent: 0, resetsAt: null },
+      models: {},
+      team: true as const,
+    }));
+}
+
 export function reserveWait(
   input: PlacementInput,
 ): { account: string; at: number } | null {
+  const known = new Set(input.accounts.map((a) => a.name));
   const options = {
     preferredModel: input.preferredModel,
     reserveModel: input.reserveModel,
   };
   let earliest: { account: string; at: number } | null = null;
-  for (const raw of input.accounts) {
+  // A Team seat known by its login only is one to wait for too: in its queue,
+  // what comes later does not overtake the turn (Astra IR5-002).
+  for (const raw of [
+    ...input.accounts,
+    ...unreadTeamSeats(input).filter((a) => !known.has(a.name)),
+  ]) {
     if (raw.name === input.currentAccount) continue;
     const account = settle(raw, input.now);
     const at = freeAt(account, input.preferredModel);

@@ -1021,6 +1021,31 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         return true;
     return false;
   }
+  /**
+   * Another thread of the project admitted to a seat on `name`, where the
+   * project is, and not started. A turn reads the project's variable as it
+   * starts: moving the project now would start it on another account, one
+   * that may keep the reserve or not run its model (Astra IR5-001). Its
+   * start ends this, and so does its seat lapsing (SEAT_TTL_MS).
+   */
+  function siblingAdmitted(
+    projectId: string,
+    name: string,
+    threadId?: string,
+  ): string | null {
+    const key = seatKey(name);
+    const look = (): string | null => {
+      for (const [sibling, project] of seatProjects) {
+        if (project !== projectId || sibling === threadId) continue;
+        const seat = seats.seatOf(sibling);
+        if (seat?.state === "reserved" && seat.account === key) return sibling;
+      }
+      return null;
+    };
+    if (look() === null) return null;
+    admitWaiting();
+    return look();
+  }
   /** A thread of the project holds a seat or waits for one. */
   function projectAtSeats(projectId: string): boolean {
     for (const [threadId, project] of seatProjects)
@@ -1268,7 +1293,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (reservedFor(name, model) && canRunHere(name, model))
       return `would spend ${current.preferredModel}'s weekly`;
     const known = measuredAccounts(model).find((a) => a.name === name);
-    if (known === undefined || known.unknown === true)
+    if ((known === undefined || known.unknown === true) && unreadKeepsReserve(name))
       return `is not read yet and may spend ${current.preferredModel}'s weekly`;
     return model === "" ? "is out of usage" : `cannot run ${model}`;
   }
@@ -1928,6 +1953,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * code-reviewer r7, CR-L1).
    */
   let refreshes = 0;
+  /** A turn was held off the reserve before the first reads: they ask it again. */
+  let firstReadsAwaited = false;
   function askBannersAgain(): void {
     passAgain = true;
     bannerPass ??= (async () => {
@@ -1955,9 +1982,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       await recordSamples();
       bb.realtime.publish(CHANGED, { at: deps.now() });
     } finally {
+      const first = refreshes === 0;
       refreshes += 1;
       // Seats reserved for turns that never started are freed with it.
       admitWaiting();
+      // What waited on the accounts not read yet does not wait a full recheck.
+      if (first && firstReadsAwaited)
+        void bb.experimental_hooks
+          .recheck("message.dispatch")
+          .catch((error: unknown) =>
+            bb.log.warn(
+              `bb not asked again after the first reads: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          );
       // Also when the refresh fails: the reads it left grow old, and a
       // banner on reads older than two refreshes must go (Sol B2-R5-001).
       askBannersAgain();
@@ -2202,6 +2239,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     options: {
       byHand?: boolean;
       share?: boolean;
+      /** The thread the move is for: its own seat does not hold the project back (see siblingAdmitted). */
+      forThread?: string;
       /** Asked with the other checks after the sessions are shared: false drops the move (Codex OPUS-R5-002). */
       stillValid?: () => boolean;
     } = {},
@@ -2257,6 +2296,21 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         ) {
           bb.log.info(
             `project ${projectId}: not moved to ${toName}: picked by hand or moved meanwhile`,
+          );
+          return false;
+        }
+      }
+      // Every automatic move, whatever its reason, right before the write:
+      // nothing is awaited between this look and the write (Astra IR5-001).
+      if (move !== null && options.byHand !== true) {
+        const admitted = siblingAdmitted(
+          projectId,
+          from.account ?? current.defaultAccountName,
+          options.forThread,
+        );
+        if (admitted !== null) {
+          bb.log.info(
+            `project ${projectId}: not moved to ${toName}: thread ${admitted} was admitted where it is and has not started`,
           );
           return false;
         }
@@ -3653,7 +3707,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (decision.kind === "keep") return;
     // Moved by something else while the sessions were shared: this
     // decision, taken on the account before, no longer holds.
-    if (!(await applyAccount(projectId, accountOrDefault(decision.account), from)))
+    if (
+      !(await applyAccount(projectId, accountOrDefault(decision.account), from, {
+        forThread: thread.id,
+      }))
+    )
       return;
     await markHandled(projectId);
     noteMove(projectId, fromName, decision.account, model, before);
@@ -4369,6 +4427,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     here: string,
   ): { sendAt: number; reason: string; seatOn?: string; seatWhy?: string } {
     const reserve = current.preferredModel;
+    if (refreshes === 0) firstReadsAwaited = true;
     const free = reserveWait(input);
     if (free === null)
       return {
@@ -4443,16 +4502,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const { plan } = planOf(login, null);
     return login.kind === "max" || plan === "ultra" || plan === "max";
   }
-  /** The Team seats by login, logged in, with nothing measured of them. */
+  /** The Team seats by login, logged in, not refusing, with nothing measured of them. */
   function unreadTeams(model: string): string[] {
+    // Nothing read yet because nothing was asked yet: the first reads are
+    // seconds away, and they ask the waits again (code-reviewer r5).
+    if (refreshes === 0) return [];
     const measured = measuredAccounts(model);
     return accounts
-      .filter(
-        (login) =>
-          planOf(login, null).plan === "team" &&
-          !loggedOut(login.name) &&
-          (measured.find((a) => a.name === login.name)?.unknown ?? true),
-      )
+      .filter((login) => {
+        if (planOf(login, null).plan !== "team") return false;
+        if (loggedOut(login.name) || refusing(login.name)) return false;
+        const known = measured.find((a) => a.name === login.name);
+        return known === undefined || known.unknown === true;
+      })
       .map((login) => login.name);
   }
   /**
@@ -4579,6 +4641,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return { account: fromName, byDefault: !from.owned, writes };
     }
     if (turn.abandoned) return null;
+    // Its move would carry along a sibling about to start: asked again soon.
+    const admitted =
+      decision.account === fromName
+        ? null
+        : siblingAdmitted(projectId, fromName, thread.id);
+    if (admitted !== null) {
+      turn.held = {
+        sendAt: now + SEAT_RECHECK_MS,
+        reason: `Waiting to move to ${decision.account}: thread ${admitted} of this project is about to start on ${fromName}`,
+      };
+      return { account: fromName, byDefault: !from.owned, writes };
+    }
     // Read before the move: what the seats were as it was decided.
     const fullHere = seats.snapshot([seatKey(fromName)])[seatKey(fromName)]!;
     const roomThere = seatRoom(decision.account);
@@ -4595,7 +4669,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     const to = accountOrDefault(decision.account);
     // The sessions are not waited for: see applyAccount (Fable, 2026-10-29).
-    await applyAccount(projectId, to, from, { share: false });
+    await applyAccount(projectId, to, from, {
+      share: false,
+      forThread: thread.id,
+    });
     await markHandled(projectId);
     noteMove(projectId, fromName, decision.account, model, before);
     const reason =
@@ -5583,7 +5660,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (stuck && !current.autoSwitch) return;
     if (decision.account !== fromName) {
       if (
-        !(await applyAccount(projectId, accountOrDefault(decision.account), from))
+        !(await applyAccount(projectId, accountOrDefault(decision.account), from, {
+          forThread: event.threadId,
+        }))
       ) {
         // Moved by a placement before a turn while the sessions were shared:
         // that move, decided later, stands. Nothing is recorded; the turn is
@@ -6094,7 +6173,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     // Moved by something else while the sessions were shared: the wait
     // stays as it is, and fires on its own.
-    if (!(await applyAccount(projectId, accountOrDefault(to), from))) return;
+    if (
+      !(await applyAccount(projectId, accountOrDefault(to), from, {
+        forThread: threadId,
+      }))
+    )
+      return;
     await markHandled(projectId);
     noteMove(projectId, fromName, to, model, before);
     const reason = `Moved to account ${to}, which can run the waiting turn now: ${fromName} ${noLogin ? "is not logged in" : whyOut(fromName, model)}`;

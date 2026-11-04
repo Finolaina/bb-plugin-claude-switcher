@@ -138,3 +138,5 @@ Evidencia externa de «hecho»: suite y mutantes en verde; veredicto de Astra; e
 - **C6:** `heldBy` solo descarta la fila de un hilo archivado.
 - **T15, ampliado:** sin leer y con la Team llena entra en la cola; con todas las lecturas caídas va a una Team libre según su login.
 - **T16, nuevo:** un hermano admitido en su Team y sin arrancar cierra la vuelta de la excursión hasta que arranca o caduca su plaza.
+- **T16, ampliado (ronda 5):** la raíz de los tres high seguidos en `server.ts` es que la cuenta es de todo el proyecto y cada turno la lee al arrancar. El arreglo está en un solo punto, justo antes de escribir la variable (`applyAccount`), para todo movimiento automático; `placeTurn` hace esperar 30 s al turno que quería mover. Una plaza en otra cuenta no ata al proyecto, para que dos hermanos admitidos en cuentas distintas no se bloqueen entre sí.
+- **T15, ampliado (ronda 5):** una Team sin leer también da cola y sirve con la Ultra leída; una Team leída o que rechazó no cuenta como sin leer; antes de las primeras lecturas no se usa ninguna a ciegas, y esas lecturas vuelven a preguntar.
