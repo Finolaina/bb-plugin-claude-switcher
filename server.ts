@@ -3484,7 +3484,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const fromName = from.account ?? current.defaultAccountName;
     // Read before noteMove, which forgets it on the way home.
     const excursion = excursions.get(projectId);
-    const decision = decidePlacement({
+    const input: PlacementInput = {
       currentAccount: fromName,
       isNew,
       accounts: measured,
@@ -3497,7 +3497,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       ...paceFilter(isBackground(thread)),
       now,
       currentLoggedOut: unconfirmed(fromName),
-    });
+    };
+    const decision = decidePlacement(input);
     if (decision.kind === "keep") {
       bb.log.info(
         `thread ${thread.id}: project left on account ${fromName} (${isNew ? "the best account for a new project" : "its account can run"})`,
@@ -3522,7 +3523,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return;
     }
     if (
-      !(await applyAccount(projectId, accountOrDefault(decision.account), latest))
+      !(await applyAccount(projectId, accountOrDefault(decision.account), latest, {
+        // Judged again as it writes: a sibling that started meanwhile (the
+        // reads and the sessions are awaited) keeps the project where it is
+        // (Codex REBOTE-001).
+        stillValid: () => {
+          const again = decidePlacement({
+            ...input,
+            siblingAtWork: projectSeated(projectId, thread.id),
+          });
+          return again.kind === "move" && again.account === decision.account;
+        },
+      }))
     ) {
       bb.log.info(
         `thread ${thread.id}: not placed (the project's account changed meanwhile)`,
@@ -4705,14 +4717,22 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // where it was: told to start, this thread ties the project until its
     // turn starts or waits (see siblingAdmitted), so that one does not
     // take it elsewhere under it.
+    // ponytail: a seat it holds on another account (admitted from a queue)
+    // goes as this one is taken, and with it its place if the dispatch then
+    // waits (code-reviewer r1 of the rebote, low; as for a move for a full
+    // account since 0.2.37). Keeping both needs a seat per thread and
+    // account in src/seats.ts.
     const claim =
       when === "before" && decision.account !== fromName
         ? seatKey(decision.account)
         : null;
     if (claim !== null) {
-      // A seat it already held there (admitted from the queue) stays its
-      // own whatever the dispatch answers.
+      // A seat it already held there stays its own whatever the dispatch
+      // answers.
       if (seats.seatOf(thread.id)?.account !== claim) claims.set(thread.id, claim);
+      // A cancellation of an earlier message that is still looking at the
+      // queue leaves this seat alone (Astra SEATS-R4-003, Codex REBOTE-002).
+      seatGenerations.set(thread.id, (seatGenerations.get(thread.id) ?? 0) + 1);
       seatProjects.set(thread.id, projectId);
       seats.reserve(thread.id, claim, now);
       toldToStart.set(thread.id, {

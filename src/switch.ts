@@ -597,19 +597,20 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   // BM-INSPECT-006). Home with no free seat is no way back yet (Astra
   // SEATS-R2-004): what follows decides, as with no excursion. So does
   // home saved for the user, for background work (Codex ULTRA-R01): it is
-  // then a last resort, as in any other choice. So does a sibling at work
-  // on an account that runs the turn (see siblingAtWork).
+  // then a last resort, as in any other choice. So does a sibling at work,
+  // unless the account it is on is measured unable to run the turn or has
+  // no login (see siblingAtWork): an account not read is no such reason
+  // (code-reviewer r1 of the rebote).
   const loggedOut = input.currentLoggedOut === true;
   const current = accounts.find((a) => a.name === input.currentAccount);
-  const runsHere =
-    !loggedOut &&
-    current !== undefined &&
-    current.unknown !== true &&
-    isUsable(current) &&
-    canRunModel(current, input.preferredModel);
+  const cannotRunHere =
+    loggedOut ||
+    (current !== undefined &&
+      current.unknown !== true &&
+      !(isUsable(current) && canRunModel(current, input.preferredModel)));
   if (
     !reserving(options) &&
-    !(input.siblingAtWork === true && runsHere) &&
+    !(input.siblingAtWork === true && !cannotRunHere) &&
     typeof input.excursionFrom === "string" &&
     input.excursionFrom !== input.currentAccount &&
     input.savedForUser?.(input.excursionFrom) !== true

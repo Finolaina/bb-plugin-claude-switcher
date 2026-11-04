@@ -381,7 +381,7 @@ M = [
     # Rebote del 2026-11-04 10:49 (log del servidor de bb): hermano trabajando y
     # plaza tomada al decidir cualquier movimiento antes del turno.
     ("R rebote", "la vuelta a casa no mira a los hermanos", "src/switch.ts",
-     "    !(input.siblingAtWork === true && runsHere) &&\n", "",
+     "    !(input.siblingAtWork === true && !cannotRunHere) &&\n", "",
      "server.test.ts", "rebote"),
     ("R rebote", "un hilo nuevo no pasa el hermano a la colocación", "server.ts",
      "      excursionFrom: wayHome(projectId, current.preferredModel, measured, now),\n      siblingAtWork: projectSeated(projectId, thread.id),\n",
@@ -392,7 +392,7 @@ M = [
      "      currentLoggedOut: unconfirmed(fromName),\n",
      "server.test.ts", "R2 a Fable turn"),
     ("R rebote", "la vuelta a casa con un hermano solo si la cuenta no puede: siempre", "src/switch.ts",
-     "    !(input.siblingAtWork === true && runsHere) &&\n", "    !(input.siblingAtWork === true) &&\n",
+     "    !(input.siblingAtWork === true && !cannotRunHere) &&\n", "    !(input.siblingAtWork === true) &&\n",
      "server.test.ts", "BM-INSPECT-R3-003"),
     ("R rebote", "solo el movimiento por plazas llenas toma plaza", "server.ts",
      '      when === "before" && decision.account !== fromName\n', '      decision.why === "current-full" && decision.account !== fromName\n',
@@ -403,6 +403,18 @@ M = [
     ("R rebote", "la plaza tomada se queda aunque el turno espere", "server.ts",
      '      if (seat?.account === claim && seat.state === "reserved")\n', '      if (false)\n',
      "server.test.ts", "R4-001"),
+    ("R rebote", "sin lectura de la Team, la vuelta a casa no espera al hermano", "src/switch.ts",
+     "    (current !== undefined &&\n      current.unknown !== true &&\n      !(isUsable(current)",
+     "    (current === undefined ||\n      current.unknown === true ||\n      !(isUsable(current)",
+     "server.test.ts", "R5 the Team seat not read"),
+    ("R rebote", "la vuelta a casa de un hilo nuevo no se juzga otra vez al escribir", "server.ts",
+     "          return again.kind === \"move\" && again.account === decision.account;\n",
+     "          return again.kind !== null;\n",
+     "server.test.ts", "R7 a sibling that starts"),
+    ("R rebote", "la plaza tomada no avisa a una cancelación en curso", "server.ts",
+     "      seatGenerations.set(thread.id, (seatGenerations.get(thread.id) ?? 0) + 1);\n      seatProjects.set(thread.id, projectId);\n      seats.reserve(thread.id, claim, now);",
+     "      seatProjects.set(thread.id, projectId);\n      seats.reserve(thread.id, claim, now);",
+     "server.test.ts", "R8 a cancellation"),
 ]
 
 
