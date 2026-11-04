@@ -18807,6 +18807,8 @@ describe("caminos 2026-11-04", () => {
         await gone(h);
         clock = NOW + 120_000;
         expect((await dispatch(h, "c1", "proj-1", OPUS)).action).toBe("proceed");
+        // Past its 10 s too: only a count that started anew still holds.
+        clock = NOW + 135_000;
         const set = h.envSet.length;
         const deleted = h.envDeleted.length;
         expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("wait");
