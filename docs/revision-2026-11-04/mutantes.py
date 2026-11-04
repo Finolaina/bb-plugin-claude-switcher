@@ -419,6 +419,9 @@ M = [
      "    chooseSeated(others, options, input.freeSeats) ??\n    // The reads of a Team seat down",
      "    chooseSeated(others, options, undefined) ??\n    // The reads of a Team seat down",
      "server.test.ts", "R9 Opus"),
+    ("R rebote", "la colocación de un proyecto nuevo se juzga otra vez al escribir", "server.ts",
+     '          if (decision.why !== "back-from-excursion") return true;\n', "",
+     "server.test.ts", "R10 a new project"),
 ]
 
 

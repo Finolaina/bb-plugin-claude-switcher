@@ -17684,6 +17684,47 @@ describe("caminos 2026-11-04", () => {
       await placing;
       expect(h.envDeleted).toEqual([]);
       expect(where(h)).toBe(out);
+      expect(h.harness.logEntries.map((e) => e.message)).toContainEqual(
+        `thread t2: not placed (another thread of the project started on ${out === ownNote("spare") ? "spare" : "work"} meanwhile)`,
+      );
+    });
+
+    it("R10 a new project's placement stands when a better account frees while it is written (code-reviewer r2)", async () => {
+      let reads = -1;
+      const gate = envGate();
+      const h = await host(
+        {
+          main: () => Response.json(payload(10, 40, 100)),
+          spare: () => Response.json(payload(10, 60, 20)),
+          work: () => Response.json(payload(5, 20, 30)),
+        },
+        {
+          settings: { ...FABLE, seatsMax: 1 },
+          listed: ["proj-1"],
+          extraProjects: [{ id: "proj-3", name: "proj-3" }],
+          presetEnv: { "proj-1": on("work") },
+          afterEnvRead: async (projectId) => {
+            if (reads < 0 || projectId !== "proj-3") return;
+            reads += 1;
+            if (reads !== 2) return;
+            reads = -1;
+            gate.captured();
+            await gate.held;
+          },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "o1", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "o1", projectId: "proj-1" }) });
+      reads = 0;
+      const placing = h.harness.behavior.emitThreadEvent("thread.created", { thread: thread({ id: "n1", projectId: "proj-3" }) });
+      await gate.reached;
+      // work, which ranks first, frees while proj-3 is placed on spare.
+      await h.harness.behavior.emitThreadEvent("thread.idle", { thread: thread({ id: "o1", projectId: "proj-1" }) });
+      gate.release();
+      await placing;
+      expect(h.envSet.filter((e) => e.projectId === "proj-3").map((e) => e.note)).toEqual([ownNote("spare")]);
     });
 
     it("R8 a cancellation that looks at the queue while a move takes its seat leaves that seat alone (Codex REBOTE-002)", async () => {

@@ -23,7 +23,10 @@ project uses [Semantic Versioning](https://semver.org/).
   move for a full account: two Opus turns leaving the reserve at once no
   longer pick the same last seat, and a sibling's turn decided meanwhile
   does not move the project elsewhere under it (it waits up to 30 s, as for
-  a turn told to start). A turn that then waits gives that seat up.
+  a turn told to start). A turn that then waits gives that seat up. Such a
+  move goes only where a seat is free beyond those owed to the threads
+  already waiting there, as a move for a full account did, and never moves
+  the project for a seat it did not get.
 
 ## [0.2.39] - 2026-11-04
 
