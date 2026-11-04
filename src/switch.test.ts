@@ -1,3 +1,7 @@
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { makeTurnFailedEvent } from "@get-bb/plugin-sdk/testing";
 import type { PluginTurnFailedEvent } from "@get-bb/plugin-sdk";
@@ -2179,7 +2183,31 @@ describe("unreadTeamSeats", () => {
   });
 });
 
+/**
+ * Calor's own source, when it is at hand: `CALOR_REPO`, else next to this repo
+ * or in bb-plugins. Its tick text is the mark isCalorTick looks for; changed
+ * there, the switcher would move projects for a tick again (Fable's final pass,
+ * 2026-11-05).
+ */
+const CALOR_TEXTOS = [
+  process.env.CALOR_REPO,
+  fileURLToPath(new URL("../../bb-plugin-calor", import.meta.url)),
+  join(homedir(), "Desarrollo/bb-plugins/bb-plugin-calor"),
+]
+  .filter((d): d is string => typeof d === "string" && d !== "")
+  .map((d) => join(d, "src/textos.ts"))
+  .find((f) => existsSync(f));
+
 describe("isCalorTick", () => {
+  it.skipIf(CALOR_TEXTOS === undefined)("recognises the tick Calor sends today, read from its source", () => {
+    const source = readFileSync(CALOR_TEXTOS!, "utf8");
+    const tick = /export function textoTic\(opId: string\): string \{\s*return `([^`]*)`;/.exec(source);
+    expect(tick, "textoTic not found in Calor's textos.ts").not.toBeNull();
+    const text = tick![1]!.replace("${opId}", "97d91f3e-4f58-4569-a477-00e157c210c2");
+    expect(text).not.toContain("${");
+    expect(isCalorTick(text)).toBe(true);
+  });
+
   it("is Calor's own text and nothing near it", () => {
     const id = "97d91f3e-4f58-4569-a477-00e157c210c2";
     expect(isCalorTick(`calor: tic de caché #${id}. Responde exactamente «calor ok», sin usar herramientas y sin razonar más.`)).toBe(true);

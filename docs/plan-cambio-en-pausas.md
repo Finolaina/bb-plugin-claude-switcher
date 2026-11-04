@@ -157,3 +157,10 @@ Cuatro rondas, ninguna con `high`. Respuestas: `docs/cambios-caches-2026-11-04/a
 | 4 | gpt-6-astra | APPROVED | ninguno |
 
 Las cuatro son lectura estática. Falta la pasada final de Fable y todo lo que solo se ve en vivo: que un rechazo no deje rastro en el hilo, que Calor frene su reintento tras un rescate y el ahorro real.
+
+## Pasada final de Fable (2026-11-05 00:05, sobre 2721368): sin high
+
+- **medium, atendido:** `isCalorTick` solo reconoce el texto del tic de `bb-plugin-calor`. Si Calor lo cambia, el switcher vuelve a mover proyectos por un tic sin que nadie lo vea. Ahora `src/switch.test.ts` lee `textoTic` del propio `bb-plugin-calor/src/textos.ts` y falla si deja de casar; se comprobó cambiando el texto en una copia. Límite: la prueba solo corre donde está el repo de Calor (`CALOR_REPO`, el directorio vecino o `~/Desarrollo/bb-plugins/`). En la CI de GitHub se salta, y si Calor cambia su texto no salta hasta que se pasen las pruebas del switcher. El tic de las sesiones interactivas («calor v2: tic de caché (sesión …)») no pasa por bb y no hace falta reconocerlo.
+- **low, se aclara:** rechazar un tic no deshace nada. `placeTurn` devuelve lo mismo que cuando el proyecto se queda (`{ account: fromName, writes }`): un cambio de cuenta ya escrito antes de ese punto por otro camino sigue escrito. Lo que el rechazo garantiza es que el tic no escribe ninguno nuevo, no reserva plaza y no entra en cola.
+- **low, se aclara:** un tic con mensajes en cola detrás (`queuedMessages` no vacío) se trata como un turno real y puede mover el proyecto. Es a propósito: rechazarlo dejaría filas fallidas en la cola y el vigilante avisaría (riesgo 3).
+- **nota de Fable, comprobada en el diff:** `noteTurn()` solo corre cuando el tic no se rechaza, en las tres ramas.
