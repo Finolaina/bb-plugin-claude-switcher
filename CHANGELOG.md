@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.40] - 2026-11-04
+
+### Changed
+
+- **A Calor tick no longer moves its project.** A tick only keeps a prompt
+  cache alive, and moving the project to run it rewrote the whole context on
+  the new account, for a cache that was left behind by that same move. In its
+  first attempt, a tick that would move its project, or wait for a seat or a
+  Team, is refused: nothing is written, no seat is taken, no queue row is left
+  and Calor tries again 5 minutes later. It leaves no mark either: neither its
+  model nor its activity count for the project, and it does not place a new
+  project. A real message, Calor's closing message and a tick already queued
+  behave as before. Measured over 7 days (our own count, at proxy prices,
+  `docs/plan-cambio-en-pausas.md`): 5 of 45 cache rewrites caused by account
+  changes were moved by the tick itself, and 3 of them (12.44 $) were not used
+  by any real turn afterwards.
+
 ## [0.2.39] - 2026-11-04
 
 ### Fixed

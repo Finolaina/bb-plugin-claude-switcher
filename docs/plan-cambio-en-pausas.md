@@ -121,3 +121,23 @@ Mutantes (al estilo de `docs/revision-2026-11-04/mutantes.py`; cada uno debe rom
 - Se instala en el servidor de bb con la cola de Opus vacía, o se avisa (PARA Y ESPERA 2 del encargo). Vuelta atrás: reinstalar 0.2.39.
 - 24 h en vivo: `grep "Calor's tick refused"` en el registro del plugin, comprobar en `bb thread log` que el rechazo no deja rastro visible en el hilo y que su caché no se escribió en otra cuenta, y que el vigilante no avisó de ninguna retención nueva.
 - Lo de Calor (los 3 tics que T no alcanza y sus 18 falsos «fría») va a su buzón en el Optimizador. No se toca aquí.
+<!-- fin del plan revisado -->
+
+## Veredicto de Astra
+
+**APPROVED**, sin hallazgos, en la ronda 2 (`gpt-6-astra`, esfuerzo alto), sobre el SHA256 `e94d7198ac6a4418bf0cf0499120a7a4583cad303496f9540c390c5678f9f805` de todo lo que hay por encima de la marca de fin. Se comprueba con:
+
+```
+sed '/^<!-- fin del plan revisado -->$/,$d' docs/plan-cambio-en-pausas.md | sha256sum
+```
+
+- Ronda 1, `REVISE`, dos hallazgos medios: `T-001` (un tic rechazado dejaba su modelo apuntado) y `T-002` (un tic podía colocar un proyecto nuevo). Los dos entraron en el plan, en sus riesgos 4 y 5.
+- Respuestas íntegras: `docs/cambios-caches-2026-11-04/astra-plan-r1.json` y `astra-plan-r2.json`.
+- Corrió en el NUC porque la sesión de Codex del i9 está caducada («refresh token was already used», 2026-11-04 11:21).
+- Astra lo dice en sus límites y aquí se repite: la aprobación es del plan, por lectura estática. Ni el rechazo en vivo ni el ahorro se han comprobado ejecutándolos.
+
+## Cambios sobre el plan aprobado, al construir
+
+- La guarda es `queuedMessages` vacío y la marca. Para `attempt`, basta con que `beforeStart` solo corre en `start-turn`; un tic que se une a un turno o con el cambio automático apagado anota su modelo como cualquier mensaje. Dos pruebas más que las 13 del plan lo fijan.
+- La «actualización de cuota» de la prueba 12 tiene que ser una pasada real del servicio `usage-refresh`: la RPC `accounts_refresh` no ejecuta `rescueStranded` y la prueba pasaba sin comprobar nada. Corregida antes de confiar en ella; su mutante muere.
+- Encontrado al implementar, sin cambio de código: con la cuota agotada, la siguiente pasada de `rescueStranded` mueve el proyecto parado aunque el tic se haya rechazado. La caché se pierde igual, pero el reintento del tic no reescribe en la cuenta nueva si Calor lo frena con su regla de cuenta distinta (`bb-plugin-calor/src/decisor.ts:354-364`, leído). De ese freno depende el ahorro en los casos de cuota. En los 7 días hubo 3 tics que escribieron en otra cuenta sin que los moviera el propio tic, sin causa aclarada: se comprueba en vivo.

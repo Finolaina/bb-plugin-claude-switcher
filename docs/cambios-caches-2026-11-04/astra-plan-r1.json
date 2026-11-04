@@ -1,0 +1,33 @@
+{
+  "verdict": "REVISE",
+  "summary": "Two unaddressed paths can let a maintenance tick change project placement despite the proposed rejection.",
+  "findings": [
+    {
+      "id": "T-001",
+      "severity": "medium",
+      "path": "docs/plan-cambio-en-pausas.md:79",
+      "evidence": "The shared-state audit covers noteActivity but omits noteProjectModel. Before beforeStart can reject, server.ts:5084–5088 records and persists the tick's model. rescueStranded/rescue then use that model (server.ts:3978–4116). For example, a project last used for Opus remains on a Team account that can run Opus but has exhausted Fable. A Fable tick from another idle thread is rejected, yet replaces the project's model with Fable; the next refresh can move the entire project, affecting its Opus threads despite no real Fable turn being accepted.",
+      "fix": "Ensure rejected ticks do not commit thread/project model changes or activity changes that affect placement. Preserve concurrent real activity rather than blindly restoring a snapshot. Add a dispatch regression followed by a usage refresh, checking the stored model, project account and history."
+    },
+    {
+      "id": "T-002",
+      "severity": "medium",
+      "path": "docs/plan-cambio-en-pausas.md:91",
+      "evidence": "Protecting placeTurn misses the earlier placement writer: beforeStart calls placeNewProject at server.ts:4846, before constructing the proposed tick-aware turn. A project created after installation can remain unhandled when initial usage reads fail: placeProject returns without markHandled at server.ts:3473–3478, while a logged-in default account can still run its first turn. After measurements recover, its first Calor tick can invoke placeNewProject → placeProject → applyAccount and move the warmed project to the best account before the tick guard runs.",
+      "fix": "Apply the tick policy before invoking new-project placement as well. An eligible tick must not initiate a project-account write through placeNewProject/placeProject. Add a regression with an unhandled project, an existing warm thread on the default account, and recovered measurements favoring another account."
+    }
+  ],
+  "coverage": [
+    "Verified the plan file matches the supplied SHA256.",
+    "Traced dispatch, placement, seat reservations and queues, rejection cleanup, activity/model persistence, rescue, after-turn placement, rebalance and account writers.",
+    "Inspected relevant existing dispatch and rescue test harnesses without executing them.",
+    "Inspected Calor's literal tick text, send-error handling, retry and expiry decisions.",
+    "Inspected bb-app 0.48.1 dispatch rejection and queued-message handling.",
+    "Read the cache-analysis report and simulation logic for options T and A–G."
+  ],
+  "limitations": [
+    "Static plan review against version 0.2.39; the proposed implementation is not present.",
+    "No files edited, tests or simulations executed, or work delegated.",
+    "Historical totals were not independently recomputed; live rejection behavior and deployment outcomes remain unverified."
+  ]
+}

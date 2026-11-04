@@ -8,6 +8,7 @@ import {
   decideAhead,
   decidePlacement,
   decideSwitch,
+  isCalorTick,
   modelFamily,
   opusInstead,
   opusInsteadText,
@@ -2175,5 +2176,18 @@ describe("unreadTeamSeats", () => {
   it("a window full with no date of reset is not read as free", () => {
     const full = { usedPercent: 100, resetsAt: null };
     expect(seat(account("work", { unknown: true, weekly: full }))?.weekly).toEqual(full);
+  });
+});
+
+describe("isCalorTick", () => {
+  it("is Calor's own text and nothing near it", () => {
+    const id = "97d91f3e-4f58-4569-a477-00e157c210c2";
+    expect(isCalorTick(`calor: tic de caché #${id}. Responde exactamente «calor ok», sin usar herramientas y sin razonar más.`)).toBe(true);
+    expect(isCalorTick(`  calor: tic de caché #${id}. Responde`)).toBe(true);
+    expect(isCalorTick(`calor: cierre automático #${id} (6 h sin actividad).`)).toBe(false);
+    expect(isCalorTick("calor: tic de caché #sin-uuid. Responde")).toBe(false);
+    expect(isCalorTick(`Calor: tic de caché #${id}. Responde`)).toBe(false);
+    expect(isCalorTick(`mira este texto: calor: tic de caché #${id}. Responde`)).toBe(false);
+    expect(isCalorTick("")).toBe(false);
   });
 });

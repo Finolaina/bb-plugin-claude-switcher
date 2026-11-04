@@ -128,6 +128,19 @@ export function declineReason(
   return null;
 }
 
+/** The mark of Calor's tick (bb-plugin-calor, `src/textos.ts`); its closing message is real work, and is not one. */
+const CALOR_TICK =
+  /^\s*calor: tic de caché #[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\./;
+
+/**
+ * A message that only keeps a prompt cache alive. Moving its project to run it
+ * would rewrite the whole context on the new account for nothing: the cache it
+ * is there to keep stays behind (docs/plan-cambio-en-pausas.md).
+ */
+export function isCalorTick(text: string): boolean {
+  return CALOR_TICK.test(text);
+}
+
 /**
  * The usage API's name for the model a bb model id runs
  * ("claude-opus-5-5" → "Opus"), or null when the id is not a Claude model id
