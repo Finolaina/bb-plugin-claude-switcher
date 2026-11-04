@@ -1,4 +1,4 @@
-HEAD fbcb19b29f51827442214ac13117219a289c289a
+HEAD 97f8a587af123202db06fc421143c8f8dfbcb07c
 MUERE      placeTurn no sabe que es un tic: mueve · Tests  6 failed | 10 passed | 707 skipped (723)
 MUERE      un tic ya en cola también se rechaza · Tests  1 failed | 15 passed | 707 skipped (723)
 MUERE      se rechaza también lo que no movería · Tests  2 failed | 14 passed | 707 skipped (723)

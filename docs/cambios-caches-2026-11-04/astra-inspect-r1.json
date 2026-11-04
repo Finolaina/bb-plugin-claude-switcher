@@ -1,0 +1,32 @@
+{
+  "verdict": "REVISE",
+  "summary": "Two material issues remain: stale committed build artifacts and incorrect timezone handling in the historical analysis.",
+  "findings": [
+    {
+      "id": "T-003",
+      "severity": "medium",
+      "path": "package.json:3",
+      "evidence": "The package declares 0.2.40, but dist/server.meta.json:6 still declares 0.2.39 and dist/server.js contains neither tick recognition nor refusal handling. The plan requires an updated build, and .github/workflows/check.yml:27–28 rebuilds and requires dist to remain clean, so these artifacts cannot satisfy that check.",
+      "fix": "Rebuild using the repository's pinned bb version and commit the resulting dist artifacts alongside the source change."
+    },
+    {
+      "id": "T-004",
+      "severity": "medium",
+      "path": "docs/cambios-caches-2026-11-04/parsear-registro.py:63",
+      "evidence": "hora_local interprets exhaustion deadlines as Europe/Madrid, but their producer, stranded() in server.ts:3999, formats them with toISOString(), which is UTC. Both agotadas() and filas() use this conversion. A reset logged as 2026-11-04 12:00 therefore becomes 11:00 UTC instead of 12:00 UTC. This can mark exhausted accounts available an hour early and incorrectly classify reset-before-turn cases, affecting options A, B, E, F and G.",
+      "fix": "Parse deadlines emitted by stranded() as UTC in both extraction paths. Regenerate the affected compressed datasets and analysis, then update the report and plan figures."
+    }
+  ],
+  "coverage": [
+    "Verified the supplied plan SHA256 and reviewed all 37 changed files, including decoding and inspecting the compressed datasets.",
+    "Traced dispatch eligibility, placement, account writes, reservations, queues, rejection cleanup, activity/model persistence, background rescue, after-turn placement, retries, manual selection and rebalance.",
+    "Read the added tests and mutation runner without executing them.",
+    "Inspected Calor's tick text, send-error handling, retry timing and expiry/account-change checks, plus bb-app 0.48.1 dispatch rejection handling.",
+    "Compared committed build artifacts with source changes and CI requirements; reviewed extraction and simulation logic."
+  ],
+  "limitations": [
+    "Static review only: no files edited, tests, builds, mutations or simulations run, and no delegation.",
+    "Historical totals were not independently recomputed against original logs or transcripts.",
+    "Live rejection visibility, cache savings and deployment behavior remain unverified."
+  ]
+}

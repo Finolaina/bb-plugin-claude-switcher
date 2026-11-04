@@ -144,3 +144,16 @@ sed '/^<!-- fin del plan revisado -->$/,$d' docs/plan-cambio-en-pausas.md | sha2
 - Corregido tras la inspección de código (`T-004`): `parsear-registro.py` leía como hora de Madrid las fechas de agotamiento, que el plugin escribe en UTC. Recalculado sobre los mismos registros, solo cambia F: con 30 min salva 0 (no 2/9,70 $), con 60 min 1/4,68 $ (no 3/15,84 $) y con 120 min 4/20,53 $ (no 5/25,47 $). T, A, B, C, D, E y G quedan iguales, y el veredicto de cada opción también; F sale aún peor. La tabla de arriba es la que revisó Astra y no se reescribe.
 - Corregido tras la inspección final (`CACHE-F-001`): F contaba como salvadas cachés que habrían caducado antes del reset. Exigiendo que el turno vuelva con la caché viva, F salva 0 con cualquier espera de 5 a 120 min (las cifras de la línea anterior quedan sustituidas). `comprobar.py` lleva ese caso como canario. Esto refuerza el descarte de F.
 - El historial de `main` se reescribió durante este trabajo (484 commits, `origin/main` 4a53435 en vez de dbc8053). Los commits se pasaron a un clon nuevo, como pide el encargo.
+
+## Inspección del código
+
+Cuatro rondas, ninguna con `high`. Respuestas: `docs/cambios-caches-2026-11-04/astra-inspect-r1.json` a `r4`.
+
+| Ronda | Modelo | Veredicto | Hallazgos |
+| --- | --- | --- | --- |
+| 1 | gpt-6.1-sol | REVISE | medios: `dist` sin construir (T-003), fechas UTC leídas como hora de Madrid (T-004) |
+| 2 | gpt-6.1-sol | APPROVED | ninguno |
+| 3 | gpt-6-astra | REVISE | medio: la opción F contaba cachés ya caducadas (CACHE-F-001); ninguno en el código del plugin |
+| 4 | gpt-6-astra | APPROVED | ninguno |
+
+Las cuatro son lectura estática. Falta la pasada final de Fable y todo lo que solo se ve en vivo: que un rechazo no deje rastro en el hilo, que Calor frene su reintento tras un rescate y el ahorro real.
