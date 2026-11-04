@@ -68,12 +68,6 @@ M = [
     ("T15 sin leer", "con todas las lecturas caídas no usa la Team libre", "server.ts",
      "      unreadTeams: unreadTeams(model),\n", "",
      "server.test.ts", "with all the reads down"),
-    ("T16 hermano", "la vuelta se lleva a un hermano sin arrancar", "server.ts",
-     '        seats.seatOf(sibling)?.state === "reserved"\n', "        false\n",
-     "server.test.ts", "T16 a sibling"),
-    ("T16 hermano", "un hermano ya en marcha también cierra la vuelta", "server.ts",
-     '        seats.seatOf(sibling)?.state === "reserved"\n', "        seats.seatOf(sibling) !== null\n",
-     "server.test.ts", "T16 a sibling"),
     ("T16 hermano", "un movimiento automático se lleva a un hermano admitido", "server.ts",
      "        const admitted = siblingAdmitted(\n          projectId,\n          from.account ?? current.defaultAccountName,\n          options.forThread,\n        );\n", "        const admitted = null as string | null;\n",
      "server.test.ts", "T16 a sibling"),
@@ -181,11 +175,11 @@ M = [
      '    if (input.seatsFull !== true) return { kind: "keep" };', '    return { kind: "keep" };',
      "server.test.ts", "T9 seats full"),
     ("T9b hermano", "exigir hilo parado en current-reserved", "server.ts",
-     "    if (turn.abandoned) return null;\n    // Read before the move: what the seats were as it was decided.",
+     "    if (turn.abandoned) return null;\n    // Its move would carry along a sibling about to start: asked again soon.",
      '''    if (decision.why === "current-reserved" && projectSeated(projectId, thread.id))
       return { account: fromName, byDefault: !from.owned, writes };
     if (turn.abandoned) return null;
-    // Read before the move: what the seats were as it was decided.''',
+    // Its move would carry along a sibling about to start: asked again soon.''',
      "server.test.ts", "T9b a sibling"),
     ("T10 cambio a Opus", "opusInstead sin placedOn", "src/switch.ts",
      """  return placedOn({

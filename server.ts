@@ -3405,20 +3405,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     model: string,
     measured: ReturnType<typeof measuredAccounts>,
     now: number,
-    /** The thread the turn is placed for: its own seat does not hold it back. */
-    threadId?: string,
   ): string | null | undefined {
     const excursion = excursions.get(projectId);
     if (excursion === undefined || otherModel(model)) return undefined;
-    // A sibling admitted here and not started yet would start on the account
-    // the way home leads to (code-reviewer r4). Its seat lapses by itself.
-    for (const [sibling, project] of seatProjects)
-      if (
-        project === projectId &&
-        sibling !== threadId &&
-        seats.seatOf(sibling)?.state === "reserved"
-      )
-        return null;
     const left = aheadLeft.get(projectId);
     const home = measured.find((a) => a.name === excursion.from);
     return left !== undefined &&
@@ -4399,7 +4388,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       accounts: measured,
       preferredModel: model,
       reserveModel: current.preferredModel,
-      excursionFrom: wayHome(projectId, model, measured, now, threadId),
+      excursionFrom: wayHome(projectId, model, measured, now),
       freeSeats:
         own === null
           ? freeSeats
