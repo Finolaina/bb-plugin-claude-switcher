@@ -957,6 +957,15 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
 
 ## Known limitations
 
+- **Turns the provider starts by itself** (a background task that completes
+  and wakes the thread) never pass bb's dispatch checkpoint: they run where
+  the project is, on a seat or not, and an Opus one may run on an account
+  that keeps Fable. They are counted once they start, so the next turn
+  waits, but this plugin cannot hold or place them.
+- **A turn that waits behind a sibling.** A project out on a Team seat for
+  Opus stays there while another of its threads works: a Fable turn runs on
+  that seat instead of going home, and a turn that finds the seat full waits
+  for it rather than moving the project under the sibling.
 - **Between a turn told to start and its start.** The account belongs to the
   whole project and a turn reads it as it starts, so no automatic move is
   written during that time: 90 s from the first answer and, for a turn another

@@ -378,6 +378,31 @@ M = [
     ("C7 canario", "lectura fallida sale con 0", "scripts/canario-cola.mjs",
      "      console.error(`lectura fallida: ${error.message}`);\n      process.exitCode = 1;", "      console.error(`lectura fallida: ${error.message}`);\n      process.exitCode = 0;",
      "scripts/canario-cola.test.ts", ""),
+    # Rebote del 2026-11-04 10:49 (log del servidor de bb): hermano trabajando y
+    # plaza tomada al decidir cualquier movimiento antes del turno.
+    ("R rebote", "la vuelta a casa no mira a los hermanos", "src/switch.ts",
+     "    !(input.siblingAtWork === true && runsHere) &&\n", "",
+     "server.test.ts", "rebote"),
+    ("R rebote", "un hilo nuevo no pasa el hermano a la colocación", "server.ts",
+     "      excursionFrom: wayHome(projectId, current.preferredModel, measured, now),\n      siblingAtWork: projectSeated(projectId, thread.id),\n",
+     "      excursionFrom: wayHome(projectId, current.preferredModel, measured, now),\n",
+     "server.test.ts", "R1 a new thread"),
+    ("R rebote", "el turno no pasa el hermano a la colocación", "server.ts",
+     "      currentLoggedOut: unconfirmed(fromName),\n      siblingAtWork: projectSeated(projectId, thread.id),\n",
+     "      currentLoggedOut: unconfirmed(fromName),\n",
+     "server.test.ts", "R2 a Fable turn"),
+    ("R rebote", "la vuelta a casa con un hermano solo si la cuenta no puede: siempre", "src/switch.ts",
+     "    !(input.siblingAtWork === true && runsHere) &&\n", "    !(input.siblingAtWork === true) &&\n",
+     "server.test.ts", "BM-INSPECT-R3-003"),
+    ("R rebote", "solo el movimiento por plazas llenas toma plaza", "server.ts",
+     '      when === "before" && decision.account !== fromName\n', '      decision.why === "current-full" && decision.account !== fromName\n',
+     "server.test.ts", "R4 a move away"),
+    ("R rebote", "la plaza tomada no ata el proyecto", "server.ts",
+     "      seats.reserve(thread.id, claim, now);\n      toldToStart.set(thread.id, {", "      seats.reserve(thread.id, claim, now);\n      if (false) toldToStart.set(thread.id, {",
+     "server.test.ts", "under way: the Fable turn waits"),
+    ("R rebote", "la plaza tomada se queda aunque el turno espere", "server.ts",
+     '      if (seat?.account === claim && seat.state === "reserved")\n', '      if (false)\n',
+     "server.test.ts", "R4-001"),
 ]
 
 
