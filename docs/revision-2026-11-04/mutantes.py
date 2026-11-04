@@ -415,6 +415,10 @@ M = [
      "      seatGenerations.set(thread.id, (seatGenerations.get(thread.id) ?? 0) + 1);\n      seatProjects.set(thread.id, projectId);\n      seats.reserve(thread.id, claim, now);",
      "      seatProjects.set(thread.id, projectId);\n      seats.reserve(thread.id, claim, now);",
      "server.test.ts", "R8 a cancellation"),
+    ("R rebote", "la reserva elige destino sin mirar plazas", "src/switch.ts",
+     "    chooseSeated(others, options, input.freeSeats) ??\n    // The reads of a Team seat down",
+     "    chooseSeated(others, options, undefined) ??\n    // The reads of a Team seat down",
+     "server.test.ts", "R9 Opus"),
 ]
 
 

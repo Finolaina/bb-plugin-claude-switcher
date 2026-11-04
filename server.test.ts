@@ -17748,6 +17748,43 @@ describe("caminos 2026-11-04", () => {
     });
   });
 
+  describe("rebote: every allowed destination full", () => {
+    it("R9 Opus turns of a project on the Ultra, one with a sibling at work, wait while every Team seat is full: no move, no seat past its capacity", async () => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(10, 10, 5)),
+          spare: () => Response.json(payload(10, 20, 5)),
+          work: () => Response.json(payload(10, 30, 100)),
+        },
+        {
+          settings: { ...FABLE, seatsTeam: 1 },
+          listed: ["proj-1", "proj-2"],
+          extraProjects: [{ id: "proj-3", name: "proj-3" }],
+          presetEnv: { "proj-2": on("spare"), "proj-3": on("work") },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      // Both Team seats taken by other projects' Opus turns.
+      for (const [id, project] of [["o2", "proj-2"], ["o3", "proj-3"]] as const) {
+        expect(await dispatch(h, id, project, OPUS)).toEqual({ action: "proceed" });
+        await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id, projectId: project }) });
+      }
+      // proj-1's Fable sibling at work on the Ultra.
+      expect(await dispatch(h, "f1", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "f1", projectId: "proj-1" }) });
+      const all = await Promise.all(["t1", "t2"].map((id) => dispatch(h, id, "proj-1", OPUS)));
+      for (const r of all) expect(r.action).toBe("wait");
+      // Not moved, and the reserve not spent: no Opus seat on the Ultra.
+      expect(h.envSet.filter((e) => e.projectId === "proj-1")).toEqual([]);
+      const seatsAt = ((await h.harness.behavior.callRpc("accounts_list", null)) as State).seats ?? {};
+      for (const s of Object.values(seatsAt))
+        expect(s.running + s.reserved).toBeLessThanOrEqual(s.capacity);
+      expect(seatsAt.main).toMatchObject({ running: 1, reserved: 0 });
+    });
+  });
+
   describe("T5 an account out of the model takes no new turn while another can run it", () => {
     it("a bb that fails every write does not hold the turn for ever: 10 tries, then it starts, says so, and fails where the user is told", async () => {
       let clock = NOW;

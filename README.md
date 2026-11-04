@@ -961,7 +961,10 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
   and wakes the thread) never pass bb's dispatch checkpoint: they run where
   the project is, on a seat or not, and an Opus one may run on an account
   that keeps Fable. They are counted once they start, so the next turn
-  waits, but this plugin cannot hold or place them.
+  waits, but this plugin cannot hold or place them. A move for one thread
+  takes the seat it needs, not one for each idle sibling: a sibling woken
+  this way after the move can leave the new account over its capacity
+  (bb server log, 2026-11-04 10:50, a Team seat at 3/2).
 - **A turn that waits behind a sibling.** A project out on a Team seat for
   Opus stays there while another of its threads works: a Fable turn runs on
   that seat instead of going home, and a turn that finds the seat full waits
