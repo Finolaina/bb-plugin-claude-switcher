@@ -15788,6 +15788,32 @@ describe("no project is left on an account out of the preferred model or without
       .filter((e) => e.level === level)
       .map((e) => e.message);
 
+  it("an incomplete answer that says the account is out of Fable moves the project off it too", async () => {
+    const h = await host(
+      {
+        ...MAIN_OUT_OF_FABLE,
+        main: () =>
+          Response.json({
+            limits: [
+              { kind: "weekly_all", percent: 10, resets_at: new Date(NOW + 72 * 3_600_000).toISOString() },
+              {
+                kind: "weekly_scoped",
+                percent: 100,
+                resets_at: new Date(NOW + 4 * 3_600_000).toISOString(),
+                scope: { model: { display_name: "Fable" } },
+              },
+            ],
+            five_hour: { locked_reason: null },
+            seven_day: { locked_reason: null },
+          }),
+      },
+      OPTIONS,
+    );
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([["proj-1", `${ACCOUNTS}/work`]]);
+  });
+
   it("moves a project off an account out of Fable to the best account, with switchAheadPercent at 0", async () => {
     const h = await host(MAIN_OUT_OF_FABLE, OPTIONS);
     dispose = () => h.harness.dispose();
@@ -18163,6 +18189,104 @@ describe("caminos 2026-11-04", () => {
     const seats = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
     expect(seats.seats?.spare?.external ?? []).toEqual([]);
     expect(seats.seats?.spare?.queued.map((q) => q.threadId)).toEqual(["t2"]);
+  });
+
+  describe("T17 an incomplete answer that measured the account out of the model", () => {
+    const OK = () => Response.json(payload(0, 2, 0));
+    const answer = (windows: Record<string, unknown>[]) => () =>
+      Response.json({
+        limits: windows,
+        five_hour: { locked_reason: null },
+        seven_day: { locked_reason: null },
+      });
+    const OUT_FOR = (resetsIn: number) =>
+      answer([
+        { kind: "weekly_all", percent: 10, resets_at: new Date(NOW + 72 * 3_600_000).toISOString() },
+        {
+          kind: "weekly_scoped",
+          percent: 100,
+          resets_at: new Date(NOW + resetsIn).toISOString(),
+          scope: { model: { display_name: "Opus" } },
+        },
+      ]);
+    const OUT = OUT_FOR(4 * 3_600_000);
+    const start = async (
+      first: () => Response,
+      spare: () => Response = OK,
+      clock: () => number = () => NOW,
+    ) => {
+      let work = first;
+      const h = await host(
+        { main: () => Response.json(payload(13, 10, 5)), spare, work: () => work() },
+        {
+          clock,
+          settings: { ...FABLE, seatsTeam: 1 },
+          presetEnv: { "proj-1": on("work"), "proj-2": on("work") },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "work", "spare");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      return {
+        h,
+        read: async (then: () => Response) => {
+          work = then;
+          await h.harness.behavior.callRpc("accounts_refresh", null);
+        },
+      };
+    };
+
+    it("with a seat free where it is, the turn goes where it runs and does not start where it fails", async () => {
+      const { h } = await start(OUT);
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("spare") });
+    });
+
+    it("with its seats full, the turn does not wait behind them either", async () => {
+      const { h, read } = await start(OK);
+      expect((await dispatch(h, "x", "proj-2", OPUS)).action).toBe("proceed");
+      await read(OUT);
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("spare") });
+    });
+
+    it("with no other that can run it, the turn starts and fails to the view, as with a full answer", async () => {
+      const { h } = await start(OUT, OUT);
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("an account out of another model, in an incomplete answer, is still only unknown", async () => {
+      const { h } = await start(
+        answer([
+          { kind: "weekly_all", percent: 10, resets_at: new Date(NOW + 72 * 3_600_000).toISOString() },
+          {
+            kind: "weekly_scoped",
+            percent: 100,
+            resets_at: new Date(NOW + 4 * 3_600_000).toISOString(),
+            scope: { model: { display_name: "Fable" } },
+          },
+        ]),
+      );
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("only missing windows: still unknown, the turn stays", async () => {
+      const { h } = await start(
+        answer([{ kind: "weekly_all", percent: 10, resets_at: new Date(NOW + 72 * 3_600_000).toISOString() }]),
+      );
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("once the window that was full resets, what is left of the answer says nothing: the turn stays", async () => {
+      let clock = NOW;
+      const { h } = await start(OUT_FOR(60_000), OK, () => clock);
+      clock = NOW + 61_000;
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet).toEqual([]);
+    });
   });
 
   describe("T15 an Ultra not read yet does not run Opus: its login says what it keeps", () => {

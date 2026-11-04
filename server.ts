@@ -84,6 +84,7 @@ import {
   isRefusal,
   MAX_ATTEMPTS,
   mayAdviseOpus,
+  measuredOut,
   modelFamily,
   fullestWindow,
   opusInstead,
@@ -2450,14 +2451,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
 
   /** Measurements recent enough to decide on (see maxReadAgeMs). */
   function measuredAccounts(model = current.preferredModel) {
-    // A refusing account is out, whatever its numbers say.
+    // A refusing account is out, whatever its numbers say; so is one whose
+    // answer, incomplete, still says it is full.
     return collector.usable(maxReadAgeMs(), model).map((measured) => {
       const login = accounts.find((account) => account.name === measured.name);
       const a =
         login !== undefined && planOf(login, measured).plan === "team"
           ? { ...measured, team: true as const }
           : measured;
-      if (!refusing(a.name)) return a;
+      if (!refusing(a.name) && !measuredOut(a, model, deps.now())) return a;
       const { unknown: _, ...known } = a;
       return { ...known, blocked: true };
     });

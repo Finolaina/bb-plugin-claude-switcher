@@ -162,6 +162,21 @@ export function settle(account: AccountUsage, now: number): AccountUsage {
   };
 }
 
+/**
+ * An incomplete answer that still measured a window full, with nothing to free
+ * it yet: what it is missing does not change that the account cannot run
+ * `model` now (Astra FINAL-R9-001). Any other incomplete answer says nothing.
+ */
+export function measuredOut(account: AccountUsage, model: string, now: number): boolean {
+  if (account.unknown !== true) return false;
+  const settled = settle(account, now);
+  return [
+    settled.session,
+    settled.weekly,
+    model === "" ? undefined : modelWindow(settled, model),
+  ].some((w) => w !== undefined && w.missing !== true && w.usedPercent >= 100);
+}
+
 /** When the account can run `model` again, or null if unknown or locked. */
 function freeAt(account: AccountUsage, model: string): number | null {
   if (account.blocked) return null;
