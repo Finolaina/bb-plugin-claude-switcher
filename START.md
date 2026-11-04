@@ -16,3 +16,12 @@ Publicada e instalada en el servidor de bb a las 04:58 (`bb plugin list`). March
 - [ ] Sin comprobar en producción: si `thread.active` llega antes de que el turno lea la variable; la vuelta atrás a la 0.2.38.
 - [ ] El Panel aún no enseña la cola: encargo en el buzón del Optimizador, `encargos/2026-11-04-buzon-panel-cola-de-trabajo.md`.
 - Vigilante: `scripts/canario-cola.mjs` corre cada 10 min como una automatización de bb, con copia propia del script: al cambiarlo, `bb automation update … --script-file …`.
+
+## Rebote de la reserva (2026-11-04, sin publicar)
+
+Rama `despacho/switcher-reserva-rebote-limpia`, que sale de main limpio 4a53435. Encargo de Codex desde thr_zudr84azva: «prepara arreglo de regresión de reserva con prueba… solo código/revisión en rama». Marcha fino, rondas 1 y 2 sin high; última ronda útil: 2 de 2. Lo de después de la ronda 2 lleva prueba y mutante (125 mutantes, todos mueren).
+
+- [ ] Integrar: fusión y publicación, solo con el OK de quien encargó (el mensaje lo prohíbe por ahora).
+- [ ] La rama remota vieja `despacho/switcher-reserva-rebote` (bb05702) lleva el historial anterior a la limpieza. Retirarla espera al OK de Aitor (Inbox #237, lo lleva thr_zf8ncnt6de, que la tiene copiada en un bundle).
+- [ ] Límite: los turnos que arranca el proveedor (una tarea en segundo plano que termina) no pasan por el punto de control. Pueden pasar de plazas, como el 3/2 de las 10:50 que dejó un hermano despertado tras mover su proyecto, o gastar la reserva. Este plugin no tiene gancho para frenarlos.
+- [ ] Límite aceptado: un turno Fable espera la plaza Team de su hermano aunque casa tenga sitio (prueba R6). El canario lo puede ver como «retenido con otra libre».
