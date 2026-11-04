@@ -184,6 +184,19 @@ describe("judge", () => {
       expect(estado.avisado).toEqual({});
     });
 
+    it("una fila oculta un momento no repite el aviso al volver", () => {
+      const primera = { q1: NOW - 3 * SIN_DESTINO_MS };
+      const oculta = judge({
+        filas: [],
+        health: NADIE,
+        estado: { primeraVez: primera, vista: { q1: NOW - 60_000 }, avisado: { "sin-destino": NOW - 60_000 } },
+        ahora: NOW,
+      });
+      expect(oculta.estado.avisado).toEqual({ "sin-destino": NOW - 60_000 });
+      const vuelve = judge({ filas: [fila()], health: NADIE, estado: oculta.estado, ahora: NOW + 60_000 });
+      expect(vuelve.avisos).toEqual([]);
+    });
+
     it("con una cuenta libre es el aviso de siempre, no este", () => {
       const { avisos } = juzga(INCIDENTE, undefined, NOW - SIN_DESTINO_MS);
       expect(avisos.map((a) => (a as { tipo?: string }).tipo)).toEqual([undefined]);

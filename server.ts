@@ -1022,11 +1022,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return false;
   }
   /**
-   * Another thread of the project admitted to a seat on `name`, where the
-   * project is, and not started. A turn reads the project's variable as it
-   * starts: moving the project now would start it on another account, one
-   * that may keep the reserve or not run its model (Astra IR5-001). Its
-   * start ends this, and so does its seat lapsing (SEAT_TTL_MS).
+   * When each thread was first told to start, until it starts, leaves or is
+   * told to wait. Not renewed: another plugin may hold a turn this one lets
+   * go, asked again and again (code-reviewer r6).
+   */
+  const toldToStart = new Map<string, number>();
+  /**
+   * Another thread of the project told to start on `name`, where the project
+   * is, and not started. A turn reads the project's variable as it starts:
+   * moving the project now would start it on another account, one that may
+   * keep the reserve or not run its model (Astra IR5-001). A seat only
+   * admitted from a queue does not count: its turn is placed again before it
+   * starts. Measured from the log: half of the turns start within 1 s, 5 of
+   * 242 past SEAT_TTL_MS (docs/revision-2026-11-04/PLAN.md).
    */
   function siblingAdmitted(
     projectId: string,
@@ -1034,17 +1042,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     threadId?: string,
   ): string | null {
     const key = seatKey(name);
-    const look = (): string | null => {
-      for (const [sibling, project] of seatProjects) {
-        if (project !== projectId || sibling === threadId) continue;
-        const seat = seats.seatOf(sibling);
-        if (seat?.state === "reserved" && seat.account === key) return sibling;
-      }
-      return null;
-    };
-    if (look() === null) return null;
-    admitWaiting();
-    return look();
+    const now = deps.now();
+    for (const [sibling, project] of seatProjects) {
+      if (project !== projectId || sibling === threadId) continue;
+      const told = toldToStart.get(sibling);
+      if (told === undefined || now - told >= SEAT_TTL_MS) continue;
+      const seat = seats.seatOf(sibling);
+      if (seat?.state === "reserved" && seat.account === key) return sibling;
+    }
+    return null;
   }
   /** A thread of the project holds a seat or waits for one. */
   function projectAtSeats(projectId: string): boolean {
@@ -2251,6 +2257,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
     }
     const toName = account === null ? current.defaultAccountName : account.name;
+    const fromName = from.account ?? current.defaultAccountName;
+    // Every automatic move, whatever its reason (Astra IR5-001).
+    const siblingHolds = (): boolean => {
+      if (options.byHand === true || toName === fromName) return false;
+      const admitted = siblingAdmitted(projectId, fromName, options.forThread);
+      if (admitted === null) return false;
+      bb.log.info(
+        `project ${projectId}: not moved to ${toName}: thread ${admitted} was told to start where it is and has not`,
+      );
+      return true;
+    };
+    // Dropped here it is no move: a sibling's start stays known.
+    if (siblingHolds()) return false;
     // A move for real (another account name): counted before the write
     // starts and once it is over, landed or not.
     const move =
@@ -2300,21 +2319,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           return false;
         }
       }
-      // Every automatic move, whatever its reason, right before the write:
-      // nothing is awaited between this look and the write (Astra IR5-001).
-      if (move !== null && options.byHand !== true) {
-        const admitted = siblingAdmitted(
-          projectId,
-          from.account ?? current.defaultAccountName,
-          options.forThread,
-        );
-        if (admitted !== null) {
-          bb.log.info(
-            `project ${projectId}: not moved to ${toName}: thread ${admitted} was admitted where it is and has not started`,
-          );
-          return false;
-        }
-      }
+      // Again after the sessions were shared: nothing is awaited between
+      // this look and the write.
+      if (siblingHolds()) return false;
       if (move !== null) {
         move.writes += 1;
         wrote = true;
@@ -3492,6 +3499,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       await markHandled(projectId);
       return;
     }
+    // Not its placement yet: the next thread of a new project is placed.
+    if (siblingAdmitted(projectId, fromName) !== null) {
+      bb.log.info(
+        `thread ${thread.id}: not placed (another thread is about to start on ${fromName})`,
+      );
+      return;
+    }
     if (
       !(await applyAccount(projectId, accountOrDefault(decision.account), latest))
     ) {
@@ -4163,6 +4177,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // it waited for (a message sent with "Send now" is never asked about).
     adviceOver(thread.id);
     forgetWait(thread.id);
+    toldToStart.delete(thread.id);
     // A hidden thread's turn too: it runs on the project's account, and
     // keeps the project there (Codex PLAZAS-R2-003).
     if (thread.providerId === CLAUDE_CODE_PROVIDER) {
@@ -4275,6 +4290,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     threadModel.delete(thread.id);
     adviceOver(thread.id);
     forgetWait(thread.id);
+    toldToStart.delete(thread.id);
     stuckSaid.delete(thread.id);
     // Forgotten in storage too, or the stored list only grows (Codex r8,
     // IR8-004).
@@ -4945,7 +4961,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       const now = deps.now();
       if (!waitSince.has(ctx.thread.id)) waitSince.set(ctx.thread.id, now);
       waitAsked.set(ctx.thread.id, now);
-    } else if (ctx.attempt === "start-turn") forgetWait(ctx.thread.id);
+      toldToStart.delete(ctx.thread.id);
+    } else if (ctx.attempt === "start-turn") {
+      forgetWait(ctx.thread.id);
+      if (decision.action !== "proceed") toldToStart.delete(ctx.thread.id);
+      else if (!toldToStart.has(ctx.thread.id))
+        toldToStart.set(ctx.thread.id, deps.now());
+    }
     return decision;
   });
   /**
@@ -5662,7 +5684,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         );
         await retryTurn(
           event,
-          "Retrying: the project's account changed meanwhile",
+          "Retrying: the project stays on its account for now",
           undefined,
           stuck,
         );

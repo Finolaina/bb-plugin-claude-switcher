@@ -144,9 +144,12 @@ export function judge({ filas, health, estado, ahora }) {
         health.atascos?.some((a) => a.hilo === fila.threadId && a.proyectoOcupado) === true,
     });
   }
-  // Sin nadie en ese caso, el próximo que llegue no espera las 6 horas.
-  if (sinDestino.size === 0) delete avisado[SIN_DESTINO];
-  else if (avisado[SIN_DESTINO] === undefined) {
+  // Sin nadie en ese caso, el próximo que llegue no espera las 6 horas. Una
+  // fila que bb oculta un momento mientras la reevalúa sigue en el caso.
+  if (sinDestino.size === 0) {
+    const ocultas = Object.keys(primeraVez).some((id) => !vivas.some((f) => f.id === id));
+    if (!ocultas) delete avisado[SIN_DESTINO];
+  } else if (avisado[SIN_DESTINO] === undefined) {
     avisado[SIN_DESTINO] = ahora;
     const hilos = [...sinDestino.values()];
     avisos.push({
