@@ -4,6 +4,30 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **A project out on a Team seat for Opus stays there while a sibling works
+  on it.** A new thread is placed before its model is known, as the
+  preferred model, and that took the project home under two Opus turns at
+  work; the next Opus turn then took it to another Team seat: four threads
+  of one project went over three accounts in three seconds, and the one they
+  ended on had more turns than seats (bb server log, 2026-11-04 10:49). The
+  way home now waits while another thread of the project has a turn under
+  way or holds a seat, unless the account it is on is measured unable to
+  run the turn or has no login (an answer without windows is no such
+  reason). A new thread's way home is judged again as it is written: a
+  sibling that started meanwhile keeps the project where it is.
+- **Every move before a turn takes its seat as it is decided,** not only a
+  move for a full account: two Opus turns leaving the reserve at once no
+  longer pick the same last seat, and a sibling's turn decided meanwhile
+  does not move the project elsewhere under it (it waits up to 30 s, as for
+  a turn told to start). A turn that then waits gives that seat up. Such a
+  move goes only where a seat is free beyond those owed to the threads
+  already waiting there, as a move for a full account did, and never moves
+  the project for a seat it did not get.
+
 ## [0.2.39] - 2026-11-04
 
 ### Fixed

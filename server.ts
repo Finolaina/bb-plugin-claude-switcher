@@ -1037,6 +1037,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   const toldToStart = new Map<string, { first: number; last: number }>();
   /**
+   * The seat a placement took for the turn it moved the project for (see
+   * placeTurn), until the dispatch answers: a turn that then waits gives it
+   * up, for its move did not hold (Astra SEATS-R4-001).
+   */
+  const claims = new Map<string, string>();
+  /**
    * Another thread of the project told to start and not started. A turn reads the project's variable as it starts:
    * moving the project now would start it on another account, one that may
    * keep the reserve or not run its model (Astra IR5-001). A seat only
@@ -3478,19 +3484,21 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const fromName = from.account ?? current.defaultAccountName;
     // Read before noteMove, which forgets it on the way home.
     const excursion = excursions.get(projectId);
-    const decision = decidePlacement({
+    const input: PlacementInput = {
       currentAccount: fromName,
       isNew,
       accounts: measured,
       preferredModel: current.preferredModel,
       excursionFrom: wayHome(projectId, current.preferredModel, measured, now),
+      siblingAtWork: projectSeated(projectId, thread.id),
       freeSeats,
       // Background work behind the accounts saved for the user (SPEC
       // 2026-10-30 §2).
       ...paceFilter(isBackground(thread)),
       now,
       currentLoggedOut: unconfirmed(fromName),
-    });
+    };
+    const decision = decidePlacement(input);
     if (decision.kind === "keep") {
       bb.log.info(
         `thread ${thread.id}: project left on account ${fromName} (${isNew ? "the best account for a new project" : "its account can run"})`,
@@ -3514,9 +3522,32 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
       return;
     }
+    let siblingStarted = false;
     if (
-      !(await applyAccount(projectId, accountOrDefault(decision.account), latest))
+      !(await applyAccount(projectId, accountOrDefault(decision.account), latest, {
+        // The way home judged again as it writes: a sibling that started
+        // meanwhile (the reads and the sessions are awaited) keeps the
+        // project where it is (Codex REBOTE-001). Only that: a new
+        // project's placement stands whatever freed meanwhile (code-reviewer
+        // r2 of the rebote).
+        stillValid: () => {
+          if (decision.why !== "back-from-excursion") return true;
+          const again = decidePlacement({
+            ...input,
+            siblingAtWork: projectSeated(projectId, thread.id),
+          });
+          siblingStarted = again.kind !== "move" || again.account !== decision.account;
+          return !siblingStarted;
+        },
+      }))
     ) {
+      if (siblingStarted) {
+        bb.log.info(
+          `thread ${thread.id}: not placed (another thread of the project started on ${fromName} meanwhile)`,
+        );
+        await markHandled(projectId);
+        return;
+      }
       bb.log.info(
         `thread ${thread.id}: not placed (the project's account changed meanwhile)`,
       );
@@ -4617,6 +4648,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       unreadTeams: unreadTeams(model),
       currentAccount: fromName,
       currentLoggedOut: unconfirmed(fromName),
+      siblingAtWork: projectSeated(projectId, thread.id),
+      // Before its turn, any move goes only where a seat is free beyond
+      // those owed to the threads already waiting there, as for a full
+      // account (Codex REBOTE-R2-001); a seat it holds is its own.
+      ...(when === "before"
+        ? {
+            freeSeats: (name: string) =>
+              seats.seatOf(thread.id)?.account === seatKey(name)
+                ? 1
+                : seatRoom(name),
+          }
+        : {}),
       ...(seatsFull
         ? {
             seatsFull,
@@ -4676,25 +4719,58 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         ? null
         : siblingAdmitted(projectId, thread.id);
     if (admitted !== null) {
+      // On the account it took its seat on, when it moves the project.
+      const its = seats.seatOf(admitted)?.account;
       turn.held = {
         sendAt: now + SEAT_RECHECK_MS,
-        reason: `Waiting to move to ${decision.account}: thread ${admitted} of this project is about to start on ${fromName}`,
+        reason: `Waiting to move to ${decision.account}: thread ${admitted} of this project is about to start on ${its === undefined ? fromName : seatName(its)}`,
       };
       return { account: fromName, byDefault: !from.owned, writes };
     }
     // Read before the move: what the seats were as it was decided.
     const fullHere = seats.snapshot([seatKey(fromName)])[seatKey(fromName)]!;
     const roomThere = seatRoom(decision.account);
-    // Moved for a seat: the seat is its own from now, before anything is
-    // awaited, so a turn decided meanwhile does not choose it too (Codex
-    // PLAZAS-R3-001). A move that fails leaves it as the message asks for
-    // a seat where the project is (a seat elsewhere is given up); one
-    // whose turn never starts is freed as any reservation is (SEAT_TTL_MS).
+    // Moved before its turn, for whatever reason: the seat is its own from
+    // now, before anything is awaited, so a turn decided meanwhile does not
+    // choose it too (Codex PLAZAS-R3-001; a move off the reserve did not,
+    // bb server log 2026-11-04 10:49). A move that fails leaves it as the
+    // message asks for a seat where the project is (a seat elsewhere is
+    // given up); one whose turn never starts is freed as any reservation is
+    // (SEAT_TTL_MS). A sibling's turn decided meanwhile reads the project
+    // where it was: told to start, this thread ties the project until its
+    // turn starts or waits (see siblingAdmitted), so that one does not
+    // take it elsewhere under it.
+    // ponytail: a seat it holds on another account (admitted from a queue)
+    // goes as this one is taken, and with it its place if the dispatch then
+    // waits (code-reviewer r1 of the rebote, low; as for a move for a full
+    // account since 0.2.37). Keeping both needs a seat per thread and
+    // account in src/seats.ts.
     const claim =
-      decision.why === "current-full" ? seatKey(decision.account) : null;
+      when === "before" && decision.account !== fromName
+        ? seatKey(decision.account)
+        : null;
     if (claim !== null) {
+      // A seat it already held there stays its own whatever the dispatch
+      // answers.
+      if (seats.seatOf(thread.id)?.account !== claim) claims.set(thread.id, claim);
+      // A cancellation of an earlier message that is still looking at the
+      // queue leaves this seat alone (Astra SEATS-R4-003, Codex REBOTE-002).
+      seatGenerations.set(thread.id, (seatGenerations.get(thread.id) ?? 0) + 1);
       seatProjects.set(thread.id, projectId);
-      seats.reserve(thread.id, claim, now);
+      if (!seats.reserve(thread.id, claim, now)) {
+        // Not free after all: it waits in that account's queue, and the
+        // project is not moved for a seat it does not have (Codex
+        // REBOTE-R2-001).
+        turn.held = {
+          sendAt: now + SEAT_RECHECK_MS,
+          reason: `Waiting for a seat on ${decision.account} before moving there: ${occupancy(claim)}`,
+        };
+        return { account: fromName, byDefault: !from.owned, writes };
+      }
+      toldToStart.set(thread.id, {
+        first: toldToStart.get(thread.id)?.first ?? now,
+        last: now,
+      });
     }
     const to = accountOrDefault(decision.account);
     // The sessions are not waited for: see applyAccount (Fable, 2026-10-29).
@@ -4980,7 +5056,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
 
   bb.experimental_hooks.on("message.dispatch", async (ctx) => {
+    claims.delete(ctx.thread.id);
     const decision = await dispatchDecision(ctx);
+    const claim = claims.get(ctx.thread.id);
+    claims.delete(ctx.thread.id);
+    if (decision.action !== "proceed" && claim !== undefined) {
+      const seat = seats.seatOf(ctx.thread.id);
+      if (seat?.account === claim && seat.state === "reserved")
+        releaseSeat(ctx.thread.id, "its turn waits where the move it was taken for did not hold");
+    }
     if (decision.action === "wait") {
       const now = deps.now();
       if (!waitSince.has(ctx.thread.id)) waitSince.set(ctx.thread.id, now);
