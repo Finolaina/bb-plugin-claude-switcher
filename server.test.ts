@@ -17730,6 +17730,48 @@ describe("caminos 2026-11-04", () => {
     expect(seats.seats?.work?.reserved).toBe(1);
   });
 
+  it("T2 a pin, the literal case: A full and out of the model, the project pinned to B with a free seat, the queued message delivered on B within 2 minutes", async () => {
+    let clock = NOW;
+    const h = await host(
+      {
+        main: () => Response.json(payload(13, 88, 98)),
+        spare: () => Response.json(payload(100, 48, 100)),
+        work: () => Response.json(payload(0, 2, 0)),
+      },
+      {
+        settings: { ...FABLE, seatsTeam: 1 },
+        presetEnv: { "proj-1": on("spare"), "proj-2": on("spare"), "proj-3": on("work") },
+        clock: () => clock,
+      },
+    );
+    dispose = () => h.harness.dispose();
+    teamLogin(h, "spare", "work");
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // A (spare) is full and out of its session; B (work) is full for now.
+    for (const [id, projectId] of [["a", "proj-2"], ["b", "proj-3"]] as const) {
+      await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id, projectId }) });
+    }
+    expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("wait");
+    // B frees a seat, and the user pins the project there.
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "b", projectId: "proj-3" }),
+      lastAssistantText: null,
+    });
+    const asked = h.harness.recheckCount;
+    await h.harness.behavior.runCli(["use", "proj-1", "work"]);
+    await vi.waitFor(() => expect(h.harness.recheckCount).toBeGreaterThan(asked));
+    // bb answers a recheck by asking again about the row it holds.
+    clock = NOW + 1_000;
+    expect(await dispatch(h, "t1", "proj-1", OPUS, true)).toEqual({ action: "proceed" });
+    expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "t1", projectId: "proj-1" }),
+    });
+    const seats = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(seats.seats?.work?.running).toBe(1);
+    expect(clock - NOW).toBeLessThanOrEqual(2 * 60_000);
+  });
+
   describe("T13 a thread held 10 minutes with another account free is said to be stuck", () => {
     const held = (over: Partial<QueuedRow> = {}): QueuedRow => ({
       id: "q-t2",
@@ -18188,6 +18230,26 @@ describe("caminos 2026-11-04", () => {
       expect(seats.seats?.work?.queued.map((q) => q.threadId)).toEqual(["t1", "later"]);
     });
 
+    it("a Team seat whose incomplete answer says it is out of the model is no destination", async () => {
+      const OUT = () =>
+        Response.json({
+          limits: [
+            { kind: "weekly_all", percent: 10, resets_at: new Date(NOW + 72 * 3_600_000).toISOString() },
+            {
+              kind: "weekly_scoped",
+              percent: 100,
+              resets_at: new Date(NOW + 4 * 3_600_000).toISOString(),
+              scope: { model: { display_name: "Opus" } },
+            },
+          ],
+          five_hour: { locked_reason: null },
+          seven_day: { locked_reason: null },
+        });
+      const h = await start(REFUSES, OUT);
+      expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("wait");
+      expect(h.envSet).toEqual([]);
+    });
+
     it("a full Team seat whose answer came incomplete gives a place in its queue too", async () => {
       const h = await start(REFUSES, PARTIAL);
       expect((await dispatch(h, "other", "proj-2", OPUS)).action).toBe("proceed");
@@ -18564,6 +18626,65 @@ describe("caminos 2026-11-04", () => {
           entry: { id: "row-c1", threadId: "c1", payload: { kind: "message" } },
         } as never);
         expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("proceed");
+      });
+
+      it.each([
+        ["cancelled", (h: Awaited<ReturnType<typeof host>>) =>
+          h.harness.behavior.emitThreadEvent("message.cancelled" as never, {
+            entry: { id: "row-c1", threadId: "c1", payload: { kind: "message" } },
+          } as never)],
+        ["failed before it started", (h: Awaited<ReturnType<typeof host>>) =>
+          h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "c1", requestId: "creq_c1" }))],
+      ])("its message %s: a new one of that thread, past the 90 s, holds again", async (_, gone) => {
+        let clock = NOW;
+        const h = await held(() => clock);
+        await gone(h);
+        clock = NOW + 120_000;
+        expect((await dispatch(h, "c1", "proj-1", OPUS)).action).toBe("proceed");
+        const set = h.envSet.length;
+        const deleted = h.envDeleted.length;
+        expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("wait");
+        expect(h.envSet.length).toBe(set);
+        expect(h.envDeleted.length).toBe(deleted);
+      });
+
+      describe("a message queued behind a running turn", () => {
+        const queuedBehind = async (h: Awaited<ReturnType<typeof host>>) => {
+          await h.harness.behavior.emitThreadEvent("thread.active", {
+            thread: thread({ id: "c1", projectId: "proj-1" }),
+          });
+          expect(
+            await h.harness.registrations.hooks["message.dispatch"]!(
+              makeMessageDispatchHookContext({
+                thread: thread({ id: "c1", projectId: "proj-1", status: "active" }),
+                requestedExecution: { providerId: "claude-code", model: OPUS },
+                attempt: "start-turn",
+              }),
+            ),
+          ).toEqual({ action: "proceed" });
+        };
+
+        it("does not hold the project while that turn runs", async () => {
+          const h = await held();
+          await queuedBehind(h);
+          expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("proceed");
+        });
+
+        it("does not leave the real start without its hold, 10 minutes later", async () => {
+          let clock = NOW;
+          const h = await held(() => clock);
+          await queuedBehind(h);
+          clock = NOW + 600_000;
+          await h.harness.behavior.emitThreadEvent("thread.idle", {
+            thread: thread({ id: "c1", projectId: "proj-1" }),
+          });
+          expect((await dispatch(h, "c1", "proj-1", OPUS)).action).toBe("proceed");
+          const set = h.envSet.length;
+          const deleted = h.envDeleted.length;
+          expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("wait");
+          expect(h.envSet.length).toBe(set);
+          expect(h.envDeleted.length).toBe(deleted);
+        });
       });
 
       it("its next turn holds again: the hold is counted from each turn, not the thread's first", async () => {

@@ -1022,8 +1022,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return false;
   }
   /**
-   * When each thread was first told to start, until it starts, leaves or is
-   * told to wait. Not renewed: another plugin may hold a turn this one lets
+   * When each thread was first told to start, until it starts, loses its seat
+   * or is told to wait. Not renewed: another plugin may hold a turn this one lets
    * go, asked again and again (code-reviewer r6).
    */
   const toldToStart = new Map<string, number>();
@@ -1168,6 +1168,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function releaseSeat(threadId: string, why: string): void {
     seatTitles.delete(threadId);
     seatProjects.delete(threadId);
+    toldToStart.delete(threadId);
     unseated.delete(threadId);
     endedWhileCounting?.add(threadId);
     const key = seats.release(threadId);
@@ -4957,7 +4958,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     } else if (ctx.attempt === "start-turn") {
       forgetWait(ctx.thread.id);
       if (decision.action !== "proceed") toldToStart.delete(ctx.thread.id);
-      else if (!toldToStart.has(ctx.thread.id))
+      // Asked as a message is queued behind a running turn, it is not told
+      // to start: that turn comes later, and is asked about again (code-reviewer r7).
+      else if (
+        !TURN_UNDER_WAY.has(ctx.thread.status) &&
+        !toldToStart.has(ctx.thread.id)
+      )
         toldToStart.set(ctx.thread.id, deps.now());
     }
     return decision;

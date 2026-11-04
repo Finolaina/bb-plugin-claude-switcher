@@ -1,6 +1,6 @@
 # Revisión del switcher tras «cuenta agotada retiene hilos» (0.2.39): plan para Astra
 
-Repo público: aquí no van nombres de proyectos ni títulos de hilos; la evidencia con nombres está fuera (`Optimizador/informes/2026-11-04/switcher/evidencia/`).
+Repo público: aquí no van nombres de proyectos ni títulos de hilos; la evidencia con nombres está en el almacenamiento externo del hilo.
 
 ## Palabras literales
 
