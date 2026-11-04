@@ -560,7 +560,7 @@ export function bestAccount(
  * account (the same choice a switch makes); a known one is moved only when
  * its account is MEASURED unable to run, so a project the user pinned by
  * hand stays put while it works. An unmeasured account (or one whose answer
- * lacked a window), or no other account able to run, keeps the project: the
+ * lacked a window and measured none full), or no other account able to run, keeps the project: the
  * failure path then decides, exactly as before this check existed.
  *
  * With a reserved model (2026-10-13), "able to run" a turn in another model

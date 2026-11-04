@@ -118,7 +118,8 @@ usable measurement, and if none can be measured the project is left alone
    to run: a lock the provider reported, a window at 100 %, the
    preferred model used up, or a turn it refused in the last 6 hours (see
    "Deciding on a failed turn"). A usage answer that lacks the session or the
-   weekly window is unknown, not out, and moves nothing. A project pinned
+   weekly window is unknown, not out, and moves nothing, unless a window it
+   did measure is full with nothing to free it yet: that is out. A project pinned
    by hand stays put while its account works, even when another account
    ranks better.
 3. **Nothing happens** for a hidden thread (whoever opened it), a thread
@@ -269,8 +270,8 @@ preferred model; a thread whose model has no percentage costs no query.
    query runs before the project's queue, so a failed turn of the project
    does not wait on it; the decision, inside the queue, reads the account
    the project has by then.
-2. `decideAhead` keeps the project when its account is unknown or
-   unmeasured, or when the fullest of its session, weekly and the
+2. `decideAhead` keeps the project when its account is unknown (an answer
+   that measured a window full is not) or unmeasured, or when the fullest of its session, weekly and the
    thread's model's windows (settled: a window past its reset counts 0) is
    under the percentage.
 3. Otherwise the candidates are the accounts under the percentage in all
