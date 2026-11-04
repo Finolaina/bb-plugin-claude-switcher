@@ -4084,9 +4084,24 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     starting.delete(threadId);
     dispatchEpoch.delete(threadId);
   }
+  /** Since when this plugin holds each thread's message: answered "wait", until it goes (see src/atascos.ts). */
+  const waitSince = new Map<string, number>();
+  /** When bb last heard "wait" for each of them: bb hides a row while it asks again (Codex R1-001), so a row missing from a read is not yet a wait over. */
+  const waitAsked = new Map<string, number>();
+  /** When each thread was last said to be stuck. */
+  const stuckSaid = new Map<string, number>();
+  /** How many times each thread waited in a row at the last look (see BLOCKED_WAITS). */
+  const blockedWaits = new Map<string, number>();
+  function forgetWait(threadId: string): void {
+    waitSince.delete(threadId);
+    waitAsked.delete(threadId);
+    blockedWaits.delete(threadId);
+  }
   bb.events.on("thread.active", async ({ thread }) => {
-    // A turn of it runs: the advice of its last failure is over.
+    // A turn of it runs: the advice of its last failure is over, and whatever
+    // it waited for (a message sent with "Send now" is never asked about).
     adviceOver(thread.id);
+    forgetWait(thread.id);
     // A hidden thread's turn too: it runs on the project's account, and
     // keeps the project there (Codex PLAZAS-R2-003).
     if (thread.providerId === CLAUDE_CODE_PROVIDER) {
@@ -4198,6 +4213,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     startWaits.delete(thread.id);
     threadModel.delete(thread.id);
     adviceOver(thread.id);
+    forgetWait(thread.id);
+    stuckSaid.delete(thread.id);
     // Forgotten in storage too, or the stored list only grows (Codex r8,
     // IR8-004).
     if (cancelled.delete(thread.id)) await storeCancelled(thread.id);
@@ -4814,25 +4831,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     };
   }
 
-  /** Since when this plugin holds each thread's message: answered "wait", until it goes (see src/atascos.ts). */
-  const waitSince = new Map<string, number>();
-  /** When bb last heard "wait" for each of them: bb hides a row while it asks again (Codex R1-001), so a row missing from a read is not yet a wait over. */
-  const waitAsked = new Map<string, number>();
-  /** When each thread was last said to be stuck. */
-  const stuckSaid = new Map<string, number>();
-  /** How many times each thread waited in a row at the last look (see BLOCKED_WAITS). */
-  const blockedWaits = new Map<string, number>();
   bb.experimental_hooks.on("message.dispatch", async (ctx) => {
     const decision = await dispatchDecision(ctx);
     if (decision.action === "wait") {
       const now = deps.now();
       if (!waitSince.has(ctx.thread.id)) waitSince.set(ctx.thread.id, now);
       waitAsked.set(ctx.thread.id, now);
-    } else if (ctx.attempt === "start-turn") {
-      waitSince.delete(ctx.thread.id);
-      waitAsked.delete(ctx.thread.id);
-      blockedWaits.delete(ctx.thread.id);
-    }
+    } else if (ctx.attempt === "start-turn") forgetWait(ctx.thread.id);
     return decision;
   });
   /**
@@ -4888,8 +4893,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         readAt - asked > WAIT_FORGOTTEN_MS &&
         !rows.some((row) => row.threadId === threadId && heldBy(row, PLUGIN_ID))
       ) {
-        waitAsked.delete(threadId);
-        waitSince.delete(threadId);
+        forgetWait(threadId);
       }
     const stuck = (await atascos(rows)) ?? [];
     const now = deps.now();
@@ -5305,8 +5309,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     );
     if (typeof rows !== "object" || rows.value.length > 0) return;
     if (waitAsked.get(threadId) !== asked) return;
-    waitSince.delete(threadId);
-    waitAsked.delete(threadId);
+    forgetWait(threadId);
   }
 
   /**

@@ -1,17 +1,19 @@
 #!/usr/bin/env node
 // Canario de la cola de plazas: cada 10 minutos, en el servidor de bb (una
 // `bb automation`), avisa si el plugin retiene un mensaje 10 minutos o más
-// con una cuenta usable y con plaza libre que podría correrlo.
+// con una cuenta usable y con plaza libre que podría correrlo; si lo retiene 2
+// horas o más sin ninguna que pueda («Esperar siempre» sigue esperando, pero no
+// en silencio); y si un mensaje lleva 10 minutos fallando.
 //
 // No usa la lógica del plugin: el fallo del 2026-11-03 fue justo que el plugin
 // daba por bueno su veto. Solo lee lo que bb enseña por fuera:
 // `bb thread queue list --json` y `bb claude-switcher health --json`.
 //
-// Una lectura que falla sale con código 1 (visible en `bb automation runs`):
-// nunca «todo bien» sin haber mirado.
+// Una lectura que falla sale con código 1 (visible en `bb automation runs`) y,
+// si dura media hora, también avisa: nunca «todo bien» sin haber mirado.
 import { execFile } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { appendFile, readFile, rename, writeFile } from "node:fs/promises";
+import { appendFile, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,7 +23,16 @@ export const UMBRAL_MS = 10 * 60_000;
 export const REAVISO_MS = 60 * 60_000;
 /** Una fila que bb no enseña este rato se da por ida: mientras la reevalúa la oculta, y su antigüedad no se pierde por eso. */
 export const OLVIDO_MS = 20 * 60_000;
+/** Retenida este rato sin ninguna cuenta que pueda correrla: avisa aunque sea «Esperar siempre». */
+export const SIN_DESTINO_MS = 2 * 60 * 60_000;
+/** Un solo aviso agrupado cada este rato: esperar toda una noche no son ocho avisos por hora. */
+export const REAVISO_SIN_DESTINO_MS = 6 * 60 * 60_000;
+/** El vigilante lleva este rato sin poder mirar: avisa. Un fallo suelto solo queda en `bb automation runs`. */
+export const FALLO_MS = 30 * 60_000;
+const SIN_DESTINO = "sin-destino";
 const PLUGIN = "claude-switcher";
+/** Lo único por lo que una fila fallida no espera nada (cola real del servidor, 2026-11-04). */
+const ARCHIVADO = "Thread is archived";
 const RESERVADO = "Fable";
 
 /** «claude-opus-5-5», «opus», «opus[1m]» → «Opus»; sin nombre conocido, el modelo que guarda el reparto. */
@@ -64,12 +75,16 @@ export function puedeCorrer(cuenta, modelo) {
  * Devuelve los avisos de esta pasada y el estado siguiente.
  */
 export function judge({ filas, health, estado, ahora }) {
-  const vivas = filas.filter(
-    (f) =>
-      f.waitingOn?.kind === "plugin" &&
-      f.waitingOn.pluginId === PLUGIN &&
-      (f.failureReason ?? null) === null,
-  );
+  // Las que retiene el plugin y las que fallan por lo que sea: un hook que
+  // agota sus intentos deja la fila parada hasta que alguien la vea.
+  const vivas = filas.filter((f) => {
+    const razon = f.failureReason ?? null;
+    if (razon === ARCHIVADO) return false;
+    return (
+      razon !== null ||
+      (f.waitingOn?.kind === "plugin" && f.waitingOn.pluginId === PLUGIN)
+    );
+  });
   const primeraVez = {};
   const avisado = {};
   const vista = {};
@@ -82,17 +97,35 @@ export function judge({ filas, health, estado, ahora }) {
     }
   // Por hilo: tres mensajes del mismo hilo son un aviso, no tres.
   for (const [hilo, cuando] of Object.entries(estado.avisado ?? {}))
-    if (ahora - cuando < REAVISO_MS) avisado[hilo] = cuando;
+    if (ahora - cuando < (hilo === SIN_DESTINO ? REAVISO_SIN_DESTINO_MS : REAVISO_MS))
+      avisado[hilo] = cuando;
+  const sinDestino = new Map();
   for (const fila of vivas) {
     const desde = estado.primeraVez?.[fila.id] ?? ahora;
     primeraVez[fila.id] = desde;
     vista[fila.id] = ahora;
     if (ahora - desde < UMBRAL_MS) continue;
+    if ((fila.failureReason ?? null) !== null) {
+      if (avisado[fila.threadId] !== undefined) continue;
+      avisado[fila.threadId] = ahora;
+      avisos.push({
+        tipo: "fallida",
+        fila: fila.id,
+        hilo: fila.threadId,
+        minutos: Math.floor((ahora - desde) / 60_000),
+        razon: fila.failureReason,
+      });
+      continue;
+    }
     const modelo = familia(fila.model);
     const libres = health.cuentas
       .filter((c) => puedeCorrer(c, modelo))
       .map((c) => c.nombre);
-    if (libres.length === 0) continue;
+    if (libres.length === 0) {
+      if (ahora - desde >= SIN_DESTINO_MS && !sinDestino.has(fila.threadId))
+        sinDestino.set(fila.threadId, { hilo: fila.threadId, modelo, desde });
+      continue;
+    }
     if (avisado[fila.threadId] !== undefined) continue;
     avisado[fila.threadId] = ahora;
     avisos.push({
@@ -106,10 +139,25 @@ export function judge({ filas, health, estado, ahora }) {
         health.atascos?.some((a) => a.hilo === fila.threadId && a.proyectoOcupado) === true,
     });
   }
+  if (sinDestino.size > 0 && avisado[SIN_DESTINO] === undefined) {
+    avisado[SIN_DESTINO] = ahora;
+    const hilos = [...sinDestino.values()];
+    avisos.push({
+      tipo: SIN_DESTINO,
+      clave: SIN_DESTINO,
+      hilo: hilos[0].hilo,
+      hilos: hilos.map(({ hilo, modelo }) => ({ hilo, modelo })),
+      horas: Math.floor((ahora - Math.min(...hilos.map((h) => h.desde))) / (60 * 60_000)),
+    });
+  }
   return { avisos, estado: { primeraVez, avisado, vista }, retenidas: vivas.length };
 }
 
 export function textoAviso(a) {
+  if (a.tipo === "fallida")
+    return `El mensaje del hilo ${a.hilo} lleva ${a.minutos} min fallando: ${a.razon}`;
+  if (a.tipo === SIN_DESTINO)
+    return `${a.hilos.length === 1 ? "1 hilo lleva" : `${a.hilos.length} hilos llevan hasta`} ${a.horas} h retenido${a.hilos.length === 1 ? "" : "s"} sin ninguna cuenta que pueda correrlo: ${a.hilos.map((h) => `${h.hilo} (${h.modelo})`).join(", ")}`;
   return `El switcher retiene el hilo ${a.hilo} (${a.modelo}) ${a.minutos} min con ${a.libres.join(", ")} libre${a.libres.length === 1 ? "" : "s"}${a.ocupado ? "; su proyecto tiene otro hilo en marcha y por eso no se mueve solo" : ""}`;
 }
 
@@ -134,6 +182,21 @@ async function bb(args) {
   throw ultimo;
 }
 
+/** Manda un aviso; falla si el plugin de avisos no llega a nadie. */
+async function enviar(dir, mensaje) {
+  const entrada = join(dir, "canario-cola-aviso.json");
+  await writeFile(entrada, JSON.stringify(mensaje));
+  const respuesta = JSON.parse(
+    await bb([
+      "plugin", "rpc", "call", "--json", "--input-file", entrada,
+      "push-notifications", "notifications.send",
+    ]),
+  );
+  // Lista vacía: el plugin de avisos dice que no llegó a nadie.
+  if (!(respuesta.channels?.length > 0))
+    throw new Error("ningún canal lo recibió");
+}
+
 async function leerEstado(ruta) {
   try {
     return JSON.parse(await readFile(ruta, "utf8"));
@@ -142,6 +205,28 @@ async function leerEstado(ruta) {
       console.error(`estado ilegible, empieza de cero: ${error.message}`);
     return {};
   }
+}
+
+const FICHERO_FALLO = "canario-cola-fallo.json";
+
+/** La lectura falló: tras FALLO_MS seguidos lo dice una vez por hora, si bb deja. */
+export async function avisarFallo({ dir = process.cwd(), ahora = Date.now(), motivo }) {
+  const ruta = join(dir, FICHERO_FALLO);
+  const fallo = await leerEstado(ruta);
+  const desde = fallo.desde ?? ahora;
+  let avisado = fallo.avisado ?? null;
+  if (ahora - desde >= FALLO_MS && (avisado === null || ahora - avisado >= REAVISO_MS)) {
+    try {
+      await enviar(dir, {
+        title: "Switcher: el vigilante no ve la cola",
+        body: `Lleva ${Math.floor((ahora - desde) / 60_000)} min sin poder mirar: ${motivo}`,
+      });
+      avisado = ahora;
+    } catch (error) {
+      console.error(`aviso no entregado: ${error.message}`);
+    }
+  }
+  await writeFile(ruta, JSON.stringify({ desde, avisado }));
 }
 
 export async function main({ dir = process.cwd(), ahora = Date.now() } = {}) {
@@ -156,6 +241,14 @@ export async function main({ dir = process.cwd(), ahora = Date.now() } = {}) {
     estado: await leerEstado(ruta),
     ahora,
   });
+  // Sin cuentas que juzgar, «0 avisos» con filas retenidas no sería haber mirado.
+  if (
+    veredicto.retenidas > 0 &&
+    (health.cuentas.length === 0 ||
+      health.cuentas.some((c) => typeof c.usable !== "boolean"))
+  )
+    throw new Error("la salud no enseña cuentas con las que juzgar lo retenido");
+  await rm(join(dir, FICHERO_FALLO), { force: true });
   let entregado = true;
   for (const aviso of veredicto.avisos) {
     const texto = textoAviso(aviso);
@@ -165,28 +258,18 @@ export async function main({ dir = process.cwd(), ahora = Date.now() } = {}) {
       `${new Date(ahora).toISOString()} ${texto}\n`,
     );
     try {
-      const entrada = join(dir, "canario-cola-aviso.json");
-      await writeFile(
-        entrada,
-        JSON.stringify({
-          title: "Switcher: hilo retenido",
-          body: texto,
-          threadId: aviso.hilo,
-        }),
-      );
-      const respuesta = JSON.parse(
-        await bb([
-          "plugin", "rpc", "call", "--json", "--input-file", entrada,
-          "push-notifications", "notifications.send",
-        ]),
-      );
-      // Lista vacía: el plugin de avisos dice que no llegó a nadie.
-      if (!(respuesta.channels?.length > 0))
-        throw new Error("ningún canal lo recibió");
+      await enviar(dir, {
+        title:
+          aviso.tipo === "fallida"
+            ? "Switcher: mensaje que falla"
+            : "Switcher: hilo retenido",
+        body: texto,
+        threadId: aviso.hilo,
+      });
     } catch (error) {
       entregado = false;
       // Sin marcar: se repite en la pasada siguiente.
-      delete veredicto.estado.avisado[aviso.hilo];
+      delete veredicto.estado.avisado[aviso.clave ?? aviso.hilo];
       console.error(`aviso no entregado: ${error.message}`);
     }
   }
@@ -221,5 +304,6 @@ if (esEntrada())
     (error) => {
       console.error(`lectura fallida: ${error.message}`);
       process.exitCode = 1;
+      return avisarFallo({ motivo: error.message });
     },
   );
