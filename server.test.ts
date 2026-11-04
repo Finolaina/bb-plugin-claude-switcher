@@ -17422,7 +17422,7 @@ describe("caminos 2026-11-04", () => {
   });
 
   // 2026-11-04 10:49 (log of the bb server): four Opus threads of one
-  // project took it aitor→team5→aitor→team1 in three seconds; a new
+  // project took it Ultra→Team→Ultra→another Team in three seconds; a new
   // thread judged as Fable took it home under two turns at work.
   describe("rebote: a project out for Opus with siblings at work", () => {
     const BOUNCE = {
