@@ -136,3 +136,5 @@ Evidencia externa de «hecho»: suite y mutantes en verde; veredicto de Astra; e
 - **C7, canario:** además de lo retenido con otra cuenta libre, avisa de lo retenido 2 horas sin ninguna (un aviso agrupado cada 6 horas) y de una fila que falla, salvo la de un hilo archivado, 10 minutos parada. Un aviso por hilo y tipo, no por fila. Cada llamada a `bb` tiene tiempo máximo; 30 minutos sin poder mirar avisan.
 - **T15, nuevo:** una Max o Ultra sin leer, según su login, no corre Opus: va a una Team libre o espera.
 - **C6:** `heldBy` solo descarta la fila de un hilo archivado.
+- **T15, ampliado:** sin leer y con la Team llena entra en la cola; con todas las lecturas caídas va a una Team libre según su login.
+- **T16, nuevo:** un hermano admitido en su Team y sin arrancar cierra la vuelta de la excursión hasta que arranca o caduca su plaza.
