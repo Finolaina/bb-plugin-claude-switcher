@@ -19561,6 +19561,23 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
       );
     });
 
+    it("is a new home, not an excursion: a Fable turn afterwards stays there, with the Team seat free again", async () => {
+      const { h } = await start({ settings: { otherModelUpTo: 50 } });
+      expect(await dispatch(h, "b", "proj-1")).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("main");
+      await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "b", projectId: "proj-1" }) });
+      await h.harness.behavior.emitThreadEvent("thread.idle", { thread: thread({ id: "a", projectId: "proj-1" }) });
+      const fable = await h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id: "f", projectId: "proj-1" }),
+          requestedExecution: { providerId: "claude-code", model: "claude-fable-5-1" },
+          attempt: "start-turn",
+        }),
+      );
+      expect(fable).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("main");
+    });
+
     it("with no account with seats for all, it waits (the wait of (a) decides later)", async () => {
       const { h } = await start({ main: [51, 10], settings: { otherModelUpTo: 50 } });
       expect((await dispatch(h, "b", "proj-1")).action).toBe("wait");
