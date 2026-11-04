@@ -2,6 +2,15 @@
 
 - [ ] Tras reescribir el historial sin nombres de proyectos (Aitor, 2026-11-03 ~19:15: «Sí, borrarlos del historial»): confirmar que GitHub Support purgó las vistas en caché de los commits viejos (d01559a y los de la rama de 0.2.37). Estado en `docs/plazas-2026-11-03/START-preguntas-abiertas.md`.
 
+## Estado de la 0.2.41 (2026-11-05 00:30): en rama `fix/atasco-noche`, en revisión
+
+Encargo de Aitor, 2026-11-05 00:20 (por Fable, hilo thr_gar882gnyj): «hay demasiadas cosas atascadas … resuelve si es cosa de swicher … ponte loops … abre un poco la mano … Tenemos opus!». Causa y cifra: Optimizador `informes/2026-11-05/switcher-noche/CAUSA.md` (24 h de espera el 4-nov, cuenta nuestra; todas con un hermano del proyecto trabajando).
+
+- [x] Reglas (a) espera > `stuckMoveMinutes`, (b) `use` aguanta, (c) más hilos que plazas, Opus en Ultra ≤ `otherModelUpTo`: código y pruebas en verde (1243).
+- [ ] Codex `inspect` (marcha normal, tope 4 + 2), fusión, etiqueta `v0.2.41`, `bb plugin update claude-switcher` en el NUC (arrastra la 0.2.40 sin instalar), 30 min de `seats` sin STUCK.
+- [ ] Bucle temporal `switcher-desatasco` (systemd --user en el i9, cada 10 min, `scripts/desatasco-noche.py`): se apaga solo con la 0.2.41 instalada o a las 08:00. Registro: `~/.claude/state/switcher-desatasco.jsonl` y `…-pasadas.log` en el i9.
+- [ ] [SUPUESTO] 10 min y 50 % son los valores por defecto que puso la sesión que delegó; no medidos. Cambiarlos es de Aitor.
+
 ## Estado de la 0.2.40 (2026-11-05): fusionada, sin instalar
 
 Encargo de Aitor, 2026-11-04, audio tareas-1: valorar las cachés que mata el cambio de cuenta y ver cómo cambiar sin perderlas, sin machacar lo demás. Informe: `docs/cambios-y-caches.md`. Opciones, simulación y veredictos: `docs/plan-cambio-en-pausas.md`.
