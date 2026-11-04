@@ -14,7 +14,6 @@ import json
 import re
 import sys
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 
 RE_HILO = re.compile(r"^thread (thr_[a-z0-9]+): (?:left in error: )?(.*)$", re.S)
 RE_PROY = re.compile(r"^project (.+?): (moved from|picked by hand|Rebalanced)(?=[ ,:])(.*)$", re.S)
@@ -58,9 +57,9 @@ def plazas(ruta):
                 yield {"ts": d["ts"], "cuenta": g.group(1), "ocupadas": int(g.group(2)), "tope": int(g.group(3))}
 
 
-def hora_local(texto):
-    """«2026-10-30 12:00» del registro a ms. El servidor está en Europe/Madrid."""
-    dt = datetime.strptime(texto, "%Y-%m-%d %H:%M").replace(tzinfo=ZoneInfo("Europe/Madrid"))
+def hora_utc(texto):
+    """«2026-10-30 12:00» del registro a ms. El plugin lo escribe con toISOString: es UTC (server.ts, stranded)."""
+    dt = datetime.strptime(texto, "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
     return int(dt.timestamp() * 1000)
 
 
@@ -76,7 +75,7 @@ def agotadas(ruta):
             m = d.get("message") or ""
             a, en = RE_AGOTADA.search(m), RE_EN.search(m)
             if a and en:
-                yield {"ts": d["ts"], "cuenta": en.group(1), "modelo": a.group(1), "hasta": hora_local(a.group(2))}
+                yield {"ts": d["ts"], "cuenta": en.group(1), "modelo": a.group(1), "hasta": hora_utc(a.group(2))}
                 continue
             e = RE_ESPERA.search(m)
             if e:
@@ -128,7 +127,7 @@ def filas(ruta, proyectos, vistos):
                 fila = {"ts": ts, "tipo": "rescate", "proyecto": pid, "de": g.group(1), "a": g.group(4), "motivo": motivo, "modelo": g.group(3)}
                 u = re.search(r"until (\d{4}-\d{2}-\d{2} \d{2}:\d{2})", resto)
                 if u:
-                    fila["hasta"] = hora_local(u.group(1))
+                    fila["hasta"] = hora_utc(u.group(1))
                 yield fila
             elif forma == "picked by hand":
                 g = re.match(r", (\S+) → (\S+)", resto)
