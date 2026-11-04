@@ -966,6 +966,10 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
   Opus stays there while another of its threads works: a Fable turn runs on
   that seat instead of going home, and a turn that finds the seat full waits
   for it rather than moving the project under the sibling.
+- **A seat admitted from a queue, then a move elsewhere.** A thread that
+  holds a seat on one account and whose turn moves the project to another
+  gives the first seat up as it takes the second; if its turn then waits
+  (the project moved again meanwhile), it waits at the end of the queue.
 - **Between a turn told to start and its start.** The account belongs to the
   whole project and a turn reads it as it starts, so no automatic move is
   written during that time: 90 s from the first answer and, for a turn another

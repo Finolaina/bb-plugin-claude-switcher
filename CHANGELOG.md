@@ -15,7 +15,10 @@ project uses [Semantic Versioning](https://semver.org/).
   of one project went over three accounts in three seconds, and the one they
   ended on had more turns than seats (bb server log, 2026-11-04 10:49). The
   way home now waits while another thread of the project has a turn under
-  way or holds a seat, unless the account it is on cannot run the turn.
+  way or holds a seat, unless the account it is on is measured unable to
+  run the turn or has no login (an answer without windows is no such
+  reason). A new thread's way home is judged again as it is written: a
+  sibling that started meanwhile keeps the project where it is.
 - **Every move before a turn takes its seat as it is decided,** not only a
   move for a full account: two Opus turns leaving the reserve at once no
   longer pick the same last seat, and a sibling's turn decided meanwhile
