@@ -1028,27 +1028,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   const toldToStart = new Map<string, number>();
   /**
-   * Another thread of the project told to start on `name`, where the project
-   * is, and not started. A turn reads the project's variable as it starts:
+   * Another thread of the project told to start and not started. A turn reads the project's variable as it starts:
    * moving the project now would start it on another account, one that may
    * keep the reserve or not run its model (Astra IR5-001). A seat only
    * admitted from a queue does not count: its turn is placed again before it
    * starts. Measured from the log: half of the turns start within 1 s, 5 of
    * 242 past SEAT_TTL_MS (docs/revision-2026-11-04/PLAN.md).
    */
-  function siblingAdmitted(
-    projectId: string,
-    name: string,
-    threadId?: string,
-  ): string | null {
-    const key = seatKey(name);
+  function siblingAdmitted(projectId: string, threadId?: string): string | null {
     const now = deps.now();
     for (const [sibling, project] of seatProjects) {
       if (project !== projectId || sibling === threadId) continue;
       const told = toldToStart.get(sibling);
       if (told === undefined || now - told >= SEAT_TTL_MS) continue;
-      const seat = seats.seatOf(sibling);
-      if (seat?.state === "reserved" && seat.account === key) return sibling;
+      if (seats.seatOf(sibling)?.state === "reserved") return sibling;
     }
     return null;
   }
@@ -2261,7 +2254,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // Every automatic move, whatever its reason (Astra IR5-001).
     const siblingHolds = (): boolean => {
       if (options.byHand === true || toName === fromName) return false;
-      const admitted = siblingAdmitted(projectId, fromName, options.forThread);
+      const admitted = siblingAdmitted(projectId, options.forThread);
       if (admitted === null) return false;
       bb.log.info(
         `project ${projectId}: not moved to ${toName}: thread ${admitted} was told to start where it is and has not`,
@@ -3500,7 +3493,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return;
     }
     // Not its placement yet: the next thread of a new project is placed.
-    if (siblingAdmitted(projectId, fromName) !== null) {
+    if (siblingAdmitted(projectId) !== null) {
       bb.log.info(
         `thread ${thread.id}: not placed (another thread is about to start on ${fromName})`,
       );
@@ -4650,7 +4643,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const admitted =
       decision.account === fromName
         ? null
-        : siblingAdmitted(projectId, fromName, thread.id);
+        : siblingAdmitted(projectId, thread.id);
     if (admitted !== null) {
       turn.held = {
         sendAt: now + SEAT_RECHECK_MS,

@@ -11410,6 +11410,9 @@ describe("an Opus turn never retried, released or placed on a Max account that k
       await gate.reached;
       expect(await dispatch(h, "thread-3", FABLE_ID)).toEqual({ action: "proceed" });
       expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-1"]);
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "thread-3", projectId: "proj-1" }),
+      });
       gate.release();
       expect(await opus).toEqual({ action: "proceed" });
       workSession = 17;
@@ -18535,6 +18538,47 @@ describe("caminos 2026-11-04", () => {
         }),
       );
       expect(h.harness.logEntries.map((e) => e.message).join("\n")).toContain("account main refused a turn");
+    });
+
+    describe("what ends the hold", () => {
+      const held = async (clock: () => number = () => NOW) => {
+        const h = await host(
+          {
+            main: () => Response.json(payload(13, 30, 40)),
+            spare: () => Response.json(payload(13, 30, 100)),
+            work: () => Response.json(payload(13, 30, 100)),
+          },
+          { settings: { ...FABLE, seatsTeam: 2 }, presetEnv: { "proj-1": on("spare") }, clock },
+        );
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "spare", "work");
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        expect((await dispatch(h, "c1", "proj-1", OPUS)).action).toBe("proceed");
+        expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("wait");
+        return h;
+      };
+
+      it("its message cancelled: the project goes at the next look", async () => {
+        const h = await held();
+        await h.harness.behavior.emitThreadEvent("message.cancelled" as never, {
+          entry: { id: "row-c1", threadId: "c1", payload: { kind: "message" } },
+        } as never);
+        expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("proceed");
+      });
+
+      it("its next turn holds again: the hold is counted from each turn, not the thread's first", async () => {
+        let clock = NOW;
+        const h = await held(() => clock);
+        await h.harness.behavior.emitThreadEvent("thread.active", {
+          thread: thread({ id: "c1", projectId: "proj-1" }),
+        });
+        await h.harness.behavior.emitThreadEvent("thread.idle", {
+          thread: thread({ id: "c1", projectId: "proj-1" }),
+        });
+        clock = NOW + 120_000;
+        expect((await dispatch(h, "c1", "proj-1", OPUS)).action).toBe("proceed");
+        expect((await dispatch(h, "f1", "proj-1", FABLE_ID)).action).toBe("wait");
+      });
     });
 
     it("a seat that lapses without its turn starting lets the project go", async () => {
