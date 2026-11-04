@@ -461,6 +461,12 @@ export type PlacementDecision =
 
 export interface PlacementInput {
   currentAccount: string;
+  /**
+   * With nothing measured of an account, whether its login says it keeps the
+   * reserved model's weekly (a Max or an Ultra): a turn held off the reserve
+   * goes elsewhere, or waits at the checkpoint. Unset: nothing is known.
+   */
+  unreadKeepsReserve?: (account: string) => boolean;
   /** The project has never been seen by this plugin (created after it was installed). */
   isNew: boolean;
   /** Every account with measured usage, the current one included. */
@@ -584,8 +590,21 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   }
   const loggedOut = input.currentLoggedOut === true;
   const current = accounts.find((a) => a.name === input.currentAccount);
-  if (!loggedOut && (current === undefined || current.unknown === true))
-    return { kind: "keep" };
+  if (!loggedOut && (current === undefined || current.unknown === true)) {
+    if (
+      input.unreadKeepsReserve?.(input.currentAccount) !== true ||
+      !holdsForReserve(options)
+    )
+      return { kind: "keep" };
+    const elsewhere = chooseSeated(
+      accounts.filter((a) => a.name !== input.currentAccount),
+      options,
+      input.freeSeats,
+    );
+    return elsewhere === null
+      ? { kind: "keep" }
+      : { kind: "move", account: elsewhere.account, why: "current-reserved" };
+  }
   const runs =
     !loggedOut &&
     current !== undefined &&

@@ -42,9 +42,15 @@ project uses [Semantic Versioning](https://semver.org/).
   `pctExacto`, the unrounded percentage (99.6 % rounds to 100 and still
   runs).
 - **`scripts/canario-cola.mjs`**, a canary from outside the plugin, every
-  10 minutes as a `bb automation` on bb's server: it warns when the plugin
-  holds a message with a usable account with a free seat that could run it.
-  A failed read exits 1.
+  10 minutes as a `bb automation` on bb's server. It warns when the plugin
+  holds a message 10 minutes with a usable account with a free seat that
+  could run it; when it holds one 2 hours with none that could (one grouped
+  warning every 6 hours: the rule still waits, not in silence); and when a
+  failed message has been stopped 10 minutes. A failed read, or a `bb` that
+  hangs, exits 1, and warns after 30 minutes in a row.
+- **An account not read yet, whose login says Max or Ultra, runs no Opus**:
+  just after a reload, or with its reads failing, the turn goes to a free
+  Team seat or waits.
 - **The wait says why**: `Waiting for a seat on team5 for Opus: main keeps
   its weekly for Fable; 2/2 threads running, 0 ahead in the queue`.
 
@@ -126,7 +132,7 @@ project uses [Semantic Versioning](https://semver.org/).
   of the preferred model judged every project for Fable, so a project
   whose threads run Opus left a Team seat (or a Max account out of
   Fable) that still ran Opus for a Max account that keeps Fable
-  (measured 2026-11-02 18:23: viaulab → aitor). It now judges each
+  (measured 2026-11-02 18:23). It now judges each
   project for the model of its latest turn, and moves one in Opus only
   where Opus spends no weekly Fable needs.
 - **After a turn in Opus that ran on a Max account that keeps Fable, the

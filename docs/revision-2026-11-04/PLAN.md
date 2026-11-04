@@ -13,8 +13,8 @@ Repo público: aquí no van nombres de proyectos ni títulos de hilos; la eviden
 ## Causa raíz medida (log del plugin, `list --json`, 2026-11-03 23:36 CET)
 
 1. **Las Team ya informan de semanal.** `src/usage.ts:95` marcaba `weekly.absent` solo si `seven_day` era null (medido 2026-10-11). Hoy `list --json` da `weekly_all` en las cinco Team (team2 0 %, team3 13 %, team4 2 %, team1 37 %, team5 48 %). `spendsReservedWeekly` (`src/policy.ts:142`) usa `weekly.absent !== true` como «es una Max»: una Team con Fable por debajo de 100 % pasa a «conserva la reserva» y queda vetada para Opus. Solo quedan elegibles las Team con Fable al 100 % (team1, team5). Log: 48 movimientos por reserva a team2/3/4, el último 11-02 23:57; desde entonces 157 a team1/5 y ninguno a team2/3/4, aunque estuvieran 0/2.
-2. **Por eso la cola no sigue a la cuenta del proyecto.** `reserveHold` (`server.ts:4217`) devuelve `seatOn` = la única elegible, y `beforeStart` (`server.ts:4565`) encola el hilo en la cola de plazas de esa cuenta, con el proyecto en otra. No depende de la última sesión del hilo: la hipótesis de la cola «atada a la última sesión» queda descartada por el log (hilos nuevos con el proyecto en joytorm y siloeads esperando en team5 a las 23:17-23:18; mismo camino).
-3. **El «desatasco» por receta es un agujero.** `modelFamily` (`src/switch.ts:136`) solo entiende `claude-<familia>-…`. `bb thread tell --model opus` deja `model: "opus"` en la fila (medido en `bb thread queue list --json`) → `model = null` → no hay colocación por modelo ni `heldOff`, y con la cuenta por defecto sin login se coloca como si fuera Fable (`server.ts:4524`). Corre en la Ultra del proyecto y gasta la semanal que «Esperar siempre» protege. Log 23:20-23:35: filas borradas y reenviadas así corrieron en siloeads, joytorm y team4.
+2. **Por eso la cola no sigue a la cuenta del proyecto.** `reserveHold` (`server.ts:4217`) devuelve `seatOn` = la única elegible, y `beforeStart` (`server.ts:4565`) encola el hilo en la cola de plazas de esa cuenta, con el proyecto en otra. No depende de la última sesión del hilo: la hipótesis de la cola «atada a la última sesión» queda descartada por el log (hilos nuevos con el proyecto en ultra1 y ultra2 esperando en team5 a las 23:17-23:18; mismo camino).
+3. **El «desatasco» por receta es un agujero.** `modelFamily` (`src/switch.ts:136`) solo entiende `claude-<familia>-…`. `bb thread tell --model opus` deja `model: "opus"` en la fila (medido en `bb thread queue list --json`) → `model = null` → no hay colocación por modelo ni `heldOff`, y con la cuenta por defecto sin login se coloca como si fuera Fable (`server.ts:4524`). Corre en la Ultra del proyecto y gasta la semanal que «Esperar siempre» protege. Log 23:20-23:35: filas borradas y reenviadas así corrieron en ultra2, ultra1 y team4.
 4. **Un pin a una Ultra no decide un turno de Opus, y es correcto.** Con `use` a una Ultra que conserva Fable, el siguiente turno de Opus va a una Team o espera: lo manda «Esperar siempre». Se documenta; no se cambia.
 5. **Tras un `use`, bb no vuelve a preguntar.** `recheck` solo tras admitir plaza: una fila en espera de reserva tarda hasta `RESERVE_RECHECK_MS` (5 min), y la de plazas `SEAT_RECHECK_MS` (30 s).
 6. **El rebalanceo no «saltó» porque nunca salta solo**: `rebalance` solo se ejecuta por CLI (`server.ts:6471`), reparte proyectos entre Ultra y no toca los que tienen trabajo. El dato de partida «último movimiento automático a las 12:02» no casa con `history`: hay movimientos automáticos hasta las 21:32Z.
@@ -46,7 +46,7 @@ Con el pin aplicado (también si confirma la cuenta en la que ya está), fuera d
 
 ### C5 · Línea de espera que dice el porqué
 
-`seatWait` añade el motivo cuando la plaza es de otra cuenta: `Waiting for a seat on team5 for Opus: siloeads keeps its weekly for Fable`. Mismo prefijo para no romper lectores.
+`seatWait` añade el motivo cuando la plaza es de otra cuenta: `Waiting for a seat on team5 for Opus: ultra2 keeps its weekly for Fable`. Mismo prefijo para no romper lectores.
 
 ### C6 · Aviso de atasco dentro del plugin (`src/atascos.ts`, puro)
 
@@ -58,7 +58,7 @@ Por fila: antigüedad desde que el plugin empezó a retenerla (`waitSince` por h
 
 El Panel no tiene «Cola de trabajo» (`grep` en `bb-plugin-panel`: solo la columna «En cola» del despachador): queda en su buzón `encargos/` la petición con las palabras de Aitor y el contrato `health.atascos`. Hueco declarado, no tapado.
 
-### C7 · Canario independiente (`scripts/canario-cola.mjs`, `bb automation` cada 10 min en `linux-nuc`)
+### C7 · Canario independiente (`scripts/canario-cola.mjs`, `bb automation` cada 10 min en el servidor de bb)
 
 No usa la lógica del plugin, porque el fallo de hoy fue justo que el plugin creía correcto su veto. Lee `bb thread queue list --json` y `bb claude-switcher health --json`:
 
@@ -75,7 +75,7 @@ Tests en `server.test.ts` (`describe("caminos 2026-11-04")`) con un helper que c
 | --- | ---------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------ | -------------------------------------------------- |
 | T1  | reserva                | Opus, proyecto en Ultra, team5 2/2, team2-4 libres con semanal | se mueve a Team con plaza, sin cola                                            | quitar `team` de `spendsReservedWeekly`            |
 | T2  | pin a Team (encargo)   | fila esperando en team5; `use p team2`                         | `recheck`; al repreguntar corre en team2, en < 2 min de reloj                  | sin `recheck`                                      |
-| T3 | pin a Ultra con Opus | fila esperando, `use p joytorm`, Team libres | Esperar siempre: corre en Team, no en joytorm; con Team llenas espera | quitar la reserva de `chooseAccount` |
+| T3 | pin a Ultra con Opus | fila esperando, `use p ultra1`, Team libres | Esperar siempre: corre en Team, no en ultra1; con Team llenas espera | quitar la reserva de `chooseAccount` |
 | T4 | recarga | proyecto pasa de Fable a Opus en Team con Fable 100 y se recarga sin refresco de por medio | el rescate no lo mueve; proyecto sin modelo guardado sí se juzga por Fable | no cargar `project-models`; guardar solo en `recordSamples` |
 | T5 | agotada para el modelo | Fable en cuenta con Fable 100 y plaza; otra con Fable llena | espera en la cola de la otra, no arranca; con plaza en otra, va; ninguna con Fable → camino de fallo con aviso; fila admitida y cuenta agotada después → sigue a la otra; `use` concurrente que la devuelve a la agotada (carrera de R4-001) → espera y recoloca | sin `current-blocked` en `keep`; sin la comprobación final antes de reservar |
 | T6  | Esperar siempre        | Opus, todas las Team llenas, Ultra libres                      | espera; nunca a Ultra                                                          | Team/Ultra confundidas: `team` en todas            |
@@ -109,7 +109,7 @@ Cambiar techos o logins. La rama `bb/rotador-fable-semanal…` (36 commits sin f
 
 ## Llegada
 
-Versión 0.2.39, CHANGELOG, README y `CLAUDE.md` del repo; `dist` construido como en 0.2.38. Rondas: Codex Sol + `code-reviewer` a la vez, Astra tras un high y al final, parar a 2 sin high, tope 8. Fusión a `main` y tag por R-2026-11-01-5/6. Instalación en `linux-nuc` con `bb plugin update claude-switcher` (fuente git; se vuelve con `bb plugin install git:…@v0.2.38`). Comprobación: `seats` con la cola de team5 vacía, filas reales en espera entregadas, canario ejecutado una vez a mano con `bb automation run`.
+Versión 0.2.39, CHANGELOG, README y `CLAUDE.md` del repo; `dist` construido como en 0.2.38. Rondas: Codex Sol + `code-reviewer` a la vez, Astra tras un high y al final, parar a 2 sin high, tope 8. Fusión a `main` y tag por R-2026-11-01-5/6. Instalación en el servidor de bb con `bb plugin update claude-switcher` (fuente git; se vuelve con `bb plugin install git:…@v0.2.38`). Comprobación: `seats` con la cola de team5 vacía, filas reales en espera entregadas, canario ejecutado una vez a mano con `bb automation run`.
 
 Evidencia externa de «hecho»: suite y mutantes en verde; veredicto de Astra; en producción, `bb thread queue list --json` sin filas retenidas con Team libre.
 
@@ -130,3 +130,9 @@ Evidencia externa de «hecho»: suite y mutantes en verde; veredicto de Astra; e
 - **R2-003, aceptado:** se guarda en cada cambio.
 - **R2-004, aceptado:** `waitSince`.
 - **R2-005, aceptado:** `pctExacto`.
+
+## Cambios sobre el plan aprobado (rondas 2 y 3)
+
+- **C7, canario:** además de lo retenido con otra cuenta libre, avisa de lo retenido 2 horas sin ninguna (un aviso agrupado cada 6 horas) y de una fila que falla, salvo la de un hilo archivado, 10 minutos parada. Un aviso por hilo y tipo, no por fila. Cada llamada a `bb` tiene tiempo máximo; 30 minutos sin poder mirar avisan.
+- **T15, nuevo:** una Max o Ultra sin leer, según su login, no corre Opus: va a una Team libre o espera.
+- **C6:** `heldBy` solo descarta la fila de un hilo archivado.

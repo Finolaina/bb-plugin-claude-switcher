@@ -114,10 +114,10 @@ function deadline(account: AccountUsage, model: string): number {
 }
 
 /**
- * Whether a turn with `model` on this account counts against no weekly
- * window: the account has no general weekly at all (a Team seat) and no
- * window of the model's own. Only its 5-hour session is spent. A window of
- * the model that exists, settled or not, counts as spent.
+ * Whether a turn with `model` on this account spends no weekly the reserved
+ * model needs: a Team seat, or an account with no general weekly at all, and
+ * no window of the model's own. A window of the model that exists, settled
+ * or not, counts as spent.
  */
 export function spendsNoWeekly(account: AccountUsage, model: string): boolean {
   return (

@@ -489,16 +489,15 @@ candidate.
 Usable accounts are ranked by the quarter their 5-hour session is in
 (0-24 %, 25-49 %, 50-74 %, 75-99 %), then by the closest deadline for the
 model the turn runs with (the earlier of the weekly reset and the model's
-own window reset: a Team seat has no general weekly window, only its
-model's), then by the lowest session use, then by name. Within a quarter,
+own window reset), then by the lowest session use, then by name. Within a quarter,
 what runs out first is spent first; the quarter keeps new sessions from
 piling on one account until its 5-hour window burns. With a preferred
 model, only accounts that can still run it are chosen; a thread sent
 with another model goes first to the accounts that can no longer run the
 preferred one, so it does not spend the preferred model's window where it
-is still free, then to the Team seats that keep it (no weekly window:
-only their session is spent). An account that
-keeps the preferred model AND has a weekly window (a Max account) is
+is still free, then to the Team seats that keep it (what a Team seat
+spends is not what the preferred model needs). A Max or Ultra account that
+keeps the preferred model is
 never chosen for another model, not even as the last resort: on a Max
 account the weekly and the preferred model's window reset together, so
 what the other model spends there is the preferred model's. A wait for a
@@ -868,7 +867,10 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
   seat keeps `seatsTeam`.
 - **Which kind.** From `oauthAccount.organizationType` in the account's
   `.claude.json` (`claude_max`, `claude_team`). Anything else: Team when
-  the provider reports no general weekly window, Max otherwise.
+  the provider reports no general weekly window, Max otherwise. Since
+  November 2026 a Team seat reports a general weekly too, so the login is
+  what tells one: a seat with no `organizationType` that reports a weekly is
+  taken for a Max.
 - **Whose seats.** The seats are the login's (`oauthAccount.accountUuid`):
   two directories logged into the same account share them, and renaming
   the default account keeps the seats it has taken.
@@ -891,6 +893,10 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
   first come, first served. A seat reserved for a turn that does not start
   within 90 s is freed; a thread that stops asking (its message was
   removed) leaves the line.
+- **A canary from outside the plugin** (`scripts/canario-cola.mjs`, a `bb
+  automation` every 10 minutes on bb's server) warns of a message held 10
+  minutes with another account free, held 2 hours with none, or stopped by
+  a failure 10 minutes, and of not being able to look for 30 minutes.
 - **A full account sends the project to one with a free seat** (since
   0.2.37; Aitor, 2026-11-03: «necesitaría abrir más hilos»). With the
   automatic choice on, a turn that would wait for a seat moves its

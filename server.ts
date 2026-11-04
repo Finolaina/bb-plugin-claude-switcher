@@ -3859,7 +3859,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * rescue move 7 projects). Aitor 2026-11-03: the rescue judged every project
    * for the preferred model, and moved one working in Opus off a Team seat
    * (or a Max account out of Fable) that still ran Opus, to a Max account
-   * whose weekly Fable needs (viaulab → aitor, 2 Nov 18:23).
+   * whose weekly Fable needs (2 Nov 18:23).
    */
   const projectModel = new Map<string, { model: string; at: number }>(
     Object.entries(storedProjectModels).map(([id, model]) => [
@@ -3919,7 +3919,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * on an exhausted account or one without a login without moving by
    * itself, respecting the seats»): bb greys out the composer of a project
    * whose account is at its limit, so the dispatch checkpoint never gets to
-   * move it (Mariscal · Web on ganaresenas, Fable at 100 %). Each project
+   * move it (Fable at 100 %). Each project
    * this plugin may move (not external) whose account cannot run the
    * preferred model goes to the best account with a free seat, as a
    * placement would choose it, whatever switchAheadPercent says. With none,
@@ -4417,15 +4417,28 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return otherThatRuns(name, model) !== null;
   }
   /**
+   * With nothing measured of `name`, its login still says what it is: a Max
+   * or an Ultra keeps the reserved model's weekly until a read says otherwise
+   * (just after a reload, or with its reads failing: code-reviewer r3). A
+   * Team seat, or a plan the login does not tell, starts as ever.
+   */
+  function unreadKeepsReserve(name: string): boolean {
+    const login = accounts.find((a) => a.name === name);
+    if (login === undefined) return false;
+    const { plan } = planOf(login, null);
+    return plan === "ultra" || plan === "max";
+  }
+  /**
    * A turn in `model` on `name` would spend the weekly the reserved model
    * needs, and `model` is held off such an account (see holdsForReserve),
-   * as measured now; false when nothing is known of it.
+   * as measured now or, unmeasured, as its login says.
    */
   function heldOff(name: string, model: string): boolean {
     const options = { preferredModel: model, reserveModel: current.preferredModel };
     if (!holdsForReserve(options)) return false;
     const usage = measuredAccounts(model).find((a) => a.name === name);
-    if (usage === undefined || usage.unknown === true) return false;
+    if (usage === undefined || usage.unknown === true)
+      return unreadKeepsReserve(name);
     // Where the turn cannot run anyway it fails there, and the failure
     // moves it: only a turn that would run and spend the reserve is held.
     const settled = settle(usage, deps.now());
@@ -4482,6 +4495,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     const input: PlacementInput = {
       ...placementOf(projectId, model, now, isBackground(thread), thread.id),
+      unreadKeepsReserve,
       currentAccount: fromName,
       currentLoggedOut: unconfirmed(fromName),
       ...(seatsFull
