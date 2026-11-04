@@ -21,7 +21,9 @@ scp -q -o BatchMode=yes "$E/extraer.py" nuc:/tmp/sw-extraer.py
 ssh -o BatchMode=yes nuc "nice -n 10 python3 /tmp/sw-extraer.py $((NOW-8*86400000)) $NOW" > hilos.jsonl
 gzip -nc hilos.jsonl > "$E/hilos.jsonl.gz"
 python3 "$E/parsear-registro.py" projects.json "$E/movimientos.jsonl.gz" "$E/agotadas.jsonl.gz" "$E/plazas.jsonl.gz" switcher-mac.log switcher.log
-jq -c 'select(.message|test("tic #.* enviado"))|{ts,hilo:(.message|capture("hilo (?<h>thr_[a-z0-9]+)").h)}' calor.log | gzip -n > "$E/tics.jsonl.gz"
+scp -q -o BatchMode=yes "$E/tics-bb.py" nuc:/tmp/sw-tics-bb.py
+ssh -o BatchMode=yes nuc "nice -n 10 python3 /tmp/sw-tics-bb.py $((NOW-8*86400000)) $NOW" | gzip -n > "$E/tics-bb.jsonl.gz"
+jq -c 'select(.message|test("tic #.* (enviado|encolado)"))|{ts,hilo:(.message|capture("hilo (?<h>thr_[a-z0-9]+)").h)}' calor.log | gzip -n > "$E/tics.jsonl.gz"
 python3 "$E/consultas.py" "$E" > consultas.json
 nice -n 10 python3 "$E/primeras.py" < consultas.json > prim-i9.jsonl
 for h in nuc mac; do scp -q -o BatchMode=yes "$E/primeras.py" consultas.json "$h:/tmp/"; done

@@ -105,9 +105,15 @@ def simular():
     hilos = {h["t"]: h for h in an.leer_gz("hilos.jsonl.gz")}
     org = json.load(open(os.path.join(AQUI, "cuentas.json"), encoding="utf-8"))
     primeras = {(p["h"], p["t"]): p for p in an.leer_gz("primeras.jsonl.gz")}
+    # Los tics que bb dio por turno, de su evento: el registro de Calor no marca «enviado» los que se encolaron.
     tics = defaultdict(list)
-    for x in an.leer_gz("tics.jsonl.gz"):
+    for x in an.leer_gz("tics-bb.jsonl.gz"):
         tics[x["hilo"]].append(x["ts"])
+    # Cuándo los mandó Calor, con el hilo parado («enviado») o retenidos por el plugin o por un turno («encolado»):
+    # es el primer intento, el único que el plugin puede rechazar sin dejar una fila fallida.
+    intentos = defaultdict(list)
+    for x in an.leer_gz("tics.jsonl.gz"):
+        intentos[x["hilo"]].append(x["ts"])
     movs = an.leer_gz("movimientos.jsonl.gz")
     tandas = {t: an.tandas_de(h) for t, h in hilos.items()}
     por_proyecto = defaultdict(list)
@@ -148,13 +154,14 @@ def simular():
     # Solo la que movió el propio tic está en la mano del plugin: si el proyecto ya se había movido antes,
     # el tic solo arrancó el proceso en la cuenta nueva, y eso Calor ya lo frena desde su regla de «cuenta cambiada».
     def movida_por_tic(f):
-        return f["mov_at"] is not None and abs(f["mov_at"] - f["at"]) <= TIC_MS
+        return f["mov_at"] is not None and any(abs(f["mov_at"] - x) <= TIC_MS for x in intentos.get(f["hilo"], []))
+
     salida["T_tic_no_mueve"] = {
         "disparadas_por_tic": resumen(t_todas),
         "movida_por_tic": resumen([f for f in t_todas if movida_por_tic(f)]),
         "ahorro": resumen([f for f in t_derroche if movida_por_tic(f)]),
         "solo_aplaza": resumen([f for f in t_diferida if movida_por_tic(f)]),
-        "filas": [(f["hilo"], f["de"], f["a"], f["motivo"], f["coste"], f in t_derroche) for f in t_todas if movida_por_tic(f)],
+        "filas": [(f["hilo"], f["de"], f["a"], f["motivo"], f["coste"], f in t_derroche, movida_por_tic(f)) for f in t_todas],
     }
 
     # A · saliendo de una Team, otra Team con plaza (la misma organización conserva la caché).
