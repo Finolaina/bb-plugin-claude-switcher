@@ -965,6 +965,9 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
   a thread whose earlier turn never started has only the 10 s. A move by hand
   is not held back. A thread held by this waits up to 30 s more,
   and a move after a turn is tried once per turn.
+- **An incomplete answer that measured a window full** gives no date to wait
+  for: an Opus turn looks again every 5 minutes rather than at that window's
+  reset.
 - **With every usage read down at once,** a turn may try a Team seat by what
   its login says; if that seat is out, the turn fails where you can see it and
   stays in error until the reads come back.

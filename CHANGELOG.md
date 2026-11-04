@@ -17,9 +17,14 @@ project uses [Semantic Versioning](https://semver.org/).
 - **A turn told to start keeps its project where it is until it starts.** A
   turn reads the project's account as it starts, and the account belongs to
   the whole project: a sibling's move in between could start an Opus turn on
-  an Ultra. No automatic move is written during that time (90 s at most from
-  the first time it was told); the turn that wanted to move waits 30 s. A
-  move by hand is not held back.
+  an Ultra. No automatic move is written during that time (90 s from the
+  first answer and, for a turn another plugin holds and that is asked again,
+  10 s from each answer); the turn that wanted to move waits 30 s. A move by
+  hand is not held back.
+- **An incomplete usage answer that measured a window full is out.** It used
+  to read as unknown: a turn stayed on an account known to fail, a stuck
+  project was not rescued, and the veto on what only the clock frees did not
+  reach it. What is merely missing still says nothing.
 - **`--model opus` is an Opus turn.** A model named by its alias (`opus`,
   `fable`, `sonnet`, `haiku`, with or without `[1m]`) was read as no model:
   it skipped the reserve and, with the default account without a login, was
@@ -50,7 +55,8 @@ project uses [Semantic Versioning](https://semver.org/).
 - **`scripts/canario-cola.mjs`**, a canary from outside the plugin, every
   10 minutes as a `bb automation` on bb's server. It warns when the plugin
   holds a message 10 minutes with a usable account with a free seat that
-  could run it; when it holds one 2 hours with none that could (one grouped
+  could run it, seen in two looks in a row (a seat just freed is taken within
+  30 s); when it holds one 2 hours with none that could (one grouped
   warning every 6 hours: the rule still waits, not in silence); and when a
   failed message has been stopped 10 minutes. A failed read, or a `bb` that
   hangs, exits 1, and warns after 30 minutes in a row.

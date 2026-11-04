@@ -18256,6 +18256,36 @@ describe("caminos 2026-11-04", () => {
       expect(h.envSet).toEqual([]);
     });
 
+    it("out of the preferred model only: a pick by hand onto it is not undone by the failure of a turn in another", async () => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(13, 10, 5)),
+          spare: OK,
+          work: answer([
+            { kind: "weekly_all", percent: 10, resets_at: new Date(NOW + 72 * 3_600_000).toISOString() },
+            {
+              kind: "weekly_scoped",
+              percent: 100,
+              resets_at: new Date(NOW + 4 * 3_600_000).toISOString(),
+              scope: { model: { display_name: "Fable" } },
+            },
+          ]),
+        },
+        { settings: { ...FABLE, seatsTeam: 2 }, presetEnv: { "proj-1": on("spare") } },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "work", "spare");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "t1", projectId: "proj-1" }),
+      });
+      await h.harness.behavior.callRpc("project_set_account", { projectId: "proj-1", account: "work" });
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "t1" }));
+      expect(h.retries.at(-1)?.reason).toBe("Retrying on account work");
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+    });
+
     it("an account out of another model, in an incomplete answer, is still only unknown", async () => {
       const { h } = await start(
         answer([

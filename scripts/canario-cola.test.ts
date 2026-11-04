@@ -326,6 +326,29 @@ describe("judge", () => {
       expect(vistos).toEqual(["sin-destino"]);
     });
 
+    it("una fila oculta en medio no vuelve a empezar la cuenta", () => {
+      const una = pasa(INCIDENTE, { primeraVez: { q1: NOW - 3 * UMBRAL_MS } }, NOW);
+      const oculta = judge({ filas: [], health: INCIDENTE, estado: una.estado, ahora: NOW + UMBRAL_MS });
+      expect(oculta.avisos).toEqual([]);
+      expect(pasa(INCIDENTE, oculta.estado, NOW + 2 * UMBRAL_MS).avisos).toHaveLength(1);
+    });
+
+    it("lo visto con destino se olvida con la fila, a los 20 minutos sin verla", () => {
+      const una = pasa(INCIDENTE, { primeraVez: { q1: NOW - 3 * UMBRAL_MS } }, NOW);
+      const oculta = judge({ filas: [], health: INCIDENTE, estado: una.estado, ahora: NOW + OLVIDO_MS });
+      expect(oculta.estado.conLibre).toEqual({});
+    });
+
+    it("una fila fallida vieja no conserva la marca: el próximo no espera 6 horas", () => {
+      const { estado } = judge({
+        filas: [fila({ failureReason: "hook timed out" })],
+        health: INCIDENTE,
+        estado: { primeraVez: { q1: NOW - 2 * SIN_DESTINO_MS }, avisado: { "sin-destino": NOW - 60_000 } },
+        ahora: NOW,
+      });
+      expect(estado.avisado["sin-destino"]).toBeUndefined();
+    });
+
     it("sin nadie con 2 horas, una fila joven no conserva la marca", () => {
       const { estado } = judge({
         filas: [fila()],

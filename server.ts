@@ -2576,12 +2576,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   /**
    * No login, or MEASURED unable to run any model: a turn sent there would
-   * fail. Not measured yet, an incomplete answer, or no preferred model left
-   * do not count: those accounts may still run it.
+   * fail. Not measured yet, an incomplete answer with nothing measured full
+   * for every model, or no preferred model left do not count: those accounts
+   * may still run it.
    */
   function cannotRun(name: string): boolean {
     if (loggedOut(name)) return true;
-    const known = measuredAccounts().find((a) => a.name === name);
+    const known = measuredAccounts("").find((a) => a.name === name);
     return (
       known !== undefined &&
       known.unknown !== true &&

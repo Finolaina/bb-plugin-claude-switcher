@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Canario de la cola de plazas: cada 10 minutos, en el servidor de bb (una
 // `bb automation`), avisa si el plugin retiene un mensaje 10 minutos o más
-// con una cuenta usable y con plaza libre que podría correrlo; si lo retiene 2
+// con una cuenta usable y con plaza libre que podría correrlo, vista en dos
+// pasadas seguidas (una plaza recién soltada no es un atasco); si lo retiene 2
 // horas o más sin ninguna que pueda («Esperar siempre» sigue esperando, pero no
 // en silencio); y si un mensaje que falla lleva 10 minutos parado.
 //
@@ -103,6 +104,11 @@ export function judge({ filas, health, estado, ahora }) {
   for (const [hilo, cuando] of Object.entries(estado.avisado ?? {}))
     if (ahora - cuando < (hilo === SIN_DESTINO ? REAVISO_SIN_DESTINO_MS : REAVISO_MS))
       avisado[hilo] = cuando;
+  // Lo visto con destino libre, como la antigüedad: una fila que bb oculta en
+  // una pasada no vuelve a empezar la cuenta.
+  for (const [hilo, cuando] of Object.entries(estado.conLibre ?? {}))
+    if (ahora - cuando < OLVIDO_MS && !vivas.some((f) => f.threadId === hilo))
+      conLibre[hilo] = cuando;
   const sinDestino = new Map();
   for (const fila of vivas) {
     const desde = estado.primeraVez?.[fila.id] ?? ahora;
@@ -151,11 +157,12 @@ export function judge({ filas, health, estado, ahora }) {
         health.atascos?.some((a) => a.hilo === fila.threadId && a.proyectoOcupado) === true,
     });
   }
-  // Sin nadie que lleve ese tiempo, el próximo que llegue no espera las 6
-  // horas. Quien lo lleva sigue en el caso aunque bb lo oculte un momento o
-  // en esta pasada se vea una plaza suelta.
+  // Sin nadie retenido que lleve ese tiempo, el próximo que llegue no espera
+  // las 6 horas. Quien lo lleva sigue en el caso aunque bb lo oculte un momento
+  // o en esta pasada se vea una plaza suelta; una fila que falla no es del caso.
   if (sinDestino.size === 0) {
-    if (!Object.values(primeraVez).some((desde) => ahora - desde >= SIN_DESTINO_MS))
+    const fallidas = new Set(vivas.filter((f) => (f.failureReason ?? null) !== null).map((f) => f.id));
+    if (!Object.entries(primeraVez).some(([id, desde]) => !fallidas.has(id) && ahora - desde >= SIN_DESTINO_MS))
       delete avisado[SIN_DESTINO];
   } else if (avisado[SIN_DESTINO] === undefined) {
     avisado[SIN_DESTINO] = ahora;
