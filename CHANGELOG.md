@@ -46,7 +46,8 @@ project uses [Semantic Versioning](https://semver.org/).
 - **A seat a thread gives up when its move fails goes at once to the
   threads waiting for it**, and reservations whose turn never started are
   freed before a turn with siblings at work is judged: a seat that is in
-  fact free does not move the project.
+  fact free does not move the project. A turn sent now, past the checkpoint,
+  on another account than its seat also frees that seat at once.
 
 ## [0.2.42] - 2026-11-05
 

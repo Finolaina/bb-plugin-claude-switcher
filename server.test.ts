@@ -17201,6 +17201,33 @@ describe("bb claude-switcher reserve / unreserve: a seat held from outside bb", 
     });
   });
 
+  it("a thread let in from the queue that starts on another account (sent now, past the checkpoint) frees its seat at once (Codex ASIENTOS-R3-002)", async () => {
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    // x of proj-2 runs on main; t1 (proj-1) and t2 (proj-2) wait for main.
+    expect(await sent(h, "x", "proj-2")).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "x", projectId: "proj-2" }) });
+    expect(await ask(h, "t1")).toMatchObject({ action: "wait" });
+    expect(await sent(h, "t2", "proj-2")).toMatchObject({ action: "wait" });
+    // x ends: t1 is let in (a seat reserved on main), t2 still waits.
+    await h.harness.behavior.emitThreadEvent("thread.idle", { thread: thread({ id: "x", projectId: "proj-2" }) });
+    await vi.waitFor(async () => {
+      const seats = JSON.parse((await h.harness.behavior.runCli(["seats", "--json"])).stdout).seats;
+      expect(seats.main.reserved).toBe(1);
+      expect(seats.main.queued).toEqual([{ threadId: "t2", title: null }]);
+    });
+    // proj-1 picked onto spare; t1 is sent now and starts there.
+    expect((await h.harness.behavior.runCli(["use", "proj-1", "spare"])).exitCode).toBe(0);
+    const before = h.harness.recheckCount;
+    await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "t1", projectId: "proj-1" }) });
+    await vi.waitFor(async () => {
+      const seats = JSON.parse((await h.harness.behavior.runCli(["seats", "--json"])).stdout).seats;
+      expect(seats.spare.running).toBe(1);
+      expect(seats.main.queued).toEqual([]);
+    });
+    await vi.waitFor(() => expect(h.harness.recheckCount).toBeGreaterThan(before));
+  });
+
   it("a hold moved to another account frees its seat: the thread waiting there is let in at once (Codex ASIENTOS-001)", async () => {
     const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 } });
     dispose = () => h.harness.dispose();
@@ -19747,13 +19774,40 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
       expect(moves(h)).toEqual([]);
     });
 
-    // The second one's move is dropped as the first one's seat holds the
-    // project (siblingHolds, 0.2.39): it waits where the project went.
-    it("two threads of the project asking at once move it once (Codex ASIENTOS-R2-003)", async () => {
-      const { h } = await start();
-      const [b, c] = await Promise.all([dispatch(h, "b", "proj-1"), dispatch(h, "c", "proj-1")]);
-      expect(moves(h)).toHaveLength(1);
-      expect([b.action, c.action].sort()).toEqual(["proceed", "wait"]);
+    // Codex ASIENTOS-R2-003 / R3-001: b claims work's only seat and its
+    // write is under way; c, on the same read of spare, would take main
+    // (the default account: a delete, not a set). It waits instead, and is
+    // asked again as b's move lands.
+    // Codex ASIENTOS-R2-003 / R3-001. A read a write crosses is refused and
+    // the turn waits (the project moved while it was read); the guard in
+    // placeTurn holds a move decided on a read no write had crossed yet.
+    it("no second move while one of the project is being written (Codex ASIENTOS-R3-001)", async () => {
+      // A pick by hand of work is being written, held; b would move proj-1
+      // off spare (full, a at work) meanwhile.
+      let hold = false;
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      const { h } = await start({
+        workBusy: true,
+        extra: {
+          beforeSet: async () => {
+            if (hold) await held;
+          },
+        },
+      });
+      hold = true;
+      const use = h.harness.behavior.runCli(["use", "proj-1", "work"]);
+      await new Promise((r) => setTimeout(r, 20));
+      const before = h.harness.recheckCount;
+      const b = await dispatch(h, "b", "proj-1");
+      hold = false;
+      release();
+      expect((await use).exitCode).toBe(0);
+      const writes = [...h.envSet, ...h.envDeleted].filter((e) => e.projectId === "proj-1");
+      expect(writes).toHaveLength(1);
+      expect(b.action).toBe("wait");
+      // Asked again as the write lands, not at its next 30 s.
+      await vi.waitFor(() => expect(h.harness.recheckCount).toBeGreaterThan(before));
     });
 
     it("with no one waiting anywhere, a seat freed asks nothing again", async () => {

@@ -62,10 +62,14 @@ MUTANTES = [
     ("M17 las reservas caducadas no se sueltan antes de juzgar con hermanos (Codex ASIENTOS-R2-002)", "server.ts",
      "    if (when === \"before\") admitWaiting();\n    let seatsFull",
      "    let seatsFull"),
-    ("M18 sin la regla del hermano con paso, dos peticiones a la vez mueven dos veces (Codex ASIENTOS-R2-003)", "server.ts",
-     "    if (siblingHolds()) return false;",
-     "    if (false) return false;"),
+    ("M18 un turno que arranca en otra cuenta que su plaza no la suelta a la cola (Codex ASIENTOS-R3-002)", "server.ts",
+     "    const { over } = seats.confirm(threadId, key, deps.now());\n    if (had !== undefined && had !== key) admitWaiting(true);",
+     "    const { over } = seats.confirm(threadId, key, deps.now());"),
 ]
+# Codex ASIENTOS-R3-001 (dos movimientos del mismo proyecto en vuelo) no lleva arreglo: una
+# guarda que retenía el segundo rompió 6 tests que fijan a propósito cómo se resuelven dos
+# movimientos que se cruzan (el último en escribir manda y el fallo se reintenta donde está
+# el proyecto). Lo cubre el test «no second move while one of the project is being written».
 
 
 def vitest() -> tuple[int, str]:

@@ -1319,9 +1319,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /**
    * seats.reserve, and a seat the thread gave up on another account (a move
    * that failed, or went elsewhere) goes at once to the threads waiting
-   * (Codex ASIENTOS-R2-001). A turn confirmed elsewhere than its seat (sent
-   * past the checkpoint) leaves it to expire in SEAT_TTL_MS, which asks
-   * them again too.
+   * (Codex ASIENTOS-R2-001).
    */
   function reserveSeat(threadId: string, key: string, now: number): boolean {
     const had = seats.seatOf(threadId)?.account;
@@ -1331,7 +1329,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
   function confirmSeat(threadId: string, key: string): void {
     unseated.delete(threadId);
+    // A turn sent now, past the checkpoint, after its project moved: its
+    // seat on the old account goes to the threads waiting there (Codex
+    // ASIENTOS-R3-002).
+    const had = seats.seatOf(threadId)?.account;
     const { over } = seats.confirm(threadId, key, deps.now());
+    if (had !== undefined && had !== key) admitWaiting(true);
     seatTitles.delete(threadId);
     const line = `thread ${threadId}: running on ${seatName(key)}${over ? " over capacity" : ""}; ${occupancy(key)}`;
     if (over) bb.log.warn(line);
