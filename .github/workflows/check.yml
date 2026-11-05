@@ -25,4 +25,5 @@ jobs:
       - run: npm install -g bb-app@0.45.0
       - run: bb plugin types --check
       - run: npm run build
-      - run: test -z "$(git status --porcelain -- dist)"
+      # Say which file differs, and how, before failing.
+      - run: git diff --stat -- dist && git diff -U0 -- dist/server.meta.json dist/app.meta.json && test -z "$(git status --porcelain -- dist)"
