@@ -19621,7 +19621,7 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
    * `work` is a Team seat too, `main` an Ultra that keeps Fable.
    */
   const start = async (
-    o: { main?: [number, number]; settings?: Record<string, unknown>; workBusy?: boolean; preset?: string } = {},
+    o: { main?: [number, number]; settings?: Record<string, unknown>; workBusy?: boolean; preset?: string; extra?: Partial<HostOptions> } = {},
   ) => {
     let clock = NOW;
     const [weekly, fable] = o.main ?? [40, 30];
@@ -19635,6 +19635,7 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
         clock: () => clock,
         settings: { preferredModel: "Fable", seatsTeam: 1, seatsMax: 4, stuckMoveMinutes: 10, ...o.settings },
         presetEnv: { "proj-1": on(o.preset ?? "spare"), "proj-2": on("work") },
+        ...o.extra,
       },
     );
     dispose = () => h.harness.dispose();
@@ -19708,6 +19709,51 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
       expect(h.harness.recheckCount).toBe(before);
       await h.harness.behavior.emitThreadEvent("thread.idle", { thread: thread({ id: "busy", projectId: "proj-2" }) });
       await vi.waitFor(() => expect(h.harness.recheckCount).toBe(before + 1));
+    });
+
+    it("a move that fails gives its claimed seat back to the thread waiting there, at once (Codex ASIENTOS-R2-001)", async () => {
+      let w: Promise<{ action: string }> | null = null;
+      const { h } = await start({
+        main: [60, 60],
+        extra: {
+          failSet: ["proj-1"],
+          // As b's move is written, w of proj-2 asks for work's only seat, which b claimed.
+          beforeSet: async () => {
+            if (w === null) {
+              w = dispatch(h, "w", "proj-2");
+              expect(await w).toMatchObject({ action: "wait" });
+            }
+          },
+        },
+      });
+      const before = h.harness.recheckCount;
+      const b = await dispatch(h, "b", "proj-1").catch((e: unknown) => ({ action: `threw ${String(e)}` }));
+      expect(w).not.toBeNull();
+      expect(b.action).not.toBe("proceed");
+      const seats = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+      expect(seats.seats?.work?.queued).toEqual([]);
+      expect(seats.seats?.work?.reserved).toBe(1);
+      await vi.waitFor(() => expect(h.harness.recheckCount).toBeGreaterThan(before));
+    });
+
+    it("a reservation expired is freed before the seats are judged: no move for a seat that is free (Codex ASIENTOS-R2-002)", async () => {
+      const { h, at } = await start({ settings: { seatsTeam: 2 } });
+      // x of proj-3 takes spare's second seat and never starts.
+      await h.harness.behavior.runCli(["use", "proj-3", "spare"]);
+      expect((await dispatch(h, "x", "proj-3")).action).toBe("proceed");
+      at(91_000);
+      expect(await dispatch(h, "b", "proj-1")).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("spare");
+      expect(moves(h)).toEqual([]);
+    });
+
+    // The second one's move is dropped as the first one's seat holds the
+    // project (siblingHolds, 0.2.39): it waits where the project went.
+    it("two threads of the project asking at once move it once (Codex ASIENTOS-R2-003)", async () => {
+      const { h } = await start();
+      const [b, c] = await Promise.all([dispatch(h, "b", "proj-1"), dispatch(h, "c", "proj-1")]);
+      expect(moves(h)).toHaveLength(1);
+      expect([b.action, c.action].sort()).toEqual(["proceed", "wait"]);
     });
 
     it("with no one waiting anywhere, a seat freed asks nothing again", async () => {

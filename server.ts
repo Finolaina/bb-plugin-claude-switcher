@@ -1316,6 +1316,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     admitWaiting(true);
   }
   /** The thread's turn started on the seat budget `key`: its seat runs there. */
+  /**
+   * seats.reserve, and a seat the thread gave up on another account (a move
+   * that failed, or went elsewhere) goes at once to the threads waiting
+   * (Codex ASIENTOS-R2-001). A turn confirmed elsewhere than its seat (sent
+   * past the checkpoint) leaves it to expire in SEAT_TTL_MS, which asks
+   * them again too.
+   */
+  function reserveSeat(threadId: string, key: string, now: number): boolean {
+    const had = seats.seatOf(threadId)?.account;
+    const got = seats.reserve(threadId, key, now);
+    if (had !== undefined && had !== key) admitWaiting(true);
+    return got;
+  }
   function confirmSeat(threadId: string, key: string): void {
     unseated.delete(threadId);
     const { over } = seats.confirm(threadId, key, deps.now());
@@ -1369,7 +1382,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const key = seatKey(account);
     seatProjects.set(thread.id, thread.projectId);
     const queuedBefore = seats.position(thread.id) !== null;
-    if (seats.reserve(thread.id, key, now)) {
+    if (reserveSeat(thread.id, key, now)) {
       seatTitles.delete(thread.id);
       if (queuedBefore)
         bb.log.info(
@@ -4837,13 +4850,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const fromName = from.account ?? current.defaultAccountName;
     const now = deps.now();
     const excursion = excursions.get(projectId);
-    // Its turn would wait for a seat here: reservations whose turn never
-    // started are freed first, and the seats looked at again.
+    // Reservations whose turn never started are freed first, for both
+    // judgments below (Codex ASIENTOS-R2-002).
+    if (when === "before") admitWaiting();
     let seatsFull = when === "before" && seatsFullFor(thread, fromName);
-    if (seatsFull) {
-      admitWaiting();
-      seatsFull = seatsFullFor(thread, fromName);
-    }
     let busy =
       when === "before" && !seatsFull && turn.tick !== true
         ? crowded(thread, fromName, model, now)
@@ -4955,7 +4965,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       decision.why === "current-full" ? seatKey(decision.account) : null;
     if (claim !== null) {
       seatProjects.set(thread.id, projectId);
-      seats.reserve(thread.id, claim, now);
+      reserveSeat(thread.id, claim, now);
     }
     const to = accountOrDefault(decision.account);
     // The sessions are not waited for: see applyAccount (Fable, 2026-10-29).

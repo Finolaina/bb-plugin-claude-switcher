@@ -4,6 +4,8 @@
 Cada mutante rompe a propósito una pieza; la suite debe fallar con cada uno ("muerto").
 Uso, desde la raíz del repo: python3 docs/asientos-2026-11-05/mutantes.py
 Deja el código como estaba al acabar, también si se corta (try/finally).
+Primero corre la suite sin mutar y exige que pase; un mutante cuenta como muerto solo si
+Vitest informa de tests fallidos, no si no arranca (Codex ASIENTOS-R2-004).
 """
 import subprocess
 import sys
@@ -54,10 +56,30 @@ MUTANTES = [
     ("M15 las retenciones de fuera se guardan sumadas a las de bb (Codex ASIENTOS-003)", "server.ts",
      "        reserved: taken.reserved,\n        external:",
      "        reserved: taken.reserved + (taken.external?.length ?? 0),\n        external:"),
+    ("M16 una plaza abandonada al fallar un movimiento no despierta la cola (Codex ASIENTOS-R2-001)", "server.ts",
+     "    if (had !== undefined && had !== key) admitWaiting(true);\n    return got;",
+     "    return got;"),
+    ("M17 las reservas caducadas no se sueltan antes de juzgar con hermanos (Codex ASIENTOS-R2-002)", "server.ts",
+     "    if (when === \"before\") admitWaiting();\n    let seatsFull",
+     "    let seatsFull"),
+    ("M18 sin la regla del hermano con paso, dos peticiones a la vez mueven dos veces (Codex ASIENTOS-R2-003)", "server.ts",
+     "    if (siblingHolds()) return false;",
+     "    if (false) return false;"),
 ]
 
 
+def vitest() -> tuple[int, str]:
+    r = subprocess.run(["npx", "vitest", "run", "--bail=1"], capture_output=True, text=True, timeout=900)
+    resumen = next((l.strip() for l in r.stdout.splitlines() if l.strip().startswith("Tests ")), "sin resumen")
+    return r.returncode, resumen
+
+
 def main() -> int:
+    rc, resumen = vitest()
+    print(f"SIN MUTAR  rc={rc} · {resumen}")
+    if rc != 0 or "failed" in resumen or "passed" not in resumen:
+        print("la suite sin mutar no pasa: no se prueba ningún mutante")
+        return 2
     vivos = []
     for nombre, fichero, antes, despues in MUTANTES:
         original = open(fichero).read()
@@ -67,11 +89,11 @@ def main() -> int:
             continue
         try:
             open(fichero, "w").write(original.replace(antes, despues))
-            r = subprocess.run(["npx", "vitest", "run", "--bail=1"], capture_output=True, text=True, timeout=900)
-            muerto = r.returncode != 0
+            rc, resumen = vitest()
+            muerto = rc != 0 and "failed" in resumen
         finally:
             open(fichero, "w").write(original)
-        print(("muerto " if muerto else "VIVO   ") + nombre)
+        print(("muerto " if muerto else "VIVO   ") + nombre + " · " + resumen)
         if not muerto:
             vivos.append(nombre)
     print(f"{len(MUTANTES) - len(vivos)}/{len(MUTANTES)} mutantes muertos")

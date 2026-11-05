@@ -43,6 +43,10 @@ project uses [Semantic Versioning](https://semver.org/).
 - **A seat held with `reserve` and moved to another account frees its old
   seat at once**: the threads waiting for it are asked again then, not at
   their next 30-second ask.
+- **A seat a thread gives up when its move fails goes at once to the
+  threads waiting for it**, and reservations whose turn never started are
+  freed before a turn with siblings at work is judged: a seat that is in
+  fact free does not move the project.
 
 ## [0.2.42] - 2026-11-05
 
