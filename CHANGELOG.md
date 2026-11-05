@@ -4,6 +4,55 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.43] - 2026-11-05
+
+### Changed
+
+- **A thread that would wait for a seat no longer waits 10 minutes first.**
+  With a sibling of its project at work, a turn in another model that
+  finds its account full moves the project at its first ask: to an account
+  with seats for all of the project's threads when it asks for more than
+  its account has, else to a seat for the thread (Team first, then an
+  Ultra at or under `otherModelUpTo`). Measured before (2026-11-05 13:22):
+  a thread waited 10 min 24 s on a full Ultra with four other accounts
+  free. `stuckMoveMinutes` (10) is now how long a project so moved stays
+  where it went before it moves again that way; 0 still turns it off.
+- **A seat that ends asks the waiting threads again at once**, also those
+  waiting on other accounts: one whose project can move to it goes now,
+  not at its next 30-second ask.
+- **`bb claude-switcher seats` lists the last day's samples**; the week is
+  in `history --dias N`.
+
+### Added
+
+- **A week of seat history** (`bb claude-switcher history --dias N`, 1 to
+  7): per hour and account, the seats taken and the threads waiting at
+  most and the session and weekly %; every stuck thread with its why; and
+  the moves of those days. Kept in the plugin's own SQLite database, one
+  row per account and measurement.
+
+### Fixed
+
+- **The seat samples were not kept past two days.** They went to one
+  key-value row, and from about the third day it passed bb's 256 KB limit:
+  every store failed (662 times in the log from 2026-11-03 to 2026-11-05)
+  and a reload lost them. The samples kept there move to the database once;
+  if the database cannot take them they stay in memory, and in key-value
+  storage for the next load, and a failed delete does not stop the week
+  being read back.
+- **A seat held with `reserve` and moved to another account frees its old
+  seat at once**: the threads waiting for it are asked again then, not at
+  their next 30-second ask.
+- **A seat a thread gives up when its move fails goes at once to the
+  threads waiting for it**, and reservations whose turn never started are
+  freed before a turn with siblings at work is judged: a seat that is in
+  fact free does not move the project. A turn sent now, past the checkpoint,
+  on another account than its seat also frees that seat at once, and two
+  threads of a project that decide on the same read move it once for a seat,
+  not twice: while a move for a seat is written and recorded no other move
+  of the project starts (Team first included); the thread held waits and is
+  asked again as it ends.
+
 ## [0.2.42] - 2026-11-05
 
 ### Fixed

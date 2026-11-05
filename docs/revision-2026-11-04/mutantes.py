@@ -381,9 +381,11 @@ M = [
     # 0.2.41, noche 2026-11-05: espera larga (a), Ultra con margen, `use` (b), proyecto
     # que pide más plazas (c). T3b prueba desde la 0.2.41 que un `use` aguanta: el
     # mutante de arriba que quita la reserva muere ahora con T6.
-    ("N-a espera", "mueve a los N min justos, no pasados", "server.ts",
-     "if (since !== null && now - since > limit)", "if (since !== null && now - since >= limit)",
-     "server.test.ts", "waits at exactly 10 min"),
+    # 0.2.43 (2026-11-05): ya no hay espera de N min antes de mover; los N min son
+    # la calma tras un movimiento por plazas (M5 de docs/asientos-2026-11-05).
+    ("N-a espera", "la calma corta en N min justos, no pasados (0.2.43)", "server.ts",
+     "    if (last !== undefined && now - last <= limit) return null;", "    if (last !== undefined && now - last < limit) return null;",
+     "server.test.ts", "a project so moved stays where it went"),
     ("N-a espera", "0 ya no es nunca", "server.ts",
      "if (!(limit > 0) || !current.autoSwitch) return null;", "if (!current.autoSwitch) return null;",
      "server.test.ts", "0 = never: the project with a thread at work stays"),
@@ -401,16 +403,15 @@ M = [
      "    0;",
      "src/policy.test.ts", "reserveSpareUpTo"),
     ("N-c plazas", "el proyecto que pide más plazas no se mueve de entrada", "server.ts",
-     "if (capacity > 0 && wanted > capacity)", "if (false)",
+     "if (since === null && capacity > 0 && wanted > capacity)", "if (false)",
      "server.test.ts", "moves at once to the account with seats for all"),
-    ("N-c plazas", "sin cuenta con plazas para todos, se va a cualquiera con una", "src/switch.ts",
-     "(input.seatsWantedOnly === true && wanted > 1", "(false",
-     "server.test.ts", "with no account with seats for all, it waits"),
+    # Retirado en la 0.2.43: sin cuenta con plazas para todos, el hilo coge al momento
+    # una plaza para él solo (Team primero); lo prueba M2 de docs/asientos-2026-11-05.
     ("N-b use", "un `use` no aguanta a Opus", "src/switch.ts",
      "if (runs && (input.pinned === true || !spendsReservedWeekly(current, options))) {", "if (runs && !spendsReservedWeekly(current, options)) {",
      "server.test.ts", "holds an Opus turn on the Ultra picked"),
     ("N-c plazas", "el movimiento por plazas queda como excursión", "server.ts",
-     "      if (excursions.get(projectId)?.from === fromName) excursions.delete(projectId);\n      crowdedMoves.set(projectId, { at: now, to: decision.account });", "      noteMove(projectId, fromName, decision.account, model, before);\n      crowdedMoves.set(projectId, { at: now, to: decision.account });",
+     "        if (excursions.get(projectId)?.from === fromName) excursions.delete(projectId);\n        crowdedMoves.set(projectId, { at: now, to: decision.account });", "        noteMove(projectId, fromName, decision.account, model, before);\n        crowdedMoves.set(projectId, { at: now, to: decision.account });",
      "server.test.ts", "is a new home, not an excursion"),
     ("N-c plazas", "el movimiento por plazas borra cualquier excursión", "server.ts",
      "      if (excursions.get(projectId)?.from === fromName) excursions.delete(projectId);", "      excursions.delete(projectId);",
@@ -432,7 +433,7 @@ M = [
      "server.test.ts", "release forgets the pick"),
     ("N-a motivo", "el motivo nunca dice «trabajando» (r1 L3)", "server.ts",
      "      if (project === thread.projectId && threadId !== thread.id) working = true;", "      if (project === thread.projectId && threadId !== thread.id) working = false;",
-     "server.test.ts", "waits at exactly 10 min"),
+     "server.test.ts", "moves its project at its first ask"),
     ("N-a Team primero", "un hilo atascado pide plazas para todo el proyecto (r2 high)", "server.ts",
      "            ...(busy?.kind === \"crowded\"\n              ? { seatsWanted: busy.wanted, seatsWantedOnly: true }\n              : {}),",
      "            ...(busy === null ? {} : { seatsWanted: busy.wanted, seatsWantedOnly: busy.kind === \"crowded\" }),",

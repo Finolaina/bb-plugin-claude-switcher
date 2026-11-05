@@ -45,6 +45,17 @@ import {
 } from "./src/accounts.js";
 import { nextDayStart, paceOf, type DayStart, type Pace } from "./src/pace.js";
 import {
+  HISTORIAL_DIAS,
+  HISTORIAL_MIGRATIONS,
+  addSample,
+  addStuck,
+  historyText,
+  prune as pruneHistorial,
+  readSamples,
+  readStuck,
+  type HistorialDb,
+} from "./src/historial.js";
+import {
   healthReport,
   healthText,
   isoInZone,
@@ -636,9 +647,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     },
     stuckMoveMinutes: {
       type: "number",
-      label: "Move a project whose thread waits for a seat (minutes)",
+      label: "A project moved for a seat with threads at work stays (minutes)",
       description:
-        "A thread that has waited this long for a seat on its project's account moves the project to another account with a free seat, also while other threads of the project are at work (their next turns run there). A project with more threads asking than its account has seats moves at once to one with seats for all of them. Needs the automatic choice. 0 = never: a project with a thread at work stays.",
+        "A thread that would wait for a seat on its project's account moves the project at once to another account with a free seat, also while other threads of the project are at work (their next turns run there): to one with seats for all of them when the project asks for more than its account has, else to a seat for the thread. A project so moved is not moved again that way within this many minutes. Needs the automatic choice. 0 = never: a project with a thread at work stays.",
       default: 10,
     },
     // On by default (Aitor, 2026-11-03: «que no sea un "máximo 4"»).
@@ -969,6 +980,23 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * one seat costs (`bb claude-switcher seats`).
    */
   const seatSamples: Record<string, SeatSample[]> = {};
+  /** The seat history's database (src/historial.ts); null when it could not be opened. */
+  let historial: HistorialDb | null = null;
+  /** A write to the seat history; a failure is logged, never thrown. */
+  // ponytail: a write that fails is lost to the history (logged), also when
+  // the database comes back: `history --dias` reads the database only. Tope
+  // conocido (Astra ASIENTOS-R5-002); the way up is to keep the rows that
+  // failed for 7 days and write them again once it answers.
+  function toHistorial(what: string, write: (db: HistorialDb) => void): void {
+    if (historial === null) return;
+    try {
+      write(historial);
+    } catch (error) {
+      bb.log.warn(
+        `could not write ${what} to the seat history: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
   /**
    * The samples older than a week go, by the clock and not only as their
    * account is measured again: as they load, are stored and are listed
@@ -1124,15 +1152,35 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** When each project last moved for a crowded seat (see crowded): not again within stuckMoveMinutes. */
   const crowdedMoves = new Map<string, { at: number; to: string }>();
   /**
+   * Projects with a move for a seat under way, from its decision until it
+   * is recorded (crowdedMoves), and projects with a turn held meanwhile:
+   * asked again as the move ends, landed or not (Astra ASIENTOS-R4-001/002).
+   */
+  const seatMoving = new Set<string>();
+  const heldForMove = new Set<string>();
+  function wakeHeldForMove(projectId: string): void {
+    if (seatMoving.has(projectId) || movesOf(projectId).inFlight > 0) return;
+    if (!heldForMove.delete(projectId)) return;
+    void bb.experimental_hooks
+      .recheck("message.dispatch")
+      .catch((error: unknown) =>
+        bb.log.warn(
+          `bb not asked again after a move of project ${projectId}: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      );
+  }
+  /**
    * The thread's turn would wait for a seat on `name` while another thread
    * of its project is at work there, so seatsFullFor keeps the project
    * (Aitor 2026-11-05, «hay demasiadas cosas atascadas … Tenemos opus!»):
-   * it moves anyway, its siblings' next turns with it, when the thread has
-   * waited more than stuckMoveMinutes ("stuck"), or at once when the
-   * project asks for more seats than the account has ("crowded": only to
-   * an account with seats for all). For a model other than the reserved one
-   * only: where the reserved model's turns run is not this rule's. Null:
-   * neither, or stuckMoveMinutes is 0, or the project moved so within it.
+   * it moves anyway, its siblings' next turns with it, at once (Aitor
+   * 2026-11-05 13:15, «que cuando termine una … salga otra»: 0.2.41 waited
+   * stuckMoveMinutes first): to an account with seats for all when the
+   * project asks for more than the account has ("crowded", first ask
+   * only), else to a seat for the thread ("stuck"). For a model other than
+   * the reserved one only: where the reserved model's turns run is not this
+   * rule's. Null: neither, or stuckMoveMinutes is 0, or the project moved so
+   * within it.
    */
   function crowded(
     thread: ThreadResponse,
@@ -1167,11 +1215,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     let working = false;
     for (const [threadId, project] of turnsUnderWay)
       if (project === thread.projectId && threadId !== thread.id) working = true;
-    if (since !== null && now - since > limit)
-      return { kind: "stuck", minutes, wanted, capacity, working };
-    if (capacity > 0 && wanted > capacity)
+    // Seats for all first, at the first ask only: placeTurn falls back to
+    // a seat for the thread alone when no account has them.
+    if (since === null && capacity > 0 && wanted > capacity)
       return { kind: "crowded", minutes, wanted, capacity, working };
-    return null;
+    return { kind: "stuck", minutes, wanted, capacity, working };
   }
   /**
    * Whose seat a turn of a project on `at` takes (Astra SEATS-R3-001): its
@@ -1215,12 +1263,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /**
    * Reservations whose turn never started are freed, and every free seat
    * goes to the first in its account's queue; bb is asked again at once
-   * when someone got one.
+   * when someone got one, or when `freed` (a seat just ended) and threads
+   * wait on other accounts: one whose project can move to the seat goes
+   * now, not at its next SEAT_RECHECK_MS (Aitor 2026-11-05, «que cuando
+   * termine una … salga otra»).
    */
-  function admitWaiting(): void {
+  function admitWaiting(freed = false): void {
     const now = deps.now();
     const held = seats.holds().length;
-    for (const key of seats.expire(now, SEAT_TTL_MS))
+    const expired = seats.expire(now, SEAT_TTL_MS);
+    if (expired.length > 0) freed = true;
+    for (const key of expired)
       bb.log.info(
         `a seat reserved on ${seatName(key)} expired (its turn did not start, or its hold from outside bb ended); ${occupancy(key)}`,
       );
@@ -1232,7 +1285,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         `thread ${threadId}: admitted to a seat on ${seatName(key)}; ${occupancy(key)}`,
       );
     }
-    if (admitted.length > 0)
+    const waitingElsewhere =
+      freed &&
+      (heldForMove.size > 0 ||
+        Object.values(seats.snapshot()).some((s) => s.queued.length > 0));
+    if (admitted.length > 0 || waitingElsewhere)
       void bb.experimental_hooks
         .recheck("message.dispatch")
         .catch((error: unknown) =>
@@ -1279,12 +1336,28 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     bb.log.info(
       `thread ${threadId}: seat on ${seatName(key)} released (${why}); ${occupancy(key)}`,
     );
-    admitWaiting();
+    admitWaiting(true);
   }
   /** The thread's turn started on the seat budget `key`: its seat runs there. */
+  /**
+   * seats.reserve, and a seat the thread gave up on another account (a move
+   * that failed, or went elsewhere) goes at once to the threads waiting
+   * (Codex ASIENTOS-R2-001).
+   */
+  function reserveSeat(threadId: string, key: string, now: number): boolean {
+    const had = seats.seatOf(threadId)?.account;
+    const got = seats.reserve(threadId, key, now);
+    if (had !== undefined && had !== key) admitWaiting(true);
+    return got;
+  }
   function confirmSeat(threadId: string, key: string): void {
     unseated.delete(threadId);
+    // A turn sent now, past the checkpoint, after its project moved: its
+    // seat on the old account goes to the threads waiting there (Codex
+    // ASIENTOS-R3-002).
+    const had = seats.seatOf(threadId)?.account;
     const { over } = seats.confirm(threadId, key, deps.now());
+    if (had !== undefined && had !== key) admitWaiting(true);
     seatTitles.delete(threadId);
     const line = `thread ${threadId}: running on ${seatName(key)}${over ? " over capacity" : ""}; ${occupancy(key)}`;
     if (over) bb.log.warn(line);
@@ -1335,7 +1408,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const key = seatKey(account);
     seatProjects.set(thread.id, thread.projectId);
     const queuedBefore = seats.position(thread.id) !== null;
-    if (seats.reserve(thread.id, key, now)) {
+    if (reserveSeat(thread.id, key, now)) {
       seatTitles.delete(thread.id);
       if (queuedBefore)
         bb.log.info(
@@ -1625,24 +1698,82 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       `could not read the projects' models; the preferred model judges them, and they are not stored until a reload: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  // The seat samples kept; one of another shape (before 0.2.31's second
-  // round: no usage in it) is left out.
+  // The seat history (src/historial.ts): the plugin's SQLite database, a
+  // week of it. Unopened, the samples live in memory until a reload, as
+  // before, and the history says it has none.
+  try {
+    const db = bb.storage.database();
+    bb.storage.migrate(db, HISTORIAL_MIGRATIONS);
+    historial = db;
+  } catch (error) {
+    bb.log.warn(
+      `could not open the seat history; samples are kept in memory only until a reload: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  // The seat samples kept: those of the history, and once, those 0.2.42 and
+  // before kept in kv (one of another shape, before 0.2.31's second round,
+  // is left out), which go to the history and leave kv.
+  // Each step apart: one that fails leaves the others' samples (Codex
+  // ASIENTOS-002), and kv keeps its own until the history has them all.
+  const kept = new Map<string, Map<number, SeatSample>>();
+  const keep = (name: string, s: SeatSample) => {
+    const own = kept.get(name) ?? new Map<number, SeatSample>();
+    if (!own.has(s[0])) own.set(s[0], s);
+    kept.set(name, own);
+  };
+  let fromKv: [string, SeatSample][] | null = null;
   try {
     const parsed = z
       .record(z.string(), z.array(z.unknown()))
       .safeParse(await bb.storage.kv.get<unknown>(KV_SEATS));
-    if (parsed.success)
+    if (parsed.success) {
+      fromKv = [];
       for (const [name, samples] of Object.entries(parsed.data))
-        seatSamples[name] = samples.flatMap((sample) => {
+        for (const sample of samples) {
           const one = seatSampleSchema.safeParse(sample);
-          return one.success ? [one.data] : [];
-        });
-    pruneSeatSamples();
+          if (one.success) fromKv.push([name, one.data]);
+        }
+    }
   } catch (error) {
     bb.log.warn(
-      `could not read the seat samples; starting them again: ${error instanceof Error ? error.message : String(error)}`,
+      `could not read the seat samples 0.2.42 kept: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  for (const [name, s] of fromKv ?? []) keep(name, s);
+  if (historial !== null) {
+    if (fromKv !== null) {
+      let imported = false;
+      try {
+        for (const [name, [at, running, reserved, session, weekly, sessionResets, weeklyResets]] of fromKv)
+          addSample(historial, { at, account: name, running, reserved, external: null, waiting: null, capacity: null, session, weekly, sessionResets, weeklyResets });
+        imported = true;
+      } catch (error) {
+        bb.log.warn(
+          `could not move the seat samples 0.2.42 kept to the seat history; kept in memory, and in storage for the next load: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      if (imported)
+        try {
+          await bb.storage.kv.delete(KV_SEATS);
+        } catch (error) {
+          bb.log.warn(
+            `could not delete the seat samples 0.2.42 kept (now in the seat history; the next load tries again): ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+    }
+    try {
+      pruneHistorial(historial, deps.now());
+      for (const r of readSamples(historial, deps.now() - SEAT_SAMPLES_MS))
+        keep(r.account, [r.at, r.running, r.reserved, r.session, r.weekly, r.sessionResets, r.weeklyResets]);
+    } catch (error) {
+      bb.log.warn(
+        `could not read the seat history; starting the samples again: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  for (const [name, own] of kept)
+    seatSamples[name] = [...own.values()].sort((a, b) => a[0] - b[0]);
+  pruneSeatSamples();
   // What the banners were asked on before the restart, thread by thread:
   // checked against bb by the first refresh (see reviseAdvice). None with
   // the automatic choice off, which ends them all.
@@ -1777,15 +1908,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const paceSnapshot = { ...paceDay };
     const snapshot = series;
     pruneSeatSamples();
-    const seatSnapshot = structuredClone(seatSamples);
+    toHistorial("the week's end", (db) => pruneHistorial(db, deps.now()));
     seriesWrites = seriesWrites.then(async () => {
-      try {
-        await bb.storage.kv.set(KV_SEATS, seatSnapshot);
-      } catch (error) {
-        bb.log.warn(
-          `could not store the seat samples: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
       await storePaceDay(paceSnapshot);
       try {
         await bb.storage.kv.set(KV_SERIES, snapshot);
@@ -1864,6 +1988,21 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       weekly.absent === true ? null : weekly.resetsAt,
     ]);
     seatSamples[name] = own;
+    toHistorial(`a sample of ${name}`, (db) =>
+      addSample(db, {
+        at,
+        account: name,
+        running: taken.running,
+        reserved: taken.reserved,
+        external: taken.external?.length ?? 0,
+        waiting: taken.queued.length,
+        capacity: taken.capacity,
+        session: session.usedPercent,
+        weekly: weekly.absent === true ? null : weekly.usedPercent,
+        sessionResets: session.resetsAt,
+        weeklyResets: weekly.absent === true ? null : weekly.resetsAt,
+      }),
+    );
   }
   function forecasts(): State["forecasts"] {
     const now = deps.now();
@@ -2492,6 +2631,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         // banner taken away) runs here, inside this `finally`.
         if (move.inFlight === 0 && passAfterMove.delete(projectId))
           askBannersAgain();
+        wakeHeldForMove(projectId);
       }
     }
     if (toName !== (from.account ?? current.defaultAccountName))
@@ -4737,14 +4877,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const fromName = from.account ?? current.defaultAccountName;
     const now = deps.now();
     const excursion = excursions.get(projectId);
-    // Its turn would wait for a seat here: reservations whose turn never
-    // started are freed first, and the seats looked at again.
+    // Reservations whose turn never started are freed first, for both
+    // judgments below (Codex ASIENTOS-R2-002).
+    if (when === "before") admitWaiting();
     let seatsFull = when === "before" && seatsFullFor(thread, fromName);
-    if (seatsFull) {
-      admitWaiting();
-      seatsFull = seatsFullFor(thread, fromName);
-    }
-    const busy =
+    let busy =
       when === "before" && !seatsFull && turn.tick !== true
         ? crowded(thread, fromName, model, now)
         : null;
@@ -4782,7 +4919,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         now - crowdedMoves.get(projectId)!.at <=
           current.stuckMoveMinutes * 60_000,
     };
-    const decision = decidePlacement(input);
+    let decision = decidePlacement(input);
+    // No account with seats for all: a seat for the thread alone, at once.
+    if (busy?.kind === "crowded" && decision.kind === "keep") {
+      busy = { ...busy, kind: "stuck" };
+      const { seatsWanted: _w, seatsWantedOnly: _o, ...alone } = input;
+      decision = decidePlacement(alone);
+    }
     if (decision.kind === "keep") {
       // The turn runs where the project is (refused at the checkpoint only
       // when that is the default account and it has no login), unless it
@@ -4837,6 +4980,22 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       };
       return { account: fromName, byDefault: !from.owned, writes };
     }
+    // A move of any kind while a move of the project for a seat is written
+    // and recorded (a sibling that decided on the same read, or Team first
+    // sending it back): a second move in a row. Held, and placed again on a
+    // fresh read (Codex/Astra ASIENTOS-R3-001/R3-002/R4-001/R5-001). Other
+    // moves that cross keep their rule: the last one written stands.
+    // ponytail: moves made outside placeTurn (moveAhead, a refresh) do not
+    // look at it (Astra ASIENTOS-R6-001; needs switchAheadPercent on); the
+    // way up is to check it where every automatic move is written.
+    if (decision.account !== fromName && seatMoving.has(projectId)) {
+      heldForMove.add(projectId);
+      turn.held = {
+        sendAt: now + SEAT_RECHECK_MS,
+        reason: "Waiting: this project is being moved to another account for a seat",
+      };
+      return { account: fromName, byDefault: !from.owned, writes };
+    }
     // Read before the move: what the seats were as it was decided.
     const fullHere = seats.snapshot([seatKey(fromName)])[seatKey(fromName)]!;
     const roomThere = seatRoom(decision.account);
@@ -4847,26 +5006,35 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // whose turn never starts is freed as any reservation is (SEAT_TTL_MS).
     const claim =
       decision.why === "current-full" ? seatKey(decision.account) : null;
-    if (claim !== null) {
-      seatProjects.set(thread.id, projectId);
-      seats.reserve(thread.id, claim, now);
-    }
+    const seatMove = claim !== null && decision.account !== fromName;
+    if (seatMove) seatMoving.add(projectId);
     const to = accountOrDefault(decision.account);
-    // The sessions are not waited for: see applyAccount (Fable, 2026-10-29).
-    await applyAccount(projectId, to, from, {
-      share: false,
-      forThread: thread.id,
-    });
-    await markHandled(projectId);
-    // A move for a crowded seat is a new home, not an excursion: a turn in
-    // the preferred model going back would take the project to the full
-    // account again, where the threads of another model would queue anew.
-    // An excursion that left another account (Fable's home) is kept: only
-    // the way back to the full account goes (code-reviewer r1 H2).
-    if (busy !== null && decision.why === "current-full") {
-      if (excursions.get(projectId)?.from === fromName) excursions.delete(projectId);
-      crowdedMoves.set(projectId, { at: now, to: decision.account });
-    } else noteMove(projectId, fromName, decision.account, model, before);
+    try {
+      if (claim !== null) {
+        seatProjects.set(thread.id, projectId);
+        reserveSeat(thread.id, claim, now);
+      }
+      // The sessions are not waited for: see applyAccount (Fable, 2026-10-29).
+      await applyAccount(projectId, to, from, {
+        share: false,
+        forThread: thread.id,
+      });
+      await markHandled(projectId);
+      // A move for a crowded seat is a new home, not an excursion: a turn in
+      // the preferred model going back would take the project to the full
+      // account again, where the threads of another model would queue anew.
+      // An excursion that left another account (Fable's home) is kept: only
+      // the way back to the full account goes (code-reviewer r1 H2).
+      if (busy !== null && decision.why === "current-full") {
+        if (excursions.get(projectId)?.from === fromName) excursions.delete(projectId);
+        crowdedMoves.set(projectId, { at: now, to: decision.account });
+      } else noteMove(projectId, fromName, decision.account, model, before);
+    } finally {
+      if (seatMove) {
+        seatMoving.delete(projectId);
+        wakeHeldForMove(projectId);
+      }
+    }
     const reason =
       busy !== null && decision.why === "current-full"
         ? busyReason(busy, fromName, decision.account, roomThere, fullHere, model, input.pinned === true)
@@ -4918,7 +5086,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const libres = roomThere === 1 ? "libre" : "libres";
     const why =
       busy.kind === "stuck"
-        ? `el hilo llevaba ${busy.minutes} min esperando plaza, ahora en ${fromName} (${taken}/${busy.capacity} ocupadas), con otro hilo de su proyecto ${busy.working ? "trabajando" : "a punto de arrancar"}`
+        ? `${busy.minutes === 0 ? `el hilo iba a esperar plaza en ${fromName}` : `el hilo llevaba ${busy.minutes} min esperando plaza, ahora en ${fromName}`} (${taken}/${busy.capacity} ocupadas), con otro hilo de su proyecto ${busy.working ? "trabajando" : "a punto de arrancar"}`
         : `el proyecto pide ${busy.wanted} plazas a la vez y ${fromName} tiene ${busy.capacity}`;
     const options = { preferredModel: model, ...reserveOf() };
     const there = measuredAccounts(model).find((a) => a.name === to);
@@ -5272,7 +5440,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     for (const a of stuck) {
       if (now - (stuckSaid.get(a.hilo) ?? -Infinity) < STUCK_WAIT_MS) continue;
       stuckSaid.set(a.hilo, now);
-      bb.log.warn(atascoLine(a));
+      const line = atascoLine(a);
+      bb.log.warn(line);
+      toHistorial(`thread ${a.hilo} stuck`, (db) =>
+        addStuck(db, {
+          at: now,
+          thread: a.hilo,
+          account: a.cuenta,
+          model: a.modelo,
+          minutes: a.minutos,
+          free: a.libres,
+          projectBusy: a.proyectoOcupado,
+          line,
+        }),
+      );
     }
     for (const threadId of stuckSaid.keys())
       if (!waitSince.has(threadId)) stuckSaid.delete(threadId);
@@ -6986,13 +7167,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                 seats.releaseExternal(options.id);
                 if (before !== undefined) seats.restoreHolds([before], deps.now());
                 void storeHolds();
-                admitWaiting();
+                admitWaiting(true);
               }
               throw new PluginCliError(
                 `The seat on ${name} could not be stored (a reload would forget it); nothing held${before === undefined ? "" : ", the hold stays as it was"}.`,
                 { code: "not_stored", exitCode: 1 },
               );
             }
+            // Moved from another account: its seat there is free now (Codex
+            // ASIENTOS-001).
+            if (before !== undefined && before.account !== key) admitWaiting(true);
             bb.log.info(
               `seat on ${name} held from outside bb by ${options.id} until ${isoInZone(result.until)}${result.renewed ? " (renewed)" : ""}; ${occupancy(key)}`,
             );
@@ -7038,7 +7222,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
               bb.log.info(
                 `seat on ${seatName(key)} held from outside bb by ${options.id} released; ${occupancy(key)}`,
               );
-              admitWaiting();
+              admitWaiting(true);
             }
             const out =
               key === null
@@ -7070,10 +7254,48 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         }),
         history: cliCommand({
           summary:
-            "Show every move of a project to another account and every thread told to switch to Opus, latest first, and why",
-          options: { json: JSON_OPTION },
+            "Show every move of a project to another account and every thread told to switch to Opus, latest first, and why; with --dias N, also the seats hour by hour and the stuck threads of the last N days (at most 7)",
+          options: {
+            json: JSON_OPTION,
+            dias: {
+              type: "string",
+              description:
+                "Also the seats taken and waiting per hour and account, and every stuck thread with its why, of the last N days (1 to 7)",
+            },
+          },
           async run({ options }) {
             const s = await state();
+            if (options.dias !== undefined) {
+              const dias = Number(options.dias);
+              if (!Number.isInteger(dias) || dias < 1 || dias > HISTORIAL_DIAS)
+                return {
+                  exitCode: 2,
+                  stderr: `--dias takes a whole number from 1 to ${HISTORIAL_DIAS}\n`,
+                };
+              const now = deps.now();
+              const since = now - dias * 24 * 60 * 60_000;
+              if (historial === null)
+                return {
+                  exitCode: 1,
+                  stderr: "the seat history could not be opened (see the plugin's log)\n",
+                };
+              const samples = readSamples(historial, since);
+              const stuck = readStuck(historial, since);
+              const moves = s.history.filter((r) => r.at >= since);
+              if (options.json)
+                return {
+                  exitCode: 0,
+                  stdout: `${JSON.stringify({ dias, moves, stuck, samples }, null, 2)}\n`,
+                };
+              const moved = moves.map(
+                (r) =>
+                  `${new Date(r.at).toISOString()}\t${projectName(s.projects, r.projectId)}\t${r.from} → ${r.to}\t${r.reason}`,
+              );
+              return {
+                exitCode: 0,
+                stdout: `${historyText({ samples, stuck, dias, now })}\nMoves: ${moved.length}${moved.length === 0 ? "" : `\n${moved.join("\n")}`}\n`,
+              };
+            }
             if (options.json) {
               return {
                 exitCode: 0,
@@ -7120,7 +7342,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
               "time\taccount\trunning\treserved\tsession %\tweekly %\tsession resets\tweekly resets\tsession % per hour and seat",
             );
             const spend: string[] = [];
-            for (const [name, samples] of Object.entries(seatSamples)) {
+            // The text, the last day: the week is in `history --dias N`.
+            const dayAgo = deps.now() - 24 * 60 * 60_000;
+            for (const [name, all] of Object.entries(seatSamples)) {
+              const samples = all.filter(([at]) => at >= dayAgo);
               // The 5-hour window's share an hour of one seat spent, between
               // samples of the same window: Δ% ÷ hours ÷ the seats running
               // on average. None across a reset.
@@ -7151,7 +7376,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                 `${name}\t${seatHours > 0 ? `${(used / seatHours).toFixed(1)} %` : "—"} of the 5-hour window per hour and seat`,
               );
             }
-            lines.push("", ...spend);
+            lines.push("", ...spend, "", "Older samples, a week of them: bb claude-switcher history --dias N");
             return { exitCode: 0, stdout: `${lines.join("\n")}\n` };
           },
         }),
