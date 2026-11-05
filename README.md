@@ -963,8 +963,8 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
   turn in another model stays on the account picked, whatever it spends
   of `preferredModel`, until that account cannot run the turn; seats
   still move it (the history ends with `deja de valer el \`use\` a mano a
-  team2`), any automatic move ends the pick, and `release` forgets them
-  all.
+  team2`), a switch ahead of the limit does not (0.2.42), any automatic
+  move ends the pick, and `release` forgets them all.
 - **Otherwise seats steer the moves made for other reasons**: a new
   project, a move before a turn off an account that cannot run it, a
   move off a long wait and a switch ahead of the limit go only to an

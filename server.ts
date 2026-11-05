@@ -3830,6 +3830,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const from = await projectAccount(projectId);
     if (from.external) return;
     const fromName = from.account ?? current.defaultAccountName;
+    // A pick by hand holds until the account cannot run the turn, not
+    // until it nears a limit (Aitor 2026-11-05, (b); code-reviewer r4).
+    if (pins.get(projectId) === fromName) return;
     const now = deps.now();
     const decision = decideAhead({
       currentAccount: fromName,

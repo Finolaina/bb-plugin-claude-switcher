@@ -449,6 +449,9 @@ M = [
     ("N-b use", "el historial no dice que el `use` deja de valer (r2 low)", "server.ts",
      "    const pick = pinned ? ", "    const pick = false ? ",
      "server.test.ts", "a pick by hand of the full account gives way"),
+    ("N-b use", "el adelanto por límite deshace un `use` (r4)", "server.ts",
+     "    if (pins.get(projectId) === fromName) return;\n    const now = deps.now();\n    const decision = decideAhead({", "    const now = deps.now();\n    const decision = decideAhead({",
+     "server.test.ts", "does not move ahead of the limit off an account picked by hand"),
 ]
 
 

@@ -5901,6 +5901,24 @@ describe("moving a project ahead of the limit for a thread in another model", ()
     });
   });
 
+  it("does not move ahead of the limit off an account picked by hand: the pick holds until the account cannot run the turn (Aitor 2026-11-05, (b); code-reviewer r4)", async () => {
+    let clock = NOW;
+    const h = await host(TEAM_AHEAD, {
+      settings: { preferredModel: "Fable", switchAheadPercent: 0, switchAheadOtherPercent: 95 },
+      clock: () => clock,
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect((await h.harness.behavior.runCli(["use", "proj-1", "main"])).exitCode).toBe(0);
+    const writes = h.envSet.length;
+    clock = NOW + 5 * 60_000;
+    expect(await sent(h, "claude-opus-5-5")).toEqual({ action: "proceed" });
+    await idle(h);
+    expect(h.envSet.length).toBe(writes);
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history.map((r) => r.reason).join("\n")).not.toContain("Switched ahead");
+  });
+
   it("writes nothing ahead of the limit when a placement before a turn moved the project while the sessions were shared", async () => {
     let clock = NOW;
     const order: string[] = [];
