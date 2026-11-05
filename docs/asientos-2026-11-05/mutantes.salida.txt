@@ -1,18 +1,21 @@
-muerto M1 el hilo con hermanos espera en vez de moverse al momento
-muerto M2 sin plazas para todos, no prueba una plaza para el hilo solo
-muerto M3 un asiento libre no vuelve a preguntar a los de otras cuentas
-muerto M4 vuelve a preguntar en cada consulta, no solo al liberarse un asiento
-muerto M5 la ventana de calma corta en N en vez de pasado N
-muerto M6 el texto del movimiento al momento dice 0 min
-muerto M7 la poda borra también lo de 7 días justos
-muerto M8 las muestras no guardan los hilos en espera
-muerto M9 las filas STUCK no se guardan
-muerto M10 al arrancar no relee el historial
-muerto M11 history --dias admite 8
-muerto M12 una retención movida a otra cuenta no libera la de antes (Codex ASIENTOS-001)
-muerto M13 las muestras de kv no quedan en memoria si la base no las admite (Codex ASIENTOS-002)
-VIVO   M14 sin borrar kv no se lee la base (Codex ASIENTOS-002)
-muerto M15 las retenciones de fuera se guardan sumadas a las de bb (Codex ASIENTOS-003)
-14/15 mutantes muertos
-
-M14 reescrito tras esta tanda (el test no distinguía): con el test nuevo, rc del test 0 sin mutar y 1 mutado (2026-11-05 ~14:25).
+SIN MUTAR  rc=0 · Tests  1274 passed | 1 skipped (1275)
+muerto M1 el hilo con hermanos espera en vez de moverse al momento · Tests  1 failed | 1255 passed | 1 skipped (1275)
+muerto M2 sin plazas para todos, no prueba una plaza para el hilo solo · Tests  1 failed | 1247 passed | 1 skipped (1275)
+muerto M3 un asiento libre no vuelve a preguntar a los de otras cuentas · Tests  1 failed | 1249 passed | 1 skipped (1275)
+muerto M4 vuelve a preguntar en cada consulta, no solo al liberarse un asiento · Tests  1 failed | 1121 passed | 1 skipped (1275)
+muerto M5 la ventana de calma corta en N en vez de pasado N · Tests  1 failed | 1256 passed | 1 skipped (1275)
+muerto M6 el texto del movimiento al momento dice 0 min · Tests  1 failed | 1247 passed | 1 skipped (1275)
+muerto M7 la poda borra también lo de 7 días justos · Tests  1 failed | 338 passed | 49 skipped (1275)
+muerto M8 las muestras no guardan los hilos en espera · Tests  1 failed | 1060 passed | 1 skipped (1275)
+muerto M9 las filas STUCK no se guardan · Tests  1 failed | 1158 passed | 1 skipped (1275)
+muerto M10 al arrancar no relee el historial · Tests  1 failed | 1061 passed | 1 skipped (1275)
+muerto M11 history --dias admite 8 · Tests  1 failed | 1064 passed | 1 skipped (1275)
+muerto M12 una retención movida a otra cuenta no libera la de antes (Codex ASIENTOS-001) · Tests  1 failed | 1121 passed | 1 skipped (1275)
+muerto M13 las muestras de kv no quedan en memoria si la base no las admite (Codex ASIENTOS-002) · Tests  1 failed | 1062 passed | 1 skipped (1275)
+muerto M14 sin borrar kv no se lee la base (Codex ASIENTOS-002) · Tests  1 failed | 1063 passed | 1 skipped (1275)
+muerto M15 las retenciones de fuera se guardan sumadas a las de bb (Codex ASIENTOS-003) · Tests  1 failed | 1061 passed | 1 skipped (1275)
+muerto M16 una plaza abandonada al fallar un movimiento no despierta la cola (Codex ASIENTOS-R2-001) · Tests  1 failed | 1250 passed | 1 skipped (1275)
+muerto M17 las reservas caducadas no se sueltan antes de juzgar con hermanos (Codex ASIENTOS-R2-002) · Tests  1 failed | 1251 passed | 1 skipped (1275)
+muerto M18 un turno que arranca en otra cuenta que su plaza no la suelta a la cola (Codex ASIENTOS-R3-002) · Tests  1 failed | 1120 passed | 1 skipped (1275)
+muerto M19 dos hilos que deciden sobre la misma lectura mueven el proyecto dos veces (Astra ASIENTOS-R3-002) · Tests  1 failed | 1252 passed | 1 skipped (1275)
+19/19 mutantes muertos

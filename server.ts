@@ -1148,6 +1148,24 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** When each project last moved for a crowded seat (see crowded): not again within stuckMoveMinutes. */
   const crowdedMoves = new Map<string, { at: number; to: string }>();
   /**
+   * Projects with a move for a seat under way, from its decision until it
+   * is recorded (crowdedMoves), and projects with a turn held meanwhile:
+   * asked again as the move ends, landed or not (Astra ASIENTOS-R4-001/002).
+   */
+  const seatMoving = new Set<string>();
+  const heldForMove = new Set<string>();
+  function wakeHeldForMove(projectId: string): void {
+    if (seatMoving.has(projectId) || movesOf(projectId).inFlight > 0) return;
+    if (!heldForMove.delete(projectId)) return;
+    void bb.experimental_hooks
+      .recheck("message.dispatch")
+      .catch((error: unknown) =>
+        bb.log.warn(
+          `bb not asked again after a move of project ${projectId}: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      );
+  }
+  /**
    * The thread's turn would wait for a seat on `name` while another thread
    * of its project is at work there, so seatsFullFor keeps the project
    * (Aitor 2026-11-05, «hay demasiadas cosas atascadas … Tenemos opus!»):
@@ -1265,7 +1283,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     const waitingElsewhere =
       freed &&
-      Object.values(seats.snapshot()).some((s) => s.queued.length > 0);
+      (heldForMove.size > 0 ||
+        Object.values(seats.snapshot()).some((s) => s.queued.length > 0));
     if (admitted.length > 0 || waitingElsewhere)
       void bb.experimental_hooks
         .recheck("message.dispatch")
@@ -2608,6 +2627,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         // banner taken away) runs here, inside this `finally`.
         if (move.inFlight === 0 && passAfterMove.delete(projectId))
           askBannersAgain();
+        wakeHeldForMove(projectId);
       }
     }
     if (toName !== (from.account ?? current.defaultAccountName))
@@ -4964,8 +4984,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (
       decision.why === "current-full" &&
       decision.account !== fromName &&
-      movesOf(projectId).inFlight > 0
+      (seatMoving.has(projectId) || movesOf(projectId).inFlight > 0)
     ) {
+      heldForMove.add(projectId);
       turn.held = {
         sendAt: now + SEAT_RECHECK_MS,
         reason: "Waiting: this project is being moved to another account for a seat",
@@ -4982,26 +5003,35 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // whose turn never starts is freed as any reservation is (SEAT_TTL_MS).
     const claim =
       decision.why === "current-full" ? seatKey(decision.account) : null;
-    if (claim !== null) {
-      seatProjects.set(thread.id, projectId);
-      reserveSeat(thread.id, claim, now);
-    }
+    const seatMove = claim !== null && decision.account !== fromName;
+    if (seatMove) seatMoving.add(projectId);
     const to = accountOrDefault(decision.account);
-    // The sessions are not waited for: see applyAccount (Fable, 2026-10-29).
-    await applyAccount(projectId, to, from, {
-      share: false,
-      forThread: thread.id,
-    });
-    await markHandled(projectId);
-    // A move for a crowded seat is a new home, not an excursion: a turn in
-    // the preferred model going back would take the project to the full
-    // account again, where the threads of another model would queue anew.
-    // An excursion that left another account (Fable's home) is kept: only
-    // the way back to the full account goes (code-reviewer r1 H2).
-    if (busy !== null && decision.why === "current-full") {
-      if (excursions.get(projectId)?.from === fromName) excursions.delete(projectId);
-      crowdedMoves.set(projectId, { at: now, to: decision.account });
-    } else noteMove(projectId, fromName, decision.account, model, before);
+    try {
+      if (claim !== null) {
+        seatProjects.set(thread.id, projectId);
+        reserveSeat(thread.id, claim, now);
+      }
+      // The sessions are not waited for: see applyAccount (Fable, 2026-10-29).
+      await applyAccount(projectId, to, from, {
+        share: false,
+        forThread: thread.id,
+      });
+      await markHandled(projectId);
+      // A move for a crowded seat is a new home, not an excursion: a turn in
+      // the preferred model going back would take the project to the full
+      // account again, where the threads of another model would queue anew.
+      // An excursion that left another account (Fable's home) is kept: only
+      // the way back to the full account goes (code-reviewer r1 H2).
+      if (busy !== null && decision.why === "current-full") {
+        if (excursions.get(projectId)?.from === fromName) excursions.delete(projectId);
+        crowdedMoves.set(projectId, { at: now, to: decision.account });
+      } else noteMove(projectId, fromName, decision.account, model, before);
+    } finally {
+      if (seatMove) {
+        seatMoving.delete(projectId);
+        wakeHeldForMove(projectId);
+      }
+    }
     const reason =
       busy !== null && decision.why === "current-full"
         ? busyReason(busy, fromName, decision.account, roomThere, fullHere, model, input.pinned === true)

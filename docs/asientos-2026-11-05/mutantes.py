@@ -66,8 +66,14 @@ MUTANTES = [
      "    const { over } = seats.confirm(threadId, key, deps.now());\n    if (had !== undefined && had !== key) admitWaiting(true);",
      "    const { over } = seats.confirm(threadId, key, deps.now());"),
     ("M19 dos hilos que deciden sobre la misma lectura mueven el proyecto dos veces (Astra ASIENTOS-R3-002)", "server.ts",
-     "      decision.account !== fromName &&\n      movesOf(projectId).inFlight > 0\n    ) {",
-     "      decision.account !== fromName &&\n      false\n    ) {"),
+     "      (seatMoving.has(projectId) || movesOf(projectId).inFlight > 0)\n    ) {",
+     "      false\n    ) {"),
+    ("M20 la guarda solo mira la escritura, no el registro del movimiento (Astra ASIENTOS-R4-001)", "server.ts",
+     "      (seatMoving.has(projectId) || movesOf(projectId).inFlight > 0)\n    ) {",
+     "      movesOf(projectId).inFlight > 0\n    ) {"),
+    ("M21 el turno retenido por un movimiento no se vuelve a preguntar al acabar (Astra ASIENTOS-R4-002)", "server.ts",
+     "    if (!heldForMove.delete(projectId)) return;\n    void bb",
+     "    if (heldForMove.delete(projectId)) return;\n    void bb"),
 ]
 
 

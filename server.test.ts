@@ -19801,6 +19801,7 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
         },
       });
       armed = true;
+      const before = h.harness.recheckCount;
       const b = await dispatch(h, "b", "proj-1");
       const cc = await c!;
       armed = false;
@@ -19810,6 +19811,37 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
       expect((await history(h)).filter((r) => r.startsWith("Movido") || r.startsWith("Moved"))).toHaveLength(1);
       const seats = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
       expect((seats.seats?.main?.reserved ?? 0) + (seats.seats?.work?.reserved ?? 0)).toBe(1);
+      // The one held is asked again as the move ends, not at its next 30 s (Astra ASIENTOS-R4-002).
+      await vi.waitFor(() => expect(h.harness.recheckCount).toBeGreaterThan(before));
+    });
+
+    it("the move for a seat holds the project until it is recorded, and the thread held meanwhile is asked again as it ends (Astra ASIENTOS-R4-001/002)", async () => {
+      // b's move to work is written; while it is being recorded, c asks on
+      // the new read (work, its seat b's): it would move again, to main.
+      let armed = false;
+      let c: Promise<{ action: string; reason?: string }> | null = null;
+      // One seat each: spare (a's), work and main.
+      const { h } = await start({ settings: { otherModelUpTo: 50, seatsMax: 1, seatsFollowLoad: false } });
+      const set = h.bb.storage.kv.set.bind(h.bb.storage.kv);
+      h.bb.storage.kv.set = async (key: string, value: unknown) => {
+        if (armed && key === "handled-projects" && c === null) {
+          c = dispatch(h, "c", "proj-1");
+          await c;
+        }
+        return set(key, value);
+      };
+      // proj-1 is new to the handled list: its move writes it.
+      await h.bb.storage.kv.delete("handled-projects");
+      armed = true;
+      const before = h.harness.recheckCount;
+      const b = await dispatch(h, "b", "proj-1");
+      armed = false;
+      expect(c).not.toBeNull();
+      const writes = [...h.envSet, ...h.envDeleted].filter((e) => e.projectId === "proj-1");
+      expect(writes).toHaveLength(1);
+      expect(b.action).toBe("proceed");
+      expect(await c!).toMatchObject({ action: "wait", reason: "Waiting: this project is being moved to another account for a seat" });
+      await vi.waitFor(() => expect(h.harness.recheckCount).toBeGreaterThan(before));
     });
 
     // Codex ASIENTOS-R2-003 / R3-001. A read a write crosses is refused and
