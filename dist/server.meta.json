@@ -1,11 +1,11 @@
 {
   "sdkMajor": 0,
-  "sdkVersion": "0.6.104",
+  "sdkVersion": "0.6.15",
   "artifactFormatVersion": 1,
   "pluginId": "claude-switcher",
   "pluginVersion": "0.2.42",
   "builtWith": {
     "bbVersion": "0.45.0",
-    "pluginSdkVersion": "0.6.104"
+    "pluginSdkVersion": "0.6.15"
   }
 }
