@@ -2,6 +2,17 @@
 
 - [ ] Tras reescribir el historial sin nombres de proyectos (Aitor, 2026-11-03 ~19:15: «Sí, borrarlos del historial»): confirmar que GitHub Support purgó las vistas en caché de los commits viejos (d01559a y los de la rama de 0.2.37). Estado en `docs/plazas-2026-11-03/START-preguntas-abiertas.md`.
 
+## Estado de la 0.2.43 (2026-11-05 15:36): en main (2ef9835), instalada
+
+Encargo de Aitor del 2026-11-05 13:15 («que no se quede nada pillado… abrir un poco más el grifo»); medida en el Optimizador, `informes/2026-11-05/asientos/MEDIDA.md`.
+
+- [x] Mover al momento con hermanos trabajando (2,0 s en vivo, antes 10 min 24 s); al liberarse una plaza, el siguiente entra en 0,7 s; el hermano termina su turno.
+- [x] Historial de 7 días en SQLite (`history --dias N`, fila de atascos); arregla lo de `seat-samples` que no cabía en el almacén.
+- [x] seatsTeam 3 (14:23) y seatsMax 5 (14:52; 6 con seatsFollowLoad): una hora de cada uno sin 429.
+- [ ] Al recargar, un hilo en marcha cuenta en la cuenta actual de su proyecto, no en la que arrancó (team2 salió 5/3 al instalar). Viene de antes; guardar la cuenta de arranque de cada hilo en el almacén.
+- [ ] Mañana: mirar `history --dias 1` y la fila de atascos. Si hay atascos dentro de los 10 min tras un movimiento por plazas, bajar `stuckMoveMinutes`; si las Team agotan su sesión a diario y vuelve la cola, proponer a Aitor otra Max.
+- [ ] Techos anotados en CLAUDE.md: R5-002, R6-001 y R6-002 (`docs/asientos-2026-11-05/`).
+
 ## Estado de la 0.2.41 (2026-11-05 00:30): en rama `fix/atasco-noche`, en revisión
 
 Encargo de Aitor, 2026-11-05 00:20 (por Fable, hilo thr_gar882gnyj): «hay demasiadas cosas atascadas … resuelve si es cosa de swicher … ponte loops … abre un poco la mano … Tenemos opus!». Causa y cifra: Optimizador `informes/2026-11-05/switcher-noche/CAUSA.md` (24 h de espera el 4-nov, cuenta nuestra; todas con un hermano del proyecto trabajando).
