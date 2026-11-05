@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.42] - 2026-11-05
+
+### Fixed
+
+- **A pick by hand also holds against a switch ahead of the limit.** With
+  `switchAheadOtherPercent` on, an Opus turn on a picked account at 95 %
+  of its session moved the project away; now the pick holds until the
+  account cannot run the turn, as 0.2.41 promised.
+
 ## [0.2.41] - 2026-11-05
 
 ### Changed
