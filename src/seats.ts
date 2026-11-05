@@ -368,6 +368,11 @@ export class Seats {
       .map(([threadId], i) => ({ threadId, position: i + 1 }));
   }
 
+  /** Since when the thread waits for a seat (kept when its project moves), or null when it is in no queue. */
+  waitingSince(threadId: string): number | null {
+    return this.waiting.get(threadId)?.since ?? null;
+  }
+
   /** Where the thread waits, or null when it is in no queue. */
   position(threadId: string): { account: string; position: number } | null {
     const waiting = this.waiting.get(threadId);

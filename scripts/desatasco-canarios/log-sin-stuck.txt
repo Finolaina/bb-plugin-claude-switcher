@@ -1,0 +1,1 @@
+{"ts":1793832950000,"level":"info","message":"thread thr_x: running on team3; 1/2 taken, 0 waiting"}

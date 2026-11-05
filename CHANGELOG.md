@@ -4,6 +4,35 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.41] - 2026-11-05
+
+### Changed
+
+- **A busy project no longer keeps its waiting thread for hours.** On
+  2026-11-04 twelve threads waited 24 hours in all (our own count, from
+  the plugin's STUCK lines) in full Team seats while Ultras sat idle: a
+  project with another thread at work was never moved for seats, and a
+  turn in another model never ran on an account that keeps the preferred
+  model. Now a thread in another model that has waited more than
+  `stuckMoveMinutes` (10) moves its project to an account with a seat,
+  other threads at work or not; a project asking for more seats than its
+  account has moves at once to one with seats for all of them.
+- **A turn in another model may run on a Max or Ultra account with room**
+  (`otherModelUpTo`, 50 %): while the account's weekly and its
+  preferred-model window are both at or under it, after every Team seat
+  with a free seat. 0 restores «wait for a Team seat».
+- **A pick by hand holds** for turns in another model until the account
+  cannot run them; until 0.2.40 an Opus turn moved the project off a
+  picked Max account within a second. A thread left in error on a picked
+  account retries there; `release` forgets every pick.
+- The history says the new moves in Spanish, with how long the thread
+  waited or how many seats the project asked for, and the margin of the
+  account it went to.
+- **Team first, without bouncing.** A stuck thread takes a free Team seat
+  before an Ultra with room; a project on an Ultra with room goes to a
+  Team seat with room for all its threads there, but not within
+  `stuckMoveMinutes` of a move for seats.
+
 ## [0.2.40] - 2026-11-04
 
 ### Changed

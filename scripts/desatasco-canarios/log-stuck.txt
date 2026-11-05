@@ -1,0 +1,4 @@
+{"ts":1793831400000,"level":"warn","message":"STUCK: team1 holds thread thr_viejo (Opus) 40 min, team3 is free"}
+{"ts":1793832900000,"level":"warn","message":"STUCK: team2 holds thread thr_atascado (Opus) 24 min, team4, team3 are free; another thread of its project is at work"}
+{"ts":1793832900000,"level":"warn","message":"STUCK: team5 holds thread thr_fable (Fable) 12 min, team3 is free"}
+{"ts":1793832950000,"level":"info","message":"thread thr_x: running on team3; 1/2 taken, 0 waiting"}

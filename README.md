@@ -816,6 +816,8 @@ named `default`; the default account's own name always works.
 | `claudeCommand`      | `claude`             | The Claude Code executable used to log an account in from bb: a name looked up in the `PATH` of bb's server, or a full path.                                                                                        |
 | `seatsMax`           | `4`                  | Threads at once on a Max account: a thread whose turn is about to start waits when the project's account already runs this many. 0 = no limit. See [Seats per account](#seats-per-account). |
 | `seatsTeam`          | `2`                  | The same for a Team account. |
+| `stuckMoveMinutes`   | `10`                 | A thread in another model than `preferredModel` that has waited this long for a seat moves its project to an account with a seat, other threads of it at work or not; a project asking for more seats than its account has moves at once to one with seats for all. 0 = never. See [Seats per account](#seats-per-account). |
+| `otherModelUpTo`     | `50`                 | A turn in another model runs on a Max or Ultra account that keeps `preferredModel` while that account's weekly and preferred-model windows are both at or under this %, after every Team seat with a free seat. 0 = never. |
 | `seatsFollowLoad`    | `true`               | A Max or Ultra account takes one thread more than `seatsMax` while its day's pace is under 50 % and its 5-hour session (when it has one) under 40 %, and one fewer once its pace passes 90 %; each change is in the history. Off: `seatsMax`, always. See [Seats per account](#seats-per-account). |
 | `dayStartHour`       | `9`                  | Hour the day starts in Europe/Madrid. Each day gets an even share of what is left of an account's weekly window; the panel and `health` show how much of it is spent. |
 | `paceHoldsBackground` | `false`             | On: an Ultra or Max account at 90 % of its share of the day takes no more background work (a thread another thread, an automation or a plugin opens) unless no other account can run it, and the panel shows it as kept for you. Your own threads are never held back by it. Off (the default since 0.2.33): the day's share is only shown. |
@@ -923,8 +925,46 @@ may run turns on it at once, `seatsMax` (default 4) on a Max account and
   one is set, never a Max account that keeps Fable for another model).
   The history says `Moved to account joytorm before the turn: siloeads
   seats full (4/4), joytorm had 4 free`. A project with another thread's
-  turn under way (or about to start) stays: moving it moves all its
-  threads. The message waits only when no such account has a seat.
+  turn under way (or about to start) stays at first: moving it moves all
+  its threads (their next turns run on the new account; a turn already
+  running goes on where it started). The message waits only when no such
+  account has a seat.
+- **A busy project still moves** (`stuckMoveMinutes`, default 10, since
+  0.2.41; Aitor, 2026-11-05: «hay demasiadas cosas atascadas … Tenemos
+  opus!»: on 2026-11-04 twelve threads waited 24 hours in all in full
+  Team seats, every one behind another thread of its own project, with
+  Ultras idle). A thread in a model other than `preferredModel` that has
+  waited more than that many minutes for a seat moves its project, other
+  threads at work or not, to an account with a seat: `Movido a team3
+  antes del turno: el hilo llevaba 12 min esperando plaza, ahora en team2
+  (2/2 ocupadas), con otro hilo de su proyecto trabajando; team3 tenía 1
+  libre` («a punto de arrancar» instead of «trabajando» when the other
+  thread was told to start but has not started yet). A
+  project that asks for more seats at once than its account has (its
+  threads at work or waiting there, and this one) moves at once, but only
+  to an account with seats for all of them: `… el proyecto pide 3 plazas
+  a la vez y team5 tiene 2; viaulab tenía 5 libres …`. A stuck thread
+  takes a Team seat for itself before an Ultra with room for the whole
+  project; only a crowded project needs seats for all. A project moved so
+  is not moved so again, nor taken back to a Team seat, within the same
+  minutes. These clocks live in memory: a reload of the plugin starts
+  them again. 0 = never.
+- **Opus on an Ultra with room** (`otherModelUpTo`, default 50, since
+  0.2.41). A Max or Ultra account that keeps `preferredModel` takes a
+  turn in another model while its weekly and its preferred-model window
+  are both at or under this share; it comes after every Team seat with a
+  free seat, so it is used only when none has one; a project on it goes
+  to a Team seat with room for all its threads there before such a turn
+  (`Movido a team3 antes del turno: viaulab guarda la semanal de Fable y
+  team3 es una Team con plaza (Team primero)`). The history adds `y le queda margen de
+  Fable (semanal 0 %, Fable 0 %, tope 50 %)`. 0 = never: the turn waits
+  for a Team seat, as before 0.2.41.
+- **A pick by hand holds** (since 0.2.41). After `use` or the picker, a
+  turn in another model stays on the account picked, whatever it spends
+  of `preferredModel`, until that account cannot run the turn; seats
+  still move it (the history ends with `deja de valer el \`use\` a mano a
+  team2`), any automatic move ends the pick, and `release` forgets them
+  all.
 - **Otherwise seats steer the moves made for other reasons**: a new
   project, a move before a turn off an account that cannot run it, a
   move off a long wait and a switch ahead of the limit go only to an

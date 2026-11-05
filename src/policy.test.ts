@@ -703,3 +703,44 @@ describe("chooseAccount for background work (SPEC 2026-10-30 §2)", () => {
     expect(chooseAccount([busy, ultra], { preferredModel: "" })?.account).toBe("ultra");
   });
 });
+
+// Aitor 2026-11-05 («hay cuota de claude … Tenemos opus!»): with the Team
+// seats full, a turn in another model may run on a Max or Ultra account that
+// keeps the reserved model while its weekly and the reserved model's window
+// are at or under `reserveSpareUpTo`; never above it.
+describe("reserveSpareUpTo", () => {
+  // "a-ultra" sorts before "team": the Team goes first by rank, not by name.
+  const ultra = (weekly: number, fable: number) =>
+    account("a-ultra", {
+      weekly: { usedPercent: weekly, resetsAt: NOW + 48 * HOUR },
+      models: { Fable: { usedPercent: fable, resetsAt: NOW + 48 * HOUR } },
+    });
+  const team = account("team", { team: true, models: { Fable: { usedPercent: 4, resetsAt: NOW + 48 * HOUR } } });
+  const opus = (upTo?: number): ChoiceOptions => ({
+    preferredModel: "Opus",
+    reserveModel: "Fable",
+    ...(upTo === undefined ? {} : { reserveSpareUpTo: upTo }),
+  });
+
+  it("an Ultra at the threshold in both windows spares the reserve; one point above in either does not", () => {
+    expect(spendsReservedWeekly(ultra(50, 50), opus(50))).toBe(false);
+    expect(spendsReservedWeekly(ultra(51, 10), opus(50))).toBe(true);
+    expect(spendsReservedWeekly(ultra(10, 51), opus(50))).toBe(true);
+  });
+
+  it("unset or 0 keeps every account with the reserve for it, as before", () => {
+    expect(spendsReservedWeekly(ultra(0, 0), opus())).toBe(true);
+    expect(spendsReservedWeekly(ultra(0, 0), opus(0))).toBe(true);
+  });
+
+  it("a Team seat with a free seat still goes first; the Ultra only when no Team has one", () => {
+    const seats = (free: Record<string, number>) => ({ ...opus(50), freeSeats: (a: string) => free[a] ?? 0 });
+    expect(chooseAccount([ultra(0, 0), team], seats({ "a-ultra": 5, team: 1 }))?.account).toBe("team");
+    expect(chooseAccount([ultra(0, 0), team], seats({ "a-ultra": 5, team: 0 }))?.account).toBe("a-ultra");
+    expect(chooseAccount([ultra(51, 0), team], seats({ "a-ultra": 5, team: 0 }))).toBeNull();
+  });
+
+  it("does not change where the reserved model itself runs", () => {
+    expect(spendsReservedWeekly(ultra(80, 80), { preferredModel: "Fable", reserveModel: "Fable", reserveSpareUpTo: 50 })).toBe(false);
+  });
+});

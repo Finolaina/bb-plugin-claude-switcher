@@ -2,6 +2,17 @@
 
 - [ ] Tras reescribir el historial sin nombres de proyectos (Aitor, 2026-11-03 ~19:15: «Sí, borrarlos del historial»): confirmar que GitHub Support purgó las vistas en caché de los commits viejos (d01559a y los de la rama de 0.2.37). Estado en `docs/plazas-2026-11-03/START-preguntas-abiertas.md`.
 
+## Estado de la 0.2.41 (2026-11-05 00:30): en rama `fix/atasco-noche`, en revisión
+
+Encargo de Aitor, 2026-11-05 00:20 (por Fable, hilo thr_gar882gnyj): «hay demasiadas cosas atascadas … resuelve si es cosa de swicher … ponte loops … abre un poco la mano … Tenemos opus!». Causa y cifra: Optimizador `informes/2026-11-05/switcher-noche/CAUSA.md` (24 h de espera el 4-nov, cuenta nuestra; todas con un hermano del proyecto trabajando).
+
+- [x] Reglas (a) espera > `stuckMoveMinutes`, (b) `use` aguanta, (c) más hilos que plazas, Opus en Ultra ≤ `otherModelUpTo`: código y pruebas en verde (1253) y 135 mutantes (`docs/revision-2026-11-04/mutantes.salida.txt`).
+- [x] Revisión: Codex no disponible (sesión revocada en el NUC y el Mac, sin login en el i9), así que code-reviewer en sesión limpia con el mismo encargo (regla de Aitor, 2026-09-28). Marcha normal, última ronda útil: 4 de 4. r1 y r2 con high (Team primero, rebote, hilo atascado a la Ultra con una Team libre), arreglados con prueba y mutante; r3 y r4 sin high.
+- [ ] Low de r3/r4 sin arreglar, a la espera de uso real: dos hilos del mismo proyecto pueden moverlo a la vez en la misma revisión de 30 s (dos líneas en el historial, nada roto); el adelanto por límite (`switchAhead*Percent`, a 0 de serie) no respeta un `use`; un `pins` guardado que no case con el esquema se pierde sin aviso y no hay prueba de recarga; tras el freno de `stuckMoveMinutes` un proyecto de muchos hilos puede volver a una Team y rebotar cada 10 min; el texto de «Team primero» en el camino `after` sale genérico.
+- [ ] Fusión, etiqueta `v0.2.41`, `bb plugin update claude-switcher` en el NUC (arrastra la 0.2.40 sin instalar: se instala con cola porque deshacer esa cola es el encargo), 30 min de `seats` sin STUCK.
+- [ ] Bucle temporal `switcher-desatasco` (systemd --user en el i9, cada 10 min, `scripts/desatasco-noche.py`): se apaga solo con la 0.2.41 instalada o a las 08:00. Registro: `~/.claude/state/switcher-desatasco.jsonl` y `…-pasadas.log` en el i9.
+- [ ] [SUPUESTO] 10 min y 50 % son los valores por defecto que puso la sesión que delegó; no medidos. Cambiarlos es de Aitor.
+
 ## Estado de la 0.2.40 (2026-11-05): fusionada, sin instalar
 
 Encargo de Aitor, 2026-11-04, audio tareas-1: valorar las cachés que mata el cambio de cuenta y ver cómo cambiar sin perderlas, sin machacar lo demás. Informe: `docs/cambios-y-caches.md`. Opciones, simulación y veredictos: `docs/plan-cambio-en-pausas.md`.
