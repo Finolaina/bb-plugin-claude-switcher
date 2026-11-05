@@ -47,7 +47,9 @@ project uses [Semantic Versioning](https://semver.org/).
   threads waiting for it**, and reservations whose turn never started are
   freed before a turn with siblings at work is judged: a seat that is in
   fact free does not move the project. A turn sent now, past the checkpoint,
-  on another account than its seat also frees that seat at once.
+  on another account than its seat also frees that seat at once, and two
+  threads of a project that decide on the same read move it once for a seat,
+  not twice.
 
 ## [0.2.42] - 2026-11-05
 

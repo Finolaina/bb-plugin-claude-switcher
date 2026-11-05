@@ -65,11 +65,11 @@ MUTANTES = [
     ("M18 un turno que arranca en otra cuenta que su plaza no la suelta a la cola (Codex ASIENTOS-R3-002)", "server.ts",
      "    const { over } = seats.confirm(threadId, key, deps.now());\n    if (had !== undefined && had !== key) admitWaiting(true);",
      "    const { over } = seats.confirm(threadId, key, deps.now());"),
+    ("M19 dos hilos que deciden sobre la misma lectura mueven el proyecto dos veces (Astra ASIENTOS-R3-002)", "server.ts",
+     "      decision.account !== fromName &&\n      movesOf(projectId).inFlight > 0\n    ) {",
+     "      decision.account !== fromName &&\n      false\n    ) {"),
 ]
-# Codex ASIENTOS-R3-001 (dos movimientos del mismo proyecto en vuelo) no lleva arreglo: una
-# guarda que retenía el segundo rompió 6 tests que fijan a propósito cómo se resuelven dos
-# movimientos que se cruzan (el último en escribir manda y el fallo se reintenta donde está
-# el proyecto). Lo cubre el test «no second move while one of the project is being written».
+
 
 
 def vitest() -> tuple[int, str]:

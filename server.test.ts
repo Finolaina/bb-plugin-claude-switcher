@@ -19778,6 +19778,40 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
     // write is under way; c, on the same read of spare, would take main
     // (the default account: a delete, not a set). It waits instead, and is
     // asked again as b's move lands.
+    it("two threads of the project deciding on the same read, two places free, move it once (Astra ASIENTOS-R3-002)", async () => {
+      // b's read of proj-1 answers only once c's has too: both decide on
+      // spare full, with work (Team) and main (Ultra at 40 %) both free.
+      let armed = false;
+      let c: Promise<{ action: string; reason?: string }> | null = null;
+      let bothRead!: () => void;
+      const barrier = new Promise<void>((resolve) => (bothRead = resolve));
+      const { h } = await start({
+        settings: { otherModelUpTo: 50 },
+        extra: {
+          afterEnvRead: async (projectId: string) => {
+            if (!armed || projectId !== "proj-1") return;
+            if (c === null) {
+              c = dispatch(h, "c", "proj-1");
+              await barrier;
+            } else {
+              setTimeout(bothRead, 0);
+              await barrier;
+            }
+          },
+        },
+      });
+      armed = true;
+      const b = await dispatch(h, "b", "proj-1");
+      const cc = await c!;
+      armed = false;
+      const writes = [...h.envSet, ...h.envDeleted].filter((e) => e.projectId === "proj-1");
+      expect(writes).toHaveLength(1);
+      expect([b.action, cc.action].sort()).toEqual(["proceed", "wait"]);
+      expect((await history(h)).filter((r) => r.startsWith("Movido") || r.startsWith("Moved"))).toHaveLength(1);
+      const seats = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+      expect((seats.seats?.main?.reserved ?? 0) + (seats.seats?.work?.reserved ?? 0)).toBe(1);
+    });
+
     // Codex ASIENTOS-R2-003 / R3-001. A read a write crosses is refused and
     // the turn waits (the project moved while it was read); the guard in
     // placeTurn holds a move decided on a read no write had crossed yet.

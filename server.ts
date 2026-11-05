@@ -4956,6 +4956,22 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       };
       return { account: fromName, byDefault: !from.owned, writes };
     }
+    // Moved for a seat while another move of the project is being written
+    // (a sibling that decided on the same read): a second move in a row.
+    // Held, and placed again on a fresh read (Codex/Astra ASIENTOS-R3-001/
+    // R3-002). Other moves that cross keep their rule: the last one written
+    // stands.
+    if (
+      decision.why === "current-full" &&
+      decision.account !== fromName &&
+      movesOf(projectId).inFlight > 0
+    ) {
+      turn.held = {
+        sendAt: now + SEAT_RECHECK_MS,
+        reason: "Waiting: this project is being moved to another account for a seat",
+      };
+      return { account: fromName, byDefault: !from.owned, writes };
+    }
     // Read before the move: what the seats were as it was decided.
     const fullHere = seats.snapshot([seatKey(fromName)])[seatKey(fromName)]!;
     const roomThere = seatRoom(decision.account);
