@@ -49,8 +49,9 @@ project uses [Semantic Versioning](https://semver.org/).
   fact free does not move the project. A turn sent now, past the checkpoint,
   on another account than its seat also frees that seat at once, and two
   threads of a project that decide on the same read move it once for a seat,
-  not twice: the second waits until the first move is written and recorded,
-  and is asked again as it ends.
+  not twice: while a move for a seat is written and recorded no other move
+  of the project starts (Team first included); the thread held waits and is
+  asked again as it ends.
 
 ## [0.2.42] - 2026-11-05
 

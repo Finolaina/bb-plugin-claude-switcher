@@ -411,7 +411,7 @@ M = [
      "if (runs && (input.pinned === true || !spendsReservedWeekly(current, options))) {", "if (runs && !spendsReservedWeekly(current, options)) {",
      "server.test.ts", "holds an Opus turn on the Ultra picked"),
     ("N-c plazas", "el movimiento por plazas queda como excursión", "server.ts",
-     "      if (excursions.get(projectId)?.from === fromName) excursions.delete(projectId);\n      crowdedMoves.set(projectId, { at: now, to: decision.account });", "      noteMove(projectId, fromName, decision.account, model, before);\n      crowdedMoves.set(projectId, { at: now, to: decision.account });",
+     "        if (excursions.get(projectId)?.from === fromName) excursions.delete(projectId);\n        crowdedMoves.set(projectId, { at: now, to: decision.account });", "        noteMove(projectId, fromName, decision.account, model, before);\n        crowdedMoves.set(projectId, { at: now, to: decision.account });",
      "server.test.ts", "is a new home, not an excursion"),
     ("N-c plazas", "el movimiento por plazas borra cualquier excursión", "server.ts",
      "      if (excursions.get(projectId)?.from === fromName) excursions.delete(projectId);", "      excursions.delete(projectId);",

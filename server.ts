@@ -983,6 +983,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** The seat history's database (src/historial.ts); null when it could not be opened. */
   let historial: HistorialDb | null = null;
   /** A write to the seat history; a failure is logged, never thrown. */
+  // ponytail: a write that fails is lost to the history (logged), also when
+  // the database comes back: `history --dias` reads the database only. Tope
+  // conocido (Astra ASIENTOS-R5-002); the way up is to keep the rows that
+  // failed for 7 days and write them again once it answers.
   function toHistorial(what: string, write: (db: HistorialDb) => void): void {
     if (historial === null) return;
     try {
@@ -4977,14 +4981,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return { account: fromName, byDefault: !from.owned, writes };
     }
     // Moved for a seat while another move of the project is being written
-    // (a sibling that decided on the same read): a second move in a row.
-    // Held, and placed again on a fresh read (Codex/Astra ASIENTOS-R3-001/
-    // R3-002). Other moves that cross keep their rule: the last one written
-    // stands.
+    // (a sibling that decided on the same read), or moved at all while a
+    // move for a seat is (Team first sending it back, Astra ASIENTOS-R5-001):
+    // a second move in a row. Held, and placed again on a fresh read
+    // (Codex/Astra ASIENTOS-R3-001/R3-002). Other moves that cross keep
+    // their rule: the last one written stands.
     if (
-      decision.why === "current-full" &&
       decision.account !== fromName &&
-      (seatMoving.has(projectId) || movesOf(projectId).inFlight > 0)
+      (seatMoving.has(projectId) ||
+        (decision.why === "current-full" && movesOf(projectId).inFlight > 0))
     ) {
       heldForMove.add(projectId);
       turn.held = {

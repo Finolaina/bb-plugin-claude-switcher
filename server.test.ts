@@ -19844,6 +19844,35 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
       await vi.waitFor(() => expect(h.harness.recheckCount).toBeGreaterThan(before));
     });
 
+    it("no move of any kind, Team first included, while a move for a seat is being recorded (Astra ASIENTOS-R5-001)", async () => {
+      // spare (2 seats) runs a and a2; work (Team, 2 free) cannot take 3,
+      // main (Ultra, 4) can: b moves proj-1 there. While it is recorded, c
+      // reads main and «Team primero» would send it back to work.
+      let armed = false;
+      let c: Promise<{ action: string; reason?: string }> | null = null;
+      const { h } = await start({ settings: { otherModelUpTo: 50, seatsTeam: 2, seatsMax: 4, seatsFollowLoad: false } });
+      expect((await dispatch(h, "a2", "proj-1")).action).toBe("proceed");
+      await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "a2", projectId: "proj-1" }) });
+      const set = h.bb.storage.kv.set.bind(h.bb.storage.kv);
+      h.bb.storage.kv.set = async (key: string, value: unknown) => {
+        if (armed && key === "handled-projects" && c === null) {
+          c = dispatch(h, "c", "proj-1");
+          await c;
+        }
+        return set(key, value);
+      };
+      await h.bb.storage.kv.delete("handled-projects");
+      armed = true;
+      const b = await dispatch(h, "b", "proj-1");
+      armed = false;
+      expect(c).not.toBeNull();
+      expect(b.action).toBe("proceed");
+      const writes = [...h.envSet, ...h.envDeleted].filter((e) => e.projectId === "proj-1");
+      expect(writes).toHaveLength(1);
+      expect(await where(h)).toBe("main");
+      expect(await c!).toMatchObject({ action: "wait", reason: "Waiting: this project is being moved to another account for a seat" });
+    });
+
     // Codex ASIENTOS-R2-003 / R3-001. A read a write crosses is refused and
     // the turn waits (the project moved while it was read); the guard in
     // placeTurn holds a move decided on a read no write had crossed yet.
