@@ -36,7 +36,13 @@ project uses [Semantic Versioning](https://semver.org/).
 - **The seat samples were not kept past two days.** They went to one
   key-value row, and from about the third day it passed bb's 256 KB limit:
   every store failed (662 times in the log from 2026-11-03 to 2026-11-05)
-  and a reload lost them. The samples kept there move to the database once.
+  and a reload lost them. The samples kept there move to the database once;
+  if the database cannot take them they stay in memory, and in key-value
+  storage for the next load, and a failed delete does not stop the week
+  being read back.
+- **A seat held with `reserve` and moved to another account frees its old
+  seat at once**: the threads waiting for it are asked again then, not at
+  their next 30-second ask.
 
 ## [0.2.42] - 2026-11-05
 

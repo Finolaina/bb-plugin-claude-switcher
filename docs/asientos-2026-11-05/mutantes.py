@@ -42,6 +42,18 @@ MUTANTES = [
     ("M11 history --dias admite 8", "server.ts",
      "dias < 1 || dias > HISTORIAL_DIAS)",
      "dias < 1 || dias > HISTORIAL_DIAS + 1)"),
+    ("M12 una retención movida a otra cuenta no libera la de antes (Codex ASIENTOS-001)", "server.ts",
+     "if (before !== undefined && before.account !== key) admitWaiting(true);",
+     "if (false) admitWaiting(true);"),
+    ("M13 las muestras de kv no quedan en memoria si la base no las admite (Codex ASIENTOS-002)", "server.ts",
+     "  for (const [name, s] of fromKv ?? []) keep(name, s);",
+     "  if (historial === null) for (const [name, s] of fromKv ?? []) keep(name, s);"),
+    ("M14 sin borrar kv no se lee la base (Codex ASIENTOS-002)", "server.ts",
+     "          await bb.storage.kv.delete(KV_SEATS);\n        } catch (error) {",
+     "          await bb.storage.kv.delete(KV_SEATS);\n        } catch (error) {\n          historial = null;"),
+    ("M15 las retenciones de fuera se guardan sumadas a las de bb (Codex ASIENTOS-003)", "server.ts",
+     "        reserved: taken.reserved,\n        external:",
+     "        reserved: taken.reserved + (taken.external?.length ?? 0),\n        external:"),
 ]
 
 

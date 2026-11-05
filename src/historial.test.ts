@@ -26,6 +26,7 @@ const sample = (at: number, o: Partial<SampleRow> = {}): SampleRow => ({
   account: "team1",
   running: 1,
   reserved: 0,
+  external: 0,
   waiting: 0,
   capacity: 2,
   session: 10,

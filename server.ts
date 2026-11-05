@@ -1674,32 +1674,67 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   // The seat samples kept: those of the history, and once, those 0.2.42 and
   // before kept in kv (one of another shape, before 0.2.31's second round,
   // is left out), which go to the history and leave kv.
+  // Each step apart: one that fails leaves the others' samples (Codex
+  // ASIENTOS-002), and kv keeps its own until the history has them all.
+  const kept = new Map<string, Map<number, SeatSample>>();
+  const keep = (name: string, s: SeatSample) => {
+    const own = kept.get(name) ?? new Map<number, SeatSample>();
+    if (!own.has(s[0])) own.set(s[0], s);
+    kept.set(name, own);
+  };
+  let fromKv: [string, SeatSample][] | null = null;
   try {
     const parsed = z
       .record(z.string(), z.array(z.unknown()))
       .safeParse(await bb.storage.kv.get<unknown>(KV_SEATS));
-    if (parsed.success)
+    if (parsed.success) {
+      fromKv = [];
       for (const [name, samples] of Object.entries(parsed.data))
         for (const sample of samples) {
           const one = seatSampleSchema.safeParse(sample);
-          if (!one.success) continue;
-          const [at, running, reserved, session, weekly, sessionResets, weeklyResets] = one.data;
-          if (historial !== null)
-            addSample(historial, { at, account: name, running, reserved, waiting: null, capacity: null, session, weekly, sessionResets, weeklyResets });
-          else (seatSamples[name] ??= []).push(one.data);
+          if (one.success) fromKv.push([name, one.data]);
         }
-    if (historial !== null) {
-      if (parsed.success) await bb.storage.kv.delete(KV_SEATS);
-      pruneHistorial(historial, deps.now());
-      for (const r of readSamples(historial, deps.now() - SEAT_SAMPLES_MS))
-        (seatSamples[r.account] ??= []).push([r.at, r.running, r.reserved, r.session, r.weekly, r.sessionResets, r.weeklyResets]);
     }
-    pruneSeatSamples();
   } catch (error) {
     bb.log.warn(
-      `could not read the seat samples; starting them again: ${error instanceof Error ? error.message : String(error)}`,
+      `could not read the seat samples 0.2.42 kept: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  for (const [name, s] of fromKv ?? []) keep(name, s);
+  if (historial !== null) {
+    if (fromKv !== null) {
+      let imported = false;
+      try {
+        for (const [name, [at, running, reserved, session, weekly, sessionResets, weeklyResets]] of fromKv)
+          addSample(historial, { at, account: name, running, reserved, external: null, waiting: null, capacity: null, session, weekly, sessionResets, weeklyResets });
+        imported = true;
+      } catch (error) {
+        bb.log.warn(
+          `could not move the seat samples 0.2.42 kept to the seat history; kept in memory, and in storage for the next load: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      if (imported)
+        try {
+          await bb.storage.kv.delete(KV_SEATS);
+        } catch (error) {
+          bb.log.warn(
+            `could not delete the seat samples 0.2.42 kept (now in the seat history; the next load tries again): ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+    }
+    try {
+      pruneHistorial(historial, deps.now());
+      for (const r of readSamples(historial, deps.now() - SEAT_SAMPLES_MS))
+        keep(r.account, [r.at, r.running, r.reserved, r.session, r.weekly, r.sessionResets, r.weeklyResets]);
+    } catch (error) {
+      bb.log.warn(
+        `could not read the seat history; starting the samples again: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  for (const [name, own] of kept)
+    seatSamples[name] = [...own.values()].sort((a, b) => a[0] - b[0]);
+  pruneSeatSamples();
   // What the banners were asked on before the restart, thread by thread:
   // checked against bb by the first refresh (see reviseAdvice). None with
   // the automatic choice off, which ends them all.
@@ -1919,7 +1954,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         at,
         account: name,
         running: taken.running,
-        reserved: taken.reserved + (taken.external?.length ?? 0),
+        reserved: taken.reserved,
+        external: taken.external?.length ?? 0,
         waiting: taken.queued.length,
         capacity: taken.capacity,
         session: session.usedPercent,
@@ -7069,13 +7105,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                 seats.releaseExternal(options.id);
                 if (before !== undefined) seats.restoreHolds([before], deps.now());
                 void storeHolds();
-                admitWaiting();
+                admitWaiting(true);
               }
               throw new PluginCliError(
                 `The seat on ${name} could not be stored (a reload would forget it); nothing held${before === undefined ? "" : ", the hold stays as it was"}.`,
                 { code: "not_stored", exitCode: 1 },
               );
             }
+            // Moved from another account: its seat there is free now (Codex
+            // ASIENTOS-001).
+            if (before !== undefined && before.account !== key) admitWaiting(true);
             bb.log.info(
               `seat on ${name} held from outside bb by ${options.id} until ${isoInZone(result.until)}${result.renewed ? " (renewed)" : ""}; ${occupancy(key)}`,
             );

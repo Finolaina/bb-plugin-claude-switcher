@@ -370,6 +370,10 @@ interface HostOptions {
   threadEventsError?: string;
   /** Plugin storage answers every read with this error while the plugin loads. */
   kvReadError?: string;
+  /** Plugin storage's delete throws this while the plugin loads. */
+  kvDeleteError?: string;
+  /** The seat history's writes of samples throw this while the plugin loads. */
+  historialWriteError?: string;
   /** Values already in plugin storage when the plugin loads. */
   kvPreset?: Record<string, unknown>;
   /** When each project was created; default: proj-1 and proj-2 a day before NOW, any other just after. */
@@ -737,6 +741,27 @@ async function host(
   for (const [key, value] of Object.entries(options.kvPreset ?? {}))
     await fake.bb.storage.kv.set(key, value);
   const kvGet = fake.bb.storage.kv.get;
+  const kvDelete = fake.bb.storage.kv.delete;
+  const database = fake.bb.storage.database;
+  if (options.kvDeleteError !== undefined) {
+    fake.bb.storage.kv.delete = async () => {
+      throw new Error(options.kvDeleteError);
+    };
+  }
+  if (options.historialWriteError !== undefined) {
+    fake.bb.storage.database = ((...args: Parameters<typeof database>) => {
+      const db = database(...args);
+      return new Proxy(db, {
+        get(target, prop, receiver) {
+          if (prop !== "prepare") return Reflect.get(target, prop, receiver) as unknown;
+          return (sql: string) => {
+            if (sql.includes("INTO seat_samples")) throw new Error(options.historialWriteError);
+            return target.prepare(sql);
+          };
+        },
+      });
+    }) as typeof database;
+  }
   if (options.kvReadError !== undefined) {
     fake.bb.storage.kv.get = async () => {
       throw new Error(options.kvReadError);
@@ -756,6 +781,8 @@ async function host(
   };
   await createPlugin(fake.bb, pluginDeps);
   fake.bb.storage.kv.get = kvGet;
+  fake.bb.storage.kv.delete = kvDelete;
+  fake.bb.storage.database = database;
   // The seats counted after the load, as they are by the time a user sends
   // a message, unless the test holds the count: a message meanwhile waits
   // at once (Astra SEATS-R4-002).
@@ -15772,6 +15799,56 @@ describe("bb claude-switcher seats", () => {
     expect(text.split("\n").filter((l) => /\tmain\t/.test(l))).toHaveLength(1);
   });
 
+  it("a sample keeps its bb reservations and its holds from outside bb apart: the same before and after a reload (Codex ASIENTOS-003)", async () => {
+    const h = await host(ALL_FREE, { settings: { autoSwitch: false, seatsMax: 2 } });
+    dispose = () => h.harness.dispose();
+    const until = new Date(NOW + HOUR).toISOString().replace("Z", "+00:00");
+    expect((await h.harness.behavior.runCli(["reserve", "main", "--id", "night", "--until", until])).exitCode).toBe(0);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const mainOf = async (x: typeof h) =>
+      (JSON.parse((await x.harness.behavior.runCli(["seats", "--json"])).stdout) as { samples: Record<string, unknown[][]> }).samples.main;
+    const before = await mainOf(h);
+    expect(before).toEqual([[NOW, 0, 0, 100, 40, expect.anything(), expect.anything()]]);
+    const again = await h.harness.lifecycle.reload((bb) => createPlugin(bb, h.pluginDeps));
+    expect(await mainOf(again)).toEqual(before);
+    // The hour's seats taken count the hold: 1 of 2.
+    expect((await again.harness.behavior.runCli(["history", "--dias", "1"])).stdout).toMatch(/\tmain\t1\/2\t0\t100\t40\n/);
+  });
+
+  it("the samples 0.2.42 kept in kv stay in memory, and in kv, when the history cannot take them (Codex ASIENTOS-002)", async () => {
+    const DAY = 24 * HOUR;
+    const old = [NOW - 2 * DAY, 1, 0, 10, 40, null, null];
+    const h = await host(ALL_FREE, {
+      settings: { autoSwitch: false },
+      kvPreset: { "seat-samples": { main: [old] } },
+      historialWriteError: "disk I/O error",
+    });
+    dispose = () => h.harness.dispose();
+    const json = JSON.parse((await h.harness.behavior.runCli(["seats", "--json"])).stdout) as { samples: Record<string, unknown[]> };
+    expect(json.samples.main).toEqual([old]);
+    expect(await h.bb.storage.kv.get("seat-samples")).toEqual({ main: [old] });
+  });
+
+  it("a kv that cannot let go of 0.2.42's samples still loads the week from the history (Codex ASIENTOS-002)", async () => {
+    const DAY = 24 * HOUR;
+    const old = [NOW - 2 * DAY, 1, 0, 10, 40, null, null];
+    const h = await host(ALL_FREE, { settings: { autoSwitch: false } });
+    dispose = () => h.harness.dispose();
+    // A sample of now, in the history only.
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // An old one back in kv, which cannot be deleted on the next load.
+    await h.bb.storage.kv.set("seat-samples", { main: [old] });
+    const again = await h.harness.lifecycle.reload((bb) => {
+      bb.storage.kv.delete = async () => {
+        throw new Error("storage is down");
+      };
+      return createPlugin(bb, h.pluginDeps);
+    });
+    expect(again.harness.logEntries.some((e) => e.message.startsWith("could not delete the seat samples 0.2.42 kept"))).toBe(true);
+    const json = JSON.parse((await again.harness.behavior.runCli(["seats", "--json"])).stdout) as { samples: Record<string, unknown[][]> };
+    expect(json.samples.main!.map((s) => s[0])).toEqual([NOW - 2 * DAY, NOW]);
+  });
+
   it("history --dias takes 1 to 7: 8 or a word is refused", async () => {
     const h = await host(ALL_FREE, { settings: { autoSwitch: false } });
     dispose = () => h.harness.dispose();
@@ -17122,6 +17199,19 @@ describe("bb claude-switcher reserve / unreserve: a seat held from outside bb", 
       total: 2,
       externas: [{ id: "night", hasta: "2026-09-29T13:00:00+02:00" }],
     });
+  });
+
+  it("a hold moved to another account frees its seat: the thread waiting there is let in at once (Codex ASIENTOS-001)", async () => {
+    const h = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 1 } });
+    dispose = () => h.harness.dispose();
+    expect((await h.harness.behavior.runCli(["reserve", "main", "--id", "night", "--until", until(NOW + HOUR)])).exitCode).toBe(0);
+    expect(await ask(h, "t1")).toMatchObject({ action: "wait" });
+    const before = h.harness.recheckCount;
+    expect((await h.harness.behavior.runCli(["reserve", "spare", "--id", "night", "--until", until(NOW + HOUR)])).exitCode).toBe(0);
+    const seats = JSON.parse((await h.harness.behavior.runCli(["seats", "--json"])).stdout).seats;
+    expect(seats.main.queued).toEqual([]);
+    expect(seats.spare.external).toEqual([{ id: "night", until: NOW + HOUR }]);
+    await vi.waitFor(() => expect(h.harness.recheckCount).toBe(before + 1));
   });
 
   describe("only a hold stored is a hold (Codex ULTRA-R2-004)", () => {
@@ -19780,7 +19870,8 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
       expect(await where(h)).toBe("work");
       expect((await h.harness.behavior.runCli(["release"])).exitCode).toBe(0);
       expect(await where(h)).toBe("main");
-      at(12 * MINUTE);
+      // Within the brake of the move to work (as 0.2.42's 1 min 59 s after it).
+      at(2 * MINUTE);
       expect(await dispatch(h, "c", "proj-1")).toEqual({ action: "proceed" });
       expect(await where(h)).toBe("work");
     });

@@ -16,6 +16,7 @@ export const HISTORIAL_MIGRATIONS = [
     account TEXT NOT NULL,
     running INTEGER NOT NULL,
     reserved INTEGER NOT NULL,
+    external INTEGER,
     waiting INTEGER,
     capacity INTEGER,
     session REAL NOT NULL,
@@ -49,7 +50,10 @@ export interface SampleRow {
   at: number;
   account: string;
   running: number;
+  /** Seats reserved for bb threads about to start. */
   reserved: number;
+  /** Seats held from outside bb (reserve); null in samples kept before 0.2.43. */
+  external: number | null;
   /** Threads waiting for a seat on it then; null in samples kept before 0.2.43. */
   waiting: number | null;
   /** Its seats then (0 = no limit); null in samples kept before 0.2.43. */
@@ -79,13 +83,14 @@ export interface StuckRow {
 export function addSample(db: HistorialDb, r: SampleRow): void {
   db.prepare(
     `INSERT OR IGNORE INTO seat_samples
-      (at, account, running, reserved, waiting, capacity, session, weekly, session_resets, weekly_resets)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (at, account, running, reserved, external, waiting, capacity, session, weekly, session_resets, weekly_resets)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     r.at,
     r.account,
     r.running,
     r.reserved,
+    r.external,
     r.waiting,
     r.capacity,
     r.session,
@@ -123,6 +128,7 @@ interface SampleDbRow {
   account: string;
   running: number;
   reserved: number;
+  external: number | null;
   waiting: number | null;
   capacity: number | null;
   session: number;
@@ -142,6 +148,7 @@ export function readSamples(db: HistorialDb, since: number): SampleRow[] {
     account: r.account,
     running: r.running,
     reserved: r.reserved,
+    external: r.external,
     waiting: r.waiting,
     capacity: r.capacity,
     session: r.session,
@@ -229,7 +236,7 @@ export function historyText(o: {
   for (const r of samples) {
     const key = `${madrid(r.at).slice(0, 13)}:00\t${r.account}`;
     const was = hours.get(key);
-    const taken = r.running + r.reserved;
+    const taken = r.running + r.reserved + (r.external ?? 0);
     hours.set(key, {
       taken: Math.max(was?.taken ?? 0, taken),
       capacity: r.capacity ?? was?.capacity ?? null,
