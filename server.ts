@@ -4980,17 +4980,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       };
       return { account: fromName, byDefault: !from.owned, writes };
     }
-    // Moved for a seat while another move of the project is being written
-    // (a sibling that decided on the same read), or moved at all while a
-    // move for a seat is (Team first sending it back, Astra ASIENTOS-R5-001):
-    // a second move in a row. Held, and placed again on a fresh read
-    // (Codex/Astra ASIENTOS-R3-001/R3-002). Other moves that cross keep
-    // their rule: the last one written stands.
-    if (
-      decision.account !== fromName &&
-      (seatMoving.has(projectId) ||
-        (decision.why === "current-full" && movesOf(projectId).inFlight > 0))
-    ) {
+    // A move of any kind while a move of the project for a seat is written
+    // and recorded (a sibling that decided on the same read, or Team first
+    // sending it back): a second move in a row. Held, and placed again on a
+    // fresh read (Codex/Astra ASIENTOS-R3-001/R3-002/R4-001/R5-001). Other
+    // moves that cross keep their rule: the last one written stands.
+    // ponytail: moves made outside placeTurn (moveAhead, a refresh) do not
+    // look at it (Astra ASIENTOS-R6-001; needs switchAheadPercent on); the
+    // way up is to check it where every automatic move is written.
+    if (decision.account !== fromName && seatMoving.has(projectId)) {
       heldForMove.add(projectId);
       turn.held = {
         sendAt: now + SEAT_RECHECK_MS,

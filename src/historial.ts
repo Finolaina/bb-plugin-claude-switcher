@@ -195,7 +195,12 @@ const MADRID = new Intl.DateTimeFormat("sv-SE", {
   minute: "2-digit",
   hourCycle: "h23",
 });
-/** «2026-11-05 12:10», Madrid's clock. */
+/**
+ * «2026-11-05 12:10», Madrid's clock. ponytail: no UTC offset, so the two
+ * 02:00 hours of the autumn change are one row of `history` (Astra
+ * ASIENTOS-R6-002); the way up is to key the hour by its instant and show
+ * the offset.
+ */
 function madrid(at: number): string {
   return MADRID.format(at);
 }
