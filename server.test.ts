@@ -19522,39 +19522,81 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
       return p === undefined ? undefined : (p.account ?? "main");
     };
 
-  describe("(a) a thread that waits more than stuckMoveMinutes", () => {
-    it("waits at exactly 10 min; one ms later the project goes to the free Team seat, and the history says why", async () => {
-      const { h, at, askUntil } = await start({ settings: { seatsMax: 1 } });
-      const waits = await askUntil(10 * MINUTE);
-      expect(waits.every((w) => w.action === "wait")).toBe(true);
-      expect(waits.at(-1)?.reason).toContain("Waiting for a seat on spare");
-      expect(moves(h)).toEqual([]);
-      at(10 * MINUTE + 1);
+  // Aitor 2026-11-05 13:15 («que cuando termine una se frene otra, o sea,
+  // salga otra»; «no podemos estar así atascados»): the 10 minutes a thread
+  // waited first were 0.2.41's; now it moves at its first ask, and
+  // stuckMoveMinutes is how long a project so moved stays where it went.
+  describe("(a) a thread that would wait, with a sibling at work", () => {
+    it("moves its project at its first ask to the free Team seat, and the history says why", async () => {
+      const { h } = await start({ settings: { seatsMax: 1 } });
       expect(await dispatch(h, "b", "proj-1")).toEqual({ action: "proceed" });
       expect(moves(h).at(-1)).toMatchObject({ note: ownNote("work") });
       expect((await history(h))[0]).toBe(
-        "Movido a work antes del turno: el hilo llevaba 10 min esperando plaza, ahora en spare (1/1 ocupadas), con otro hilo de su proyecto trabajando; work tenía 1 libre",
+        "Movido a work antes del turno: el hilo iba a esperar plaza en spare (1/1 ocupadas), con otro hilo de su proyecto trabajando; work tenía 1 libre",
       );
     });
 
+    it("one that did wait (no seat anywhere) moves when one frees, and says for how long", async () => {
+      const { h, at, askUntil } = await start({ workBusy: true, main: [60, 60], settings: { seatsMax: 1, otherModelUpTo: 50 } });
+      expect((await askUntil(3 * MINUTE)).every((w) => w.action === "wait")).toBe(true);
+      expect(moves(h)).toEqual([]);
+      await h.harness.behavior.emitThreadEvent("thread.idle", { thread: thread({ id: "busy", projectId: "proj-2" }) });
+      at(3 * MINUTE + 1);
+      expect(await dispatch(h, "b", "proj-1")).toEqual({ action: "proceed" });
+      expect((await history(h))[0]).toBe(
+        "Movido a work antes del turno: el hilo llevaba 3 min esperando plaza, ahora en spare (1/1 ocupadas), con otro hilo de su proyecto trabajando; work tenía 1 libre",
+      );
+    });
+
+    it("a seat freed on another account asks the waiting threads again at once, not at their next 30 s", async () => {
+      const { h, askUntil } = await start({ workBusy: true, main: [60, 60], settings: { seatsMax: 1, otherModelUpTo: 50 } });
+      expect((await askUntil(0)).every((w) => w.action === "wait")).toBe(true);
+      const before = h.harness.recheckCount;
+      await h.harness.behavior.emitThreadEvent("thread.idle", { thread: thread({ id: "busy", projectId: "proj-2" }) });
+      await vi.waitFor(() => expect(h.harness.recheckCount).toBe(before + 1));
+    });
+
+    it("with no one waiting anywhere, a seat freed asks nothing again", async () => {
+      const { h } = await start({ workBusy: true, main: [60, 60], settings: { seatsMax: 1, otherModelUpTo: 50 } });
+      const before = h.harness.recheckCount;
+      await h.harness.behavior.emitThreadEvent("thread.idle", { thread: thread({ id: "busy", projectId: "proj-2" }) });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(h.harness.recheckCount).toBe(before);
+    });
+
     it("Team first: a Team seat for this thread alone beats an Ultra with room for the whole project (code-reviewer r2 high)", async () => {
-      // spare (2 seats) holds a and a thread of proj-3: b of proj-1 waits, not crowded (2 wanted, 2 seats).
-      const { h, at, askUntil } = await start({ main: [40, 30], workBusy: true, settings: { seatsTeam: 2, seatsMax: 4, otherModelUpTo: 50 } });
+      // spare (2 seats) holds a and a thread of proj-3: b of proj-1 would wait, not crowded (2 wanted, 2 seats).
+      const { h } = await start({ main: [40, 30], workBusy: true, settings: { seatsTeam: 2, seatsMax: 4, otherModelUpTo: 50 } });
       await h.harness.behavior.runCli(["use", "proj-3", "spare"]);
       expect((await dispatch(h, "x", "proj-3")).action).toBe("proceed");
       await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "x", projectId: "proj-3" }) });
-      expect((await askUntil(10 * MINUTE)).every((w) => w.action === "wait")).toBe(true);
-      at(10 * MINUTE + 1);
       expect(await dispatch(h, "b", "proj-1")).toEqual({ action: "proceed" });
       expect(await where(h)).toBe("work");
     });
 
-    it("with N+1 minutes too (the cut is past N, not at N+1)", async () => {
-      const { h, askUntil } = await start({ settings: { seatsMax: 1, stuckMoveMinutes: 11 } });
-      const answers = await askUntil(11 * MINUTE + 30_000);
-      expect(answers.slice(0, -1).every((w) => w.action === "wait")).toBe(true);
-      expect(answers.at(-1)).toEqual({ action: "proceed" });
-      expect(moves(h).at(-1)).toMatchObject({ note: ownNote("work") });
+    it("a project so moved stays where it went for stuckMoveMinutes: at exactly N it waits, one ms later it moves again", async () => {
+      // b takes proj-1 at once to main (seats for a and b).
+      const { h, at } = await start({ main: [40, 30], settings: { seatsMax: 4, otherModelUpTo: 50, stuckMoveMinutes: 11 } });
+      expect(await dispatch(h, "b", "proj-1")).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("main");
+      const first = moves(h).length;
+      await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "b", projectId: "proj-1" }) });
+      // Three seats of main held from outside bb: with b, main is full.
+      for (const id of ["y1", "y2", "y3"])
+        expect(
+          (await h.harness.behavior.runCli(["reserve", "main", "--id", id, "--until", new Date(NOW + 60 * MINUTE).toISOString()])).exitCode,
+        ).toBe(0);
+      // c of proj-1 would wait on main, within 11 min of the move: it waits.
+      const asked: { action: string }[] = [];
+      for (let t = 0; t <= 11 * MINUTE; t += 30_000) {
+        at(t);
+        asked.push(await dispatch(h, "c", "proj-1"));
+      }
+      expect(asked.filter((w) => w.action !== "wait")).toEqual([]);
+      expect(moves(h).length).toBe(first);
+      at(11 * MINUTE + 1);
+      expect(await dispatch(h, "c", "proj-1")).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("work");
     });
 
     it("0 = never: the project with a thread at work stays, as before", async () => {
@@ -19563,10 +19605,8 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
       expect(moves(h)).toEqual([]);
     });
 
-    it("with no Team seat free it goes to the Ultra at the threshold (50 % weekly and Fable)", async () => {
-      const { h, at, askUntil } = await start({ main: [50, 50], workBusy: true, settings: { seatsMax: 1, otherModelUpTo: 50 } });
-      await askUntil(10 * MINUTE);
-      at(10 * MINUTE + 1);
+    it("with no Team seat free it goes at once to the Ultra at the threshold (50 % weekly and Fable)", async () => {
+      const { h } = await start({ main: [50, 50], workBusy: true, settings: { seatsMax: 1, otherModelUpTo: 50 } });
       expect(await dispatch(h, "b", "proj-1")).toEqual({ action: "proceed" });
       expect(await where(h)).toBe("main");
       expect((await history(h))[0]).toContain("; main tenía 1 libre y le queda margen de Fable (semanal 50 %, Fable 50 %, tope 50 %)");
@@ -19574,20 +19614,32 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
 
     it("an Ultra one point over the threshold is no target: it keeps waiting", async () => {
       const { h, at, askUntil } = await start({ main: [51, 10], workBusy: true, settings: { seatsMax: 1, otherModelUpTo: 50 } });
-      await askUntil(10 * MINUTE);
+      expect((await askUntil(10 * MINUTE)).every((w) => w.action === "wait")).toBe(true);
       at(10 * MINUTE + 1);
       expect((await dispatch(h, "b", "proj-1")).action).toBe("wait");
       expect(moves(h)).toEqual([]);
     });
+
+    it("a Fable turn that would wait is not this rule's: no move", async () => {
+      const { h } = await start({ settings: { seatsMax: 1 } });
+      const fable = (await h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: thread({ id: "b", projectId: "proj-1" }),
+          requestedExecution: { providerId: "claude-code", model: "claude-fable-5-1" },
+          attempt: "start-turn",
+        }),
+      )) as { action: string };
+      expect(fable.action).toBe("wait");
+      expect(moves(h)).toEqual([]);
+    });
+
     it("keeps the way home of Fable when the full account was itself an excursion (code-reviewer r1 H2)", async () => {
       // Fable's home is main, over the threshold: Opus goes out to the Team seat spare.
-      const { h, at, askUntil } = await start({ preset: "main", main: [60, 30], settings: { seatsMax: 1, otherModelUpTo: 50 } });
+      const { h } = await start({ preset: "main", main: [60, 30], settings: { seatsMax: 1, otherModelUpTo: 50 } });
       expect(await dispatch(h, "a", "proj-1")).toEqual({ action: "proceed" });
       expect(await where(h)).toBe("spare");
       await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "a", projectId: "proj-1" }) });
-      // b waits on spare past the limit: the project goes to work.
-      await askUntil(10 * MINUTE);
-      at(10 * MINUTE + 1);
+      // b would wait on spare: the project goes to work at once.
       expect(await dispatch(h, "b", "proj-1")).toEqual({ action: "proceed" });
       expect(await where(h)).toBe("work");
       await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "b", projectId: "proj-1" }) });
@@ -19656,12 +19708,10 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
     });
 
     it("the brake holds only on the account the project moved to: back on the Ultra, Team first applies at once (code-reviewer r3 medium)", async () => {
-      const { h, at, askUntil } = await start({ main: [40, 30], workBusy: false, settings: { seatsTeam: 2, seatsMax: 4, otherModelUpTo: 50 } });
+      const { h, at } = await start({ main: [40, 30], workBusy: false, settings: { seatsTeam: 2, seatsMax: 4, otherModelUpTo: 50 } });
       await h.harness.behavior.runCli(["use", "proj-3", "spare"]);
       expect((await dispatch(h, "x", "proj-3")).action).toBe("proceed");
       await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "x", projectId: "proj-3" }) });
-      await askUntil(10 * MINUTE);
-      at(10 * MINUTE + 1);
       expect(await dispatch(h, "b", "proj-1")).toEqual({ action: "proceed" });
       expect(await where(h)).toBe("work");
       expect((await h.harness.behavior.runCli(["release"])).exitCode).toBe(0);
@@ -19679,10 +19729,13 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
       expect((await history(h))[0]).toMatch(/; deja de valer el `use` a mano a spare$/);
     });
 
-    it("with no account with seats for all, it waits (the wait of (a) decides later)", async () => {
+    it("with no account with seats for all, a seat for the thread alone at once (Team first)", async () => {
       const { h } = await start({ main: [51, 10], settings: { otherModelUpTo: 50 } });
-      expect((await dispatch(h, "b", "proj-1")).action).toBe("wait");
-      expect(moves(h)).toEqual([]);
+      expect(await dispatch(h, "b", "proj-1")).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("work");
+      expect((await history(h))[0]).toBe(
+        "Movido a work antes del turno: el hilo iba a esperar plaza en spare (1/1 ocupadas), con otro hilo de su proyecto trabajando; work tenía 1 libre",
+      );
     });
   });
 

@@ -636,9 +636,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     },
     stuckMoveMinutes: {
       type: "number",
-      label: "Move a project whose thread waits for a seat (minutes)",
+      label: "A project moved for a seat with threads at work stays (minutes)",
       description:
-        "A thread that has waited this long for a seat on its project's account moves the project to another account with a free seat, also while other threads of the project are at work (their next turns run there). A project with more threads asking than its account has seats moves at once to one with seats for all of them. Needs the automatic choice. 0 = never: a project with a thread at work stays.",
+        "A thread that would wait for a seat on its project's account moves the project at once to another account with a free seat, also while other threads of the project are at work (their next turns run there): to one with seats for all of them when the project asks for more than its account has, else to a seat for the thread. A project so moved is not moved again that way within this many minutes. Needs the automatic choice. 0 = never: a project with a thread at work stays.",
       default: 10,
     },
     // On by default (Aitor, 2026-11-03: «que no sea un "máximo 4"»).
@@ -1127,12 +1127,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * The thread's turn would wait for a seat on `name` while another thread
    * of its project is at work there, so seatsFullFor keeps the project
    * (Aitor 2026-11-05, «hay demasiadas cosas atascadas … Tenemos opus!»):
-   * it moves anyway, its siblings' next turns with it, when the thread has
-   * waited more than stuckMoveMinutes ("stuck"), or at once when the
-   * project asks for more seats than the account has ("crowded": only to
-   * an account with seats for all). For a model other than the reserved one
-   * only: where the reserved model's turns run is not this rule's. Null:
-   * neither, or stuckMoveMinutes is 0, or the project moved so within it.
+   * it moves anyway, its siblings' next turns with it, at once (Aitor
+   * 2026-11-05 13:15, «que cuando termine una … salga otra»: 0.2.41 waited
+   * stuckMoveMinutes first): to an account with seats for all when the
+   * project asks for more than the account has ("crowded", first ask
+   * only), else to a seat for the thread ("stuck"). For a model other than
+   * the reserved one only: where the reserved model's turns run is not this
+   * rule's. Null: neither, or stuckMoveMinutes is 0, or the project moved so
+   * within it.
    */
   function crowded(
     thread: ThreadResponse,
@@ -1167,11 +1169,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     let working = false;
     for (const [threadId, project] of turnsUnderWay)
       if (project === thread.projectId && threadId !== thread.id) working = true;
-    if (since !== null && now - since > limit)
-      return { kind: "stuck", minutes, wanted, capacity, working };
-    if (capacity > 0 && wanted > capacity)
+    // Seats for all first, at the first ask only: placeTurn falls back to
+    // a seat for the thread alone when no account has them.
+    if (since === null && capacity > 0 && wanted > capacity)
       return { kind: "crowded", minutes, wanted, capacity, working };
-    return null;
+    return { kind: "stuck", minutes, wanted, capacity, working };
   }
   /**
    * Whose seat a turn of a project on `at` takes (Astra SEATS-R3-001): its
@@ -1215,12 +1217,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /**
    * Reservations whose turn never started are freed, and every free seat
    * goes to the first in its account's queue; bb is asked again at once
-   * when someone got one.
+   * when someone got one, or when `freed` (a seat just ended) and threads
+   * wait on other accounts: one whose project can move to the seat goes
+   * now, not at its next SEAT_RECHECK_MS (Aitor 2026-11-05, «que cuando
+   * termine una … salga otra»).
    */
-  function admitWaiting(): void {
+  function admitWaiting(freed = false): void {
     const now = deps.now();
     const held = seats.holds().length;
-    for (const key of seats.expire(now, SEAT_TTL_MS))
+    const expired = seats.expire(now, SEAT_TTL_MS);
+    if (expired.length > 0) freed = true;
+    for (const key of expired)
       bb.log.info(
         `a seat reserved on ${seatName(key)} expired (its turn did not start, or its hold from outside bb ended); ${occupancy(key)}`,
       );
@@ -1232,7 +1239,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         `thread ${threadId}: admitted to a seat on ${seatName(key)}; ${occupancy(key)}`,
       );
     }
-    if (admitted.length > 0)
+    const waitingElsewhere =
+      freed &&
+      Object.values(seats.snapshot()).some((s) => s.queued.length > 0);
+    if (admitted.length > 0 || waitingElsewhere)
       void bb.experimental_hooks
         .recheck("message.dispatch")
         .catch((error: unknown) =>
@@ -1279,7 +1289,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     bb.log.info(
       `thread ${threadId}: seat on ${seatName(key)} released (${why}); ${occupancy(key)}`,
     );
-    admitWaiting();
+    admitWaiting(true);
   }
   /** The thread's turn started on the seat budget `key`: its seat runs there. */
   function confirmSeat(threadId: string, key: string): void {
@@ -4744,7 +4754,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       admitWaiting();
       seatsFull = seatsFullFor(thread, fromName);
     }
-    const busy =
+    let busy =
       when === "before" && !seatsFull && turn.tick !== true
         ? crowded(thread, fromName, model, now)
         : null;
@@ -4782,7 +4792,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         now - crowdedMoves.get(projectId)!.at <=
           current.stuckMoveMinutes * 60_000,
     };
-    const decision = decidePlacement(input);
+    let decision = decidePlacement(input);
+    // No account with seats for all: a seat for the thread alone, at once.
+    if (busy?.kind === "crowded" && decision.kind === "keep") {
+      busy = { ...busy, kind: "stuck" };
+      const { seatsWanted: _w, seatsWantedOnly: _o, ...alone } = input;
+      decision = decidePlacement(alone);
+    }
     if (decision.kind === "keep") {
       // The turn runs where the project is (refused at the checkpoint only
       // when that is the default account and it has no login), unless it
@@ -4918,7 +4934,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const libres = roomThere === 1 ? "libre" : "libres";
     const why =
       busy.kind === "stuck"
-        ? `el hilo llevaba ${busy.minutes} min esperando plaza, ahora en ${fromName} (${taken}/${busy.capacity} ocupadas), con otro hilo de su proyecto ${busy.working ? "trabajando" : "a punto de arrancar"}`
+        ? `${busy.minutes === 0 ? `el hilo iba a esperar plaza en ${fromName}` : `el hilo llevaba ${busy.minutes} min esperando plaza, ahora en ${fromName}`} (${taken}/${busy.capacity} ocupadas), con otro hilo de su proyecto ${busy.working ? "trabajando" : "a punto de arrancar"}`
         : `el proyecto pide ${busy.wanted} plazas a la vez y ${fromName} tiene ${busy.capacity}`;
     const options = { preferredModel: model, ...reserveOf() };
     const there = measuredAccounts(model).find((a) => a.name === to);
@@ -7038,7 +7054,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
               bb.log.info(
                 `seat on ${seatName(key)} held from outside bb by ${options.id} released; ${occupancy(key)}`,
               );
-              admitWaiting();
+              admitWaiting(true);
             }
             const out =
               key === null
