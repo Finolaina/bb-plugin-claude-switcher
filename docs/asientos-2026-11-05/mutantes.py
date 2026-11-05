@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""Mutantes de la 0.2.43 (asientos sin esperas fijas e historial de 7 días; Aitor, 2026-11-05).
+
+Cada mutante rompe a propósito una pieza; la suite debe fallar con cada uno ("muerto").
+Uso, desde la raíz del repo: python3 docs/asientos-2026-11-05/mutantes.py
+Deja el código como estaba al acabar, también si se corta (try/finally).
+"""
+import subprocess
+import sys
+
+MUTANTES = [
+    ("M1 el hilo con hermanos espera en vez de moverse al momento", "server.ts",
+     "    return { kind: \"stuck\", minutes, wanted, capacity, working };\n  }",
+     "    if (since === null) return null;\n    return { kind: \"stuck\", minutes, wanted, capacity, working };\n  }"),
+    ("M2 sin plazas para todos, no prueba una plaza para el hilo solo", "server.ts",
+     "    if (busy?.kind === \"crowded\" && decision.kind === \"keep\") {",
+     "    if (false && busy?.kind === \"crowded\" && decision.kind === \"keep\") {"),
+    ("M3 un asiento libre no vuelve a preguntar a los de otras cuentas", "server.ts",
+     "    if (admitted.length > 0 || waitingElsewhere)",
+     "    if (admitted.length > 0)"),
+    ("M4 vuelve a preguntar en cada consulta, no solo al liberarse un asiento", "server.ts",
+     "    const waitingElsewhere =\n      freed &&",
+     "    const waitingElsewhere =\n      true &&"),
+    ("M5 la ventana de calma corta en N en vez de pasado N", "server.ts",
+     "    if (last !== undefined && now - last <= limit) return null;",
+     "    if (last !== undefined && now - last < limit) return null;"),
+    ("M6 el texto del movimiento al momento dice 0 min", "server.ts",
+     "${busy.minutes === 0 ?",
+     "${busy.minutes === -1 ?"),
+    ("M7 la poda borra también lo de 7 días justos", "src/historial.ts",
+     "DELETE FROM seat_samples WHERE at < ?",
+     "DELETE FROM seat_samples WHERE at <= ?"),
+    ("M8 las muestras no guardan los hilos en espera", "server.ts",
+     "        waiting: taken.queued.length,",
+     "        waiting: 0,"),
+    ("M9 las filas STUCK no se guardan", "server.ts",
+     "      toHistorial(`thread ${a.hilo} stuck`, (db) =>",
+     "      if (false) toHistorial(`thread ${a.hilo} stuck`, (db) =>"),
+    ("M10 al arrancar no relee el historial", "server.ts",
+     "      for (const r of readSamples(historial, deps.now() - SEAT_SAMPLES_MS))",
+     "      for (const r of readSamples(historial, deps.now() + 1))"),
+    ("M11 history --dias admite 8", "server.ts",
+     "dias < 1 || dias > HISTORIAL_DIAS)",
+     "dias < 1 || dias > HISTORIAL_DIAS + 1)"),
+]
+
+
+def main() -> int:
+    vivos = []
+    for nombre, fichero, antes, despues in MUTANTES:
+        original = open(fichero).read()
+        if original.count(antes) != 1:
+            print(f"?? {nombre}: el ancla aparece {original.count(antes)} veces")
+            vivos.append(nombre)
+            continue
+        try:
+            open(fichero, "w").write(original.replace(antes, despues))
+            r = subprocess.run(["npx", "vitest", "run", "--bail=1"], capture_output=True, text=True, timeout=900)
+            muerto = r.returncode != 0
+        finally:
+            open(fichero, "w").write(original)
+        print(("muerto " if muerto else "VIVO   ") + nombre)
+        if not muerto:
+            vivos.append(nombre)
+    print(f"{len(MUTANTES) - len(vivos)}/{len(MUTANTES)} mutantes muertos")
+    return 1 if vivos else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

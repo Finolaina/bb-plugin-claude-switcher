@@ -45,6 +45,17 @@ import {
 } from "./src/accounts.js";
 import { nextDayStart, paceOf, type DayStart, type Pace } from "./src/pace.js";
 import {
+  HISTORIAL_DIAS,
+  HISTORIAL_MIGRATIONS,
+  addSample,
+  addStuck,
+  historyText,
+  prune as pruneHistorial,
+  readSamples,
+  readStuck,
+  type HistorialDb,
+} from "./src/historial.js";
+import {
   healthReport,
   healthText,
   isoInZone,
@@ -969,6 +980,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * one seat costs (`bb claude-switcher seats`).
    */
   const seatSamples: Record<string, SeatSample[]> = {};
+  /** The seat history's database (src/historial.ts); null when it could not be opened. */
+  let historial: HistorialDb | null = null;
+  /** A write to the seat history; a failure is logged, never thrown. */
+  function toHistorial(what: string, write: (db: HistorialDb) => void): void {
+    if (historial === null) return;
+    try {
+      write(historial);
+    } catch (error) {
+      bb.log.warn(
+        `could not write ${what} to the seat history: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
   /**
    * The samples older than a week go, by the clock and not only as their
    * account is measured again: as they load, are stored and are listed
@@ -1635,18 +1659,41 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       `could not read the projects' models; the preferred model judges them, and they are not stored until a reload: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  // The seat samples kept; one of another shape (before 0.2.31's second
-  // round: no usage in it) is left out.
+  // The seat history (src/historial.ts): the plugin's SQLite database, a
+  // week of it. Unopened, the samples live in memory until a reload, as
+  // before, and the history says it has none.
+  try {
+    const db = bb.storage.database();
+    bb.storage.migrate(db, HISTORIAL_MIGRATIONS);
+    historial = db;
+  } catch (error) {
+    bb.log.warn(
+      `could not open the seat history; samples are kept in memory only until a reload: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  // The seat samples kept: those of the history, and once, those 0.2.42 and
+  // before kept in kv (one of another shape, before 0.2.31's second round,
+  // is left out), which go to the history and leave kv.
   try {
     const parsed = z
       .record(z.string(), z.array(z.unknown()))
       .safeParse(await bb.storage.kv.get<unknown>(KV_SEATS));
     if (parsed.success)
       for (const [name, samples] of Object.entries(parsed.data))
-        seatSamples[name] = samples.flatMap((sample) => {
+        for (const sample of samples) {
           const one = seatSampleSchema.safeParse(sample);
-          return one.success ? [one.data] : [];
-        });
+          if (!one.success) continue;
+          const [at, running, reserved, session, weekly, sessionResets, weeklyResets] = one.data;
+          if (historial !== null)
+            addSample(historial, { at, account: name, running, reserved, waiting: null, capacity: null, session, weekly, sessionResets, weeklyResets });
+          else (seatSamples[name] ??= []).push(one.data);
+        }
+    if (historial !== null) {
+      if (parsed.success) await bb.storage.kv.delete(KV_SEATS);
+      pruneHistorial(historial, deps.now());
+      for (const r of readSamples(historial, deps.now() - SEAT_SAMPLES_MS))
+        (seatSamples[r.account] ??= []).push([r.at, r.running, r.reserved, r.session, r.weekly, r.sessionResets, r.weeklyResets]);
+    }
     pruneSeatSamples();
   } catch (error) {
     bb.log.warn(
@@ -1787,15 +1834,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const paceSnapshot = { ...paceDay };
     const snapshot = series;
     pruneSeatSamples();
-    const seatSnapshot = structuredClone(seatSamples);
+    toHistorial("the week's end", (db) => pruneHistorial(db, deps.now()));
     seriesWrites = seriesWrites.then(async () => {
-      try {
-        await bb.storage.kv.set(KV_SEATS, seatSnapshot);
-      } catch (error) {
-        bb.log.warn(
-          `could not store the seat samples: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
       await storePaceDay(paceSnapshot);
       try {
         await bb.storage.kv.set(KV_SERIES, snapshot);
@@ -1874,6 +1914,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       weekly.absent === true ? null : weekly.resetsAt,
     ]);
     seatSamples[name] = own;
+    toHistorial(`a sample of ${name}`, (db) =>
+      addSample(db, {
+        at,
+        account: name,
+        running: taken.running,
+        reserved: taken.reserved + (taken.external?.length ?? 0),
+        waiting: taken.queued.length,
+        capacity: taken.capacity,
+        session: session.usedPercent,
+        weekly: weekly.absent === true ? null : weekly.usedPercent,
+        sessionResets: session.resetsAt,
+        weeklyResets: weekly.absent === true ? null : weekly.resetsAt,
+      }),
+    );
   }
   function forecasts(): State["forecasts"] {
     const now = deps.now();
@@ -5288,7 +5342,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     for (const a of stuck) {
       if (now - (stuckSaid.get(a.hilo) ?? -Infinity) < STUCK_WAIT_MS) continue;
       stuckSaid.set(a.hilo, now);
-      bb.log.warn(atascoLine(a));
+      const line = atascoLine(a);
+      bb.log.warn(line);
+      toHistorial(`thread ${a.hilo} stuck`, (db) =>
+        addStuck(db, {
+          at: now,
+          thread: a.hilo,
+          account: a.cuenta,
+          model: a.modelo,
+          minutes: a.minutos,
+          free: a.libres,
+          projectBusy: a.proyectoOcupado,
+          line,
+        }),
+      );
     }
     for (const threadId of stuckSaid.keys())
       if (!waitSince.has(threadId)) stuckSaid.delete(threadId);
@@ -7086,10 +7153,48 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         }),
         history: cliCommand({
           summary:
-            "Show every move of a project to another account and every thread told to switch to Opus, latest first, and why",
-          options: { json: JSON_OPTION },
+            "Show every move of a project to another account and every thread told to switch to Opus, latest first, and why; with --dias N, also the seats hour by hour and the stuck threads of the last N days (at most 7)",
+          options: {
+            json: JSON_OPTION,
+            dias: {
+              type: "string",
+              description:
+                "Also the seats taken and waiting per hour and account, and every stuck thread with its why, of the last N days (1 to 7)",
+            },
+          },
           async run({ options }) {
             const s = await state();
+            if (options.dias !== undefined) {
+              const dias = Number(options.dias);
+              if (!Number.isInteger(dias) || dias < 1 || dias > HISTORIAL_DIAS)
+                return {
+                  exitCode: 2,
+                  stderr: `--dias takes a whole number from 1 to ${HISTORIAL_DIAS}\n`,
+                };
+              const now = deps.now();
+              const since = now - dias * 24 * 60 * 60_000;
+              if (historial === null)
+                return {
+                  exitCode: 1,
+                  stderr: "the seat history could not be opened (see the plugin's log)\n",
+                };
+              const samples = readSamples(historial, since);
+              const stuck = readStuck(historial, since);
+              const moves = s.history.filter((r) => r.at >= since);
+              if (options.json)
+                return {
+                  exitCode: 0,
+                  stdout: `${JSON.stringify({ dias, moves, stuck, samples }, null, 2)}\n`,
+                };
+              const moved = moves.map(
+                (r) =>
+                  `${new Date(r.at).toISOString()}\t${projectName(s.projects, r.projectId)}\t${r.from} → ${r.to}\t${r.reason}`,
+              );
+              return {
+                exitCode: 0,
+                stdout: `${historyText({ samples, stuck, dias, now })}\nMoves: ${moved.length}${moved.length === 0 ? "" : `\n${moved.join("\n")}`}\n`,
+              };
+            }
             if (options.json) {
               return {
                 exitCode: 0,
@@ -7136,7 +7241,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
               "time\taccount\trunning\treserved\tsession %\tweekly %\tsession resets\tweekly resets\tsession % per hour and seat",
             );
             const spend: string[] = [];
-            for (const [name, samples] of Object.entries(seatSamples)) {
+            // The text, the last day: the week is in `history --dias N`.
+            const dayAgo = deps.now() - 24 * 60 * 60_000;
+            for (const [name, all] of Object.entries(seatSamples)) {
+              const samples = all.filter(([at]) => at >= dayAgo);
               // The 5-hour window's share an hour of one seat spent, between
               // samples of the same window: Δ% ÷ hours ÷ the seats running
               // on average. None across a reset.
@@ -7167,7 +7275,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                 `${name}\t${seatHours > 0 ? `${(used / seatHours).toFixed(1)} %` : "—"} of the 5-hour window per hour and seat`,
               );
             }
-            lines.push("", ...spend);
+            lines.push("", ...spend, "", "Older samples, a week of them: bb claude-switcher history --dias N");
             return { exitCode: 0, stdout: `${lines.join("\n")}\n` };
           },
         }),

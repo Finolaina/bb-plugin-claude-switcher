@@ -742,7 +742,7 @@ async function host(
       throw new Error(options.kvReadError);
     };
   }
-  await createPlugin(fake.bb, {
+  const pluginDeps = {
     credentialIo,
     accountsIo,
     loginIo,
@@ -753,7 +753,8 @@ async function host(
     ...(options.sessionsIo === undefined
       ? {}
       : { sessionsIo: options.sessionsIo }),
-  });
+  };
+  await createPlugin(fake.bb, pluginDeps);
   fake.bb.storage.kv.get = kvGet;
   // The seats counted after the load, as they are by the time a user sends
   // a message, unless the test holds the count: a message meanwhile waits
@@ -767,6 +768,7 @@ async function host(
     await Promise.resolve();
   return {
     ...fake,
+    pluginDeps,
     env,
     envSet,
     envDeleted,
@@ -15720,12 +15722,62 @@ describe("bb claude-switcher seats", () => {
     workDown = true;
     clock = NOW + 2 * DAY;
     await h.harness.behavior.callRpc("accounts_refresh", null);
-    const stored = (await h.bb.storage.kv.get("seat-samples")) as Record<string, unknown[]>;
-    expect(stored.work).toHaveLength(1);
-    expect(stored.work).not.toContainEqual(sample(NOW - 6 * DAY));
+    // Stored in the seat history now (0.2.43): kv keeps none.
+    expect(await h.bb.storage.kv.get("seat-samples")).toBeUndefined();
+    const stored = JSON.parse((await h.harness.behavior.runCli(["history", "--dias", "7", "--json"])).stdout) as {
+      samples: { at: number; account: string }[];
+    };
+    expect(stored.samples.filter((r) => r.account === "work")).toHaveLength(1);
+    expect(stored.samples.map((r) => r.at)).not.toContain(NOW - 6 * DAY);
+    // The text lists the last day; the week is in --json and in history --dias.
+    const text = (await h.harness.behavior.runCli(["seats"])).stdout;
+    expect(text).not.toContain(new Date(NOW - 6 * DAY).toISOString());
+    expect(text).toContain(new Date(NOW + 2 * DAY).toISOString());
+    expect(text).toContain("Older samples, a week of them: bb claude-switcher history --dias N");
     // Listed six days on, nothing measured: main's of 2 days before load is gone.
     clock = NOW + 6 * DAY + 1;
     expect((await listed()).main).not.toContainEqual(sample(NOW - 2 * DAY));
+  });
+
+  it("history --dias: the samples of a week survive a reload, each with the threads waiting then, hour by hour", async () => {
+    const DAY = 24 * HOUR;
+    let clock = NOW;
+    const h = await host(ALL_FREE, { settings: { autoSwitch: false, seatsMax: 1 }, clock: () => clock });
+    dispose = () => h.harness.dispose();
+    await sent(h, "t1", "proj-1");
+    await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "t1", projectId: "proj-1" }) });
+    // t2 waits for main's only seat as main is measured.
+    await h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: "t2", projectId: "proj-1" }),
+        requestedExecution: { providerId: "claude-code", model: "claude-opus-5-5" },
+        attempt: "start-turn",
+      }),
+    );
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + 6 * DAY;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const again = await h.harness.lifecycle.reload((bb) => createPlugin(bb, h.pluginDeps));
+    const json = JSON.parse((await again.harness.behavior.runCli(["history", "--dias", "7", "--json"])).stdout) as {
+      samples: { at: number; account: string; running: number; waiting: number | null; capacity: number | null }[];
+    };
+    expect(json.samples.filter((r) => r.account === "main").map((r) => [r.at, r.running, r.waiting, r.capacity])).toEqual([
+      [NOW, 1, 1, 1],
+      [NOW + 6 * DAY, 1, 1, 1],
+    ]);
+    const text = (await again.harness.behavior.runCli(["history", "--dias", "1"])).stdout;
+    expect(text).toContain("Seats and stuck threads, last 1 day (Europe/Madrid)");
+    expect(text).toMatch(/\tmain\t1\/1\t1\t100\t40\n/);
+    // Six days back is not in the last day.
+    expect(text.split("\n").filter((l) => /\tmain\t/.test(l))).toHaveLength(1);
+  });
+
+  it("history --dias takes 1 to 7: 8 or a word is refused", async () => {
+    const h = await host(ALL_FREE, { settings: { autoSwitch: false } });
+    dispose = () => h.harness.dispose();
+    for (const bad of ["8", "0", "siete"])
+      expect((await h.harness.behavior.runCli(["history", "--dias", bad])).exitCode).toBe(2);
+    expect((await h.harness.behavior.runCli(["history", "--dias", "7"])).exitCode).toBe(0);
   });
 
   it("R07: measuring only one account leaves another's sample as it was measured", async () => {
@@ -17885,6 +17937,14 @@ describe("caminos 2026-11-04", () => {
       at(20 * 60_000);
       await pass(h);
       expect(lines(h)).toHaveLength(2);
+      // Each one said is a row of the seat history, with its why (Aitor 2026-11-05).
+      const history = JSON.parse((await h.harness.behavior.runCli(["history", "--dias", "1", "--json"])).stdout) as {
+        stuck: { at: number; thread: string; line: string; free: string[] }[];
+      };
+      expect(history.stuck.map((r) => [r.at - NOW, r.thread, r.free, r.line])).toEqual([
+        [10 * 60_000, "t2", ["work"], "STUCK: main holds thread t2 (Opus) 10 min, work is free"],
+        [20 * 60_000, "t2", ["work"], lines(h)[1]],
+      ]);
     });
 
     it("with no other account free it waits as it must: Team full and only Ultras free is «Esperar siempre»", async () => {
@@ -19552,6 +19612,10 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
       const { h, askUntil } = await start({ workBusy: true, main: [60, 60], settings: { seatsMax: 1, otherModelUpTo: 50 } });
       expect((await askUntil(0)).every((w) => w.action === "wait")).toBe(true);
       const before = h.harness.recheckCount;
+      // Asking again while it waits asks bb nothing: only a seat that ends does.
+      expect((await askUntil(2 * MINUTE)).every((w) => w.action === "wait")).toBe(true);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(h.harness.recheckCount).toBe(before);
       await h.harness.behavior.emitThreadEvent("thread.idle", { thread: thread({ id: "busy", projectId: "proj-2" }) });
       await vi.waitFor(() => expect(h.harness.recheckCount).toBe(before + 1));
     });
