@@ -33,7 +33,9 @@ import {
   atascoLine,
   heldBy,
   heldLong,
+  waitingForTeam,
   type Atasco,
+  type EsperaTeam,
   type HeldRow,
 } from "./src/atascos.js";
 import {
@@ -637,12 +639,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       default: 2,
     },
     // Aitor 2026-11-05 («hay cuota de claude … Tenemos opus!»); 50 is the
-    // delegating session's default, not a measure.
+    // delegating session's default, not a measure. Since 2026-11-06 («los
+    // Opus tienen que salir por Team sí o sí») Haiku's only.
     otherModelUpTo: {
       type: "number",
-      label: "Other models on a Max or Ultra account that keeps the preferred one, up to (%)",
+      label: "Haiku on a Max or Ultra account that keeps the preferred one, up to (%)",
       description:
-        "A turn in another model (Opus while Fable is preferred) runs on a Max or Ultra account that can still run the preferred model only while that account's weekly and preferred-model windows are both at or under this share, and only when no Team seat is free. 0 = never: such a turn waits for a Team seat.",
+        "A Haiku turn runs on a Max or Ultra account that can still run the preferred model only while that account's weekly and preferred-model windows are both at or under this share. Opus and Sonnet never run on a Max or Ultra account while Fable is preferred, whatever this says: they run on a Team seat or wait for one. 0 = never.",
       default: 50,
     },
     stuckMoveMinutes: {
@@ -5414,6 +5417,22 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     );
     return typeof read === "object" ? read.value : null;
   }
+  /**
+   * The Opus and Sonnet turns held for a Team seat (see waitingForTeam), as
+   * bb's queue stands; null when it could not be read in time.
+   */
+  async function esperandoTeam(): Promise<EsperaTeam[] | null> {
+    const read = await within(
+      bb.sdk.threads.queue.list(),
+      STUCK_READ_LIMIT_MS,
+      "the threads waiting for a Team seat could not be read",
+    );
+    if (typeof read !== "object") return null;
+    return waitingForTeam(read.value, PLUGIN_ID, waitSince, deps.now(), (model) => {
+      const family = modelFamily(model) ?? current.preferredModel;
+      return holdsForReserve({ preferredModel: family, ...reserveOf() }) ? family : null;
+    });
+  }
   async function readAtascos(rows?: readonly HeldRow[]): Promise<Atasco[]> {
     const all = rows ?? (await bb.sdk.threads.queue.list());
     const out: Atasco[] = [];
@@ -7006,6 +7025,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       .filter((at): at is number => at !== null);
     return healthReport({
       atascos: await atascos(),
+      esperandoTeam: await esperandoTeam(),
       measured: observed.length === 0 ? now : Math.max(...observed),
       dayStartHour: dayHour(),
       holdsBackground: current.paceHoldsBackground === true,

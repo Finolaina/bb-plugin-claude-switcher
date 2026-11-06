@@ -19422,12 +19422,17 @@ describe("caminos 2026-11-04", () => {
     expect(h.envDeleted.at(-1)).toMatchObject({ projectId: "proj-1" });
     expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
     expect(h.envSet.filter((e) => e.projectId === "proj-1").map((e) => e.note)).toEqual([ownNote("work")]);
+    // The pick is kept, for Fable.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(await h.bb.storage.kv.get("pins")).toEqual({ "proj-1": "main" });
     // Its next Fable turn goes back to the Ultra picked by hand, and stays.
     await h.harness.behavior.emitThreadEvent("thread.idle", { thread: thread({ id: "t1", projectId: "proj-1" }) });
     const deletes = h.envDeleted.length;
     expect(await dispatch(h, "f1", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
     expect(h.envDeleted.length).toBe(deletes + 1);
     expect(h.envDeleted.at(-1)).toMatchObject({ projectId: "proj-1" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(await h.bb.storage.kv.get("pins")).toEqual({ "proj-1": "main" });
   });
 
   describe("T-tic a Calor tick does not move its project (docs/plan-cambio-en-pausas.md)", () => {
@@ -20077,6 +20082,24 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
         expect(await history(h)).toEqual([]);
       },
     );
+
+    it("health lists the Opus turn waiting for a Team seat with its minutes, for Flota (2026-11-06)", async () => {
+      const row: QueuedRow = {
+        id: "q-b",
+        threadId: "b",
+        payload: { kind: "inline" },
+        sendAt: NOW + 30_000,
+        waitingOn: { kind: "plugin", pluginId: "claude-switcher", reason: "seat" },
+        createdAt: NOW - HOUR,
+        model: OPUS,
+        failureReason: null,
+      };
+      const { h, askUntil } = await start({ main: [0, 0], workBusy: true, settings: { seatsMax: 1, otherModelUpTo: 50 }, extra: { queued: [row] } });
+      expect((await askUntil(31 * MINUTE)).every((w) => w.action === "wait")).toBe(true);
+      const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+      expect(report.esperandoTeam).toEqual([{ hilo: "b", modelo: "Opus", minutos: 31 }]);
+      expect((await h.harness.behavior.runCli(["health"])).stdout).toContain("esperando Team: b (Opus) 31 min");
+    });
 
     it("an Ultra one point over the threshold is no target: it keeps waiting", async () => {
       const { h, at, askUntil } = await start({ main: [51, 10], workBusy: true, settings: { seatsMax: 1, otherModelUpTo: 50 } });

@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""Opus solo por Team (0.2.44, encargo de Aitor del 2026-11-06: «los Opus tienen que salir por Team sí o sí»).
+Cada pieza nueva tiene una prueba que muere con su mutante: se aplica el cambio en un clon limpio de HEAD,
+se ejecuta SU prueba y se exige rojo. Un mutante que no aplica o que queda en verde hace fallar el script.
+Salida: mutantes.salida.txt, junto a este fichero. Mismo motor que docs/revision-2026-11-04/mutantes.py."""
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+REPO = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
+SALIDA = os.path.join(REPO, "docs/opus-por-team-2026-11-06/mutantes.salida.txt")
+
+QUITA_REGLA = ("  if (holdsForReserve(options)) return true;\n", "")
+# (camino, mutante, fichero, viejo, nuevo, ficheros de test, filtro)
+M = [
+    ("R1 canario", "sin la regla: Opus vuelve a la Ultra con margen o sin Fable", "src/policy.ts", *QUITA_REGLA,
+     "src/policy.test.ts", "Opus solo por Team"),
+    ("R1 canario", "sin la regla (servidor: Team llena, Ultra ociosa)", "src/policy.ts", *QUITA_REGLA,
+     "server.test.ts", "canario: with no Team seat free"),
+    ("R1 canario", "sin la regla (colocación con pin a Ultra)", "src/policy.ts", *QUITA_REGLA,
+     "src/switch.test.ts", "canario: an Opus turn with the Team seat full"),
+    ("R2 pin", "un pin a Ultra vuelve a aguantar a Opus al colocar", "src/switch.ts",
+     "  const pinHolds = input.pinned === true && !holdsForReserve(options);\n", "  const pinHolds = input.pinned === true;\n",
+     "src/switch.test.ts", "Opus solo por Team: placement"),
+    ("R2 pin", "un pin a Ultra vuelve a aguantar a Opus (servidor)", "src/switch.ts",
+     "  const pinHolds = input.pinned === true && !holdsForReserve(options);\n", "  const pinHolds = input.pinned === true;\n",
+     "server.test.ts", "T3"),
+    ("R2 pin", "un hilo en error con pin a Ultra se reintenta allí en Opus", "src/switch.ts",
+     "      input.pinned === true && !holdsForReserve(options)\n        ? { ...options, reserveModel: undefined }",
+     "      input.pinned === true\n        ? { ...options, reserveModel: undefined }",
+     "src/switch.test.ts", "in Opus, leaves the picked Max account"),
+    ("R3 pin se queda", "el movimiento de Opus borra el pin", "server.ts",
+     "        keepPin:\n          decision.why === \"current-reserved\" &&", "        keepPin:\n          false &&",
+     "server.test.ts", "T3 a pick by hand of an Ultra with a Team seat free"),
+    ("R3 pin se queda", "la vuelta a casa borra el pin", "server.ts",
+     "      pins.get(projectId) !== toName &&\n", "",
+     "server.test.ts", "T3 a pick by hand of an Ultra with a Team seat free"),
+    ("R4 Flota", "esperandoTeam cuenta también los turnos de Fable", "src/atascos.ts",
+     "    if (at === undefined || modelo === null) continue;\n", "    if (at === undefined) continue;\n",
+     "src/atascos.test.ts", "waitingForTeam"),
+    ("R4 Flota", "health no lee la cola para esperandoTeam", "server.ts",
+     "      esperandoTeam: await esperandoTeam(),\n", "      esperandoTeam: [],\n",
+     "server.test.ts", "health lists the Opus turn waiting"),
+]
+
+
+def main() -> int:
+    head = subprocess.check_output(["git", "-C", REPO, "rev-parse", "HEAD"], text=True).strip()
+    trabajo = tempfile.mkdtemp(prefix="mutantes-")
+    clon = os.path.join(trabajo, "clon")
+    subprocess.check_call(["git", "clone", "-q", REPO, clon])
+    subprocess.check_call(["git", "-C", clon, "checkout", "-q", head])
+    os.symlink(os.path.join(REPO, "node_modules"), os.path.join(clon, "node_modules"))
+    lineas = [f"HEAD {head}"]
+    fallos = 0
+    for camino, nombre, fichero, viejo, nuevo, tests, filtro in M:
+        ruta = os.path.join(clon, fichero)
+        original = open(ruta).read()
+        if original.count(viejo) != 1:
+            lineas.append(f"NO APLICA  {camino} · {nombre} (coincidencias: {original.count(viejo)})")
+            fallos += 1
+            print(lineas[-1], flush=True)
+            continue
+        open(ruta, "w").write(original.replace(viejo, nuevo))
+        orden = ["npx", "vitest", "run", tests]
+        if filtro:
+            orden += ["-t", filtro]
+        r = subprocess.run(orden, cwd=clon, capture_output=True, text=True)
+        resumen = next((l.strip() for l in r.stdout.splitlines() if "Tests " in l), "sin resumen")
+        if r.returncode != 0 and "failed" in resumen:
+            lineas.append(f"MUERE      {camino} · {nombre} · {tests} {filtro!r} · {resumen}")
+        else:
+            lineas.append(f"VIVE       {camino} · {nombre} · {tests} {filtro!r} · {resumen}")
+            fallos += 1
+        print(lineas[-1], flush=True)
+        open(ruta, "w").write(original)
+    r = subprocess.run(["npx", "vitest", "run"], cwd=clon, capture_output=True, text=True)
+    resumen = next((l.strip() for l in r.stdout.splitlines() if "Tests " in l), "sin resumen")
+    lineas.append(f"SIN MUTAR  rc={r.returncode} · {resumen}")
+    print(lineas[-1], flush=True)
+    if r.returncode != 0:
+        fallos += 1
+    lineas.append(f"mutantes: {len(M)}, sin morir o sin aplicar: {fallos}")
+    open(SALIDA, "w").write("\n".join(lineas) + "\n")
+    print(lineas[-1])
+    shutil.rmtree(trabajo)
+    return 1 if fallos else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
