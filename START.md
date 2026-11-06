@@ -2,6 +2,15 @@
 
 - [ ] Tras reescribir el historial sin nombres de proyectos (Aitor, 2026-11-03 ~19:15: «Sí, borrarlos del historial»): confirmar que GitHub Support purgó las vistas en caché de los commits viejos (d01559a y los de la rama de 0.2.37). Estado en `docs/plazas-2026-11-03/START-preguntas-abiertas.md`.
 
+## Estado de la 0.2.45 (2026-11-06): modelo de cada proyecto sembrado al cargar
+
+Página de limpieza del 2026-11-06, punto 60 (Aitor, 12:25: «Puedes resolver hilos o decisiones de cosas que pueden estar pendientes, atascadas o ocupando hilos…»; Fable: «terminar tal como lo propone la página»). Cierra el medium de la pasada final de Fable sobre la 0.2.39 (más abajo).
+
+- [x] Siembra al cargar (también de los hilos archivados), 13 pruebas nuevas (1317 en total) y 17 mutantes (`docs/modelo-al-cargar-2026-11-06/mutantes.salida.txt`); los 26 de la 0.2.44 siguen muriendo. Revisión Codex en el NUC, marcha normal, última ronda útil: 2 de 3. r1 (Sol, ronda invalidada por el runner al escribir los mutantes durante la lectura) y r2 (Sol; sombra de Astra coincide) con el mismo medium (hilos archivados), arreglado; r3 (Astra, final) un low, arreglado con prueba y mutante (`codex-r1.md` … `codex-r3.md`).
+- [ ] Fusión, etiqueta `v0.2.45` e instalación con `bb plugin update claude-switcher`; vuelta atrás: `bb plugin install git:https://github.com/Finolaina/bb-plugin-claude-switcher@v0.2.44`.
+- [ ] [SUPUESTO] `SEED_WAIT_MS` (30 s) no está medido: con la lectura en marcha, el primer rescate tras recargar espera hasta 30 s.
+- [ ] Sin cubrir (low de la misma pasada): la primera colocación de un hilo nuevo (`placeProject`) juzga por el preferido; el modelo de ese hilo aún no se conoce.
+
 ## Estado de la 0.2.44 (2026-11-06): Opus y Sonnet solo por Team
 
 Encargo de Aitor, 2026-11-06 09:33 (por Fable, hilo thr_vhyiv6cwdd): «el switcher sigue gastando más Opus que Fable y no tira de las cuentas Team… los Opus tienen que salir por Team sí o sí». Medida de antes: `docs/opus-por-team-2026-11-06.md`.
@@ -38,7 +47,7 @@ Encargo de Aitor, 2026-11-04, audio tareas-1: valorar las cachés que mata el ca
 Publicada e instalada en el servidor de bb a las 04:58 (`bb plugin list`). Marcha fino, última ronda útil: 10 de 10; las rondas 9 y 10 sin high. Lo arreglado tras la ronda 10 lleva prueba y mutante, no otra ronda.
 
 - [x] Pasada final de Fable (hilo thr_7b3zi4mvnv, 2026-11-04): aprobada en lectura, sin bloqueantes. Hallazgos para seguimiento, sin encargo de código por ahora:
-  - [ ] medium: el rescate al recargar juzga por Fable a un proyecto sin modelo guardado (movimientos y caché perdida; fue lo que movió 4 proyectos al instalar).
+  - [x] medium: el rescate al recargar juzga por Fable a un proyecto sin modelo guardado (movimientos y caché perdida; fue lo que movió 4 proyectos al instalar). Arreglado en la 0.2.45.
   - [ ] low: la primera colocación de un proyecto hace la misma suposición.
   - [ ] low: el vigilante no cuenta la cola al medir las plazas libres.
   - [ ] low: el contador del vigilante incluye filas fallidas de otro origen.

@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.45] - 2026-11-06
+
+### Fixed
+
+- **A reload no longer moves a project for want of its model.** A project
+  with no model stored (no turn since the store began, or the store not
+  read) was judged by the first refresh's rescue for the preferred model:
+  on installing 0.2.39, four projects whose threads ran Opus on Team seats
+  out of Fable went to an Ultra, losing their prompt cache, and the same
+  happened on every reload to any project with no turn since. At load,
+  each such project now takes the model of the latest turn of its latest
+  Claude Code thread, archived ones included, from the list of threads
+  the seat count reads anyway plus the archived ones (one log read per
+  project with no model, none for the others). Any turn beats it, and it is not stored until a turn names it.
+  A project with no thread, or whose latest turn names no model, is judged
+  for the preferred model as before; a read that fails is said once in the
+  log and that project is judged as before. The rescue waits for these
+  reads at most 30 s; turns never wait for them. The log says, once per
+  load, how many projects took a model, had no thread, had a turn with no
+  model or could not be read.
+
 ## [0.2.44] - 2026-11-06
 
 ### Changed

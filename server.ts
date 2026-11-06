@@ -169,6 +169,8 @@ const DISPATCH_MIN_MS = 500;
 const OUT_OF_TIME_WAIT_MS = 5_000;
 /** One project's rescue off an account that cannot run, its queue included, is not waited for longer (Astra SEATS-R4-004). */
 const RESCUE_LIMIT_MS = 10_000;
+/** How long a rescue waits for the projects' models read at load (see seedProjectModels). */
+export const SEED_WAIT_MS = 30_000;
 /**
  * A new project's first message waits this long, once, when its placement
  * has not finished within DISPATCH_LIMIT_MS (the accounts are measured
@@ -4244,17 +4246,27 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       { model, at: 0 },
     ]),
   );
+  /**
+   * The projects whose model was read at load from their latest thread
+   * (see seedProjectModels), until a turn names it: left out of the store,
+   * for only a turn's model is stored.
+   */
+  const seededModels = new Set<string>();
   /** Writes in order (see storeHolds). */
   let projectModelWrites: Promise<void> = Promise.resolve();
   /** The latest write failed: the next turn stores it again, also with no change (Codex IR-001). */
   let projectModelsUnsaved = false;
   /** Stored as it changes, without holding the turn back: a failed write is logged and tried again. */
   function noteProjectModel(projectId: string, model: string, at: number): void {
-    const before = projectModel.get(projectId)?.model;
+    const before = seededModels.delete(projectId)
+      ? undefined
+      : projectModel.get(projectId)?.model;
     projectModel.set(projectId, { model, at });
     if (!projectModelsRead || (before === model && !projectModelsUnsaved)) return;
     const snapshot = Object.fromEntries(
-      [...projectModel].map(([id, known]) => [id, known.model]),
+      [...projectModel]
+        .filter(([id]) => !seededModels.has(id))
+        .map(([id, known]) => [id, known.model]),
     );
     projectModelWrites = projectModelWrites.then(async () => {
       try {
@@ -4271,6 +4283,122 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** The model a project's next turn is judged for: its latest turn's, else the preferred one. */
   function modelOfProject(projectId: string): string {
     return projectModel.get(projectId)?.model ?? current.preferredModel;
+  }
+  /**
+   * Limpieza 2026-11-06, punto 60 (Aitor 2026-11-06: «resolver hilos o
+   * decisiones … pendientes»): a project with no model stored (no turn since
+   * project-models began, or the store unread) was judged for the preferred
+   * model by the first rescue after a load, and moved off a Team seat out of
+   * Fable where its Opus thread ran (4 projects on installing 0.2.39). At
+   * load, each such project takes the model of the latest turn of its
+   * latest Claude Code thread (by updatedAt; the user's, as the checkpoint
+   * notes them), with `at: 0` so any turn beats it, from the list of
+   * threads the seat count reads anyway: one log read per project, none per
+   * other thread. Not stored until a turn names it (see seededModels). A
+   * read that fails is said and that project is judged as before; the
+   * rescue waits for this at most SEED_WAIT_MS.
+   */
+  let seedAsked = false;
+  let seedDone!: () => void;
+  const modelsSeeded = new Promise<void>((resolve) => (seedDone = resolve));
+  let seedLateSaid = false;
+  type LatestThreads = Map<string, { id: string; updatedAt: number }>;
+  /** `t` as its project's latest thread of the user, if it is the latest so far (as the checkpoint notes a model). */
+  function noteLatestThread(
+    latest: LatestThreads,
+    t: { id: string; projectId: string; updatedAt: number } & Parameters<
+      typeof notTheUsersThread
+    >[0] & { providerId: string },
+  ): void {
+    if (
+      t.providerId === CLAUDE_CODE_PROVIDER &&
+      notTheUsersThread(t) === null &&
+      (latest.get(t.projectId)?.updatedAt ?? -Infinity) < t.updatedAt
+    )
+      latest.set(t.projectId, { id: t.id, updatedAt: t.updatedAt });
+  }
+  function seedProjectModels(latest: LatestThreads | null): void {
+    if (seedAsked) return;
+    seedAsked = true;
+    void readSeeds(latest)
+      .catch((error: unknown) =>
+        bb.log.warn(
+          `the projects' models not read from their latest threads; the preferred model judges those with none stored: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      )
+      .finally(seedDone);
+  }
+  async function readSeeds(latest: LatestThreads | null): Promise<void> {
+    if (latest === null) {
+      bb.log.warn(
+        "the threads not listed to read each project's model at load; the preferred model judges those with none stored",
+      );
+      return;
+    }
+    const listed = await within(
+      bb.sdk.projects.list({ includePersonal: true }),
+      DISPATCH_LIMIT_MS,
+      "the projects not listed to count those with no thread",
+    );
+    // Late is said too (Astra MLC-002): a project with only archived
+    // threads, or none, is judged for the preferred model then.
+    if (listed === "late")
+      bb.log.warn(
+        "the projects not listed to count those with no thread: no answer in time; those not among the threads listed are judged for the preferred model",
+      );
+    const ids =
+      typeof listed === "object" ? listed.value.map((p) => p.id) : [...latest.keys()];
+    const asked = ids.filter((id) => !projectModel.has(id));
+    // An archived thread is a thread of its project too (Codex MLC-001):
+    // listed here, only when some project has no model, page by page. A
+    // page that is not read leaves every project judged as before.
+    const PAGE = 200;
+    for (let offset = 0; asked.length > 0; offset += PAGE) {
+      const what =
+        "the archived threads not listed to read each project's model at load; the preferred model judges those with none stored";
+      const page = await within(
+        bb.sdk.threads.list({ archived: true, limit: PAGE, offset }),
+        DISPATCH_LIMIT_MS,
+        what,
+      );
+      if (page === "late") bb.log.warn(`${what}: no answer in time`);
+      if (typeof page !== "object") return;
+      for (const t of page.value) noteLatestThread(latest, t);
+      if (page.value.length < PAGE) break;
+    }
+    let taken = 0;
+    let none = 0;
+    let unnamed = 0;
+    let unread = 0;
+    await Promise.all(
+      asked.map(async (projectId) => {
+        const thread = latest.get(projectId);
+        if (thread === undefined) {
+          none += 1;
+          return;
+        }
+        const what = `project ${projectId}: the model of its latest turn not read (the preferred model judges it)`;
+        const read = await within(latestTurn(thread.id), DISPATCH_LIMIT_MS, what);
+        if (read === "late") bb.log.warn(`${what}: no answer in time`);
+        if (typeof read !== "object") {
+          unread += 1;
+          return;
+        }
+        const model = read.value?.model ?? null;
+        if (model === null) {
+          unnamed += 1;
+          return;
+        }
+        // A turn named it while this was read: it stands.
+        if (projectModel.has(projectId)) return;
+        projectModel.set(projectId, { model, at: 0 });
+        seededModels.add(projectId);
+        taken += 1;
+      }),
+    );
+    bb.log.info(
+      `projects' models after loading: ${taken} from their latest turn, ${typeof listed === "object" ? none : "?"} with no thread, ${unnamed} whose latest turn names no model, ${unread} not read (of ${asked.length} with none stored)`,
+    );
   }
   /**
    * Why `name` cannot run `model`, as measured now: not logged in, or out
@@ -4304,6 +4432,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   async function rescueStranded(): Promise<void> {
     if (!current.autoSwitch) return;
+    // The models read at load first (see seedProjectModels), within a bound.
+    if (
+      (await within(modelsSeeded, SEED_WAIT_MS, "the projects' models")) ===
+        "late" &&
+      !seedLateSaid
+    ) {
+      seedLateSaid = true;
+      bb.log.warn(
+        `the projects' models not read from their latest threads within ${SEED_WAIT_MS / 1000} s of a rescue; the preferred model judges those with none stored until they are`,
+      );
+    }
     const now = deps.now();
     // Each project read apart, within DISPATCH_LIMIT_MS: one that cannot be
     // read is said and left out, the rest are looked at (Astra
@@ -7647,6 +7786,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // Hidden ones too: they take no seat, but keep their project where it
       // is (Codex PLAZAS-R2-003).
       const underWay: { id: string; projectId: string }[] = [];
+      // Each project's latest thread of the user, for its model (see
+      // seedProjectModels; the archived ones are listed there).
+      const latest = new Map<string, { id: string; updatedAt: number }>();
       const PAGE = 200;
       for (let offset = 0; ; offset += PAGE) {
         const page = await countTries("the threads", () =>
@@ -7664,8 +7806,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         );
         underWay.push(...claude);
         running.push(...claude.filter((t) => notTheUsersThread(t) === null));
+        for (const t of page) noteLatestThread(latest, t);
         if (page.length < PAGE) break;
       }
+      seedProjectModels(latest);
       const listedAt = deps.now();
       // Under way as bb lists them, whatever their seat's read says (Codex
       // PLAZAS-002); not one that ended meanwhile.
@@ -7728,6 +7872,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
       complete = !unread;
     } finally {
+      // The threads not listed: said, and judged as before.
+      seedProjectModels(null);
       endedWhileCounting = null;
       seatsReady = true;
       seatsComplete = complete;
