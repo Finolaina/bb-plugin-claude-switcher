@@ -2,6 +2,15 @@
 
 - [ ] Tras reescribir el historial sin nombres de proyectos (Aitor, 2026-11-03 ~19:15: «Sí, borrarlos del historial»): confirmar que GitHub Support purgó las vistas en caché de los commits viejos (d01559a y los de la rama de 0.2.37). Estado en `docs/plazas-2026-11-03/START-preguntas-abiertas.md`.
 
+## Estado de la 0.2.44 (2026-11-06): Opus y Sonnet solo por Team
+
+Encargo de Aitor, 2026-11-06 09:33 (por Fable, hilo thr_vhyiv6cwdd): «el switcher sigue gastando más Opus que Fable y no tira de las cuentas Team… los Opus tienen que salir por Team sí o sí». Medida de antes: `docs/opus-por-team-2026-11-06.md`.
+
+- [x] Regla, pruebas (1304) y 26 mutantes (`docs/opus-por-team-2026-11-06/mutantes.salida.txt`). Revisión Codex en el NUC, marcha normal, última ronda útil: 4 de 4. r1 (3 high) y r2 (1 high) arreglados con prueba y mutante; r3 y r4 sin high (`codex-r1.md` … `codex-r4.md`).
+- [ ] Medios de r4 sin arreglar (ninguno mete Opus en una Max/Ultra): un reintento o fallo de Fable que mueve el proyecto puede borrar el pin; una espera de Opus no se suelta hacia una Team sin leer (se coloca al vencer); un login Team sin ventana de 5 h cuenta como Ultra (decisión del canario 1 de `src/accounts.test.ts`); con la cuenta del proyecto ilegible y solo Teams agotadas, el turno arranca al 4.º intento en una Team.
+- [ ] [SUPUESTO] La espera en una Team agotada no tiene el tope de `maximumWaitHours`; PARA Y ESPERA 1 del encargo: si todas las Team se quedan sin cuota y hay más de 5 hilos de Opus esperando más de 30 min, avisar a Aitor.
+- [ ] Hueco que el switcher no puede cerrar: los subagentes de Opus de un hilo de Fable corren en la cuenta del hilo (80 % de los tokens de Opus en las Ultra en la medida, cuenta nuestra).
+
 ## Estado de la 0.2.41 (2026-11-05 00:30): en rama `fix/atasco-noche`, en revisión
 
 Encargo de Aitor, 2026-11-05 00:20 (por Fable, hilo thr_gar882gnyj): «hay demasiadas cosas atascadas … resuelve si es cosa de swicher … ponte loops … abre un poco la mano … Tenemos opus!». Causa y cifra: Optimizador `informes/2026-11-05/switcher-noche/CAUSA.md` (24 h de espera el 4-nov, cuenta nuestra; todas con un hermano del proyecto trabajando).
