@@ -2520,8 +2520,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       stillValid?: () => boolean;
       /**
        * The pick by hand stays: the move is an excursion of a turn in a model
-       * held off the reserve, and the pick still holds for the reserved
-       * model (Aitor 2026-11-06: a project pinned to a Max keeps it for Fable).
+       * other than the reserved one (Opus, Sonnet, Haiku), and the pick still
+       * holds for the reserved model (Aitor 2026-11-06: a project pinned to a
+       * Max keeps it for Fable; Codex r3 medium 1).
        */
       keepPin?: boolean;
     } = {},
@@ -4013,7 +4014,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (
       !(await applyAccount(projectId, accountOrDefault(decision.account), from, {
         forThread: thread.id,
-        keepPin: heldModel(model),
+        keepPin: otherModel(model),
       }))
     )
       return;
@@ -4382,6 +4383,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       accounts: aheadTargets(projectId, fromName, model, now),
       preferredModel: model,
       ...reserveOf(),
+      // The pick by hand first, as before a turn (Codex r3 medium 2).
+      excursionFrom: wayHome(projectId, model, measuredAccounts(model), now),
       freeSeats,
       now,
       currentLoggedOut: loggedOut(fromName),
@@ -4401,7 +4404,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const ended = turnEnds.get(projectId) ?? 0;
     if (
       !(await applyAccount(projectId, accountOrDefault(decision.account), from, {
-        keepPin: heldModel(model),
+        keepPin: otherModel(model),
         stillValid: () =>
           (activity.get(projectId) ?? 0) === seen &&
           (turnEnds.get(projectId) ?? 0) === ended &&
@@ -5055,7 +5058,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       await applyAccount(projectId, to, from, {
         share: false,
         forThread: thread.id,
-        keepPin: heldModel(model),
+        keepPin: otherModel(model),
       });
       await markHandled(projectId);
       // A move for a crowded seat is a new home, not an excursion: a turn in
@@ -6183,7 +6186,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       if (
         !(await applyAccount(projectId, accountOrDefault(decision.account), from, {
           forThread: event.threadId,
-          keepPin: heldModel(model),
+          keepPin: otherModel(model),
         }))
       ) {
         // Moved by a placement before a turn while the sessions were shared:
@@ -6653,8 +6656,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (
       !noLogin &&
       !refusing(fromName) &&
-      (here === undefined ||
-        here.unknown === true ||
+      (((here === undefined || here.unknown === true) &&
+        // Unread, and it may spend the reserve: a Team seat that can take
+        // the turn is looked for below (Codex r3 medium 3).
+        !heldOff(fromName, model)) ||
+      (here !== undefined &&
+        here.unknown !== true &&
         // With the reserve: a Max account that keeps the preferred model
         // never gets an Opus retry released on it (Codex BM-R1-005).
         // A pick by hand holds while the account runs the model (code-reviewer r1 M1),
@@ -6662,7 +6669,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         (pins.get(projectId) === fromName &&
         !holdsForReserve({ preferredModel: model, ...reserveOf() })
           ? bestAccount([here], model, now)
-          : bestAccount([here], model, now, current.preferredModel, undefined, undefined, current.otherModelUpTo)) === fromName)
+          : bestAccount([here], model, now, current.preferredModel, undefined, undefined, current.otherModelUpTo)) === fromName))
     ) {
       // It waited on the account the project was on before.
       const changed = accountChangedAt.get(projectId);
@@ -6704,7 +6711,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (
       !(await applyAccount(projectId, accountOrDefault(to), from, {
         forThread: threadId,
-        keepPin: heldModel(model),
+        keepPin: otherModel(model),
       }))
     )
       return;

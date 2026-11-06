@@ -28,7 +28,10 @@ project uses [Semantic Versioning](https://semver.org/).
   Team seat out of its session with no other Team able to take it, the
   turn waits there too: it no longer starts to fail.
 - **The pick by hand is the way home for Fable** before any excursion noted
-  since (r2).
+  since (r2), also for the refresh's rescue; a Haiku turn that moves the
+  project keeps it too (r3).
+- An Opus retry waiting on an account not read yet is moved by the refresh
+  to a free Team seat; a login whose plan name says Team is a Team seat (r3).
 
 ### Added
 

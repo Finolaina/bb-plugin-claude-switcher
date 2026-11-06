@@ -11404,6 +11404,23 @@ describe("an Opus turn never retried, released or placed on a Max account that k
       expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-1"]);
     });
 
+    it("r3-3 a waiting Opus turn on the default account unread (429) is moved by the refresh to a free Team seat (Codex r3 medium 3)", async () => {
+      const h = await host(
+        {
+          main: () => new Response(null, { status: 429 }),
+          work: () => Response.json(teamPayload(5, 42)),
+          spare: () => Response.json(payload(10, 10, 5)),
+        },
+        { ...FABLE, queued: [waitingOpus("main")], ...WAITING_OPUS },
+      );
+      dispose = () => h.harness.dispose();
+      await onePass(h);
+      expect(notes(h)).toEqual([ownNote("work")]);
+      expect(h.retries).toEqual([
+        { threadId: "thread-1", turnRequestId: "creq_r1", reason: expect.stringMatching(/work/) },
+      ]);
+    });
+
     it("leaves the waiting turn queued when a placement before a turn moved the project while the refresh shared its sessions", async () => {
       const order: string[] = [];
       let release!: () => void;
@@ -19697,6 +19714,59 @@ describe("caminos 2026-11-04", () => {
       });
       expect(h.envDeleted.length).toBe(deletes + 1);
       expect(h.envDeleted.at(-1)).toMatchObject({ projectId: "proj-1" });
+    });
+  });
+
+  describe("Opus solo por Team: the pick by hand for Fable (Codex r3, 2026-11-06)", () => {
+    it("r3-1 a Haiku turn that moves the project between Team seats keeps the pick by hand", async () => {
+      const h = await host(
+        {
+          main: INCIDENT.main,
+          spare: () => Response.json(payload(10, 60, 20)),
+          work: () => Response.json(payload(100, 20, 30)),
+        },
+        {
+          settings: { ...FABLE, seatsTeam: 1 },
+          presetEnv: { "proj-1": on("work") },
+          kvPreset: { pins: { "proj-1": "main" } },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "h1", "proj-1", "claude-haiku-5-5")).toEqual({
+        action: "proceed",
+      });
+      expect(h.envSet.map((e) => e.note)).toEqual([ownNote("spare")]);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(await h.bb.storage.kv.get("pins")).toEqual({ "proj-1": "main" });
+    });
+
+    it("r3-2 the refresh rescues a project out of Fable to the pick by hand, not to the best other account", async () => {
+      const h = await host(
+        {
+          main: INCIDENT.main,
+          // A Team seat with the emptier session: the best for Fable but the pick.
+          spare: () => Response.json(payload(5, 10, 0)),
+          // Out of Fable: the project is stranded there for a Fable turn.
+          work: () => Response.json(payload(10, 20, 100)),
+        },
+        {
+          settings: { ...FABLE, seatsTeam: 2 },
+          presetEnv: { "proj-1": on("work") },
+          kvPreset: { pins: { "proj-1": "main" } },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      // One pass of the refresh.
+      const run = h.harness.behavior.runService("usage-refresh");
+      await vi.waitFor(() => expect(h.usageCalls).toHaveLength(3));
+      await vi.waitFor(() => expect(h.envDeleted).toHaveLength(1));
+      run.controller.abort();
+      await run.done;
+      expect(h.envSet).toEqual([]);
+      expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-1"]);
     });
   });
 

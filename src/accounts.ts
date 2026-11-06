@@ -75,7 +75,9 @@ export function planOf(
     login.planName === "Ultra" ||
     tier.includes("max_20x");
   if (fiveHour !== false) {
-    if (login.kind === "team") return info("team", "Team");
+    // The plan name says Team too (Codex r3 medium 4).
+    if (login.kind === "team" || login.planName === "Team")
+      return info("team", "Team");
     // By its windows only when the login says nothing of its plan: a plan
     // name or a tier of Max or Ultra is not a Team seat because it reports
     // no weekly (Codex r2 high 1, 2026-11-06: Opus went there as to a Team).
