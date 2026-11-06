@@ -18,7 +18,13 @@ project uses [Semantic Versioning](https://semver.org/).
   Ultra accounts.
 - **A pick by hand of a Max or Ultra is for Fable.** An Opus turn of such a
   project goes to a Team seat and the pick stays: the next Fable turn goes
-  back to the account picked.
+  back to the account picked, also after a reload, and the pick stays while
+  the Opus turns move between Team seats.
+- **Known as a Team seat, or no target.** An Opus or Sonnet turn waits
+  rather than start on a Max or Ultra that is out (it used to start there
+  to fail), on an account not read yet whose login does not say Team, or on
+  a Max login that reports no weekly (review r1,
+  `docs/opus-por-team-2026-11-06/codex-r1.md`).
 
 ### Added
 
