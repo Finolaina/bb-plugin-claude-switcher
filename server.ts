@@ -4340,6 +4340,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       DISPATCH_LIMIT_MS,
       "the projects not listed to count those with no thread",
     );
+    // Late is said too (Astra MLC-002): a project with only archived
+    // threads, or none, is judged for the preferred model then.
+    if (listed === "late")
+      bb.log.warn(
+        "the projects not listed to count those with no thread: no answer in time; those not among the threads listed are judged for the preferred model",
+      );
     const ids =
       typeof listed === "object" ? listed.value.map((p) => p.id) : [...latest.keys()];
     const asked = ids.filter((id) => !projectModel.has(id));

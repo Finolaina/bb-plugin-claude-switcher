@@ -75,6 +75,9 @@ M = [
     ("S9 archivados (Codex r1-r2 MLC-001)", "una lista de archivados fallida siembra igual", "server.ts",
      "      if (typeof page !== \"object\") return;\n      for (const t of page.value)", "      if (typeof page !== \"object\") break;\n      for (const t of page.value)",
      "server.test.ts", "a list of archived threads that fails"),
+    ("S10 lista de proyectos (Astra r3 MLC-002)", "una lista de proyectos tardía no se avisa", "server.ts",
+     "    if (listed === \"late\")\n      bb.log.warn(", "    if (listed === \"never\" as string)\n      bb.log.warn(",
+     "server.test.ts", "a list of projects that does not answer in time"),
 ]
 
 

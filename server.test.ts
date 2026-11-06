@@ -388,6 +388,8 @@ interface HostOptions {
   /** machineEnvironment throws for these projects (a bb hiccup), or never answers. */
   failEnvRead?: string[];
   hangEnvRead?: string[];
+  /** Runs as each projects.list starts, before it answers. */
+  beforeProjectsList?: () => Promise<void>;
   /** Runs as each projects.get starts, before it answers (Astra SEATS-R4-002). */
   beforeProjectGet?: () => Promise<unknown>;
   /** Runs as each machineEnvironment read starts, before it answers. */
@@ -679,6 +681,7 @@ async function host(
       projects: {
         // Like bb: the personal project ("Don't work in a project") only on request.
         list: async (args?: { includePersonal?: boolean }) =>
+          (await options.beforeProjectsList?.(),
           [
             { id: "proj-1", name: "Website" },
             { id: "proj-2", name: "Other" },
@@ -688,7 +691,7 @@ async function host(
               : []),
           ].filter(
             (p) => options.listed === undefined || options.listed.includes(p.id),
-          ),
+          )),
         machineEnvironment: async ({ projectId }: { projectId: string }) => {
           envReads.push(projectId);
           if (options.failEnvRead?.includes(projectId))
@@ -18190,6 +18193,31 @@ describe("caminos 2026-11-04", () => {
         );
         expect(warned).toHaveLength(1);
         expect(log(h)).toMatch(/moved from spare \(exhausted for Fable/);
+      });
+
+      it("a list of projects that does not answer in time is said once; the projects with a thread are still read", async () => {
+        vi.useFakeTimers();
+        let calls = 0;
+        const h = await host(USAGE, {
+          settings: FABLE,
+          presetEnv: { "proj-1": on("spare") },
+          threads: { t1: { projectId: "proj-1", updatedAt: NOW - HOUR } },
+          threadEvents: { t1: [turn(1, OPUS)] },
+          beforeProjectsList: () => (calls++ === 0 ? new Promise(() => {}) : Promise.resolve()),
+        });
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "spare", "work");
+        await vi.advanceTimersByTimeAsync(DISPATCH_LIMIT_MS + 100);
+        vi.useRealTimers();
+        await vi.waitFor(() => expect(log(h)).toMatch(/projects' models after loading/));
+        const warned = h.harness.logEntries.filter(
+          (e) => e.level === "warn" && /the projects not listed to count those with no thread: no answer in time/.test(e.message),
+        );
+        expect(warned).toHaveLength(1);
+        expect(log(h)).toMatch(/1 from their latest turn, \? with no thread/);
+        await pass(h);
+        expect(log(h)).not.toMatch(/moved from/i);
+        expect((await dispatch(h, "thr-2", "proj-2", FABLE_ID)).action).toBe("proceed");
       });
 
       it("one read per project with no model stored, of its latest thread only, and none for a project with one", async () => {
