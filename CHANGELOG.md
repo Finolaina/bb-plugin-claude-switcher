@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.46] - 2026-11-06
+
+### Fixed
+
+- **A reload counts each running turn where it started.** A turn reads its
+  account when it starts, and keeps running there if its project moves
+  meanwhile; a reload counted it on the project's new account. On
+  2026-11-05 a Team showed 5 threads on 3 seats after an update, and the
+  accounts they really ran on looked freer than they were. Each running
+  turn's seat is now stored as it starts (`running-seats`) and a reload
+  counts it there; a stored account no longer found counts it on its
+  project's account, as before.
+- The stored seat follows its account when the account's login becomes
+  known, a count that could not read every thread keeps what it stored, and
+  the seat's key is decided after the count's reads (Codex RS-001 to
+  RS-006). Known limit: the entry names the thread, not the turn (RS-005).
+
 ## [0.2.45] - 2026-11-06
 
 ### Fixed

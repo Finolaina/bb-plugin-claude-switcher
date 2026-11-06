@@ -1,0 +1,24 @@
+{
+  "verdict": "REVISE",
+  "summary": "La recuperación de KV puede perder la cuenta de origen de turnos ya reconstruidos y volver a atribuirlos incorrectamente tras recargar.",
+  "findings": [
+    {
+      "id": "RS-008",
+      "severity": "medium",
+      "path": "server.ts:1334",
+      "evidence": "Si la lectura inicial falla, rebuildSeats confirma plazas sin añadirlas a runningSeats (7839). Caso simple: KV está vacío, t se reconstruye en A y el reintento de lectura funciona; readRunningAgain escribe {}, olvidando esa reconstrucción. Si después el proyecto pasa a B, la siguiente recarga cuenta en B el mismo turno que sigue en A. También puede perder una asociación existente: con t→A guardado, t ya reconstruido provisionalmente en B y otro proyecto aún leyéndose, un thread.active dispara la recuperación de t→A en startedBefore; al finalizar el recuento, 7847 vacía ese mapa y elimina la asociación porque t no figura en runningSeats. A queda infracontada y puede admitir turnos por encima de su capacidad.",
+      "fix": "Conservar por separado las atribuciones provisionales del recuento y reconciliarlas al recuperar KV: dar prioridad a la asociación guardada válida y usar la provisional cuando no exista. La poda final debe preservar las asociaciones recuperadas de todos los turnos contados, incluidos los procesados antes de la recuperación. Añadir cobertura para KV vacío con fallo transitorio y para recuperación intercalada durante el recuento."
+    }
+  ],
+  "coverage": [
+    "Plan leído; SHA256 del plan y de los 14 archivos del manifiesto verificados.",
+    "Revisados los cambios de fuente, los siete tests añadidos, las cinco revisiones anteriores, documentación, versiones y metadatos; inspección focalizada de la lógica modificada en dist/server.js.",
+    "Trazados confirmación, liberación, reconstrucción, reintentos desde reserve, countUnseated y eventos de inicio, fin, fallo, archivo, borrado y cancelación.",
+    "Revisados src/seats.ts, src/accounts.ts, migración de claves, cambios de ajustes y cuenta del proyecto, serialización de escrituras y disposición."
+  ],
+  "limitations": [
+    "Revisión estática: no he ejecutado tests, build ni mutantes, modificado archivos o delegado. Los resultados anunciados en el plan no están verificados.",
+    "El SDK no está instalado; no he verificado las garantías del host sobre escrituras pendientes durante la descarga ni reconstruido el bundle.",
+    "RS-005 permanece como límite aceptado; no se ha demostrado el coste de consultar la identidad del turno."
+  ]
+}

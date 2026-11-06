@@ -1,0 +1,31 @@
+{
+  "verdict": "REVISE",
+  "summary": "Hay dos defectos de atribución pendientes: una lectura fallida puede sobrescribir datos válidos y una entrada puede aplicarse a otro turno del mismo hilo.",
+  "findings": [
+    {
+      "id": "R4-001",
+      "severity": "medium",
+      "path": "server.ts:1686",
+      "evidence": "Si KV_RUNNING contiene t→A pero su lectura falla transitoriamente, startedBefore queda vacío. Si el proyecto ya está en B, rebuildSeats cuenta el turno en B y storeRunning sobrescribe la entrada válida con t→B (líneas 7801–7810). La siguiente recarga tampoco puede recuperar A aunque el almacenamiento vuelva a funcionar. La protección del recuento incompleto no contempla este fallo inicial.",
+      "fix": "Distinguir una lectura fallida de una clave inexistente. No sobrescribir KV_RUNNING hasta leerlo correctamente; reintentar y reconciliar las altas y bajas posteriores. Añadir un caso con get fallido, set operativo y un turno cuyo proyecto haya cambiado de cuenta."
+    },
+    {
+      "id": "R4-002",
+      "severity": "medium",
+      "path": "server.ts:7752",
+      "evidence": "Sigue abierto RS-005: T1 arranca en A, su proyecto pasa a B y, mientras el plugin está descargado, T1 termina y T2 empieza en el mismo hilo sobre B. storedKey acepta la entrada antigua porque solo comprueba threadId y existencia de A. B queda infracontada y puede admitir turnos por encima de su capacidad. El comentario reconoce el caso; latestTurn (línea 6645) ya permite obtener requestId del registro de bb.",
+      "fix": "Persistir la identidad del intento junto con la cuenta y comprobarla al reconstruir. Reutilizar la cuenta guardada únicamente si corresponde al mismo intento; proteger las lecturas asíncronas frente a cambios de turno y cubrir la sustitución durante una recarga."
+    }
+  ],
+  "coverage": [
+    "Plan leído y SHA256 verificado; hashes de los ocho archivos del manifiesto coinciden.",
+    "Revisados los cambios de server.ts, los seis tests añadidos, versiones, metadatos y changelog; comprobación focalizada de la lógica correspondiente en dist/server.js.",
+    "Trazados confirmSeat, releaseSeat, countUnseated, rebuildSeats, eventos de inicio/fin/fallo/borrado, admisión y recuentos posteriores.",
+    "Revisados Seats, descubrimiento de cuentas, rekey, cambios de proyecto, escrituras serializadas y consulta de identidad mediante latestTurn."
+  ],
+  "limitations": [
+    "Revisión estática: no he ejecutado tests, build ni mutantes, ni modificado archivos o delegado.",
+    "El SDK no está instalado en este checkout; no he verificado las garantías del host sobre escrituras pendientes durante la descarga.",
+    "No se ha reconstruido el bundle ni comprobado exhaustivamente el código de dependencias incluido en él."
+  ]
+}

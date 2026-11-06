@@ -285,6 +285,8 @@ const KV_SERIES = "usage-series";
 const KV_PACE = "pace-day";
 /** Seats held from outside bb (`reserve`): a reload must not lose them. */
 const KV_EXTERNAL = "external-seats";
+/** Each running thread's seat budget, as its turn started: a reload counts it there (limpieza 2026-11-06, n.º 86). */
+const KV_RUNNING = "running-seats";
 /** This plugin as bb names it in a queued row's `waitingOn`. */
 const PLUGIN_ID = "claude-switcher";
 /** The model of each project's latest turn (see projectModel). */
@@ -905,8 +907,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     for (const a of accounts) {
       if (a.accountUuid === null) continue;
       const was = seatKeys.get(a.name) ?? a.name;
-      if (was !== a.accountUuid && !loginKeys.has(was))
+      if (was !== a.accountUuid && !loginKeys.has(was)) {
         seats.rekey(was, a.accountUuid);
+        // Where the running turns started moves with it (Codex RS-004).
+        let moved = false;
+        for (const m of [runningSeats, startedBefore])
+          for (const [id, k] of m)
+            if (k === was) {
+              m.set(id, a.accountUuid);
+              moved = true;
+            }
+        if (moved) storeRunning();
+      }
       seatKeys.set(a.name, a.accountUuid);
       loginKeys.add(a.accountUuid);
     }
@@ -1303,8 +1315,64 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           ),
         );
   }
+  /**
+   * The seat budget each running turn started on (KV_RUNNING): its project
+   * may move while it works, and the turn keeps running where it started.
+   */
+  const runningSeats = new Map<string, string>();
+  /** Read at load: where each turn running before the reload started. */
+  let startedBefore = new Map<string, string>();
+  let runningWrites: Promise<void> = Promise.resolve();
+  /**
+   * The stored starts could not be read at load: nothing is written over
+   * them (Astra R4-001) until a later write reads them, keeps the ones of
+   * turns not ended since and writes them with this session's (Astra
+   * RS-007).
+   */
+  let runningUnread = false;
+  /** Turns that ended while the stored starts were unread. */
+  const endedWhileUnread = new Set<string>();
+  let runningRead: Promise<void> | null = null;
+  function readRunningAgain(): void {
+    runningRead ??= (async () => {
+      try {
+        const parsed = z
+          .record(z.string(), z.string())
+          .safeParse(await bb.storage.kv.get<unknown>(KV_RUNNING));
+        if (parsed.success)
+          for (const [id, k] of Object.entries(parsed.data))
+            if (!runningSeats.has(id) && !endedWhileUnread.has(id))
+              startedBefore.set(id, k);
+        runningUnread = false;
+        endedWhileUnread.clear();
+        storeRunning();
+      } catch {
+        // Still unread: the next write tries again.
+      } finally {
+        runningRead = null;
+      }
+    })();
+  }
+  function storeRunning(): void {
+    if (runningUnread) {
+      readRunningAgain();
+      return;
+    }
+    // What a count could not confirm yet stays (Codex RS-002).
+    const snapshot = Object.fromEntries([...startedBefore, ...runningSeats]);
+    runningWrites = runningWrites.then(async () => {
+      try {
+        await bb.storage.kv.set(KV_RUNNING, snapshot);
+      } catch (error) {
+        bb.log.warn(
+          `could not store where the running turns started (a reload counts them on their project's account): ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    });
+  }
   /** Writes in order (see storeHolds). */
-  let holdsWrites: Promise<void> = Promise.resolve();
+  let holdsWrites
+: Promise<void> = Promise.resolve();
   /**
    * The seats held from outside bb (or `snapshot`, what they are to be),
    * to storage (KV_EXTERNAL), in order: true when written. A failure is
@@ -1336,6 +1404,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     toldToStart.delete(threadId);
     unseated.delete(threadId);
     endedWhileCounting?.add(threadId);
+    const counted = runningSeats.delete(threadId);
+    if (runningUnread) endedWhileUnread.add(threadId);
+    if (startedBefore.delete(threadId) || counted) storeRunning();
     const key = seats.release(threadId);
     if (key === null) return;
     bb.log.info(
@@ -1362,6 +1433,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // ASIENTOS-R3-002).
     const had = seats.seatOf(threadId)?.account;
     const { over } = seats.confirm(threadId, key, deps.now());
+    runningSeats.set(threadId, key);
+    storeRunning();
     if (had !== undefined && had !== key) admitWaiting(true);
     seatTitles.delete(threadId);
     const line = `thread ${threadId}: running on ${seatName(key)}${over ? " over capacity" : ""}; ${occupancy(key)}`;
@@ -1644,6 +1717,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   } catch (error) {
     bb.log.warn(
       `could not read the day's first readings; the day's pace starts again: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  // Where the turns running before the reload started.
+  try {
+    const parsed = z
+      .record(z.string(), z.string())
+      .safeParse(await bb.storage.kv.get<unknown>(KV_RUNNING));
+    if (parsed.success) startedBefore = new Map(Object.entries(parsed.data));
+  } catch (error) {
+    runningUnread = true;
+    bb.log.warn(
+      `could not read where the running turns started; they count on their project's account, and what is stored is kept for the next load: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
   // The seats held from outside bb before the reload.
@@ -7836,17 +7921,39 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       await Promise.all(
         running.map(async (t) => {
           const at = await reads.get(t.projectId)!;
-          if (at === null) return;
-          // On an account set outside this plugin: no seats. On one not
-          // among the accounts found: nobody's, never the default's (Astra
-          // SEATS-R3-001).
-          const seat = seatFor(at);
-          if (seat === null) return;
-          if (seat === UNKNOWN_SEAT) {
-            bb.log.debug(
-              `thread ${t.id} not counted after loading: its project's account is not among the accounts found`,
-            );
-            return;
+          // Where its turn started, when stored and still an account found:
+          // its project may have moved since (limpieza 2026-11-06, n.º 86).
+          // Stored by name before its login was known: the name's key now
+          // (Codex RS-001).
+          // ponytail: the entry names the thread, not the turn: a turn that
+          // ended and another that started while the plugin was off count
+          // where the first started (Codex RS-005; bb gives no turn id).
+          // Rare (a reload takes seconds); a turn id from bb would close it.
+          const storedKey = () => {
+            const stored = startedBefore.get(t.id);
+            return stored === undefined
+              ? undefined
+              : accounts.some((a) => seatKey(a.name) === stored)
+                ? stored
+                : accounts.some((a) => a.name === stored)
+                  ? seatKey(stored)
+                  : undefined;
+          };
+          let seat: string | null = null;
+          if (storedKey() === undefined) {
+            if (at === null) return;
+            // On an account set outside this plugin: no seats. On one not
+            // among the accounts found: nobody's, never the default's (Astra
+            // SEATS-R3-001).
+            const found = seatFor(at);
+            if (found === null) return;
+            if (found === UNKNOWN_SEAT) {
+              bb.log.debug(
+                `thread ${t.id} not counted after loading: its project's account is not among the accounts found`,
+              );
+              return;
+            }
+            seat = found;
           }
           // A read that took long: is the turn still under way? Unknown is
           // not counted, for a seat counted running is never freed but by
@@ -7866,7 +7973,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           // Ended while counted (Astra SEATS-R03), or announced or reserved
           // meanwhile (it counted itself).
           if (ended.has(t.id) || seats.seatOf(t.id) !== null) return;
-          seats.confirm(t.id, seatKey(seat), deps.now());
+          // The key as it is now, after the reads: a login found meanwhile
+          // renames it (Codex RS-006).
+          const key = storedKey() ?? (seat === null ? undefined : seatKey(seat));
+          if (key === undefined) return;
+          seats.confirm(t.id, key, deps.now());
+          // Unread stored starts: an account inferred from the project is
+          // not stored over them (Astra RS-007).
+          if (!runningUnread) runningSeats.set(t.id, key);
           seatProjects.set(t.id, t.projectId);
         }),
       );
@@ -7874,6 +7988,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     } finally {
       // The threads not listed: said, and judged as before.
       seedProjectModels(null);
+      // A count that read every thread keeps only the turns it counted; one
+      // that could not keeps what it could not confirm (Codex RS-002).
+      if (complete) startedBefore = new Map();
+      storeRunning();
       endedWhileCounting = null;
       seatsReady = true;
       seatsComplete = complete;

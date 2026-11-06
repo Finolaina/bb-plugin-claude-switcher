@@ -2,6 +2,15 @@
 
 - [ ] Tras reescribir el historial sin nombres de proyectos (Aitor, 2026-11-03 ~19:15: «Sí, borrarlos del historial»): confirmar que GitHub Support purgó las vistas en caché de los commits viejos (d01559a y los de la rama de 0.2.37). Estado en `docs/plazas-2026-11-03/START-preguntas-abiertas.md`.
 
+## Estado de la 0.2.46 (2026-11-06): recarga, en rama `fix/recarga-0.2.46`, sin subir
+
+Limpieza del 2026-11-06, n.º 86 (decisión de Fable, hilo thr_seruqz9pb5; Aitor 12:25: «Puedes resolver hilos o decisiones de cosas que pueden estar pendientes…»). Hecha primero como 0.2.45 en `fix/limpieza-recarga` (72cdad4, historia por rondas); otro hilo publicó antes su 0.2.45, así que sale como 0.2.46 aplicada sobre 92076b5.
+
+- [x] Una recarga cuenta cada turno en la cuenta donde arrancó (`running-seats`). Seis rondas (Codex Sol r1-r3, Astra r4-r6), ninguna con high; respuestas en `docs/recarga-2026-11-06/`. `npm run check` 1324 verdes sobre la 0.2.45 publicada.
+- [ ] Subir, fusionar en `main`, etiquetar `v0.2.46` e instalar. El juez de segunda opinión paró el `git push` dos veces el 2026-11-06 (la orden venía del hilo de limpieza, no de Aitor). Comando: `cd /home/aitor/Desarrollo/_wt/switcher-limpieza && env -u GH_TOKEN git push -u origin fix/recarga-0.2.46` (la sesión trae `GH_TOKEN` de mariscalai; el repo es de Finolaina).
+- [ ] Techos RS-005 (la entrada nombra el hilo, no el turno) y RS-008 (tras una lectura fallida al cargar): CLAUDE.md, viñeta de la recarga.
+- [ ] n.º 80 y 101, PR #4 («Rebote de la reserva»): sus 3 commits locales del Mac (26822ba: paquete, salida de 125 mutantes, mutantes al día) están en el NUC; la subida la paró el juez. Comando: `cd /home/aitor/Desarrollo/bb-plugins/bb-plugin-claude-accounts && env -u GH_TOKEN git push origin mac/rebote-limpia:refs/heads/despacho/switcher-reserva-rebote-limpia` (la rama `mac/rebote-limpia` del NUC los guarda). Aun subidos, el PR no se fusiona: está sobre 4a53435 (2026-11-04) y choca con la 0.2.41-0.2.45. Sus pruebas «rebote» pegadas sobre `main` fallan 9 de 11 (el fallo sigue). Rehacerlo sobre `main`: marcha fina, unas 3-4 h con revisión (cuenta nuestra).
+
 ## Estado de la 0.2.45 (2026-11-06): modelo de cada proyecto sembrado al cargar
 
 Página de limpieza del 2026-11-06, punto 60 (Aitor, 12:25: «Puedes resolver hilos o decisiones de cosas que pueden estar pendientes, atascadas o ocupando hilos…»; Fable: «terminar tal como lo propone la página»). Cierra el medium de la pasada final de Fable sobre la 0.2.39 (más abajo).
