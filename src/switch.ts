@@ -9,6 +9,7 @@ import type { PluginTurnFailedEvent } from "@get-bb/plugin-sdk";
 import {
   canRunModel,
   chooseAccount,
+  afterTeams,
   holdsForReserve,
   isUsable,
   modelWindow,
@@ -303,7 +304,9 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
   // order the accounts were measured in.
   const before = (a: string, b: string) =>
     a === input.currentAccount || (b !== input.currentAccount && a < b);
-  let earliest: { account: string; at: number } | null = null;
+  // At the same time, a Team seat before a Max out of the reserved model
+  // (Codex R047-R2-004).
+  let earliest: { account: string; at: number; late: boolean } | null = null;
   let reserved = false;
   for (const account of accounts) {
     let at = freeAt(account, input.preferredModel);
@@ -325,12 +328,16 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
       reserved = true;
       continue;
     }
+    const late = afterTeams(account, options);
     if (
       earliest === null ||
       at < earliest.at ||
-      (at === earliest.at && before(account.name, earliest.account))
+      (at === earliest.at &&
+        (late !== earliest.late
+          ? !late
+          : before(account.name, earliest.account)))
     )
-      earliest = { account: account.name, at };
+      earliest = { account: account.name, at, late };
   }
   if (earliest === null)
     return {
@@ -684,13 +691,11 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
       return { kind: "keep" };
     // A Team seat spends nothing the reserved model needs, read or not: all
     // the reads down is no reason to wait with one free (code-reviewer r4).
-    const elsewhere =
-      chooseSeated(
-        accounts.filter((a) => a.name !== input.currentAccount),
-        options,
-        input.freeSeats,
-      ) ??
-      chooseSeated(unreadTeamSeats(input), options, input.freeSeats);
+    const elsewhere = chooseTeamsFirst(
+      accounts.filter((a) => a.name !== input.currentAccount),
+      input,
+      options,
+    );
     // Kept as one that would spend the reserve: it takes its place in a
     // queue, and what comes later does not overtake it.
     return elsewhere === null
@@ -733,27 +738,33 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     );
     const wanted = input.seatsWanted ?? 1;
     const free = input.freeSeats;
-    const forAll =
-      wanted > 1 && free !== undefined
-        ? chooseSeated(roomy, options, (name) => (free(name) >= wanted ? free(name) : 0))
-        : null;
-    const choice =
-      forAll ??
+    const pick = (pool: AccountUsage[]) =>
+      (wanted > 1 && free !== undefined
+        ? chooseSeated(pool, options, (name) => (free(name) >= wanted ? free(name) : 0))
+        : null) ??
       (input.seatsWantedOnly === true && wanted > 1
         ? null
-        : chooseSeated(roomy, options, input.freeSeats));
+        : chooseSeated(pool, options, input.freeSeats));
+    // A held model: the Team seats first, measured or not, seats for all or
+    // one; a Max out of the reserved model only after (Codex R047-R2-002 and
+    // R047-R2-003), and not for seats for all only: the server then asks
+    // for one seat, which a Team seat may have.
+    const choice = holdsForReserve(options)
+      ? (pick(roomy.filter((a) => !afterTeams(a, options))) ??
+        pick(unreadTeamSeats(input)) ??
+        (input.seatsWantedOnly === true && wanted > 1 ? null : pick(roomy)))
+      : pick(roomy);
     return choice === null
       ? { kind: "keep" }
       : { kind: "move", account: choice.account, why: "current-full" };
   }
   const others = accounts.filter((a) => a.name !== input.currentAccount);
   const choice =
-    chooseSeated(others, options, input.freeSeats) ??
     // The reads of a Team seat down are no reason to wait with one free,
     // whatever is known of this account (code-reviewer r5).
     (holdsForReserve(options)
-      ? chooseSeated(unreadTeamSeats(input), options, input.freeSeats)
-      : null) ??
+      ? chooseTeamsFirst(others, input, options)
+      : chooseSeated(others, options, input.freeSeats)) ??
     // Without a login a turn kept here fails for sure: the reserve gives
     // way, but not for a model held off it (Codex OPUS-001): that turn
     // waits at the checkpoint, and the rescue leaves the project.
@@ -793,6 +804,28 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
  * inside its threads need.
  */
 /**
+ * For a model held off the reserve: a measured account that is no Max out of
+ * the reserved model (see afterTeams), then a Team seat not fully measured,
+ * then a Max out of the reserved model until its weekly resets (Codex
+ * R047-003: the unread Team seats came after any measured choice).
+ */
+function chooseTeamsFirst(
+  measured: AccountUsage[],
+  input: PlacementInput,
+  options: ChoiceOptions,
+): Choice | null {
+  return (
+    chooseSeated(
+      measured.filter((a) => !afterTeams(a, options)),
+      options,
+      input.freeSeats,
+    ) ??
+    chooseSeated(unreadTeamSeats(input), options, input.freeSeats) ??
+    chooseSeated(measured, options, input.freeSeats)
+  );
+}
+
+/**
  * The Team seats not fully measured, as accounts: nothing they spend is what
  * the reserve needs. What an incomplete answer did say still counts (Astra
  * FINAL-002, FINAL-R8-002); only a window it left out reads as free.
@@ -831,7 +864,9 @@ export function reserveWait(
     reserveModel: input.reserveModel,
     reserveSpareUpTo: input.reserveSpareUpTo,
   };
-  let earliest: { account: string; at: number } | null = null;
+  // At the same time, a Team seat before a Max out of the reserved model
+  // (Codex R047-R2-004).
+  let earliest: { account: string; at: number; late: boolean } | null = null;
   // A Team seat known by its login only is one to wait for too: in its queue,
   // what comes later does not overtake the turn (Astra IR5-002).
   for (const raw of [
@@ -846,14 +881,16 @@ export function reserveWait(
     // sent, a Max account whose reserved window resets keeps it again.
     const sendBy = Math.max(at, input.now) + RESET_BUFFER_MS + RESET_JITTER_MS;
     if (spendsReservedWeekly(settle(account, sendBy), options)) continue;
+    const late = afterTeams(account, options);
     if (
       earliest === null ||
       at < earliest.at ||
-      (at === earliest.at && account.name < earliest.account)
+      (at === earliest.at &&
+        (late !== earliest.late ? !late : account.name < earliest.account))
     )
-      earliest = { account: account.name, at };
+      earliest = { account: account.name, at, late };
   }
-  return earliest;
+  return earliest === null ? null : { account: earliest.account, at: earliest.at };
 }
 
 /**

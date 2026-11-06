@@ -1,0 +1,32 @@
+{
+  "verdict": "REVISE",
+  "summary": "The earlier fixes are present, but two account-selection paths still bypass Team-first ordering.",
+  "findings": [
+    {
+      "id": "R047-R3-001",
+      "severity": "medium",
+      "path": "server.ts:6333",
+      "evidence": "Failure recovery passes only measuredAccounts(model) to decideSwitch. If the current Team fails, a recognized unread Team has a free seat, and a measured Ultra satisfies the exception, recovery selects the Ultra. Refresh rescue likewise omits unreadTeams at server.ts:4604, and moveUpWait uses only measured candidates at server.ts:6916. The subsequent dispatch retains the now-current Ultra through src/switch.ts:710–730, so chooseTeamsFirst never corrects this new-account selection.",
+      "fix": "Include eligible unread Teams in failure recovery, refresh rescue, and wait-release selection before exception accounts. Reuse the placement candidate logic while preserving known blocking windows, refusal checks, failed-account exclusions, and seat availability. Add server-level regression coverage for these callers."
+    },
+    {
+      "id": "R047-R3-002",
+      "severity": "medium",
+      "path": "src/switch.ts:732",
+      "evidence": "The current-full branch filters by aheadThreshold before applying Team priority. With switchAheadOtherPercent=80, a full current account, another usable Team at 85% session with one free seat, and an eligible Ultra at 20% with room, the Team is removed from roomy and the Ultra is selected at lines 752–755. decideAhead applies the same filtering at lines 974–980. These are new-account choices that put the Ultra ahead of a Team with quota and a seat, contrary to the plan's unqualified Team-first rule.",
+      "fix": "Check usable Teams with free seats before allowing an exception account to win through the switch-ahead filter. For seat moves, prioritize the Team; for proactive moves, retain the current account if preserving the configured headroom rule precludes choosing that Team. Cover both paths with the threshold enabled."
+    }
+  ],
+  "coverage": [
+    "Verified the plan SHA-256, all 15 changed-file hashes, and the tracked diff hash.",
+    "Reviewed every changed file's additions and relevant surrounding code, including tests, documentation, scripts, and package metadata.",
+    "Traced placement, failure and leftover retries, refresh rescue, pins, switch-ahead, crowded seat moves, wait selection and release, and final dispatch guards.",
+    "Inspected usage parsing and caching, plan classification, project-model and excursion state, account-variable writes, seat reservation and admission, and esperandoTeam reporting."
+  ],
+  "limitations": [
+    "Static review only: no files edited, tests or mutation scripts run, or work delegated.",
+    "Large existing files were inspected in relevant sections rather than exhaustively.",
+    "External operational measurements and live provider behavior were not independently verified.",
+    "Respected the accepted existing-account retention decision. The documented esperandoTeam mislabel remains an acknowledged limitation."
+  ]
+}

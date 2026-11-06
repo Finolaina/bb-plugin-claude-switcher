@@ -171,11 +171,58 @@ export function spendsReservedWeekly(
   // (`team`). A Max or Ultra account is the reserved model's whatever it has
   // left of it and whatever its margin, also when it reports no weekly
   // (Codex r1 high 3): with no Team seat the turn waits.
+  if (reserveSpentTillWeekly(account, options.reserveModel!)) return false;
   if (holdsForReserve(options)) return true;
   if (account.weekly.absent === true) return false;
   return (
     canRunModel(account, options.reserveModel!) &&
     !reserveToSpare(account, options)
+  );
+}
+
+/**
+ * How much later than the reserved model's own window the general weekly may
+ * reset and still count as resetting with it (measured 2026-11-06: one Ultra
+ * reports Fable at 21:59:59 and its weekly at 22:00:00).
+ */
+export const RESET_TOGETHER_MS = 10 * 60 * 1_000;
+
+/**
+ * Whether the reserved model's own window is spent (100 %) until the general
+ * weekly resets with it: what is left of the weekly is lost at that reset,
+ * so a turn in another model spends nothing the reserved model needs (Aitor
+ * 2026-11-06, «si fable llega al 100 se abre opus en esa cuenta»). Not with
+ * either reset unknown or no weekly reported.
+ */
+export function reserveSpentTillWeekly(
+  account: AccountUsage,
+  reserve: string,
+): boolean {
+  const own = modelWindow(account, reserve);
+  return (
+    own !== undefined &&
+    own.usedPercent >= 100 &&
+    own.resetsAt !== null &&
+    account.weekly.absent !== true &&
+    account.weekly.resetsAt !== null &&
+    account.weekly.resetsAt <= own.resetsAt + RESET_TOGETHER_MS
+  );
+}
+
+/**
+ * A Max or Ultra account that takes a model held off the reserve only because
+ * the reserved model is spent there until its weekly resets: it comes after
+ * every Team seat, whatever their session or windows (Codex R047-002), for a
+ * Team seat runs both models and a project with threads in each stays put.
+ */
+export function afterTeams(
+  account: AccountUsage,
+  options: ChoiceOptions,
+): boolean {
+  return (
+    holdsForReserve(options) &&
+    account.team !== true &&
+    reserveSpentTillWeekly(account, options.reserveModel!)
   );
 }
 
@@ -219,7 +266,7 @@ function sessionQuarter(account: AccountUsage): number {
 function rank(
   account: AccountUsage,
   options: ChoiceOptions,
-): [number, number, number, number, number, number] {
+): [number, number, number, number, number, number, number] {
   const saved = options.savedForUser?.(account.name) === true ? 1 : 0;
   const keepsReserve =
     reserving(options) && canRunModel(account, options.reserveModel!) ? 1 : 0;
@@ -233,7 +280,10 @@ function rank(
     keepsReserve === 1 && !spendsNoWeekly(account, options.preferredModel)
       ? 1
       : 0;
+  // After every Team seat comes first, also before the day's pace (Codex
+  // R047-R2-001): it only ever sets a held model apart.
   return [
+    afterTeams(account, options) ? 1 : 0,
     saved,
     keepsReserve,
     spendsWeekly,
@@ -259,8 +309,9 @@ function sortedByRank(
   options: ChoiceOptions,
 ): AccountUsage[] {
   return [...accounts].sort((a, b) => {
-    const [va, ka, wa, ta, da, sa] = rank(a, options);
-    const [vb, kb, wb, tb, db, sb] = rank(b, options);
+    const [xa, va, ka, wa, ta, da, sa] = rank(a, options);
+    const [xb, vb, kb, wb, tb, db, sb] = rank(b, options);
+    if (xa !== xb) return xa - xb;
     if (va !== vb) return va - vb;
     if (ka !== kb) return ka - kb;
     if (wa !== wb) return wa - wb;

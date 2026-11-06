@@ -20020,6 +20020,40 @@ describe("caminos 2026-11-04", () => {
       },
     );
 
+    // Aitor 2026-11-06 later: «si fable llega al 100 se abre opus en esa cuenta».
+    /** A Max with Fable spent until its weekly resets (`together`), or 4 h before it. */
+    const outOfFable = (together: boolean) => () => {
+      const body = payload(10, 30, 100);
+      if (together)
+        (body.limits[2] as { resets_at: string }).resets_at = (body.limits[1] as { resets_at: string }).resets_at;
+      return Response.json(body);
+    };
+
+    it.each([[OPUS], [SONNET]])(
+      "on a Max out of Fable until its weekly resets, with no Team seat, a %s turn starts there",
+      async (model) => {
+        const h = await noTeam(outOfFable(true), { planDisplayName: "Ultra" });
+        expect(await dispatch(h, "t1", "proj-1", model)).not.toMatchObject({ action: "wait" });
+        expect(h.envSet.filter((e) => e.projectId === "proj-1")).toEqual([]);
+      },
+    );
+
+    it("from a Team seat out of its session, an Opus turn moves to a Max out of Fable until its weekly resets", async () => {
+      const h = await noTeam(outOfFable(true), { planDisplayName: "Ultra" }, {
+        presetEnv: { "proj-1": on("spare") },
+      });
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).not.toMatchObject({ action: "wait" });
+      // main is the default account: moving there takes the variable off.
+      expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-1"]);
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("on a Max out of Fable whose weekly outlives Fable's window, an Opus turn still waits", async () => {
+      const h = await noTeam(outOfFable(false), { planDisplayName: "Ultra" });
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toMatchObject({ action: "wait" });
+      expect(h.envSet.filter((e) => e.projectId === "proj-1")).toEqual([]);
+    });
+
     it("r1-2 on the default account unread (429) whose login says nothing of its plan, an Opus turn waits", async () => {
       const h = await noTeam(() => new Response(null, { status: 429 }));
       expect(await dispatch(h, "t1", "proj-1", OPUS)).toMatchObject({

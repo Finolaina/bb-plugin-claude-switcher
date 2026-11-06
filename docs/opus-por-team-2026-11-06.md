@@ -103,3 +103,18 @@ No se encontró ningún turno de Opus en una Ultra por estos motivos: «Team sin
 ## Para Flota
 
 `bb claude-switcher health --json` trae ahora `esperandoTeam`: una lista con `{hilo, modelo, minutos}` de cada turno de Opus o Sonnet que espera plaza en una Team. Vale `null` si no se pudo leer la cola. La salida de texto muestra cada caso como «esperando Team: …».
+
+## La medida de después (0.2.44 en el NUC)
+
+- **Ventana:** de la instalación, 2026-11-06 11:08:06, a las 13:31 (hora de Madrid). En epoch, de `1793959686` a `1793968276`. Mismo comando y mismas fuentes que arriba.
+- **Turnos:** 132 transcripts leídos (19 del i9, 38 del NUC y 75 del Mac).
+
+| tipo                | turnos Fable | turnos Opus | turnos Haiku | Mtok Fable | Mtok Opus (subag.) |
+| ------------------- | ------------ | ----------- | ------------ | ---------- | ------------------ |
+| Team (5)            | 14           | 98          | 0            | 0.11       | 2.27 (0.62)        |
+| Ultra (6)           | 15           | 0           | 0            | 0.14       | 1.32 (1.32)        |
+| sin cuenta conocida | 17           | 0           | 46           | 0.30       | 0.35 (0.35)        |
+
+- **Ningún turno de Opus ni de Sonnet en una Max o una Ultra.** Los 1.32 Mtok de Opus en las Ultra son todos de subagentes dentro de hilos de Fable, de una sola cuenta: el hueco de la causa 1, que esta regla no cubre.
+- **El límite pasa a ser las plazas.** A las 13:31 las 5 Team estaban llenas (3 de 3) y `esperandoTeam` daba 6 turnos, el más largo de 18 min; en el registro hubo esperas de 25 a 29 min, con 24 plazas libres en las Ultra. Ninguna Team se quedó sin cuota (sesión entre el 17 % y el 66 %), así que el PARA Y ESPERA 1 del encargo no saltó.
+- **Lo siguiente, medir 5 plazas por Team** (Aitor, 2026-11-06: «Medir 5 por team necesitamos más flujo»): `seatsTeam` 3 → 5 a las 13:38, ya con la 0.2.45 instalada (otro encargo, que no toca las plazas ni esta regla), con la vigilancia de errores de API de `scripts/errores-api.py`. El resultado está en `CLAUDE.md`, regla «Asientos subidos».

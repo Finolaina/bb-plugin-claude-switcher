@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.47] - 2026-11-06
+
+### Changed
+
+- **Opus and Sonnet may use a Max or Ultra account out of Fable until its
+  weekly resets.** Aitor, 2026-11-06: «si fable llega al 100 se abre opus en
+  esa cuenta». With Fable's own window at 100 % and the general weekly
+  resetting with it (no more than 10 min later), what is left of the weekly
+  is lost at that reset, so a turn in another model spends nothing Fable
+  needs. Such an account takes Opus and Sonnet after every Team seat with
+  room (a Team seat runs both models, so a project with threads in each
+  stays put), and is a wait for a turn that failed when it frees sooner.
+  Measured that day on the 6 Ultra accounts: Fable's window and the weekly
+  reset at the same moment on every one (one a second apart). Fable at
+  99 %, a weekly that outlives Fable's window, or either reset unknown:
+  the account stays Fable's, as in 0.2.44. Haiku keeps its order.
+- Reviewed in three rounds (Codex Sol r1-r2, Astra final r3, no high). Known
+  limits: a project already on such an account stays there (no move, the
+  cache is kept); `esperandoTeam` labels by model; failure recovery, the
+  refresh rescue and wait release do not look at unread Team seats, and the
+  switch-ahead threshold sets a nearly spent Team aside before the order
+  (R047-R3-001/002).
+
 ## [0.2.46] - 2026-11-06
 
 ### Fixed
