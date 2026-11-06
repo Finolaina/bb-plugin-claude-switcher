@@ -16765,7 +16765,8 @@ describe("no project is left on an account out of the preferred model or without
       expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([["proj-1", ownNote("work")]]);
     });
 
-    it("stays on a Team seat out of its session when only Max accounts that keep Fable could take it", async () => {
+    // Until 2026-11-06 the turn started there and failed; now it waits there.
+    it("stays on a Team seat out of its session when only Max accounts that keep Fable could take it: the Opus turn waits (2026-11-06)", async () => {
       const h = await host(
         {
           main: () => Response.json(teamPayload(100, 20)),
@@ -16778,7 +16779,7 @@ describe("no project is left on an account out of the preferred model or without
       // Read first: unread, a login that does not say Team holds an Opus
       // turn (Codex r1 high 2, 2026-11-06); measured, main is a Team seat.
       await h.harness.behavior.callRpc("accounts_refresh", null);
-      expect(await opusTurn(h)).toEqual({ action: "proceed" });
+      expect(await opusTurn(h)).toMatchObject({ action: "wait" });
       await onePass(h);
       expect(h.envSet).toEqual([]);
       expect(logged(h, "debug")).toContain(
@@ -17744,7 +17745,10 @@ describe("caminos 2026-11-04", () => {
       expect((await dispatch(h, "t1", "proj-1", FABLE_ID, true)).action).toBe("wait");
     });
 
-    it("no other account can run it but an Ultra that keeps Fable: an Opus turn does not wait for that one, it starts and fails", async () => {
+    // Until 2026-11-06 the turn started on the Team seat out and failed.
+    // Since («sin excepciones»; Codex r2 medium 2) it waits there for a
+    // Team seat that can run it, and never goes to the Ultra.
+    it("no other account can run it but an Ultra that keeps Fable: an Opus turn does not go to that one, it waits on its Team seat (2026-11-06)", async () => {
       const h = await host(
         {
           main: () => Response.json(payload(13, 10, 5)),
@@ -17756,7 +17760,10 @@ describe("caminos 2026-11-04", () => {
       dispose = () => h.harness.dispose();
       teamLogin(h, "spare", "work");
       await h.harness.behavior.callRpc("accounts_refresh", null);
-      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toMatchObject({
+        action: "wait",
+        reason: "Waiting for a Team seat that can run Opus: the project is on spare, which cannot run Opus",
+      });
       expect(h.envSet).toEqual([]);
     });
 
@@ -18590,9 +18597,11 @@ describe("caminos 2026-11-04", () => {
       expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("spare") });
     });
 
-    it("with no other that can run it, the turn starts and fails to the view, as with a full answer", async () => {
+    // Until 2026-11-06 the turn started and failed; an Opus turn on a Team
+    // seat out now waits for one that can run it (Codex r2 medium 2).
+    it("with no other that can run it, an Opus turn waits on its Team seat, as with a full answer (2026-11-06)", async () => {
       const { h } = await start(OUT, OUT);
-      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toMatchObject({ action: "wait" });
       expect(h.envSet).toEqual([]);
     });
 
@@ -19515,13 +19524,34 @@ describe("caminos 2026-11-04", () => {
       work: () => Response.json(payload(100, 20, 30)),
     };
 
+    /** No Team seat with quota (NO_TEAM), main as given; `login`: main's profile. */
+    const noTeam = async (
+      main: () => Response,
+      login: Record<string, string> | null = null,
+      options: HostOptions = {},
+    ) => {
+      const h = await host(
+        { ...NO_TEAM, main },
+        { ...options, settings: { ...FABLE, seatsTeam: 1 } },
+      );
+      dispose = () => h.harness.dispose();
+      if (login !== null)
+        h.files[`${HOME}/.claude.json`] = JSON.stringify({
+          oauthAccount: {
+            accountUuid: "uuid-main",
+            emailAddress: "main@example.com",
+            ...login,
+          },
+        });
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      return h;
+    };
+
     it.each([[OPUS], [SONNET]])(
       "r1-1 on a Max out of its session with no Team seat, a %s turn waits: it does not start there to fail",
       async (model) => {
-        const h = await incident({
-          ...NO_TEAM,
-          main: () => Response.json(payload(100, 88, 98)),
-        });
+        const h = await noTeam(() => Response.json(payload(100, 88, 98)));
         expect(await dispatch(h, "t1", "proj-1", model)).toMatchObject({
           action: "wait",
         });
@@ -19530,40 +19560,91 @@ describe("caminos 2026-11-04", () => {
     );
 
     it("r1-2 on the default account unread (429) whose login says nothing of its plan, an Opus turn waits", async () => {
-      const h = await incident({
-        ...NO_TEAM,
-        main: () => new Response(null, { status: 429 }),
-      });
+      const h = await noTeam(() => new Response(null, { status: 429 }));
       expect(await dispatch(h, "t1", "proj-1", OPUS)).toMatchObject({
         action: "wait",
       });
     });
 
     it("r1-3 on a Max by its login that reports no weekly, an Opus turn waits", async () => {
-      const h = await host(
-        { ...NO_TEAM, main: () => Response.json(teamPayload(10, 50)) },
-        {
-          settings: { ...FABLE, seatsTeam: 1 },
-          presetEnv: { "proj-2": on("spare") },
-        },
-      );
-      dispose = () => h.harness.dispose();
-      h.files[`${HOME}/.claude.json`] = JSON.stringify({
-        oauthAccount: {
-          accountUuid: "uuid-main",
-          emailAddress: "main@example.com",
-          organizationType: "claude_max",
-        },
+      const h = await noTeam(() => Response.json(teamPayload(10, 50)), {
+        organizationType: "claude_max",
       });
-      teamLogin(h, "spare", "work");
-      await h.harness.behavior.callRpc("accounts_refresh", null);
-      expect((await dispatch(h, "other", "proj-2", OPUS)).action).toBe(
-        "proceed",
-      );
       expect(await dispatch(h, "t1", "proj-1", OPUS)).toMatchObject({
         action: "wait",
       });
       expect(h.envSet.filter((e) => e.projectId === "proj-1")).toEqual([]);
+    });
+
+    it.each([[{ planDisplayName: "Ultra" }], [{ planDisplayName: "Max" }], [{ organizationRateLimitTier: "default_claude_max_20x" }]])(
+      "r2-1 on an account whose login names a Max or Ultra plan (%o) and reports no weekly, an Opus turn waits",
+      async (login) => {
+        const h = await noTeam(() => Response.json(teamPayload(10, 50)), login);
+        expect(await dispatch(h, "t1", "proj-1", OPUS)).toMatchObject({
+          action: "wait",
+        });
+        expect(h.envSet.filter((e) => e.projectId === "proj-1")).toEqual([]);
+      },
+    );
+
+    it.each([[OPUS], [SONNET]])(
+      "r2-2 on a Team seat out of its session, with every other Team out too, a %s turn waits there: it does not start to fail",
+      async (model) => {
+        const h = await noTeam(INCIDENT.main, null, {
+          presetEnv: { "proj-1": on("spare") },
+        });
+        expect(await dispatch(h, "t1", "proj-1", model)).toMatchObject({
+          action: "wait",
+          reason: `Waiting for a Team seat that can run ${model === OPUS ? "Opus" : "Sonnet"}: the project is on spare, which cannot run ${model === OPUS ? "Opus" : "Sonnet"}`,
+        });
+        expect(h.envSet).toEqual([]);
+      },
+    );
+
+    it("r2-3 a Fable turn goes back to the pick by hand, not to the Team seat a later excursion left", async () => {
+      // work runs Fable but not Opus; spare runs both.
+      const workNoOpus = () =>
+        Response.json({
+          ...payload(10, 20, 30),
+          limits: [
+            ...payload(10, 20, 30).limits,
+            {
+              kind: "weekly_scoped",
+              percent: 100,
+              resets_at: new Date(NOW + 4 * HOUR).toISOString(),
+              scope: { model: { display_name: "Opus" } },
+            },
+          ],
+        });
+      const h = await host(
+        {
+          main: INCIDENT.main,
+          spare: () => Response.json(payload(10, 60, 20)),
+          work: workNoOpus,
+        },
+        {
+          settings: { ...FABLE, seatsTeam: 1 },
+          presetEnv: { "proj-1": on("work") },
+          kvPreset: { pins: { "proj-1": "main" } },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "t1", "proj-1", OPUS)).toEqual({
+        action: "proceed",
+      });
+      expect(h.envSet.map((e) => e.note)).toEqual([ownNote("spare")]);
+      await h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: thread({ id: "t1", projectId: "proj-1" }),
+      });
+      const deletes = h.envDeleted.length;
+      expect(await dispatch(h, "f1", "proj-1", FABLE_ID)).toEqual({
+        action: "proceed",
+      });
+      // To main (no variable), not back to work.
+      expect(h.envDeleted.length).toBe(deletes + 1);
+      expect(h.envSet.map((e) => e.note)).toEqual([ownNote("spare")]);
     });
 
     it("r1-4 the pick by hand stays while the Opus turns move between Team seats, and Fable goes back to it", async () => {

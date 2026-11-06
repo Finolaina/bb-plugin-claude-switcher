@@ -256,6 +256,13 @@ describe("the plan behind a login (SPEC 2026-10-30 §1)", () => {
     expect(planOf({ kind: "unknown" }, usage("team"))).toEqual(team);
   });
 
+  it("a login that names a Max or Ultra plan is not taken for a Team seat for reporting no weekly (Codex r2 high 1, 2026-11-06)", () => {
+    expect(planOf({ kind: "unknown", planName: "Max" }, usage("team")).plan).toBe("max");
+    expect(planOf({ kind: "unknown", planName: "Ultra" }, usage("team")).plan).toBe("ultra");
+    expect(planOf({ kind: "unknown", tier: "default_claude_max_20x" }, usage("team")).plan).toBe("ultra");
+    expect(planOf({ kind: "unknown", tier: "default_claude_max_5x" }, usage("team")).plan).toBe("max");
+  });
+
   it("a max_20x login still on the 5-hour window is Ultra until Anthropic verifies it (canary 3)", () => {
     for (const name of ["ultra-con-5h", "ultra-con-5h-b"])
       expect(planOf(max20x, usage(name))).toEqual({

@@ -23,8 +23,12 @@ project uses [Semantic Versioning](https://semver.org/).
 - **Known as a Team seat, or no target.** An Opus or Sonnet turn waits
   rather than start on a Max or Ultra that is out (it used to start there
   to fail), on an account not read yet whose login does not say Team, or on
-  a Max login that reports no weekly (review r1,
-  `docs/opus-por-team-2026-11-06/codex-r1.md`).
+  a Max login that reports no weekly, or one whose plan name or tier says
+  Max or Ultra (reviews r1 and r2, `docs/opus-por-team-2026-11-06/`). On a
+  Team seat out of its session with no other Team able to take it, the
+  turn waits there too: it no longer starts to fail.
+- **The pick by hand is the way home for Fable** before any excursion noted
+  since (r2).
 
 ### Added
 

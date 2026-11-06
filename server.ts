@@ -3705,10 +3705,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     now: number,
   ): string | null | undefined {
     if (otherModel(model)) return undefined;
+    // A pick by hand left for a turn held off the reserve is the way home,
+    // before any excursion noted since (a reload forgets them, and a later
+    // one may start on a Team seat: Codex r1 medium 5, r2 medium 3).
+    const pin = pins.get(projectId);
+    if (pin !== undefined) return pin;
     const excursion = excursions.get(projectId);
-    // A pick by hand left for a turn held off the reserve keeps the way
-    // home, also after a reload forgot the excursion (Codex r1 medium 5).
-    if (excursion === undefined) return pins.get(projectId);
+    if (excursion === undefined) return undefined;
     const left = aheadLeft.get(projectId);
     const home = measured.find((a) => a.name === excursion.from);
     return left !== undefined &&
@@ -4843,6 +4846,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * needs, and `model` is held off such an account (see holdsForReserve),
    * as measured now or, unmeasured, as its login says.
    */
+  /** `name` is a Team seat measured unable to run `model`, a model held off the reserve. */
+  function teamOut(name: string, model: string): boolean {
+    if (!heldModel(model)) return false;
+    const usage = measuredAccounts(model).find((a) => a.name === name);
+    if (usage === undefined || usage.unknown === true || usage.team !== true)
+      return false;
+    const settled = settle(usage, deps.now());
+    return !(isUsable(settled) && canRunModel(settled, model));
+  }
   /** A turn in `model` goes to a Team seat only (see holdsForReserve). */
   function heldModel(model: string): boolean {
     return holdsForReserve({ preferredModel: model, ...reserveOf() });
@@ -5636,6 +5648,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         heldOff(at.account, model, thread.projectId)
       ) {
         const reason = `Waiting to place ${model} again: the project is on ${at.account}, which keeps its weekly for ${current.preferredModel}`;
+        bb.log.info(`thread ${thread.id}: its message waits (${reason})`);
+        return { action: "wait", reason, sendAt: deps.now() + SEAT_RECHECK_MS };
+      }
+      // A Team seat out for a model held off the reserve: the turn waits
+      // there, rather than start to fail, until a Team seat can take it
+      // (Aitor 2026-11-06, «sin excepciones»; Codex r2 medium 2).
+      if (
+        current.autoSwitch &&
+        model !== null &&
+        at !== null &&
+        at.account !== null &&
+        teamOut(at.account, model)
+      ) {
+        const reason = `Waiting for a Team seat that can run ${model}: the project is on ${at.account}, which ${whyOut(at.account, model)}`;
         bb.log.info(`thread ${thread.id}: its message waits (${reason})`);
         return { action: "wait", reason, sendAt: deps.now() + SEAT_RECHECK_MS };
       }
