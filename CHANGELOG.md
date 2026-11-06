@@ -20,6 +20,12 @@ project uses [Semantic Versioning](https://semver.org/).
   reset at the same moment on every one (one a second apart). Fable at
   99 %, a weekly that outlives Fable's window, or either reset unknown:
   the account stays Fable's, as in 0.2.44. Haiku keeps its order.
+- Reviewed in three rounds (Codex Sol r1-r2, Astra final r3, no high). Known
+  limits: a project already on such an account stays there (no move, the
+  cache is kept); `esperandoTeam` labels by model; failure recovery, the
+  refresh rescue and wait release do not look at unread Team seats, and the
+  switch-ahead threshold sets a nearly spent Team aside before the order
+  (R047-R3-001/002).
 
 ## [0.2.46] - 2026-11-06
 
