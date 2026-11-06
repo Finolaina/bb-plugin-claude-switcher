@@ -51,6 +51,23 @@ M = [
     ("S7 Team sin leer", "la Ultra sin Fable medida gana a una Team sin leer (Codex R047-003)", "src/switch.ts",
      "      measured.filter((a) => !afterTeams(a, options)),\n", "      measured,\n",
      "src/switch.test.ts", "Codex R047-003"),
+    ("S8 ronda 2", "el ritmo del día va antes que el escalón de las Team (Codex R047-R2-001)", "src/policy.ts",
+     "    afterTeams(account, options) ? 1 : 0,\n    saved,\n", "    saved,\n    afterTeams(account, options) ? 1 : 0,\n",
+     "src/policy.test.ts", "Codex R047-R2-001"),
+    ("S8 ronda 2", "con la cuenta llena, la Team sin leer no se mira (Codex R047-R2-002)", "src/switch.ts",
+     "        pick(unreadTeamSeats(input)) ??\n", "",
+     "src/switch.test.ts", "Codex R047-R2-002"),
+    ("S8 ronda 2", "plazas para todos en la Ultra ganan a una plaza en Team (Codex R047-R2-003)", "src/switch.ts",
+     "        (input.seatsWantedOnly === true && wanted > 1 ? null : pick(roomy)))\n", "        pick(roomy))\n",
+     "src/switch.test.ts", "Codex R047-R2-003"),
+    ("S8 ronda 2", "a la misma hora, la espera tras un fallo elige por nombre (Codex R047-R2-004)", "src/switch.ts",
+     "        (late !== earliest.late\n          ? !late\n          : before(account.name, earliest.account)))\n",
+     "        before(account.name, earliest.account))\n",
+     "src/switch.test.ts", "at the same reset, waits for the Team seat"),
+    ("S8 ronda 2", "a la misma hora, la espera antes de arrancar elige por nombre (Codex R047-R2-004)", "src/switch.ts",
+     "        (late !== earliest.late ? !late : account.name < earliest.account))\n",
+     "        account.name < earliest.account)\n",
+     "src/switch.test.ts", "waiting before the turn"),
 ]
 
 
@@ -74,24 +91,7 @@ def main() -> int:
         open(ruta, "w").write(original.replace(viejo, nuevo))
         orden = ["npx", "vitest", "run", tests]
         if filtro:
-            orden += ["-t", filtro    ("S8 ronda 2", "el ritmo del día va antes que el escalón de las Team (Codex R047-R2-001)", "src/policy.ts",
-     "    afterTeams(account, options) ? 1 : 0,\n    saved,\n", "    saved,\n    afterTeams(account, options) ? 1 : 0,\n",
-     "src/policy.test.ts", "Codex R047-R2-001"),
-    ("S8 ronda 2", "con la cuenta llena, la Team sin leer no se mira (Codex R047-R2-002)", "src/switch.ts",
-     "        pick(unreadTeamSeats(input)) ??\n", "",
-     "src/switch.test.ts", "Codex R047-R2-002"),
-    ("S8 ronda 2", "plazas para todos en la Ultra ganan a una plaza en Team (Codex R047-R2-003)", "src/switch.ts",
-     "        (input.seatsWantedOnly === true && wanted > 1 ? null : pick(roomy)))\n", "        pick(roomy))\n",
-     "src/switch.test.ts", "Codex R047-R2-003"),
-    ("S8 ronda 2", "a la misma hora, la espera tras un fallo elige por nombre (Codex R047-R2-004)", "src/switch.ts",
-     "        (late !== earliest.late\n          ? !late\n          : before(account.name, earliest.account)))\n",
-     "        before(account.name, earliest.account))\n",
-     "src/switch.test.ts", "at the same reset, waits for the Team seat"),
-    ("S8 ronda 2", "a la misma hora, la espera antes de arrancar elige por nombre (Codex R047-R2-004)", "src/switch.ts",
-     "        (late !== earliest.late ? !late : account.name < earliest.account))\n",
-     "        account.name < earliest.account)\n",
-     "src/switch.test.ts", "waiting before the turn"),
-]
+            orden += ["-t", filtro]
         r = subprocess.run(orden, cwd=clon, capture_output=True, text=True)
         resumen = next((l.strip() for l in r.stdout.splitlines() if "Tests " in l), "sin resumen")
         if r.returncode != 0 and "failed" in resumen:

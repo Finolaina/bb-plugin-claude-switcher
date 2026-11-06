@@ -1,0 +1,46 @@
+{
+  "verdict": "REVISE",
+  "summary": "The eligibility exception is guarded, but Team-first ordering still has four concrete bypasses when choosing an account.",
+  "findings": [
+    {
+      "id": "R047-R2-001",
+      "severity": "medium",
+      "path": "src/policy.ts:312",
+      "evidence": "savedForUser is compared before afterTeams. With paceHoldsBackground enabled, an Opus failure can switch to an eligible, unsaved Ultra even when a usable Team has a free seat but is saved by its day's pace. decideSwitch passes this callback through to chooseAccount. The new ranking therefore leaves the pace-related part of R047-002 unresolved.",
+      "fix": "Compare afterTeams before savedForUser for Opus/Sonnet, preserving pace ordering within each account class. Cover this combination through failure switching and seat movement."
+    },
+    {
+      "id": "R047-R2-002",
+      "severity": "medium",
+      "path": "src/switch.ts:726",
+      "evidence": "The current-full branch excludes unknown accounts and never calls unreadTeamSeats or chooseTeamsFirst. Consider a project on an eligible Ultra with no free seats, another measured eligible Ultra with one free seat, and a logged-in unread Team with a free seat. server.ts supplies unreadTeams at line 5156, but this branch ignores it and moves the project to the second Ultra. This chooses a new account, so the accepted keep exception does not apply.",
+      "fix": "Include eligible unread Teams in seat-movement selection before considering exception Max/Ultra accounts, retaining known blocking windows and seat checks."
+    },
+    {
+      "id": "R047-R2-003",
+      "severity": "medium",
+      "path": "src/switch.ts:735",
+      "evidence": "The forAll pass filters accounts by freeSeats >= seatsWanted before Team priority is evaluated. A project asking for six seats on a full five-seat Team moves to an eligible Ultra with six free seats even when another usable Team has one free seat. server.ts:5173 supplies seatsWantedOnly for this crowded case, and its single-seat fallback runs only when the first decision is keep. Thus capacity preference overrides rule 2 during a new account choice.",
+      "fix": "For Opus/Sonnet, evaluate usable Teams with a seat before exception accounts, applying the preference for seats for the whole project within each class."
+    },
+    {
+      "id": "R047-R2-004",
+      "severity": "medium",
+      "path": "src/switch.ts:303",
+      "evidence": "Failure waits break equal reset times by current account and name, without Team priority. Suppose the failed Team resets in three hours, eligible a-ultra and usable z-team both have exhausted sessions resetting in one hour, and a-ultra's Fable and weekly reset together in 48 hours. Neither alternative runs now; the wait loop chooses a-ultra alphabetically and moves the project there. The Ultra does not free sooner than the Team, contrary to rules 2 and 5.",
+      "fix": "For equal availability times, prefer Teams over exception Max/Ultra accounts before applying current-account and name tie-breaks. Preserve the exception when the Ultra genuinely frees earlier."
+    }
+  ],
+  "coverage": [
+    "Verified the plan hash, all 14 manifest file hashes, and the tracked diff hash; inspected every changed file's additions and relevant surrounding code.",
+    "Reviewed reserve eligibility, reset boundaries, absent and unknown windows, ranking, Haiku behavior, and related test assertions.",
+    "Traced placement, pins, failure and leftover retries, refresh rescue, switch-ahead, crowded seat moves, wait reconsideration, and final dispatch guards.",
+    "Inspected related usage parsing and caching, plan classification, pace state, project model and excursion state, seat admission, and esperandoTeam reporting."
+  ],
+  "limitations": [
+    "Static inspection only; no files were edited, no tests or scripts were run, and no work was delegated.",
+    "Large existing files were inspected in relevant sections rather than exhaustively.",
+    "External operational measurements were unavailable for independent verification.",
+    "The accepted retention behavior from R047-001 was respected. The documented esperandoTeam mislabel from R047-004 remains."
+  ]
+}
