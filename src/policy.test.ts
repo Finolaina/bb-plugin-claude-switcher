@@ -812,6 +812,10 @@ describe("Opus solo por Team (2026-11-06)", () => {
       expect(spendsReservedWeekly(noWeekly, as("Opus"))).toBe(true);
     });
 
+    it("Haiku keeps its order: an account out of Fable first, before a Team seat", () => {
+      expect(chooseAccount([spent(20, 100), team], seats(as("Haiku", 50), { "a-ultra": 6, team: 1 }))?.account).toBe("a-ultra");
+    });
+
     it("a weekly at 100 % takes nothing", () => {
       expect(chooseAccount([spent(100, 100), team], seats(as("Opus"), { "a-ultra": 6, team: 0 }))).toBeNull();
     });
