@@ -561,7 +561,10 @@ describe("decideSwitch with a reserved model: a Max account that keeps it is no 
     });
   });
 
-  it("does wait for a Max account out of the reserved model that is only blocked by its session", () => {
+  // Before 2026-11-06 it waited for that Max (out of Fable, its session
+  // full); since («los Opus tienen que salir por Team sí o sí») only for the
+  // Team seat.
+  it("does not wait for a Max account out of the reserved model: it waits for the Team seat (2026-11-06)", () => {
     const outOfFable = maxWithFable({
       session: { usedPercent: 100, resetsAt: NOW + HOUR },
       weekly: { usedPercent: 50, resetsAt: NOW + 60 * HOUR },
@@ -571,9 +574,9 @@ describe("decideSwitch with a reserved model: a Max account that keeps it is no 
       decideSwitch(opus({ accounts: [failed, outOfFable, seatOut] })),
     ).toEqual({
       kind: "wait",
-      account: "spare",
-      sendAt: NOW + HOUR + BUFFER,
-      reason: "Waiting for Opus on spare",
+      account: "team1",
+      sendAt: NOW + 2 * HOUR + BUFFER,
+      reason: "Waiting for Opus on team1",
     });
   });
 
@@ -591,11 +594,12 @@ describe("decideSwitch with a reserved model: a Max account that keeps it is no 
     expect(
       decideSwitch(opus({ failure: past, accounts: [main] })),
     ).toEqual({ kind: "decline", reason: "reserved-for-preferred-model" });
-    // Returning after the latest possible send instead: a wait on main.
+    // Returning after the latest possible send instead: a wait on main
+    // until 2026-11-06; since, a Max account is no wait for Opus either.
     const later = { ...main, models: { Fable: { usedPercent: 100, resetsAt: NOW + 60_000 } } };
     expect(
       decideSwitch(opus({ failure: past, accounts: [later] })),
-    ).toMatchObject({ kind: "wait", account: "main" });
+    ).toEqual({ kind: "decline", reason: "reserved-for-preferred-model" });
   });
 
   it("still says no-account-usable when nothing is reserved either", () => {
@@ -603,9 +607,10 @@ describe("decideSwitch with a reserved model: a Max account that keeps it is no 
       blocked: true,
       session: { usedPercent: 100, resetsAt: NOW + HOUR },
     });
-    // The failed account is out of Fable: a wait for it is fine.
+    // The failed account, a Team seat out of Fable: a wait for it is fine.
     const outOfFable = {
       ...failed,
+      team: true as const,
       models: { Fable: { usedPercent: 100, resetsAt: NOW + 60 * HOUR } },
     };
     expect(
@@ -1242,7 +1247,9 @@ describe("reserveModel reaches each decision", () => {
     weekly: { usedPercent: 10, resetsAt: NOW + 24 * HOUR },
     models: { Fable: { usedPercent: 2, resetsAt: NOW + 24 * HOUR } },
   });
+  // A Team seat out of Fable since 2026-11-06 (Opus runs on a Team seat only).
   const noFable = account("noFable", {
+    team: true,
     weekly: { usedPercent: 91, resetsAt: NOW + 60 * HOUR },
     models: { Fable: { usedPercent: 100, resetsAt: NOW + 60 * HOUR } },
   });
@@ -2221,8 +2228,9 @@ describe("isCalorTick", () => {
 });
 
 // Aitor 2026-11-05: a pick by hand holds until the account cannot run the
-// turn. A thread left in error on a picked Max account that still runs Opus
-// is retried there, not moved to a Team seat (code-reviewer r1 M1).
+// turn (code-reviewer r1 M1). Since 2026-11-06 («los Opus tienen que salir
+// por Team sí o sí») not for Opus: a thread left in error on a picked Max
+// account goes to the Team seat; Fable is still retried there.
 describe("a thread left in error on an account picked by hand", () => {
   const fable = { Fable: { usedPercent: 70, resetsAt: NOW + 48 * HOUR } };
   const stuckOn = (pinned: boolean) =>
@@ -2240,11 +2248,64 @@ describe("a thread left in error on an account picked by hand", () => {
       }),
     );
 
-  it("is retried on the picked account when it can run the model", () => {
-    expect(stuckOn(true)).toMatchObject({ kind: "retry", account: "main" });
+  it("in Opus, leaves the picked Max account for the Team seat (2026-11-06)", () => {
+    expect(stuckOn(true)).toMatchObject({ kind: "switch", account: "seat" });
+  });
+
+  it("in Fable, is retried on the picked account", () => {
+    const fableOn = decideSwitch(
+      input({
+        stuck: true,
+        currentAccount: "main",
+        accounts: [
+          account("main", { weekly: { usedPercent: 70, resetsAt: NOW + 48 * HOUR }, models: fable }),
+          account("seat", { team: true }),
+        ],
+        preferredModel: "Fable",
+        reserveModel: "Fable",
+        pinned: true,
+      }),
+    );
+    expect(fableOn).toMatchObject({ kind: "retry", account: "main" });
   });
 
   it("without the pick it leaves the account that keeps Fable, as before", () => {
     expect(stuckOn(false)).toMatchObject({ account: "seat" });
+  });
+});
+
+// Aitor 2026-11-06: «los Opus tienen que salir por Team sí o sí». A project
+// pinned by hand to a Max or Ultra keeps the pick for Fable; an Opus turn of
+// it goes to a Team seat with room, or waits (kept as current-reserved: the
+// server holds it), whatever the Ultra has left.
+describe("Opus solo por Team: placement of a project pinned to an Ultra (2026-11-06)", () => {
+  const ultra = account("ultra", {
+    weekly: { usedPercent: 20, resetsAt: NOW + 48 * HOUR },
+    models: { Fable: { usedPercent: 10, resetsAt: NOW + 48 * HOUR } },
+  });
+  const seat = account("seat", { team: true });
+  const place = (model: string, seatFree: number) =>
+    decidePlacement({
+      currentAccount: "ultra",
+      isNew: false,
+      accounts: [ultra, seat],
+      preferredModel: model,
+      reserveModel: "Fable",
+      reserveSpareUpTo: 50,
+      freeSeats: (name) => (name === "seat" ? seatFree : 6),
+      pinned: true,
+      now: NOW,
+    });
+
+  it("canario: an Opus turn with the Team seat full stays held, not run on the Ultra", () => {
+    expect(place("Opus", 0)).toEqual({ kind: "keep", why: "current-reserved" });
+  });
+
+  it("an Opus turn with a Team seat free moves there", () => {
+    expect(place("Opus", 1)).toEqual({ kind: "move", account: "seat", why: "current-reserved" });
+  });
+
+  it("a Fable turn stays on the picked Ultra", () => {
+    expect(place("Fable", 1)).toEqual({ kind: "keep" });
   });
 });

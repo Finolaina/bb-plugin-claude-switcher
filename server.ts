@@ -2515,6 +2515,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       forThread?: string;
       /** Asked with the other checks after the sessions are shared: false drops the move (Codex OPUS-R5-002). */
       stillValid?: () => boolean;
+      /**
+       * The pick by hand stays: the move is an excursion of a turn in a model
+       * held off the reserve, and the pick still holds for the reserved
+       * model (Aitor 2026-11-06: a project pinned to a Max keeps it for Fable).
+       */
+      keepPin?: boolean;
     } = {},
   ): Promise<boolean> {
     if (from.external) {
@@ -2636,7 +2642,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     if (toName !== (from.account ?? current.defaultAccountName))
       accountChangedAt.set(projectId, deps.now());
-    if (options.byHand !== true && toName !== fromName && pins.delete(projectId))
+    if (
+      options.byHand !== true &&
+      options.keepPin !== true &&
+      toName !== fromName &&
+      // Back to the account picked by hand (the way home of an excursion
+      // that kept the pick): the pick stays.
+      pins.get(projectId) !== toName &&
+      pins.delete(projectId)
+    )
       storePins();
     bb.realtime.publish(CHANGED, { at: deps.now() });
     return true;
@@ -4822,8 +4836,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   function heldOff(name: string, model: string, projectId?: string): boolean {
     const options = { preferredModel: model, ...reserveOf() };
+    // A pick by hand no longer lets such a turn spend the reserve (Aitor
+    // 2026-11-06, «sí o sí»): `projectId` is kept for the callers.
     if (!holdsForReserve(options)) return false;
-    if (projectId !== undefined && pins.get(projectId) === name) return false;
+    void projectId;
     const usage = measuredAccounts(model).find((a) => a.name === name);
     if (usage === undefined || usage.unknown === true)
       return unreadKeepsReserve(name);
@@ -5018,6 +5034,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       await applyAccount(projectId, to, from, {
         share: false,
         forThread: thread.id,
+        keepPin:
+          decision.why === "current-reserved" &&
+          holdsForReserve({ preferredModel: model, ...reserveOf() }),
       });
       await markHandled(projectId);
       // A move for a crowded seat is a new home, not an excursion: a turn in
@@ -6588,8 +6607,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         here.unknown === true ||
         // With the reserve: a Max account that keeps the preferred model
         // never gets an Opus retry released on it (Codex BM-R1-005).
-        // A pick by hand holds while the account runs the model (code-reviewer r1 M1).
-        (pins.get(projectId) === fromName
+        // A pick by hand holds while the account runs the model (code-reviewer r1 M1),
+        // never for a model held off the reserve (Aitor 2026-11-06, «sí o sí»).
+        (pins.get(projectId) === fromName &&
+        !holdsForReserve({ preferredModel: model, ...reserveOf() })
           ? bestAccount([here], model, now)
           : bestAccount([here], model, now, current.preferredModel, undefined, undefined, current.otherModelUpTo)) === fromName)
     ) {
