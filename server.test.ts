@@ -11440,6 +11440,36 @@ describe("an Opus turn never retried, released or placed on a Max account that k
       ]);
       expect(h.deleted).toEqual(["r1"]);
     });
+
+    // Until 2026-11-06 a pick by hand of the Max let the waiting Opus turn be
+    // released there; since («los Opus tienen que salir por Team sí o sí») it
+    // is not: moved to the seat and retried there, the pick kept for Fable.
+    it("never released on the Max account picked by hand either: moved to the seat and retried there (2026-11-06)", async () => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(10, 10, 2)),
+          work: () => Response.json(teamPayload(17, 42)),
+          spare: () => Response.json(payload(10, 10, 5)),
+        },
+        // Picked by hand on main, as the store keeps it.
+        { ...FABLE, queued: [waitingOpus("work")], ...WAITING_OPUS, kvPreset: { pins: { "proj-1": "main" } } },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "thread-2", OPUS_ID)).toEqual({ action: "proceed" });
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "thread-2", projectId: "proj-1" }),
+      });
+      expect(await dispatch(h, "thread-3", FABLE_ID)).toEqual({ action: "proceed" });
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "thread-3", projectId: "proj-1" }),
+      });
+      expect(await h.bb.storage.kv.get("pins")).toEqual({ "proj-1": "main" });
+      await onePass(h);
+      expect(h.retries).toEqual([
+        { threadId: "thread-1", turnRequestId: "creq_r1", reason: expect.stringMatching(/^Moved to account work, which can run the waiting turn now/) },
+      ]);
+    });
   });
 
   describe("two placements that cross (Codex BM-R2-003, BM-R3-001): no origin noted from a read or a write another move crossed", () => {
