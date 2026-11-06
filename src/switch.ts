@@ -304,7 +304,9 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
   // order the accounts were measured in.
   const before = (a: string, b: string) =>
     a === input.currentAccount || (b !== input.currentAccount && a < b);
-  let earliest: { account: string; at: number } | null = null;
+  // At the same time, a Team seat before a Max out of the reserved model
+  // (Codex R047-R2-004).
+  let earliest: { account: string; at: number; late: boolean } | null = null;
   let reserved = false;
   for (const account of accounts) {
     let at = freeAt(account, input.preferredModel);
@@ -326,12 +328,16 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
       reserved = true;
       continue;
     }
+    const late = afterTeams(account, options);
     if (
       earliest === null ||
       at < earliest.at ||
-      (at === earliest.at && before(account.name, earliest.account))
+      (at === earliest.at &&
+        (late !== earliest.late
+          ? !late
+          : before(account.name, earliest.account)))
     )
-      earliest = { account: account.name, at };
+      earliest = { account: account.name, at, late };
   }
   if (earliest === null)
     return {
@@ -732,15 +738,22 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     );
     const wanted = input.seatsWanted ?? 1;
     const free = input.freeSeats;
-    const forAll =
-      wanted > 1 && free !== undefined
-        ? chooseSeated(roomy, options, (name) => (free(name) >= wanted ? free(name) : 0))
-        : null;
-    const choice =
-      forAll ??
+    const pick = (pool: AccountUsage[]) =>
+      (wanted > 1 && free !== undefined
+        ? chooseSeated(pool, options, (name) => (free(name) >= wanted ? free(name) : 0))
+        : null) ??
       (input.seatsWantedOnly === true && wanted > 1
         ? null
-        : chooseSeated(roomy, options, input.freeSeats));
+        : chooseSeated(pool, options, input.freeSeats));
+    // A held model: the Team seats first, measured or not, seats for all or
+    // one; a Max out of the reserved model only after (Codex R047-R2-002 and
+    // R047-R2-003), and not for seats for all only: the server then asks
+    // for one seat, which a Team seat may have.
+    const choice = holdsForReserve(options)
+      ? (pick(roomy.filter((a) => !afterTeams(a, options))) ??
+        pick(unreadTeamSeats(input)) ??
+        (input.seatsWantedOnly === true && wanted > 1 ? null : pick(roomy)))
+      : pick(roomy);
     return choice === null
       ? { kind: "keep" }
       : { kind: "move", account: choice.account, why: "current-full" };
@@ -851,7 +864,9 @@ export function reserveWait(
     reserveModel: input.reserveModel,
     reserveSpareUpTo: input.reserveSpareUpTo,
   };
-  let earliest: { account: string; at: number } | null = null;
+  // At the same time, a Team seat before a Max out of the reserved model
+  // (Codex R047-R2-004).
+  let earliest: { account: string; at: number; late: boolean } | null = null;
   // A Team seat known by its login only is one to wait for too: in its queue,
   // what comes later does not overtake the turn (Astra IR5-002).
   for (const raw of [
@@ -866,14 +881,16 @@ export function reserveWait(
     // sent, a Max account whose reserved window resets keeps it again.
     const sendBy = Math.max(at, input.now) + RESET_BUFFER_MS + RESET_JITTER_MS;
     if (spendsReservedWeekly(settle(account, sendBy), options)) continue;
+    const late = afterTeams(account, options);
     if (
       earliest === null ||
       at < earliest.at ||
-      (at === earliest.at && account.name < earliest.account)
+      (at === earliest.at &&
+        (late !== earliest.late ? !late : account.name < earliest.account))
     )
-      earliest = { account: account.name, at };
+      earliest = { account: account.name, at, late };
   }
-  return earliest;
+  return earliest === null ? null : { account: earliest.account, at: earliest.at };
 }
 
 /**

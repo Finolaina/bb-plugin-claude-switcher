@@ -811,6 +811,11 @@ describe("Opus solo por Team (2026-11-06)", () => {
       expect(chooseAccount([idle, busyTeam], seats(as("Opus"), { "a-ultra": 6, team: 1 }))?.account).toBe("team");
     });
 
+    it("comes after a Team seat saved for the user's own threads (Codex R047-R2-001)", () => {
+      const saved = { ...seats(as("Opus"), { "a-ultra": 6, team: 1 }), savedForUser: (a: string) => a === "team" };
+      expect(chooseAccount([spent(20, 100), team], saved)?.account).toBe("team");
+    });
+
     it("Fable at 99 % keeps it Fable's", () => {
       expect(spendsReservedWeekly(spent(20, 99), as("Opus"))).toBe(true);
     });

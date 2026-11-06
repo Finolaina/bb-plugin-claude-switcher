@@ -18,6 +18,7 @@ import {
   opusInsteadText,
   placedOn,
   settle,
+  reserveWait,
   unreadTeamSeats,
   type PlacementInput,
   type SwitchInput,
@@ -582,6 +583,18 @@ describe("decideSwitch with a reserved model: a Max account that keeps it is no 
       sendAt: NOW + 2 * HOUR + BUFFER,
       reason: "Waiting for Opus on team1",
     });
+  });
+
+  it("at the same reset, waits for the Team seat rather than a Max out of Fable (Codex R047-R2-004)", () => {
+    const outOfFable = maxWithFable({
+      session: { usedPercent: 100, resetsAt: NOW + HOUR },
+      weekly: { usedPercent: 50, resetsAt: NOW + 60 * HOUR },
+      models: { Fable: { usedPercent: 100, resetsAt: NOW + 60 * HOUR } },
+    });
+    const teamSoon = { ...seatOut, session: { usedPercent: 100, resetsAt: NOW + HOUR } };
+    expect(
+      decideSwitch(opus({ accounts: [failed, outOfFable, teamSoon] })),
+    ).toMatchObject({ kind: "wait", account: "team1", sendAt: NOW + HOUR + BUFFER });
   });
 
   it("waits for a Max account out of Fable until its weekly resets when it frees sooner than the Team seat (Aitor 2026-11-06)", () => {
@@ -2341,6 +2354,46 @@ describe("an Ultra out of Fable comes after an unread Team seat (Codex R047-003)
         unreadKeepsReserve: () => true,
       }),
     ).toEqual({ kind: "move", account: "fresh", why: "current-reserved" });
+  });
+
+  it("a project on a full Ultra out of Fable moves to an unread Team seat before another such Ultra (Codex R047-R2-002)", () => {
+    const spent2 = { ...spent, name: "spent2" };
+    expect(
+      decidePlacement({
+        ...base,
+        currentAccount: "spent",
+        accounts: [spent, spent2, unread],
+        seatsFull: true,
+        freeSeats: (name) => (name === "spent" ? 0 : 1),
+      }),
+    ).toEqual({ kind: "move", account: "fresh", why: "current-full" });
+  });
+
+  it("seats for the whole project on such an Ultra do not beat one seat on a Team (Codex R047-R2-003)", () => {
+    const work = account("work", { team: true });
+    const other = account("other", { team: true });
+    const crowded = {
+      ...base,
+      unreadTeams: [],
+      currentAccount: "work",
+      accounts: [work, other, spent],
+      seatsFull: true,
+      seatsWanted: 6,
+      freeSeats: (name: string) => ({ work: 0, other: 1, spent: 6 })[name] ?? 0,
+    };
+    // Seats for all only: none on a Team, so it keeps; the server then asks for one seat.
+    expect(decidePlacement({ ...crowded, seatsWantedOnly: true })).toEqual({ kind: "keep" });
+    expect(decidePlacement(crowded)).toEqual({ kind: "move", account: "other", why: "current-full" });
+  });
+
+  it("waiting before the turn: at the same reset, the Team seat before the Ultra out of Fable (Codex R047-R2-004)", () => {
+    const hour = { usedPercent: 100, resetsAt: NOW + HOUR };
+    const spentOut = { ...spent, name: "a-spent", session: hour };
+    const teamOut = account("z-team", { team: true, session: hour });
+    const here = account("work", { team: true, session: { usedPercent: 100, resetsAt: NOW + 3 * HOUR } });
+    expect(
+      reserveWait({ ...base, unreadTeams: [], currentAccount: "work", accounts: [here, spentOut, teamOut] }),
+    ).toEqual({ account: "z-team", at: NOW + HOUR });
   });
 
   it("with no Team seat at all, the Ultra out of Fable", () => {

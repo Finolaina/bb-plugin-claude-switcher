@@ -280,9 +280,11 @@ function rank(
     keepsReserve === 1 && !spendsNoWeekly(account, options.preferredModel)
       ? 1
       : 0;
+  // After every Team seat comes first, also before the day's pace (Codex
+  // R047-R2-001): it only ever sets a held model apart.
   return [
-    saved,
     afterTeams(account, options) ? 1 : 0,
+    saved,
     keepsReserve,
     spendsWeekly,
     sessionQuarter(account),
@@ -307,10 +309,10 @@ function sortedByRank(
   options: ChoiceOptions,
 ): AccountUsage[] {
   return [...accounts].sort((a, b) => {
-    const [va, xa, ka, wa, ta, da, sa] = rank(a, options);
-    const [vb, xb, kb, wb, tb, db, sb] = rank(b, options);
-    if (va !== vb) return va - vb;
+    const [xa, va, ka, wa, ta, da, sa] = rank(a, options);
+    const [xb, vb, kb, wb, tb, db, sb] = rank(b, options);
     if (xa !== xb) return xa - xb;
+    if (va !== vb) return va - vb;
     if (ka !== kb) return ka - kb;
     if (wa !== wb) return wa - wb;
     if (ta !== tb) return ta - tb;
