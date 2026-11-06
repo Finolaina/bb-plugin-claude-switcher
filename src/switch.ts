@@ -9,6 +9,7 @@ import type { PluginTurnFailedEvent } from "@get-bb/plugin-sdk";
 import {
   canRunModel,
   chooseAccount,
+  afterTeams,
   holdsForReserve,
   isUsable,
   modelWindow,
@@ -684,13 +685,11 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
       return { kind: "keep" };
     // A Team seat spends nothing the reserved model needs, read or not: all
     // the reads down is no reason to wait with one free (code-reviewer r4).
-    const elsewhere =
-      chooseSeated(
-        accounts.filter((a) => a.name !== input.currentAccount),
-        options,
-        input.freeSeats,
-      ) ??
-      chooseSeated(unreadTeamSeats(input), options, input.freeSeats);
+    const elsewhere = chooseTeamsFirst(
+      accounts.filter((a) => a.name !== input.currentAccount),
+      input,
+      options,
+    );
     // Kept as one that would spend the reserve: it takes its place in a
     // queue, and what comes later does not overtake it.
     return elsewhere === null
@@ -748,12 +747,11 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   }
   const others = accounts.filter((a) => a.name !== input.currentAccount);
   const choice =
-    chooseSeated(others, options, input.freeSeats) ??
     // The reads of a Team seat down are no reason to wait with one free,
     // whatever is known of this account (code-reviewer r5).
     (holdsForReserve(options)
-      ? chooseSeated(unreadTeamSeats(input), options, input.freeSeats)
-      : null) ??
+      ? chooseTeamsFirst(others, input, options)
+      : chooseSeated(others, options, input.freeSeats)) ??
     // Without a login a turn kept here fails for sure: the reserve gives
     // way, but not for a model held off it (Codex OPUS-001): that turn
     // waits at the checkpoint, and the rescue leaves the project.
@@ -792,6 +790,28 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
  * than spend a Max account's weekly the reserved model and the Opus work
  * inside its threads need.
  */
+/**
+ * For a model held off the reserve: a measured account that is no Max out of
+ * the reserved model (see afterTeams), then a Team seat not fully measured,
+ * then a Max out of the reserved model until its weekly resets (Codex
+ * R047-003: the unread Team seats came after any measured choice).
+ */
+function chooseTeamsFirst(
+  measured: AccountUsage[],
+  input: PlacementInput,
+  options: ChoiceOptions,
+): Choice | null {
+  return (
+    chooseSeated(
+      measured.filter((a) => !afterTeams(a, options)),
+      options,
+      input.freeSeats,
+    ) ??
+    chooseSeated(unreadTeamSeats(input), options, input.freeSeats) ??
+    chooseSeated(measured, options, input.freeSeats)
+  );
+}
+
 /**
  * The Team seats not fully measured, as accounts: nothing they spend is what
  * the reserve needs. What an incomplete answer did say still counts (Astra

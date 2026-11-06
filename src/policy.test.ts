@@ -794,6 +794,23 @@ describe("Opus solo por Team (2026-11-06)", () => {
       expect(chooseAccount([spent(20, 100), teamOutOfFable], seats(as("Opus"), { "a-ultra": 6, team: 1 }))?.account).toBe("team");
     });
 
+    it("comes after a Team seat that reports an Opus window and a fuller session (Codex R047-002)", () => {
+      const busyTeam = account("team", {
+        team: true,
+        session: { usedPercent: 60, resetsAt: NOW + 2 * HOUR },
+        models: {
+          Fable: { usedPercent: 10, resetsAt: NOW + 48 * HOUR },
+          Opus: { usedPercent: 5, resetsAt: NOW + 48 * HOUR },
+        },
+      });
+      const idle = account("a-ultra", {
+        session: { usedPercent: 0, resetsAt: NOW + 2 * HOUR },
+        weekly: { usedPercent: 20, resetsAt: NOW + 48 * HOUR },
+        models: { Fable: { usedPercent: 100, resetsAt: NOW + 48 * HOUR } },
+      });
+      expect(chooseAccount([idle, busyTeam], seats(as("Opus"), { "a-ultra": 6, team: 1 }))?.account).toBe("team");
+    });
+
     it("Fable at 99 % keeps it Fable's", () => {
       expect(spendsReservedWeekly(spent(20, 99), as("Opus"))).toBe(true);
     });

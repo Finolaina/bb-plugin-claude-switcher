@@ -39,13 +39,18 @@ M = [
     ("S4 sin dato", "una cuenta sin semanal (null cuenta como 0) también abre", "src/policy.ts",
      "    account.weekly.absent !== true &&\n    account.weekly.resetsAt !== null &&\n", "",
      "src/policy.test.ts", "no reset known for Fable's window"),
-    ("S5 orden", "la Ultra sin Fable va antes que las Team", "src/policy.ts",
-     "      (holdsForReserve(options) &&\n        account.team !== true &&\n        reserveSpentTillWeekly(account, options.reserveModel!)))\n",
-     "      false)\n",
+    ("S5 orden", "la Ultra sin Fable va antes que las Team (sin el escalón)", "src/policy.ts",
+     "    afterTeams(account, options) ? 1 : 0,\n", "    0,\n",
      "src/policy.test.ts", "comes after every Team seat with room"),
+    ("S5 orden", "sin el escalón: una Team con ventana de Opus y sesión más llena pierde (Codex R047-002)", "src/policy.ts",
+     "    afterTeams(account, options) ? 1 : 0,\n", "    0,\n",
+     "src/policy.test.ts", "Codex R047-002"),
     ("S6 Haiku", "la Ultra sin Fable va detrás de las Team también para Haiku", "src/policy.ts",
-     "      (holdsForReserve(options) &&\n        account.team !== true &&\n", "      (account.team !== true &&\n",
+     "    holdsForReserve(options) &&\n    account.team !== true &&\n    reserveSpentTillWeekly", "    account.team !== true &&\n    reserveSpentTillWeekly",
      "src/policy.test.ts", "Haiku keeps its order"),
+    ("S7 Team sin leer", "la Ultra sin Fable medida gana a una Team sin leer (Codex R047-003)", "src/switch.ts",
+     "      measured.filter((a) => !afterTeams(a, options)),\n", "      measured,\n",
+     "src/switch.test.ts", "Codex R047-003"),
 ]
 
 

@@ -210,6 +210,23 @@ export function reserveSpentTillWeekly(
 }
 
 /**
+ * A Max or Ultra account that takes a model held off the reserve only because
+ * the reserved model is spent there until its weekly resets: it comes after
+ * every Team seat, whatever their session or windows (Codex R047-002), for a
+ * Team seat runs both models and a project with threads in each stays put.
+ */
+export function afterTeams(
+  account: AccountUsage,
+  options: ChoiceOptions,
+): boolean {
+  return (
+    holdsForReserve(options) &&
+    account.team !== true &&
+    reserveSpentTillWeekly(account, options.reserveModel!)
+  );
+}
+
+/**
  * The account keeps enough of the reserved model's weekly for a turn in
  * another model to run there (see ChoiceOptions.reserveSpareUpTo).
  */
@@ -249,19 +266,10 @@ function sessionQuarter(account: AccountUsage): number {
 function rank(
   account: AccountUsage,
   options: ChoiceOptions,
-): [number, number, number, number, number, number] {
+): [number, number, number, number, number, number, number] {
   const saved = options.savedForUser?.(account.name) === true ? 1 : 0;
-  // An account out of the reserved model until its weekly resets takes a
-  // model held off the reserve after every Team seat (Aitor 2026-11-06): a
-  // Team seat runs both models, so a project with threads in each stays put.
   const keepsReserve =
-    reserving(options) &&
-    (canRunModel(account, options.reserveModel!) ||
-      (holdsForReserve(options) &&
-        account.team !== true &&
-        reserveSpentTillWeekly(account, options.reserveModel!)))
-      ? 1
-      : 0;
+    reserving(options) && canRunModel(account, options.reserveModel!) ? 1 : 0;
   // Among the accounts that keep the reserved model, a turn with another
   // model goes first where it spends no weekly window (a Team seat: only
   // its session), last where it spends the weekly the reserved model needs
@@ -274,6 +282,7 @@ function rank(
       : 0;
   return [
     saved,
+    afterTeams(account, options) ? 1 : 0,
     keepsReserve,
     spendsWeekly,
     sessionQuarter(account),
@@ -298,9 +307,10 @@ function sortedByRank(
   options: ChoiceOptions,
 ): AccountUsage[] {
   return [...accounts].sort((a, b) => {
-    const [va, ka, wa, ta, da, sa] = rank(a, options);
-    const [vb, kb, wb, tb, db, sb] = rank(b, options);
+    const [va, xa, ka, wa, ta, da, sa] = rank(a, options);
+    const [vb, xb, kb, wb, tb, db, sb] = rank(b, options);
     if (va !== vb) return va - vb;
+    if (xa !== xb) return xa - xb;
     if (ka !== kb) return ka - kb;
     if (wa !== wb) return wa - wb;
     if (ta !== tb) return ta - tb;

@@ -2299,6 +2299,57 @@ describe("a thread left in error on an account picked by hand", () => {
   });
 });
 
+// Aitor 2026-11-06 later («si fable llega al 100 se abre opus en esa
+// cuenta»): a Max out of Fable until its weekly resets comes after every Team
+// seat, read or not (Codex R047-003).
+describe("an Ultra out of Fable comes after an unread Team seat (Codex R047-003)", () => {
+  const spent = account("spent", {
+    weekly: { usedPercent: 20, resetsAt: NOW + 48 * HOUR },
+    models: { Fable: { usedPercent: 100, resetsAt: NOW + 48 * HOUR } },
+  });
+  const unread = account("fresh", {
+    blocked: true,
+    unknown: true,
+    session: { usedPercent: 100, resetsAt: null, missing: true },
+  });
+  const out = account("work", {
+    team: true,
+    session: { usedPercent: 100, resetsAt: NOW + HOUR },
+  });
+  const base = {
+    isNew: false,
+    preferredModel: "Opus",
+    reserveModel: "Fable",
+    unreadTeams: ["fresh"],
+    freeSeats: () => 3,
+    now: NOW,
+  };
+
+  it("from a Team seat out of its session, the unread Team seat first", () => {
+    expect(
+      decidePlacement({ ...base, currentAccount: "work", accounts: [out, spent, unread] }),
+    ).toEqual({ kind: "move", account: "fresh", why: "current-blocked" });
+  });
+
+  it("from an unread account that keeps the reserve, the unread Team seat first", () => {
+    const here = account("main", { blocked: true, unknown: true });
+    expect(
+      decidePlacement({
+        ...base,
+        currentAccount: "main",
+        accounts: [here, spent, unread],
+        unreadKeepsReserve: () => true,
+      }),
+    ).toEqual({ kind: "move", account: "fresh", why: "current-reserved" });
+  });
+
+  it("with no Team seat at all, the Ultra out of Fable", () => {
+    expect(
+      decidePlacement({ ...base, unreadTeams: [], currentAccount: "work", accounts: [out, spent] }),
+    ).toEqual({ kind: "move", account: "spent", why: "current-blocked" });
+  });
+});
+
 // Aitor 2026-11-06: «los Opus tienen que salir por Team sí o sí». A project
 // pinned by hand to a Max or Ultra keeps the pick for Fable; an Opus turn of
 // it goes to a Team seat with room, or waits (kept as current-reserved: the
