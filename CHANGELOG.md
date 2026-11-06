@@ -4,6 +4,40 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.44] - 2026-11-06
+
+### Changed
+
+- **Opus and Sonnet run on Team seats only** (Aitor 2026-11-06: «los Opus
+  tienen que salir por Team sí o sí»). While Fable is the preferred model,
+  no Max or Ultra account takes an Opus or Sonnet turn: not with margin
+  (`otherModelUpTo` now applies to Haiku only), not when it is out of
+  Fable, not when the project was picked by hand for it. With no Team seat
+  free the turn waits, and takes the first one that frees. Measured in the
+  7 days before (`docs/opus-por-team-2026-11-06.md`): 1,740 Opus turns on
+  Ultra accounts.
+- **A pick by hand of a Max or Ultra is for Fable.** An Opus turn of such a
+  project goes to a Team seat and the pick stays: the next Fable turn goes
+  back to the account picked, also after a reload, and the pick stays while
+  the Opus turns move between Team seats.
+- **Known as a Team seat, or no target.** An Opus or Sonnet turn waits
+  rather than start on a Max or Ultra that is out (it used to start there
+  to fail), on an account not read yet whose login does not say Team, or on
+  a Max login that reports no weekly, or one whose plan name or tier says
+  Max or Ultra (reviews r1 and r2, `docs/opus-por-team-2026-11-06/`). On a
+  Team seat out of its session with no other Team able to take it, the
+  turn waits there too: it no longer starts to fail.
+- **The pick by hand is the way home for Fable** before any excursion noted
+  since (r2), also for the refresh's rescue; a Haiku turn that moves the
+  project keeps it too (r3).
+- An Opus retry waiting on an account not read yet is moved by the refresh
+  to a free Team seat; a login whose plan name says Team is a Team seat (r3).
+
+### Added
+
+- **`health` lists the turns waiting for a Team seat** (`esperandoTeam`:
+  thread, model, minutes), for Flota.
+
 ## [0.2.43] - 2026-11-05
 
 ### Changed

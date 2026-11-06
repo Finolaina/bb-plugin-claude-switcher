@@ -6,7 +6,7 @@
 // version.
 import type { PlanInfo } from "./accounts.js";
 import { DAY_ZONE, zoneOffsetMs, type Pace } from "./pace.js";
-import type { Atasco } from "./atascos.js";
+import type { Atasco, EsperaTeam } from "./atascos.js";
 import type { AccountUsage, UsageWindow } from "./policy.js";
 
 export const HEALTH_VERSION = 1;
@@ -58,6 +58,8 @@ export interface HealthReport {
   freno: boolean;
   /** Threads this plugin holds 10 min or more with another account free; null when the queue could not be read. */
   atascos: Atasco[] | null;
+  /** Opus and Sonnet turns this plugin holds for a Team seat, with the minutes (Aitor 2026-11-06); null when the queue could not be read. */
+  esperandoTeam: EsperaTeam[] | null;
   cuentas: Array<{
     nombre: string;
     plan: "ultra" | "max" | "team" | "desconocido";
@@ -135,6 +137,8 @@ export function healthReport(input: {
   holdsBackground: boolean;
   /** See HealthReport.atascos. */
   atascos: Atasco[] | null;
+  /** See HealthReport.esperandoTeam. */
+  esperandoTeam: EsperaTeam[] | null;
   accounts: HealthAccount[];
 }): HealthReport {
   return {
@@ -143,6 +147,7 @@ export function healthReport(input: {
     inicioDia: input.dayStartHour,
     freno: input.holdsBackground,
     atascos: input.atascos,
+    esperandoTeam: input.esperandoTeam,
     cuentas: input.accounts.map((a) => {
       const u = a.usage;
       const whole = u !== null && u.unknown !== true;
@@ -220,6 +225,9 @@ export function healthText(report: HealthReport): string {
           (a) =>
             `atasco: ${a.cuenta} retiene ${a.hilo} (${a.modelo}) ${a.minutos} min; libres: ${a.libres.join(", ")}${a.proyectoOcupado ? "; proyecto con otro hilo en marcha" : ""}`,
         )),
+    ...(report.esperandoTeam === null
+      ? ["esperando Team: la cola no se pudo leer"]
+      : report.esperandoTeam.map((e) => `esperando Team: ${e.hilo} (${e.modelo}) ${e.minutos} min`)),
     "",
   ].join("\n");
 }

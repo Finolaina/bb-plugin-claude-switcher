@@ -248,9 +248,13 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
   // on its measurements (code-reviewer r15).
   if (stuck || failedOn === null) {
     const own = accounts.filter((a) => a.name === input.currentAccount);
+    // A pick by hand holds for the reserved model and Haiku, never for a
+    // model held off the reserve (Aitor 2026-11-06, «sí o sí»).
     const here = chooseAccount(
       own,
-      input.pinned === true ? { ...options, reserveModel: undefined } : options,
+      input.pinned === true && !holdsForReserve(options)
+        ? { ...options, reserveModel: undefined }
+        : options,
     );
     if (here !== null) {
       return {
@@ -667,9 +671,13 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   }
   const loggedOut = input.currentLoggedOut === true;
   const current = accounts.find((a) => a.name === input.currentAccount);
+  // A pick by hand holds for the reserved model and Haiku only: a turn in a
+  // model held off the reserve goes to a Team seat or waits, pick or not
+  // (Aitor 2026-11-06: «los Opus tienen que salir por Team sí o sí»).
+  const pinHolds = input.pinned === true && !holdsForReserve(options);
   if (!loggedOut && (current === undefined || current.unknown === true)) {
     if (
-      input.pinned === true ||
+      pinHolds ||
       input.unreadKeepsReserve?.(input.currentAccount) !== true ||
       !holdsForReserve(options)
     )
@@ -694,9 +702,9 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     current !== undefined &&
     isUsable(current) &&
     canRunModel(current, input.preferredModel);
-  if (runs && (input.pinned === true || !spendsReservedWeekly(current, options))) {
+  if (runs && (pinHolds || !spendsReservedWeekly(current, options))) {
     if (
-      input.pinned !== true &&
+      !pinHolds &&
       input.justMovedHere !== true &&
       spendsReservedWeekly(current, { ...options, reserveSpareUpTo: 0 })
     ) {

@@ -71,3 +71,41 @@ export function atascoLine(a: Atasco): string {
       : `${a.libres.join(", ")} are free`;
   return `STUCK: ${a.cuenta} holds thread ${a.hilo} (${a.modelo}) ${a.minutos} min, ${free}${a.proyectoOcupado ? "; another thread of its project is at work" : ""}`;
 }
+
+/** A thread this plugin holds in a model held off the reserve (Opus, Sonnet): it waits for a Team seat. */
+export interface EsperaTeam {
+  hilo: string;
+  modelo: string;
+  minutos: number;
+}
+
+/**
+ * The threads waiting for a Team seat (Aitor 2026-11-06, «los Opus tienen
+ * que salir por Team sí o sí»: such a turn waits rather than run on a Max or
+ * Ultra), longest first, each once, from their first minute. `heldFamily`
+ * names the model of a row when it is held off the reserve, null otherwise.
+ */
+export function waitingForTeam(
+  rows: readonly HeldRow[],
+  pluginId: string,
+  since: ReadonlyMap<string, number>,
+  now: number,
+  heldFamily: (model: string | null) => string | null,
+): EsperaTeam[] {
+  const out = new Map<string, EsperaTeam & { since: number }>();
+  for (const row of rows) {
+    if (!heldBy(row, pluginId) || out.has(row.threadId)) continue;
+    const at = since.get(row.threadId);
+    const modelo = heldFamily(row.model ?? null);
+    if (at === undefined || modelo === null) continue;
+    out.set(row.threadId, {
+      hilo: row.threadId,
+      modelo,
+      minutos: Math.floor((now - at) / 60_000),
+      since: at,
+    });
+  }
+  return [...out.values()]
+    .sort((a, b) => a.since - b.since)
+    .map(({ hilo, modelo, minutos }) => ({ hilo, modelo, minutos }));
+}

@@ -71,6 +71,7 @@ describe("spendsNoWeekly", () => {
   it("is true only for an absent weekly with no window of the model", () => {
     const seat = account("team1", {
       weekly: { usedPercent: 0, resetsAt: null, absent: true },
+      team: true,
       models: { Fable: { usedPercent: 42, resetsAt: NOW + 72 * HOUR } },
     });
     expect(spendsNoWeekly(seat, "Opus")).toBe(true);
@@ -205,9 +206,9 @@ describe("chooseAccount: limits", () => {
     expect(chosen?.account).toBe("weeklySoon");
   });
 
-  // A thread sent with Opus should not burn the Fable of an account that
-  // still has it: accounts measured out of the reserved model come first.
-  it("for another model, prefers accounts that can no longer run the reserved model", () => {
+  // Until 2026-11-06 a Max account out of Fable took Opus first; since
+  // («los Opus tienen que salir por Team sí o sí») no Max or Ultra does.
+  it("for another model, a Max account out of the reserved model is not chosen either (2026-11-06)", () => {
     const chosen = chooseAccount(
       [
         // its weekly resets sooner, so without the reserve it would win
@@ -222,7 +223,7 @@ describe("chooseAccount: limits", () => {
       ],
       { preferredModel: "Opus", reserveModel: "Fable" },
     );
-    expect(chosen).toEqual({ account: "viaulab", model: "Opus" });
+    expect(chosen).toBeNull();
   });
 
   // Measured 2026-10-11: a Team seat has no general weekly window at all,
@@ -240,6 +241,7 @@ describe("chooseAccount: limits", () => {
         account("team1", {
           session: { usedPercent: 17, resetsAt: NOW + 4 * HOUR },
           weekly: { usedPercent: 0, resetsAt: null, absent: true },
+          team: true,
           models: { Fable: { usedPercent: 42, resetsAt: NOW + 72 * HOUR } },
         }),
       ],
@@ -248,14 +250,14 @@ describe("chooseAccount: limits", () => {
     expect(chosen).toEqual({ account: "team1", model: "Opus" });
   });
 
-  it("for another model, an account out of the reserved model still comes before a Team seat", () => {
+  it("for another model, a Team seat comes before a Max account out of the reserved model, which is never chosen (2026-11-06)", () => {
     const chosen = chooseAccount(
       [
         account("team1", {
           weekly: { usedPercent: 0, resetsAt: null, absent: true },
+          team: true,
           models: { Fable: { usedPercent: 42, resetsAt: NOW + 72 * HOUR } },
         }),
-        // its weekly resets LATER than the seat's Fable: only the reserve puts it first
         account("viaulab", {
           weekly: { usedPercent: 91, resetsAt: NOW + 96 * HOUR },
           models: { Fable: { usedPercent: 100, resetsAt: NOW + 96 * HOUR } },
@@ -263,7 +265,7 @@ describe("chooseAccount: limits", () => {
       ],
       { preferredModel: "Opus", reserveModel: "Fable" },
     );
-    expect(chosen?.account).toBe("viaulab");
+    expect(chosen?.account).toBe("team1");
   });
 
   it("for another model, a Team seat out of the reserved model comes before a Team seat that keeps it", () => {
@@ -274,11 +276,13 @@ describe("chooseAccount: limits", () => {
         account("teamFable", {
           session: { usedPercent: 10, resetsAt: NOW + 4 * HOUR },
           weekly: { usedPercent: 0, resetsAt: null, absent: true },
+          team: true,
           models: { Fable: { usedPercent: 42, resetsAt: NOW + 72 * HOUR } },
         }),
         account("teamNoFable", {
           session: { usedPercent: 60, resetsAt: NOW + 4 * HOUR },
           weekly: { usedPercent: 0, resetsAt: null, absent: true },
+          team: true,
           models: { Fable: { usedPercent: 100, resetsAt: NOW + 72 * HOUR } },
         }),
       ],
@@ -291,6 +295,7 @@ describe("chooseAccount: limits", () => {
     const seat = (fableResetsAt: number) =>
       account("team", {
         weekly: { usedPercent: 0, resetsAt: null, absent: true },
+        team: true,
         models: { Fable: { usedPercent: 40, resetsAt: fableResetsAt } },
       });
     const max = account("max", {
@@ -306,14 +311,14 @@ describe("chooseAccount: limits", () => {
     );
   });
 
-  // Decision 4 (2026-10-12): the seat preference only orders the accounts
-  // that keep the reserve. Among those already out of it, what runs out
-  // first is still spent first, Team seat or not.
-  it("for another model, among accounts out of the reserved model a Team seat does not jump the queue", () => {
+  // Decision 4 (2026-10-12) let a Max account out of the reserve compete
+  // with the seats by deadline; since 2026-11-06 only the seat is a target.
+  it("for another model, a Team seat out of the reserved model goes, not the Max out of it whose weekly resets sooner (2026-11-06)", () => {
     const chosen = chooseAccount(
       [
         account("teamNoFable", {
           weekly: { usedPercent: 0, resetsAt: null, absent: true },
+          team: true,
           models: { Fable: { usedPercent: 100, resetsAt: NOW + 72 * HOUR } },
         }),
         account("maxNoFable", {
@@ -323,7 +328,7 @@ describe("chooseAccount: limits", () => {
       ],
       { preferredModel: "Opus", reserveModel: "Fable" },
     );
-    expect(chosen?.account).toBe("maxNoFable");
+    expect(chosen?.account).toBe("teamNoFable");
   });
 
   it("for another model, among Team seats the emptiest session goes first, then the name", () => {
@@ -331,6 +336,7 @@ describe("chooseAccount: limits", () => {
       account(name, {
         session: { usedPercent: session, resetsAt: NOW + 4 * HOUR },
         weekly: { usedPercent: 0, resetsAt: null, absent: true },
+        team: true,
         models: { Fable: { usedPercent: 40, resetsAt: NOW + 72 * HOUR } },
       });
     expect(
@@ -388,6 +394,7 @@ describe("chooseAccount: limits", () => {
     it("while a Team seat that keeps the reserved model is, with or without a window of the other model", () => {
       const seat = account("team1", {
         weekly: { usedPercent: 0, resetsAt: null, absent: true },
+        team: true,
         models: { Fable: { usedPercent: 42, resetsAt: NOW + 72 * HOUR } },
       });
       expect(chooseAccount([maxWithFable, seat], options)?.account).toBe(
@@ -395,6 +402,7 @@ describe("chooseAccount: limits", () => {
       );
       const seatWithOpus = account("team2", {
         weekly: { usedPercent: 0, resetsAt: null, absent: true },
+        team: true,
         models: {
           Fable: { usedPercent: 42, resetsAt: NOW + 72 * HOUR },
           Opus: { usedPercent: 5, resetsAt: NOW + 72 * HOUR },
@@ -405,14 +413,12 @@ describe("chooseAccount: limits", () => {
       ).toBe("team2");
     });
 
-    it("and a Max account out of the reserved model is", () => {
+    it("nor a Max account out of the reserved model (2026-11-06, «sí o sí»)", () => {
       const out = account("viaulab", {
         weekly: { usedPercent: 91, resetsAt: NOW + 60 * HOUR },
         models: { Fable: { usedPercent: 100, resetsAt: NOW + 60 * HOUR } },
       });
-      expect(chooseAccount([maxWithFable, out], options)?.account).toBe(
-        "viaulab",
-      );
+      expect(chooseAccount([maxWithFable, out], options)).toBeNull();
     });
 
     it("but nothing changes without a reserve, or for the reserved model itself", () => {
@@ -431,6 +437,7 @@ describe("chooseAccount: limits", () => {
         spendsReservedWeekly(
           account("team1", {
             weekly: { usedPercent: 0, resetsAt: null, absent: true },
+            team: true,
             models: { Fable: { usedPercent: 42, resetsAt: NOW + 72 * HOUR } },
           }),
           options,
@@ -443,7 +450,7 @@ describe("chooseAccount: limits", () => {
           }),
           options,
         ),
-      ).toBe(false);
+      ).toBe(true);
       expect(spendsReservedWeekly(maxWithFable, { preferredModel: "Opus" })).toBe(false);
       expect(
         spendsReservedWeekly(maxWithFable, { preferredModel: "Fable", reserveModel: "Fable" }),
@@ -545,6 +552,7 @@ describe("session quarter before the deadline (S1-S7, S12)", () => {
     account(name, {
       session: { usedPercent: session, resetsAt: NOW + 4 * HOUR },
       weekly: { usedPercent: 0, resetsAt: null, absent: true },
+      team: true,
       models: {
         Fable: { usedPercent: fable, resetsAt: NOW + fableResetHours * HOUR },
         ...extra,
@@ -607,7 +615,7 @@ describe("session quarter before the deadline (S1-S7, S12)", () => {
     ).toBe("team-b");
   });
 
-  it("S5: for another model, a Max account out of the preferred model still goes first by its deadline", () => {
+  it("S5: for another model, a Max account out of the preferred model is not chosen: the seat out of it goes first (2026-11-06)", () => {
     expect(
       pick(
         [
@@ -617,7 +625,7 @@ describe("session quarter before the deadline (S1-S7, S12)", () => {
         ],
         opus,
       ),
-    ).toBe("max-a");
+    ).toBe("team-b");
   });
 
   it("S6: for another model, between seats out of the preferred model the lower quarter beats a closer deadline", () => {
@@ -639,13 +647,13 @@ describe("session quarter before the deadline (S1-S7, S12)", () => {
     expect(pick([max("max-a", 0, 20, 24, 20)], opus)).toBeNull();
   });
 
-  it("S12: for another model, a seat at 0 % beats a Max account out of the preferred model at 30 % whose weekly resets in 1 h; at 10 % the Max wins", () => {
+  it("S12: for another model, a seat beats a Max account out of the preferred model whatever its session (2026-11-06; before, at 10 % the Max won)", () => {
     expect(
       pick([max("max-a", 30, 60, 1, 100), seat("team-b", 0, 100, 80)], opus),
     ).toBe("team-b");
     expect(
       pick([max("max-a", 10, 60, 1, 100), seat("team-b", 0, 100, 80)], opus),
-    ).toBe("max-a");
+    ).toBe("team-b");
   });
 });
 
@@ -704,43 +712,60 @@ describe("chooseAccount for background work (SPEC 2026-10-30 §2)", () => {
   });
 });
 
-// Aitor 2026-11-05 («hay cuota de claude … Tenemos opus!»): with the Team
-// seats full, a turn in another model may run on a Max or Ultra account that
-// keeps the reserved model while its weekly and the reserved model's window
-// are at or under `reserveSpareUpTo`; never above it.
-describe("reserveSpareUpTo", () => {
-  // "a-ultra" sorts before "team": the Team goes first by rank, not by name.
+// Aitor 2026-11-06 («los Opus tienen que salir por Team sí o sí»): a turn in
+// Opus or Sonnet while Fable is reserved runs on a Team seat only. A Max or
+// Ultra account is Fable's whatever its margin (`reserveSpareUpTo`, the
+// 0.2.41 share, no longer counts for them) and whatever Fable has left there:
+// with every Team seat full the turn waits. Haiku keeps the old rule.
+describe("Opus solo por Team (2026-11-06)", () => {
+  // "a-ultra" sorts before "team": the Team goes first by rule, not by name.
   const ultra = (weekly: number, fable: number) =>
     account("a-ultra", {
       weekly: { usedPercent: weekly, resetsAt: NOW + 48 * HOUR },
       models: { Fable: { usedPercent: fable, resetsAt: NOW + 48 * HOUR } },
     });
   const team = account("team", { team: true, models: { Fable: { usedPercent: 4, resetsAt: NOW + 48 * HOUR } } });
-  const opus = (upTo?: number): ChoiceOptions => ({
-    preferredModel: "Opus",
+  const as = (model: string, upTo?: number): ChoiceOptions => ({
+    preferredModel: model,
     reserveModel: "Fable",
     ...(upTo === undefined ? {} : { reserveSpareUpTo: upTo }),
   });
+  const seats = (o: ChoiceOptions, free: Record<string, number>) => ({ ...o, freeSeats: (a: string) => free[a] ?? 0 });
 
-  it("an Ultra at the threshold in both windows spares the reserve; one point above in either does not", () => {
-    expect(spendsReservedWeekly(ultra(50, 50), opus(50))).toBe(false);
-    expect(spendsReservedWeekly(ultra(51, 10), opus(50))).toBe(true);
-    expect(spendsReservedWeekly(ultra(10, 51), opus(50))).toBe(true);
+  it("canario: Opus with every Team seat full is not placed on an Ultra, with margin, idle or out of Fable", () => {
+    for (const [weekly, fable] of [[0, 0], [50, 50], [20, 100], [99, 100]] as const) {
+      expect(chooseAccount([ultra(weekly, fable), team], seats(as("Opus", 50), { "a-ultra": 6, team: 0 }))).toBeNull();
+      expect(spendsReservedWeekly(ultra(weekly, fable), as("Opus", 50))).toBe(true);
+    }
   });
 
-  it("unset or 0 keeps every account with the reserve for it, as before", () => {
-    expect(spendsReservedWeekly(ultra(0, 0), opus())).toBe(true);
-    expect(spendsReservedWeekly(ultra(0, 0), opus(0))).toBe(true);
+  it("an account not known as a Team seat that reports no weekly (a Max login) is no target either (Codex r1 high 3)", () => {
+    const noWeekly = account("a-max", {
+      weekly: { usedPercent: 0, resetsAt: null, absent: true },
+      models: { Fable: { usedPercent: 10, resetsAt: NOW + 48 * HOUR } },
+    });
+    expect(spendsReservedWeekly(noWeekly, as("Opus"))).toBe(true);
+    expect(chooseAccount([noWeekly, team], seats(as("Opus"), { "a-max": 6, team: 0 }))).toBeNull();
+    // Haiku keeps the rule before: no weekly, nothing of Fable's spent.
+    expect(spendsReservedWeekly(noWeekly, as("Haiku"))).toBe(false);
   });
 
-  it("a Team seat with a free seat still goes first; the Ultra only when no Team has one", () => {
-    const seats = (free: Record<string, number>) => ({ ...opus(50), freeSeats: (a: string) => free[a] ?? 0 });
-    expect(chooseAccount([ultra(0, 0), team], seats({ "a-ultra": 5, team: 1 }))?.account).toBe("team");
-    expect(chooseAccount([ultra(0, 0), team], seats({ "a-ultra": 5, team: 0 }))?.account).toBe("a-ultra");
-    expect(chooseAccount([ultra(51, 0), team], seats({ "a-ultra": 5, team: 0 }))).toBeNull();
+  it("Sonnet too", () => {
+    expect(chooseAccount([ultra(0, 100), team], seats(as("Sonnet", 50), { "a-ultra": 6, team: 0 }))).toBeNull();
   });
 
-  it("does not change where the reserved model itself runs", () => {
-    expect(spendsReservedWeekly(ultra(80, 80), { preferredModel: "Fable", reserveModel: "Fable", reserveSpareUpTo: 50 })).toBe(false);
+  it("a Team seat with a free seat takes Opus", () => {
+    expect(chooseAccount([ultra(0, 0), team], seats(as("Opus", 50), { "a-ultra": 6, team: 1 }))?.account).toBe("team");
+  });
+
+  it("Fable still runs on the Ultra", () => {
+    expect(chooseAccount([ultra(30, 30)], as("Fable", 50))?.account).toBe("a-ultra");
+    expect(spendsReservedWeekly(ultra(80, 80), as("Fable", 50))).toBe(false);
+  });
+
+  it("Haiku keeps the margin rule: an Ultra at the threshold spares the reserve, one point above does not", () => {
+    expect(spendsReservedWeekly(ultra(50, 50), as("Haiku", 50))).toBe(false);
+    expect(spendsReservedWeekly(ultra(51, 10), as("Haiku", 50))).toBe(true);
+    expect(spendsReservedWeekly(ultra(0, 100), as("Haiku", 50))).toBe(false);
   });
 });

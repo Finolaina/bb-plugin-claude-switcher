@@ -33,7 +33,9 @@ import {
   atascoLine,
   heldBy,
   heldLong,
+  waitingForTeam,
   type Atasco,
+  type EsperaTeam,
   type HeldRow,
 } from "./src/atascos.js";
 import {
@@ -637,12 +639,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       default: 2,
     },
     // Aitor 2026-11-05 («hay cuota de claude … Tenemos opus!»); 50 is the
-    // delegating session's default, not a measure.
+    // delegating session's default, not a measure. Since 2026-11-06 («los
+    // Opus tienen que salir por Team sí o sí») Haiku's only.
     otherModelUpTo: {
       type: "number",
-      label: "Other models on a Max or Ultra account that keeps the preferred one, up to (%)",
+      label: "Haiku on a Max or Ultra account that keeps the preferred one, up to (%)",
       description:
-        "A turn in another model (Opus while Fable is preferred) runs on a Max or Ultra account that can still run the preferred model only while that account's weekly and preferred-model windows are both at or under this share, and only when no Team seat is free. 0 = never: such a turn waits for a Team seat.",
+        "A Haiku turn runs on a Max or Ultra account that can still run the preferred model only while that account's weekly and preferred-model windows are both at or under this share. Opus and Sonnet never run on a Max or Ultra account while Fable is preferred, whatever this says: they run on a Team seat or wait for one. 0 = never.",
       default: 50,
     },
     stuckMoveMinutes: {
@@ -2515,6 +2518,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       forThread?: string;
       /** Asked with the other checks after the sessions are shared: false drops the move (Codex OPUS-R5-002). */
       stillValid?: () => boolean;
+      /**
+       * The pick by hand stays: the move is an excursion of a turn in a model
+       * other than the reserved one (Opus, Sonnet, Haiku), and the pick still
+       * holds for the reserved model (Aitor 2026-11-06: a project pinned to a
+       * Max keeps it for Fable; Codex r3 medium 1).
+       */
+      keepPin?: boolean;
     } = {},
   ): Promise<boolean> {
     if (from.external) {
@@ -2636,7 +2646,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     if (toName !== (from.account ?? current.defaultAccountName))
       accountChangedAt.set(projectId, deps.now());
-    if (options.byHand !== true && toName !== fromName && pins.delete(projectId))
+    if (
+      options.byHand !== true &&
+      options.keepPin !== true &&
+      toName !== fromName &&
+      // Back to the account picked by hand (the way home of an excursion
+      // that kept the pick): the pick stays.
+      pins.get(projectId) !== toName &&
+      pins.delete(projectId)
+    )
       storePins();
     bb.realtime.publish(CHANGED, { at: deps.now() });
     return true;
@@ -3687,8 +3705,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     measured: ReturnType<typeof measuredAccounts>,
     now: number,
   ): string | null | undefined {
+    if (otherModel(model)) return undefined;
+    // A pick by hand left for a turn held off the reserve is the way home,
+    // before any excursion noted since (a reload forgets them, and a later
+    // one may start on a Team seat: Codex r1 medium 5, r2 medium 3).
+    const pin = pins.get(projectId);
+    if (pin !== undefined) return pin;
     const excursion = excursions.get(projectId);
-    if (excursion === undefined || otherModel(model)) return undefined;
+    if (excursion === undefined) return undefined;
     const left = aheadLeft.get(projectId);
     const home = measured.find((a) => a.name === excursion.from);
     return left !== undefined &&
@@ -3990,6 +4014,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (
       !(await applyAccount(projectId, accountOrDefault(decision.account), from, {
         forThread: thread.id,
+        keepPin: otherModel(model),
       }))
     )
       return;
@@ -4358,6 +4383,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       accounts: aheadTargets(projectId, fromName, model, now),
       preferredModel: model,
       ...reserveOf(),
+      // The pick by hand first, as before a turn (Codex r3 medium 2).
+      excursionFrom: wayHome(projectId, model, measuredAccounts(model), now),
       freeSeats,
       now,
       currentLoggedOut: loggedOut(fromName),
@@ -4377,6 +4404,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const ended = turnEnds.get(projectId) ?? 0;
     if (
       !(await applyAccount(projectId, accountOrDefault(decision.account), from, {
+        keepPin: otherModel(model),
         stillValid: () =>
           (activity.get(projectId) ?? 0) === seen &&
           (turnEnds.get(projectId) ?? 0) === ended &&
@@ -4792,10 +4820,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * IR4-001). A Team seat, or a login that says nothing, starts as ever.
    */
   function unreadKeepsReserve(name: string): boolean {
+    // Only a login that says Team lets a model held off the reserve start
+    // unread (Aitor 2026-11-06, «sí o sí»): a login that says nothing of its
+    // plan may be a Max as well (Codex r1 high 2).
     const login = accounts.find((a) => a.name === name);
-    if (login === undefined) return false;
-    const { plan } = planOf(login, null);
-    return login.kind === "max" || plan === "ultra" || plan === "max";
+    return login === undefined || planOf(login, null).plan !== "team";
   }
   /** The Team seats by login, logged in, not refusing, with nothing measured of them. */
   function unreadTeams(model: string): string[] {
@@ -4820,21 +4849,32 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * needs, and `model` is held off such an account (see holdsForReserve),
    * as measured now or, unmeasured, as its login says.
    */
+  /** `name` is a Team seat measured unable to run `model`, a model held off the reserve. */
+  function teamOut(name: string, model: string): boolean {
+    if (!heldModel(model)) return false;
+    const usage = measuredAccounts(model).find((a) => a.name === name);
+    if (usage === undefined || usage.unknown === true || usage.team !== true)
+      return false;
+    const settled = settle(usage, deps.now());
+    return !(isUsable(settled) && canRunModel(settled, model));
+  }
+  /** A turn in `model` goes to a Team seat only (see holdsForReserve). */
+  function heldModel(model: string): boolean {
+    return holdsForReserve({ preferredModel: model, ...reserveOf() });
+  }
   function heldOff(name: string, model: string, projectId?: string): boolean {
     const options = { preferredModel: model, ...reserveOf() };
+    // A pick by hand no longer lets such a turn spend the reserve (Aitor
+    // 2026-11-06, «sí o sí»): `projectId` is kept for the callers.
     if (!holdsForReserve(options)) return false;
-    if (projectId !== undefined && pins.get(projectId) === name) return false;
+    void projectId;
     const usage = measuredAccounts(model).find((a) => a.name === name);
     if (usage === undefined || usage.unknown === true)
       return unreadKeepsReserve(name);
-    // Where the turn cannot run anyway it fails there, and the failure
-    // moves it: only a turn that would run and spend the reserve is held.
-    const settled = settle(usage, deps.now());
-    return (
-      isUsable(settled) &&
-      canRunModel(settled, model) &&
-      spendsReservedWeekly(settled, options)
-    );
+    // Off a Team seat it waits, whether it would run there or fail: a turn
+    // started on a Max or an Ultra to fail there is no wait for a Team seat
+    // (Aitor 2026-11-06, «sí o sí»; Codex r1 high 1).
+    return spendsReservedWeekly(settle(usage, deps.now()), options);
   }
   /**
    * Before a turn starts: when the project's account is MEASURED unable to
@@ -5018,6 +5058,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       await applyAccount(projectId, to, from, {
         share: false,
         forThread: thread.id,
+        keepPin: otherModel(model),
       });
       await markHandled(projectId);
       // A move for a crowded seat is a new home, not an excursion: a turn in
@@ -5395,6 +5436,22 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     );
     return typeof read === "object" ? read.value : null;
   }
+  /**
+   * The Opus and Sonnet turns held for a Team seat (see waitingForTeam), as
+   * bb's queue stands; null when it could not be read in time.
+   */
+  async function esperandoTeam(): Promise<EsperaTeam[] | null> {
+    const read = await within(
+      bb.sdk.threads.queue.list(),
+      STUCK_READ_LIMIT_MS,
+      "the threads waiting for a Team seat could not be read",
+    );
+    if (typeof read !== "object") return null;
+    return waitingForTeam(read.value, PLUGIN_ID, waitSince, deps.now(), (model) => {
+      const family = modelFamily(model) ?? current.preferredModel;
+      return holdsForReserve({ preferredModel: family, ...reserveOf() }) ? family : null;
+    });
+  }
   async function readAtascos(rows?: readonly HeldRow[]): Promise<Atasco[]> {
     const all = rows ?? (await bb.sdk.threads.queue.list());
     const out: Atasco[] = [];
@@ -5594,6 +5651,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         heldOff(at.account, model, thread.projectId)
       ) {
         const reason = `Waiting to place ${model} again: the project is on ${at.account}, which keeps its weekly for ${current.preferredModel}`;
+        bb.log.info(`thread ${thread.id}: its message waits (${reason})`);
+        return { action: "wait", reason, sendAt: deps.now() + SEAT_RECHECK_MS };
+      }
+      // A Team seat out for a model held off the reserve: the turn waits
+      // there, rather than start to fail, until a Team seat can take it
+      // (Aitor 2026-11-06, «sin excepciones»; Codex r2 medium 2).
+      if (
+        current.autoSwitch &&
+        model !== null &&
+        at !== null &&
+        at.account !== null &&
+        teamOut(at.account, model)
+      ) {
+        const reason = `Waiting for a Team seat that can run ${model}: the project is on ${at.account}, which ${whyOut(at.account, model)}`;
         bb.log.info(`thread ${thread.id}: its message waits (${reason})`);
         return { action: "wait", reason, sendAt: deps.now() + SEAT_RECHECK_MS };
       }
@@ -6115,6 +6186,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       if (
         !(await applyAccount(projectId, accountOrDefault(decision.account), from, {
           forThread: event.threadId,
+          keepPin: otherModel(model),
         }))
       ) {
         // Moved by a placement before a turn while the sessions were shared:
@@ -6584,14 +6656,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (
       !noLogin &&
       !refusing(fromName) &&
-      (here === undefined ||
-        here.unknown === true ||
+      (((here === undefined || here.unknown === true) &&
+        // Unread, and it may spend the reserve: a Team seat that can take
+        // the turn is looked for below (Codex r3 medium 3).
+        !heldOff(fromName, model)) ||
+      (here !== undefined &&
+        here.unknown !== true &&
         // With the reserve: a Max account that keeps the preferred model
         // never gets an Opus retry released on it (Codex BM-R1-005).
-        // A pick by hand holds while the account runs the model (code-reviewer r1 M1).
-        (pins.get(projectId) === fromName
+        // A pick by hand holds while the account runs the model (code-reviewer r1 M1),
+        // never for a model held off the reserve (Aitor 2026-11-06, «sí o sí»).
+        (pins.get(projectId) === fromName &&
+        !holdsForReserve({ preferredModel: model, ...reserveOf() })
           ? bestAccount([here], model, now)
-          : bestAccount([here], model, now, current.preferredModel, undefined, undefined, current.otherModelUpTo)) === fromName)
+          : bestAccount([here], model, now, current.preferredModel, undefined, undefined, current.otherModelUpTo)) === fromName))
     ) {
       // It waited on the account the project was on before.
       const changed = accountChangedAt.get(projectId);
@@ -6633,6 +6711,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (
       !(await applyAccount(projectId, accountOrDefault(to), from, {
         forThread: threadId,
+        keepPin: otherModel(model),
       }))
     )
       return;
@@ -6985,6 +7064,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       .filter((at): at is number => at !== null);
     return healthReport({
       atascos: await atascos(),
+      esperandoTeam: await esperandoTeam(),
       measured: observed.length === 0 ? now : Math.max(...observed),
       dayStartHour: dayHour(),
       holdsBackground: current.paceHoldsBackground === true,

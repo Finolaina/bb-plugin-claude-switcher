@@ -4,6 +4,7 @@ import {
   atascoLine,
   heldBy,
   heldLong,
+  waitingForTeam,
   type HeldRow,
 } from "./atascos.js";
 
@@ -65,5 +66,36 @@ describe("atascoLine", () => {
     expect(atascoLine({ ...base, libres: ["team2", "team3"], proyectoOcupado: true })).toBe(
       "STUCK: team5 holds thread t1 (Opus) 12 min, team2, team3 are free; another thread of its project is at work",
     );
+  });
+});
+
+// Aitor 2026-11-06 («los Opus tienen que salir por Team sí o sí»): an Opus
+// turn with no Team seat waits; Flota shows it as «esperando Team» with the
+// minutes, from the first of them (not only past STUCK_WAIT_MS).
+describe("waitingForTeam", () => {
+  const since = new Map([["t1", NOW - 31 * 60_000], ["t2", NOW - 60_000], ["t3", NOW - 5 * 60_000]]);
+  /** The family of a model held off the reserve, as the server names it; null for any other. */
+  const held = (model: string | null) => /opus|sonnet/.exec(model ?? "")?.[0] ?? null;
+
+  it("lists each held thread of a model held off the reserve with its minutes, longest first, once", () => {
+    const rows = [
+      row({ threadId: "t2", model: "claude-sonnet-5-5" }),
+      row({ threadId: "t1", model: "claude-opus-5-5" }),
+      row({ threadId: "t1", model: "claude-opus-5-5" }),
+      row({ threadId: "t3", model: "claude-fable-5-1" }),
+    ];
+    expect(waitingForTeam(rows, "claude-switcher", since, NOW, held)).toEqual([
+      { hilo: "t1", modelo: "opus", minutos: 31 },
+      { hilo: "t2", modelo: "sonnet", minutos: 1 },
+    ]);
+  });
+
+  it("leaves out rows held by another plugin, archived, or never held by this one", () => {
+    const rows = [
+      row({ threadId: "t1", model: "claude-opus-5-5", waitingOn: { kind: "plugin", pluginId: "limiter" } }),
+      row({ threadId: "t2", model: "claude-opus-5-5", failureReason: "Thread is archived" }),
+      row({ threadId: "t9", model: "claude-opus-5-5" }),
+    ];
+    expect(waitingForTeam(rows, "claude-switcher", since, NOW, held)).toEqual([]);
   });
 });
