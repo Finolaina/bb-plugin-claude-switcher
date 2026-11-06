@@ -360,7 +360,7 @@ interface HostOptions {
   /** Runs before threads.get answers (a failure's look at its thread, outside the project's queue). */
   beforeThreadGet?: () => Promise<void>;
   /** Runs before threads.list answers (a list that never answers, Astra SEATS-R2-001). */
-  beforeThreadsList?: () => Promise<void>;
+  beforeThreadsList?: (args?: { archived?: boolean }) => Promise<void>;
   /** Runs as queuedMessages.delete starts, before it lands or fails (bb's events meanwhile). */
   beforeDelete?: () => Promise<void>;
   /** Runs before queuedMessages.list answers (the plugin's look for a queued retry). */
@@ -492,20 +492,27 @@ async function host(
             ...options.threadsLive?.[threadId],
           });
         },
-        // Like bb: every thread, as threads.get answers for it.
-        list: async () => {
-          await options.beforeThreadsList?.();
+        // Like bb: every thread, as threads.get answers for it; with
+        // `archived`, only those archived or only those not.
+        list: async (args?: { archived?: boolean }) => {
+          await options.beforeThreadsList?.(args);
           if (options.queueAfterList !== undefined) {
             queued.push(...options.queueAfterList);
             options.queueAfterList = undefined;
           }
-          return Object.keys(options.threads ?? {}).map((threadId) =>
-            thread({
-              id: threadId,
-              projectId: threadId === "thr-2" ? "proj-2" : "proj-1",
-              ...options.threads?.[threadId],
-            }),
-          );
+          return Object.keys(options.threads ?? {})
+            .map((threadId) =>
+              thread({
+                id: threadId,
+                projectId: threadId === "thr-2" ? "proj-2" : "proj-1",
+                ...options.threads?.[threadId],
+              }),
+            )
+            .filter(
+              (t) =>
+                args?.archived === undefined ||
+                args.archived === (t.archivedAt !== null),
+            );
         },
         events: {
           // Like bb: only the asked types, oldest first unless desc, then the limit.
@@ -18110,7 +18117,7 @@ describe("caminos 2026-11-04", () => {
         });
         dispose = () => h.harness.dispose();
         teamLogin(h, "spare", "work");
-        await vi.waitFor(() => expect(log(h)).toMatch(/projects' models after loading|not listed to read/));
+        await vi.waitFor(() => expect(log(h)).toMatch(/projects' models after loading|threads not listed to read/));
         return h;
       };
 
@@ -18152,8 +18159,42 @@ describe("caminos 2026-11-04", () => {
         expect(log(h)).toMatch(/0 from their latest turn, 2 with no thread, 1 whose latest turn names no model, 0 not read/);
       });
 
+      it("an archived thread counts: a newer archived Opus thread holds the project over an older Fable one, and so does one with only archived threads", async () => {
+        const h = await seeded({
+          listed: ["proj-1", "proj-3"],
+          extraProjects: [{ id: "proj-3", name: "Third" }],
+          presetEnv: { "proj-1": on("spare"), "proj-3": on("spare") },
+          threads: {
+            t1: { projectId: "proj-1", updatedAt: NOW - 2 * HOUR },
+            gone: { projectId: "proj-1", updatedAt: NOW - HOUR, archivedAt: NOW - HOUR },
+            c1: { projectId: "proj-3", updatedAt: NOW - HOUR, archivedAt: NOW - HOUR },
+          },
+          threadEvents: { t1: [turn(1, FABLE_ID)], gone: [turn(1, OPUS)], c1: [turn(1, OPUS)] },
+        });
+        await pass(h);
+        expect(log(h)).not.toMatch(/moved from/i);
+        expect(log(h)).toMatch(/2 from their latest turn, 0 with no thread/);
+      });
+
+      it("a list of archived threads that fails is said once and every project is judged as before", async () => {
+        const h = await seeded({
+          threads: { t1: { projectId: "proj-1", updatedAt: NOW - HOUR } },
+          threadEvents: { t1: [turn(1, OPUS)] },
+          beforeThreadsList: async (args) => {
+            if (args?.archived === true) throw new Error("HTTP 503");
+          },
+        });
+        await pass(h);
+        const warned = h.harness.logEntries.filter(
+          (e) => e.level === "warn" && /the archived threads not listed/.test(e.message),
+        );
+        expect(warned).toHaveLength(1);
+        expect(log(h)).toMatch(/moved from spare \(exhausted for Fable/);
+      });
+
       it("one read per project with no model stored, of its latest thread only, and none for a project with one", async () => {
         const read: string[] = [];
+        const lists: Array<boolean | undefined> = [];
         const h = await seeded({
           listed: ["proj-1", "proj-2", "proj-3", "proj-4"],
           extraProjects: [
@@ -18173,8 +18214,13 @@ describe("caminos 2026-11-04", () => {
           beforeEvents: async (threadId) => {
             read.push(threadId);
           },
+          beforeThreadsList: async (args) => {
+            lists.push(args?.archived);
+          },
         });
         expect(read.sort()).toEqual(["a1", "b1", "c1"]);
+        // The seats' list (one page) and one page of archived threads.
+        expect(lists).toEqual([false, true]);
         expect(log(h)).toMatch(/projects' models after loading: 3 from their latest turn, 0 with no thread/);
       });
 

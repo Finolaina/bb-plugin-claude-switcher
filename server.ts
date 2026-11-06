@@ -4302,7 +4302,22 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   let seedDone!: () => void;
   const modelsSeeded = new Promise<void>((resolve) => (seedDone = resolve));
   let seedLateSaid = false;
-  function seedProjectModels(latest: Map<string, { id: string }> | null): void {
+  type LatestThreads = Map<string, { id: string; updatedAt: number }>;
+  /** `t` as its project's latest thread of the user, if it is the latest so far (as the checkpoint notes a model). */
+  function noteLatestThread(
+    latest: LatestThreads,
+    t: { id: string; projectId: string; updatedAt: number } & Parameters<
+      typeof notTheUsersThread
+    >[0] & { providerId: string },
+  ): void {
+    if (
+      t.providerId === CLAUDE_CODE_PROVIDER &&
+      notTheUsersThread(t) === null &&
+      (latest.get(t.projectId)?.updatedAt ?? -Infinity) < t.updatedAt
+    )
+      latest.set(t.projectId, { id: t.id, updatedAt: t.updatedAt });
+  }
+  function seedProjectModels(latest: LatestThreads | null): void {
     if (seedAsked) return;
     seedAsked = true;
     void readSeeds(latest)
@@ -4313,7 +4328,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       )
       .finally(seedDone);
   }
-  async function readSeeds(latest: Map<string, { id: string }> | null): Promise<void> {
+  async function readSeeds(latest: LatestThreads | null): Promise<void> {
     if (latest === null) {
       bb.log.warn(
         "the threads not listed to read each project's model at load; the preferred model judges those with none stored",
@@ -4328,6 +4343,23 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const ids =
       typeof listed === "object" ? listed.value.map((p) => p.id) : [...latest.keys()];
     const asked = ids.filter((id) => !projectModel.has(id));
+    // An archived thread is a thread of its project too (Codex MLC-001):
+    // listed here, only when some project has no model, page by page. A
+    // page that is not read leaves every project judged as before.
+    const PAGE = 200;
+    for (let offset = 0; asked.length > 0; offset += PAGE) {
+      const what =
+        "the archived threads not listed to read each project's model at load; the preferred model judges those with none stored";
+      const page = await within(
+        bb.sdk.threads.list({ archived: true, limit: PAGE, offset }),
+        DISPATCH_LIMIT_MS,
+        what,
+      );
+      if (page === "late") bb.log.warn(`${what}: no answer in time`);
+      if (typeof page !== "object") return;
+      for (const t of page.value) noteLatestThread(latest, t);
+      if (page.value.length < PAGE) break;
+    }
     let taken = 0;
     let none = 0;
     let unnamed = 0;
@@ -7749,13 +7781,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // is (Codex PLAZAS-R2-003).
       const underWay: { id: string; projectId: string }[] = [];
       // Each project's latest thread of the user, for its model (see
-      // seedProjectModels). ponytail: archived threads are not listed here,
-      // so a project whose latest thread is archived takes an older one's
-      // model, or none; measured 2026-11-06 on the bb server: 0 of 84
-      // projects with Claude Code threads had an archived thread newer than
-      // their latest unarchived one, and listing the 630 archived would
-      // cost 4 more pages on every load. If that changes, list them too
-      // (archived: true) for the projects with no model.
+      // seedProjectModels; the archived ones are listed there).
       const latest = new Map<string, { id: string; updatedAt: number }>();
       const PAGE = 200;
       for (let offset = 0; ; offset += PAGE) {
@@ -7774,13 +7800,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         );
         underWay.push(...claude);
         running.push(...claude.filter((t) => notTheUsersThread(t) === null));
-        for (const t of page)
-          if (
-            t.providerId === CLAUDE_CODE_PROVIDER &&
-            notTheUsersThread(t) === null &&
-            (latest.get(t.projectId)?.updatedAt ?? -Infinity) < t.updatedAt
-          )
-            latest.set(t.projectId, t);
+        for (const t of page) noteLatestThread(latest, t);
         if (page.length < PAGE) break;
       }
       seedProjectModels(latest);

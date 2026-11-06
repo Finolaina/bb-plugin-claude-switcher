@@ -15,9 +15,9 @@ project uses [Semantic Versioning](https://semver.org/).
   out of Fable went to an Ultra, losing their prompt cache, and the same
   happened on every reload to any project with no turn since. At load,
   each such project now takes the model of the latest turn of its latest
-  Claude Code thread, read once from the list of threads the seat count
-  reads anyway (one log read per project with no model, none for the
-  others). Any turn beats it, and it is not stored until a turn names it.
+  Claude Code thread, archived ones included, from the list of threads
+  the seat count reads anyway plus the archived ones (one log read per
+  project with no model, none for the others). Any turn beats it, and it is not stored until a turn names it.
   A project with no thread, or whose latest turn names no model, is judged
   for the preferred model as before; a read that fails is said once in the
   log and that project is judged as before. The rescue waits for these
