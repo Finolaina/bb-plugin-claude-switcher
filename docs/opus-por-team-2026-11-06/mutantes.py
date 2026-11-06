@@ -36,7 +36,7 @@ M = [
      "        keepPin: false,\n      });\n      await markHandled(projectId);\n      // A move for a crowded",
      "server.test.ts", "T3 a pick by hand of an Ultra with a Team seat free"),
     ("R3 pin se queda", "la vuelta a casa borra el pin", "server.ts",
-     "      pins.get(projectId) === fromName &&\n", "",
+     "      pins.get(projectId) !== toName &&\n", "",
      "server.test.ts", "T3 a pick by hand of an Ultra with a Team seat free"),
     # Codex r1 (codex-r1.md): cada hallazgo con su prueba.
     ("R5 r1-1", "una Max agotada vuelve a dejar arrancar a Opus para que falle", "server.ts",
@@ -56,7 +56,8 @@ M = [
      "  if (!reserving(options) || account.team === true || account.weekly.absent === true) return false;\n",
      "src/policy.test.ts", "Codex r1 high 3"),
     ("R5 r1-4", "un movimiento entre Team borra el pin", "server.ts",
-     "      pins.get(projectId) === fromName &&\n", "      pins.get(projectId) !== toName &&\n",
+     "        keepPin: heldModel(model),\n      });\n      await markHandled(projectId);\n      // A move for a crowded",
+     "        keepPin: false,\n      });\n      await markHandled(projectId);\n      // A move for a crowded",
      "server.test.ts", "r1-4"),
     ("R5 r1-5", "tras recargar, Fable no vuelve a la cuenta fijada", "server.ts",
      "    if (excursion === undefined) return pins.get(projectId);\n", "    if (excursion === undefined) return undefined;\n",

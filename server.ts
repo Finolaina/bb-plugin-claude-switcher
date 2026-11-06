@@ -2649,10 +2649,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       options.byHand !== true &&
       options.keepPin !== true &&
       toName !== fromName &&
-      // Only a move off the account picked by hand drops the pick: on the
-      // way back to it, or between other accounts while a turn held off the
-      // reserve is away from it, the pick stays (Codex r1 medium 4).
-      pins.get(projectId) === fromName &&
+      // Back to the account picked by hand (the way home of an excursion
+      // that kept the pick): the pick stays.
+      pins.get(projectId) !== toName &&
       pins.delete(projectId)
     )
       storePins();

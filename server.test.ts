@@ -19508,9 +19508,10 @@ describe("caminos 2026-11-04", () => {
   // says nothing, or without a weekly; and the pick by hand got lost.
   describe("Opus solo por Team: no way round it (Codex r1, 2026-11-06)", () => {
     const SONNET = "claude-sonnet-5-5";
-    /** spare's one seat taken (incident), work out of its session: no Team seat anywhere. */
+    /** Every Team seat out of its session: no Team with quota anywhere. */
     const NO_TEAM = {
       ...INCIDENT,
+      spare: () => Response.json(payload(100, 60, 20)),
       work: () => Response.json(payload(100, 20, 30)),
     };
 
