@@ -171,11 +171,41 @@ export function spendsReservedWeekly(
   // (`team`). A Max or Ultra account is the reserved model's whatever it has
   // left of it and whatever its margin, also when it reports no weekly
   // (Codex r1 high 3): with no Team seat the turn waits.
+  if (reserveSpentTillWeekly(account, options.reserveModel!)) return false;
   if (holdsForReserve(options)) return true;
   if (account.weekly.absent === true) return false;
   return (
     canRunModel(account, options.reserveModel!) &&
     !reserveToSpare(account, options)
+  );
+}
+
+/**
+ * How much later than the reserved model's own window the general weekly may
+ * reset and still count as resetting with it (measured 2026-11-06: one Ultra
+ * reports Fable at 21:59:59 and its weekly at 22:00:00).
+ */
+export const RESET_TOGETHER_MS = 10 * 60 * 1_000;
+
+/**
+ * Whether the reserved model's own window is spent (100 %) until the general
+ * weekly resets with it: what is left of the weekly is lost at that reset,
+ * so a turn in another model spends nothing the reserved model needs (Aitor
+ * 2026-11-06, «si fable llega al 100 se abre opus en esa cuenta»). Not with
+ * either reset unknown or no weekly reported.
+ */
+export function reserveSpentTillWeekly(
+  account: AccountUsage,
+  reserve: string,
+): boolean {
+  const own = modelWindow(account, reserve);
+  return (
+    own !== undefined &&
+    own.usedPercent >= 100 &&
+    own.resetsAt !== null &&
+    account.weekly.absent !== true &&
+    account.weekly.resetsAt !== null &&
+    account.weekly.resetsAt <= own.resetsAt + RESET_TOGETHER_MS
   );
 }
 
@@ -221,8 +251,17 @@ function rank(
   options: ChoiceOptions,
 ): [number, number, number, number, number, number] {
   const saved = options.savedForUser?.(account.name) === true ? 1 : 0;
+  // An account out of the reserved model until its weekly resets takes a
+  // model held off the reserve after every Team seat (Aitor 2026-11-06): a
+  // Team seat runs both models, so a project with threads in each stays put.
   const keepsReserve =
-    reserving(options) && canRunModel(account, options.reserveModel!) ? 1 : 0;
+    reserving(options) &&
+    (canRunModel(account, options.reserveModel!) ||
+      (holdsForReserve(options) &&
+        account.team !== true &&
+        reserveSpentTillWeekly(account, options.reserveModel!)))
+      ? 1
+      : 0;
   // Among the accounts that keep the reserved model, a turn with another
   // model goes first where it spends no weekly window (a Team seat: only
   // its session), last where it spends the weekly the reserved model needs

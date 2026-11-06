@@ -566,10 +566,12 @@ describe("decideSwitch with a reserved model: a Max account that keeps it is no 
   // Before 2026-11-06 it waited for that Max (out of Fable, its session
   // full); since («los Opus tienen que salir por Team sí o sí») only for the
   // Team seat.
-  it("does not wait for a Max account out of the reserved model: it waits for the Team seat (2026-11-06)", () => {
+  // Aitor 2026-11-06 later («si fable llega al 100 se abre opus en esa
+  // cuenta»): one out of Fable until its weekly resets is a wait again.
+  it("does not wait for a Max account out of the reserved model whose weekly outlives Fable's window: it waits for the Team seat (2026-11-06)", () => {
     const outOfFable = maxWithFable({
       session: { usedPercent: 100, resetsAt: NOW + HOUR },
-      weekly: { usedPercent: 50, resetsAt: NOW + 60 * HOUR },
+      weekly: { usedPercent: 50, resetsAt: NOW + 72 * HOUR },
       models: { Fable: { usedPercent: 100, resetsAt: NOW + 60 * HOUR } },
     });
     expect(
@@ -579,6 +581,22 @@ describe("decideSwitch with a reserved model: a Max account that keeps it is no 
       account: "team1",
       sendAt: NOW + 2 * HOUR + BUFFER,
       reason: "Waiting for Opus on team1",
+    });
+  });
+
+  it("waits for a Max account out of Fable until its weekly resets when it frees sooner than the Team seat (Aitor 2026-11-06)", () => {
+    const outOfFable = maxWithFable({
+      session: { usedPercent: 100, resetsAt: NOW + HOUR },
+      weekly: { usedPercent: 50, resetsAt: NOW + 60 * HOUR },
+      models: { Fable: { usedPercent: 100, resetsAt: NOW + 60 * HOUR } },
+    });
+    expect(
+      decideSwitch(opus({ accounts: [failed, outOfFable, seatOut] })),
+    ).toEqual({
+      kind: "wait",
+      account: "spare",
+      sendAt: NOW + HOUR + BUFFER,
+      reason: "Waiting for Opus on spare",
     });
   });
 
