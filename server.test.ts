@@ -17,6 +17,7 @@ import {
   createPlugin,
   DISPATCH_BUDGET_MS,
   DISPATCH_LIMIT_MS,
+  SEED_WAIT_MS,
   ENV_VAR,
   FIRST_PLACEMENT_WAIT_MS,
   MAX_START_WAITS,
@@ -18086,6 +18087,217 @@ describe("caminos 2026-11-04", () => {
       dispose = () => h.harness.dispose();
       await pass(h);
       expect(log(h)).toMatch(/moved from spare \(exhausted for Fable/);
+    });
+
+    // Limpieza 2026-11-06, punto 60: with nothing stored for a project, its
+    // latest Claude Code thread's latest turn names its model at load, so the
+    // first rescue does not judge it for the preferred model.
+    describe("seeded at load from the project's latest thread", () => {
+      const turn = (seq: number, model: string | null): LoggedEvent => ({
+        id: `evt_${seq}`,
+        scope: { kind: "thread" },
+        threadId: "t",
+        seq,
+        createdAt: NOW - 60_000,
+        type: "client/turn/requested",
+        data: { requestId: `creq_${seq}`, ...(model === null ? {} : { execution: { model } }) },
+      });
+      const seeded = async (extra: Parameters<typeof host>[1] = {}) => {
+        const h = await host(USAGE, {
+          settings: FABLE,
+          presetEnv: { "proj-1": on("spare") },
+          ...extra,
+        });
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "spare", "work");
+        await vi.waitFor(() => expect(log(h)).toMatch(/projects' models after loading|not listed to read/));
+        return h;
+      };
+
+      it("a project whose latest turn ran Opus on a Team seat out of Fable stays there after a reload with nothing stored", async () => {
+        const h = await seeded({
+          threads: { t1: { projectId: "proj-1", updatedAt: NOW - HOUR } },
+          threadEvents: { t1: [turn(1, OPUS)] },
+        });
+        await pass(h);
+        expect(log(h)).not.toMatch(/moved from/i);
+        expect(h.envDeleted).toEqual([]);
+        expect(log(h)).toMatch(/projects' models after loading: 1 from their latest turn, 2 with no thread, 0 whose latest turn names no model, 0 not read/);
+      });
+
+      it("the latest thread by activity names it: an older thread's Opus does not hold a project whose latest turn ran Fable", async () => {
+        const h = await seeded({
+          threads: {
+            old: { projectId: "proj-1", updatedAt: NOW - 2 * HOUR },
+            t1: { projectId: "proj-1", updatedAt: NOW - HOUR },
+            later: { projectId: "proj-1", updatedAt: NOW - 3 * HOUR },
+          },
+          threadEvents: { old: [turn(1, OPUS)], t1: [turn(1, OPUS), turn(2, FABLE_ID)], later: [turn(1, OPUS)] },
+        });
+        await pass(h);
+        expect(log(h)).toMatch(/moved from spare \(exhausted for Fable/);
+      });
+
+      it("a latest turn that names no model, or another provider's thread or a hidden one, leaves the project judged for the preferred model", async () => {
+        const h = await seeded({
+          threads: {
+            t1: { projectId: "proj-1", updatedAt: NOW - 2 * HOUR },
+            codex: { projectId: "proj-1", providerId: "codex", updatedAt: NOW - HOUR },
+            hidden: { projectId: "proj-1", visibility: "hidden", originPluginId: "calor", updatedAt: NOW },
+          },
+          threadEvents: { t1: [turn(1, null)], codex: [turn(1, OPUS)], hidden: [turn(1, OPUS)] },
+        });
+        await pass(h);
+        expect(log(h)).toMatch(/moved from spare \(exhausted for Fable/);
+        expect(log(h)).toMatch(/0 from their latest turn, 2 with no thread, 1 whose latest turn names no model, 0 not read/);
+      });
+
+      it("one read per project with no model stored, of its latest thread only, and none for a project with one", async () => {
+        const read: string[] = [];
+        const h = await seeded({
+          listed: ["proj-1", "proj-2", "proj-3", "proj-4"],
+          extraProjects: [
+            { id: "proj-3", name: "Third" },
+            { id: "proj-4", name: "Fourth" },
+          ],
+          kvPreset: { "project-models": { "proj-4": "Fable" } },
+          threads: {
+            a1: { projectId: "proj-1", updatedAt: NOW - HOUR },
+            a2: { projectId: "proj-1", updatedAt: NOW - 2 * HOUR },
+            b1: { projectId: "proj-2", updatedAt: NOW - HOUR },
+            b2: { projectId: "proj-2", updatedAt: NOW - 2 * HOUR },
+            c1: { projectId: "proj-3", updatedAt: NOW - HOUR },
+            d1: { projectId: "proj-4", updatedAt: NOW - HOUR },
+          },
+          threadEvents: { a1: [turn(1, OPUS)], b1: [turn(1, OPUS)], c1: [turn(1, FABLE_ID)] },
+          beforeEvents: async (threadId) => {
+            read.push(threadId);
+          },
+        });
+        expect(read.sort()).toEqual(["a1", "b1", "c1"]);
+        expect(log(h)).toMatch(/projects' models after loading: 3 from their latest turn, 0 with no thread/);
+      });
+
+      it("what is seeded is not stored until a turn names it, and then it is, also with the same model", async () => {
+        const h = await seeded({
+          threads: { t1: { projectId: "proj-1", updatedAt: NOW - HOUR } },
+          threadEvents: { t1: [turn(1, OPUS)] },
+          kvPreset: { "project-models": { "proj-8": "Fable" } },
+        });
+        await pass(h);
+        // Another project's turn writes the store: the seeded one stays out of it.
+        await dispatch(h, "thr-2", "proj-2", FABLE_ID);
+        await vi.waitFor(async () => expect((await stored(h))?.["proj-2"]).toBe("Fable"));
+        expect((await stored(h))?.["proj-1"]).toBeUndefined();
+        await dispatch(h, "t1", "proj-1", OPUS);
+        await vi.waitFor(async () => expect((await stored(h))?.["proj-1"]).toBe("Opus"));
+      });
+
+      it("a turn seen before the read lands beats what is seeded: Opus now, Fable in the log", async () => {
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => (release = resolve));
+        const h = await host(USAGE, {
+          settings: FABLE,
+          presetEnv: { "proj-1": on("spare") },
+          threads: { t1: { projectId: "proj-1", updatedAt: NOW - HOUR } },
+          threadEvents: { t1: [turn(1, FABLE_ID)] },
+          beforeEvents: () => held,
+        });
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "spare", "work");
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        expect((await dispatch(h, "t2", "proj-1", OPUS)).action).toBe("proceed");
+        release();
+        await vi.waitFor(() => expect(log(h)).toMatch(/projects' models after loading: 0 from their latest turn/));
+        await pass(h);
+        expect(log(h)).not.toMatch(/moved from/i);
+      });
+
+      it("a read of bb that fails is said once and the project is judged as before; the load and a turn go on", async () => {
+        const h = await seeded({
+          threads: { t1: { projectId: "proj-1", updatedAt: NOW - HOUR } },
+          threadEvents: { t1: [turn(1, OPUS)] },
+          threadEventsError: "bb hiccup",
+        });
+        await pass(h);
+        const warned = h.harness.logEntries.filter(
+          (e) => e.level === "warn" && /project proj-1: the model of its latest turn not read/.test(e.message),
+        );
+        expect(warned).toHaveLength(1);
+        expect(log(h)).toMatch(/0 from their latest turn, 2 with no thread, 0 whose latest turn names no model, 1 not read/);
+        expect(log(h)).toMatch(/moved from spare \(exhausted for Fable/);
+        expect((await dispatch(h, "thr-2", "proj-2", FABLE_ID)).action).toBe("proceed");
+      });
+
+      it("the first rescue waits for the read under way", async () => {
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => (release = resolve));
+        const h = await host(USAGE, {
+          settings: FABLE,
+          presetEnv: { "proj-1": on("spare") },
+          threads: { t1: { projectId: "proj-1", updatedAt: NOW - HOUR } },
+          threadEvents: { t1: [turn(1, OPUS)] },
+          beforeEvents: () => held,
+        });
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "spare", "work");
+        const passing = pass(h);
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        release();
+        await passing;
+        expect(log(h)).not.toMatch(/moved from/i);
+      });
+
+      it("a read that never answers holds neither a turn nor, past its bound, the rescue: said once over two refreshes, judged as before", async () => {
+        const h = await host(USAGE, {
+          settings: FABLE,
+          presetEnv: { "proj-1": on("spare") },
+          threads: { t1: { projectId: "proj-1", updatedAt: NOW - HOUR } },
+          threadEvents: { t1: [turn(1, OPUS)] },
+          beforeEvents: () => new Promise(() => {}),
+        });
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "spare", "work");
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        expect((await dispatch(h, "thr-2", "proj-2", FABLE_ID)).action).toBe("proceed");
+        vi.useFakeTimers();
+        const run = h.harness.behavior.runService("usage-refresh");
+        await vi.advanceTimersByTimeAsync(SEED_WAIT_MS + 1_000);
+        // The next refresh (5 min) waits again, and says nothing new.
+        await vi.advanceTimersByTimeAsync(5 * 60_000 + SEED_WAIT_MS + 1_000);
+        run.controller.abort();
+        vi.useRealTimers();
+        await run.done;
+        const warned = h.harness.logEntries.filter(
+          (e) => e.level === "warn" && /within 30 s of a rescue/.test(e.message),
+        );
+        expect(warned).toHaveLength(1);
+        expect(log(h)).toMatch(/moved from spare \(exhausted for Fable/);
+      });
+
+      it("a list of threads that fails is said once and every project is judged as before", async () => {
+        vi.useFakeTimers();
+        const h = await host(USAGE, {
+          settings: FABLE,
+          presetEnv: { "proj-1": on("spare") },
+          threads: { t1: { projectId: "proj-1", updatedAt: NOW - HOUR } },
+          threadEvents: { t1: [turn(1, OPUS)] },
+          beforeThreadsList: async () => {
+            throw new Error("HTTP 503");
+          },
+        });
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "spare", "work");
+        await vi.advanceTimersByTimeAsync(3 * DISPATCH_LIMIT_MS + 2 * 2_000);
+        vi.useRealTimers();
+        await vi.waitFor(() => expect(log(h)).toMatch(/not listed to read/));
+        await pass(h);
+        const warned = h.harness.logEntries.filter(
+          (e) => e.level === "warn" && /not listed to read/.test(e.message),
+        );
+        expect(warned).toHaveLength(1);
+        expect(log(h)).toMatch(/moved from spare \(exhausted for Fable/);
+      });
     });
   });
 
