@@ -7749,7 +7749,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // is (Codex PLAZAS-R2-003).
       const underWay: { id: string; projectId: string }[] = [];
       // Each project's latest thread of the user, for its model (see
-      // seedProjectModels).
+      // seedProjectModels). ponytail: archived threads are not listed here,
+      // so a project whose latest thread is archived takes an older one's
+      // model, or none; measured 2026-11-06 on the bb server: 0 of 84
+      // projects with Claude Code threads had an archived thread newer than
+      // their latest unarchived one, and listing the 630 archived would
+      // cost 4 more pages on every load. If that changes, list them too
+      // (archived: true) for the projects with no model.
       const latest = new Map<string, { id: string; updatedAt: number }>();
       const PAGE = 200;
       for (let offset = 0; ; offset += PAGE) {
