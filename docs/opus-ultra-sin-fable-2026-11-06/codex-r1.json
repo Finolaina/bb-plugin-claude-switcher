@@ -1,0 +1,46 @@
+{
+  "verdict": "REVISE",
+  "summary": "The exception has concrete Team-first ordering bypasses. Health reporting also mislabels waits on eligible Max/Ultra accounts.",
+  "findings": [
+    {
+      "id": "R047-001",
+      "severity": "medium",
+      "path": "src/switch.ts:705",
+      "evidence": "An existing project on an eligible Ultra stays there for Opus even when a usable Team has a free seat. The new exception makes spendsReservedWeekly return false both at line 705 and in the Team-preference condition at line 709, so placement returns keep at line 725 without considering Teams. Pinned projects behave the same. The stuck-retry shortcut at lines 249–264 also chooses only the current account. This violates plan rule 2.",
+      "fix": "Check for a usable Team with room before retaining or retrying on a Max/Ultra admitted by the exception. Apply this consistently to placement and stuck retries while preserving pins and Haiku behavior."
+    },
+    {
+      "id": "R047-002",
+      "severity": "medium",
+      "path": "src/policy.ts:257",
+      "evidence": "The revised rank does not place the exception behind every Team. Consider an eligible Ultra at 0% session and a Team at 60% session with Fable at 10% and an Opus scoped window at 5%, both with free seats. Both receive keepsReserve=1 and spendsWeekly=1, so the Ultra wins by session quarter. Existing policy tests explicitly support Teams reporting Opus windows. Separately, savedForUser is compared first, allowing an unsaved Ultra to outrank a saved Team for background work.",
+      "fix": "Introduce an explicit Team-before-exception priority for Opus/Sonnet ahead of pace, scoped-window and session ranking. Preserve existing ordering within each account class and for Haiku."
+    },
+    {
+      "id": "R047-003",
+      "severity": "medium",
+      "path": "src/switch.ts:750",
+      "evidence": "Recognized but unmeasured Teams are considered only after the measured-account choice returns null. With the current account blocked, a measured eligible Ultra and a logged-in unread Team with a free seat, chooseSeated(others) selects the Ultra and unreadTeamSeats is never evaluated. The unread-current branch at lines 687–693 has the same issue. These Teams were accepted placement targets before this exception, but now lose priority regardless of their available seats.",
+      "fix": "Include eligible unread Teams in the same ordered candidate selection, preserving known blocking windows and deduplicating accounts, or select available Teams before considering exception accounts in both branches."
+    },
+    {
+      "id": "R047-004",
+      "severity": "low",
+      "path": "server.ts:5674",
+      "evidence": "esperandoTeam still classifies every plugin-held Opus/Sonnet row solely by model. An Opus project on an eligible Ultra whose seats are occupied can now wait in that Ultra's seat queue, yet health reports it as 'esperando Team'. waitingForTeam in src/atascos.ts:96–105 never checks the destination account.",
+      "fix": "Classify waits using their actual destination or hold reason. Exclude Max/Ultra seat waits from esperandoTeam, or expose their destination through a clearly named general waiting field."
+    }
+  ],
+  "coverage": [
+    "Verified the plan SHA-256 and all 11 manifest file hashes; reviewed the supplied tracked diff and changed content.",
+    "Reviewed policy eligibility, ranking, reset boundaries, unknown/absent windows, Haiku behavior and relevant test assertions.",
+    "Traced placement, pins, failure retries, stuck rescue, refresh rescue, switch-ahead, wait reconsideration and final dispatch guards through server.ts and src/switch.ts.",
+    "Inspected related usage parsing/cache, plan classification, seat reservation/admission, excursion state and esperandoTeam reporting.",
+    "Reviewed both added Python scripts, documentation changes and package version changes."
+  ],
+  "limitations": [
+    "Static review only: no tests, builds, mutation scripts or live API checks were run; no files were edited and no work was delegated.",
+    "Large test files were inspected in relevant sections rather than exhaustively.",
+    "Operational measurements referenced in external thread storage were unavailable for independent verification."
+  ]
+}
