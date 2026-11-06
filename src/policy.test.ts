@@ -71,6 +71,7 @@ describe("spendsNoWeekly", () => {
   it("is true only for an absent weekly with no window of the model", () => {
     const seat = account("team1", {
       weekly: { usedPercent: 0, resetsAt: null, absent: true },
+      team: true,
       models: { Fable: { usedPercent: 42, resetsAt: NOW + 72 * HOUR } },
     });
     expect(spendsNoWeekly(seat, "Opus")).toBe(true);
@@ -240,6 +241,7 @@ describe("chooseAccount: limits", () => {
         account("team1", {
           session: { usedPercent: 17, resetsAt: NOW + 4 * HOUR },
           weekly: { usedPercent: 0, resetsAt: null, absent: true },
+          team: true,
           models: { Fable: { usedPercent: 42, resetsAt: NOW + 72 * HOUR } },
         }),
       ],
@@ -253,6 +255,7 @@ describe("chooseAccount: limits", () => {
       [
         account("team1", {
           weekly: { usedPercent: 0, resetsAt: null, absent: true },
+          team: true,
           models: { Fable: { usedPercent: 42, resetsAt: NOW + 72 * HOUR } },
         }),
         account("viaulab", {
@@ -273,11 +276,13 @@ describe("chooseAccount: limits", () => {
         account("teamFable", {
           session: { usedPercent: 10, resetsAt: NOW + 4 * HOUR },
           weekly: { usedPercent: 0, resetsAt: null, absent: true },
+          team: true,
           models: { Fable: { usedPercent: 42, resetsAt: NOW + 72 * HOUR } },
         }),
         account("teamNoFable", {
           session: { usedPercent: 60, resetsAt: NOW + 4 * HOUR },
           weekly: { usedPercent: 0, resetsAt: null, absent: true },
+          team: true,
           models: { Fable: { usedPercent: 100, resetsAt: NOW + 72 * HOUR } },
         }),
       ],
@@ -290,6 +295,7 @@ describe("chooseAccount: limits", () => {
     const seat = (fableResetsAt: number) =>
       account("team", {
         weekly: { usedPercent: 0, resetsAt: null, absent: true },
+        team: true,
         models: { Fable: { usedPercent: 40, resetsAt: fableResetsAt } },
       });
     const max = account("max", {
@@ -312,6 +318,7 @@ describe("chooseAccount: limits", () => {
       [
         account("teamNoFable", {
           weekly: { usedPercent: 0, resetsAt: null, absent: true },
+          team: true,
           models: { Fable: { usedPercent: 100, resetsAt: NOW + 72 * HOUR } },
         }),
         account("maxNoFable", {
@@ -329,6 +336,7 @@ describe("chooseAccount: limits", () => {
       account(name, {
         session: { usedPercent: session, resetsAt: NOW + 4 * HOUR },
         weekly: { usedPercent: 0, resetsAt: null, absent: true },
+        team: true,
         models: { Fable: { usedPercent: 40, resetsAt: NOW + 72 * HOUR } },
       });
     expect(
@@ -386,6 +394,7 @@ describe("chooseAccount: limits", () => {
     it("while a Team seat that keeps the reserved model is, with or without a window of the other model", () => {
       const seat = account("team1", {
         weekly: { usedPercent: 0, resetsAt: null, absent: true },
+        team: true,
         models: { Fable: { usedPercent: 42, resetsAt: NOW + 72 * HOUR } },
       });
       expect(chooseAccount([maxWithFable, seat], options)?.account).toBe(
@@ -393,6 +402,7 @@ describe("chooseAccount: limits", () => {
       );
       const seatWithOpus = account("team2", {
         weekly: { usedPercent: 0, resetsAt: null, absent: true },
+        team: true,
         models: {
           Fable: { usedPercent: 42, resetsAt: NOW + 72 * HOUR },
           Opus: { usedPercent: 5, resetsAt: NOW + 72 * HOUR },
@@ -427,6 +437,7 @@ describe("chooseAccount: limits", () => {
         spendsReservedWeekly(
           account("team1", {
             weekly: { usedPercent: 0, resetsAt: null, absent: true },
+            team: true,
             models: { Fable: { usedPercent: 42, resetsAt: NOW + 72 * HOUR } },
           }),
           options,
@@ -541,6 +552,7 @@ describe("session quarter before the deadline (S1-S7, S12)", () => {
     account(name, {
       session: { usedPercent: session, resetsAt: NOW + 4 * HOUR },
       weekly: { usedPercent: 0, resetsAt: null, absent: true },
+      team: true,
       models: {
         Fable: { usedPercent: fable, resetsAt: NOW + fableResetHours * HOUR },
         ...extra,
@@ -725,6 +737,17 @@ describe("Opus solo por Team (2026-11-06)", () => {
       expect(chooseAccount([ultra(weekly, fable), team], seats(as("Opus", 50), { "a-ultra": 6, team: 0 }))).toBeNull();
       expect(spendsReservedWeekly(ultra(weekly, fable), as("Opus", 50))).toBe(true);
     }
+  });
+
+  it("an account not known as a Team seat that reports no weekly (a Max login) is no target either (Codex r1 high 3)", () => {
+    const noWeekly = account("a-max", {
+      weekly: { usedPercent: 0, resetsAt: null, absent: true },
+      models: { Fable: { usedPercent: 10, resetsAt: NOW + 48 * HOUR } },
+    });
+    expect(spendsReservedWeekly(noWeekly, as("Opus"))).toBe(true);
+    expect(chooseAccount([noWeekly, team], seats(as("Opus"), { "a-max": 6, team: 0 }))).toBeNull();
+    // Haiku keeps the rule before: no weekly, nothing of Fable's spent.
+    expect(spendsReservedWeekly(noWeekly, as("Haiku"))).toBe(false);
   });
 
   it("Sonnet too", () => {

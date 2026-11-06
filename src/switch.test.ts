@@ -98,6 +98,7 @@ describe("settle", () => {
   it("keeps the absent mark of a Team seat's weekly and never adds one", () => {
     const seat = account("team1", {
       weekly: { usedPercent: 0, resetsAt: null, absent: true },
+      team: true,
       models: { Fable: { usedPercent: 100, resetsAt: NOW - 1 } },
     });
     expect(settle(seat, NOW)).toEqual({
@@ -526,6 +527,7 @@ describe("decideSwitch with a reserved model: a Max account that keeps it is no 
   const seatOut = account("team1", {
     session: { usedPercent: 100, resetsAt: NOW + 2 * HOUR },
     weekly: { usedPercent: 0, resetsAt: null, absent: true },
+    team: true,
     models: { Fable: { usedPercent: 42, resetsAt: NOW + 72 * HOUR } },
   });
 
@@ -884,6 +886,7 @@ describe("decidePlacement with a reserved model (2026-10-13: the Max accounts ar
   const seat = account("team1", {
     session: { usedPercent: 17, resetsAt: NOW + 4 * HOUR },
     weekly: { usedPercent: 0, resetsAt: null, absent: true },
+    team: true,
     models: { Fable: { usedPercent: 42, resetsAt: NOW + 72 * HOUR } },
   });
   const known = {
@@ -1332,6 +1335,7 @@ describe("opusInstead: a Fable thread no account can run is told to switch to Op
   const seat = (name: string, overrides: Partial<AccountUsage> = {}) =>
     account(name, {
       weekly: { usedPercent: 0, resetsAt: null, absent: true },
+      team: true,
       ...overrides,
     });
   // Where the turn failed: its report (a blocked session) and its numbers agree.
@@ -1751,6 +1755,7 @@ describe("placedOn: where the placement before a turn runs it", () => {
     account(name, {
       session: { usedPercent: session, resetsAt: NOW + HOUR },
       weekly: { usedPercent: 0, resetsAt: null, absent: true },
+      team: true,
       models: {
         Fable: { usedPercent: 100, resetsAt: NOW + 5 * HOUR },
         Opus: { usedPercent: opusUsed, resetsAt: NOW + 96 * HOUR },
@@ -1790,6 +1795,7 @@ describe("placedOn: where the placement before a turn runs it", () => {
     const reset = account("team1", {
       session: { usedPercent: 100, resetsAt: NOW - 1 },
       weekly: { usedPercent: 0, resetsAt: null, absent: true },
+      team: true,
       models: { Fable: { usedPercent: 100, resetsAt: NOW + HOUR } },
     });
     expect(placedOn(opus("team1", [reset]))).toBe("team1");
@@ -2023,6 +2029,7 @@ describe("background work in every choice of another account (Codex ULTRA-R01)",
   it("goes home from an excursion only when home is not saved for the user", () => {
     const seat = account("team1", {
       weekly: { usedPercent: 0, resetsAt: null, absent: true },
+      team: true,
       session: { usedPercent: 100, resetsAt: NOW + 2 * HOUR },
     });
     const home = account("work", { models: { Fable: { usedPercent: 5, resetsAt: NOW + 30 * HOUR } } });

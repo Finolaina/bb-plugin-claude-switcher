@@ -2649,9 +2649,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       options.byHand !== true &&
       options.keepPin !== true &&
       toName !== fromName &&
-      // Back to the account picked by hand (the way home of an excursion
-      // that kept the pick): the pick stays.
-      pins.get(projectId) !== toName &&
+      // Only a move off the account picked by hand drops the pick: on the
+      // way back to it, or between other accounts while a turn held off the
+      // reserve is away from it, the pick stays (Codex r1 medium 4).
+      pins.get(projectId) === fromName &&
       pins.delete(projectId)
     )
       storePins();
@@ -3704,8 +3705,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     measured: ReturnType<typeof measuredAccounts>,
     now: number,
   ): string | null | undefined {
+    if (otherModel(model)) return undefined;
     const excursion = excursions.get(projectId);
-    if (excursion === undefined || otherModel(model)) return undefined;
+    // A pick by hand left for a turn held off the reserve keeps the way
+    // home, also after a reload forgot the excursion (Codex r1 medium 5).
+    if (excursion === undefined) return pins.get(projectId);
     const left = aheadLeft.get(projectId);
     const home = measured.find((a) => a.name === excursion.from);
     return left !== undefined &&
@@ -4007,6 +4011,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (
       !(await applyAccount(projectId, accountOrDefault(decision.account), from, {
         forThread: thread.id,
+        keepPin: heldModel(model),
       }))
     )
       return;
@@ -4394,6 +4399,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const ended = turnEnds.get(projectId) ?? 0;
     if (
       !(await applyAccount(projectId, accountOrDefault(decision.account), from, {
+        keepPin: heldModel(model),
         stillValid: () =>
           (activity.get(projectId) ?? 0) === seen &&
           (turnEnds.get(projectId) ?? 0) === ended &&
@@ -4809,10 +4815,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * IR4-001). A Team seat, or a login that says nothing, starts as ever.
    */
   function unreadKeepsReserve(name: string): boolean {
+    // Only a login that says Team lets a model held off the reserve start
+    // unread (Aitor 2026-11-06, «sí o sí»): a login that says nothing of its
+    // plan may be a Max as well (Codex r1 high 2).
     const login = accounts.find((a) => a.name === name);
-    if (login === undefined) return false;
-    const { plan } = planOf(login, null);
-    return login.kind === "max" || plan === "ultra" || plan === "max";
+    return login === undefined || planOf(login, null).plan !== "team";
   }
   /** The Team seats by login, logged in, not refusing, with nothing measured of them. */
   function unreadTeams(model: string): string[] {
@@ -4837,6 +4844,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * needs, and `model` is held off such an account (see holdsForReserve),
    * as measured now or, unmeasured, as its login says.
    */
+  /** A turn in `model` goes to a Team seat only (see holdsForReserve). */
+  function heldModel(model: string): boolean {
+    return holdsForReserve({ preferredModel: model, ...reserveOf() });
+  }
   function heldOff(name: string, model: string, projectId?: string): boolean {
     const options = { preferredModel: model, ...reserveOf() };
     // A pick by hand no longer lets such a turn spend the reserve (Aitor
@@ -4846,14 +4857,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const usage = measuredAccounts(model).find((a) => a.name === name);
     if (usage === undefined || usage.unknown === true)
       return unreadKeepsReserve(name);
-    // Where the turn cannot run anyway it fails there, and the failure
-    // moves it: only a turn that would run and spend the reserve is held.
-    const settled = settle(usage, deps.now());
-    return (
-      isUsable(settled) &&
-      canRunModel(settled, model) &&
-      spendsReservedWeekly(settled, options)
-    );
+    // Off a Team seat it waits, whether it would run there or fail: a turn
+    // started on a Max or an Ultra to fail there is no wait for a Team seat
+    // (Aitor 2026-11-06, «sí o sí»; Codex r1 high 1).
+    return spendsReservedWeekly(settle(usage, deps.now()), options);
   }
   /**
    * Before a turn starts: when the project's account is MEASURED unable to
@@ -5037,9 +5044,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       await applyAccount(projectId, to, from, {
         share: false,
         forThread: thread.id,
-        keepPin:
-          decision.why === "current-reserved" &&
-          holdsForReserve({ preferredModel: model, ...reserveOf() }),
+        keepPin: heldModel(model),
       });
       await markHandled(projectId);
       // A move for a crowded seat is a new home, not an excursion: a turn in
@@ -6153,6 +6158,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       if (
         !(await applyAccount(projectId, accountOrDefault(decision.account), from, {
           forThread: event.threadId,
+          keepPin: heldModel(model),
         }))
       ) {
         // Moved by a placement before a turn while the sessions were shared:
@@ -6673,6 +6679,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (
       !(await applyAccount(projectId, accountOrDefault(to), from, {
         forThread: threadId,
+        keepPin: heldModel(model),
       }))
     )
       return;

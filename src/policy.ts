@@ -165,13 +165,14 @@ export function spendsReservedWeekly(
   account: AccountUsage,
   options: ChoiceOptions,
 ): boolean {
-  if (!reserving(options) || account.team === true || account.weekly.absent === true)
-    return false;
+  if (!reserving(options) || account.team === true) return false;
   // Aitor 2026-11-06 («los Opus tienen que salir por Team sí o sí»): a model
-  // held off the reserve runs on a Team seat only. A Max or Ultra account is
-  // the reserved model's whatever it has left of it and whatever its margin:
-  // with no Team seat the turn waits.
+  // held off the reserve runs on a Team seat only, known as one by its login
+  // (`team`). A Max or Ultra account is the reserved model's whatever it has
+  // left of it and whatever its margin, also when it reports no weekly
+  // (Codex r1 high 3): with no Team seat the turn waits.
   if (holdsForReserve(options)) return true;
+  if (account.weekly.absent === true) return false;
   return (
     canRunModel(account, options.reserveModel!) &&
     !reserveToSpare(account, options)
