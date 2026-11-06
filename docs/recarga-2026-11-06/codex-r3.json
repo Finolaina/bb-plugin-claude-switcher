@@ -1,0 +1,31 @@
+{
+  "verdict": "REVISE",
+  "summary": "Quedan dos defectos concretos que pueden atribuir plazas al presupuesto equivocado y permitir superar su capacidad.",
+  "findings": [
+    {
+      "id": "RS-006",
+      "severity": "medium",
+      "path": "server.ts:7752",
+      "evidence": "rebuildSeats resuelve key antes del await de threads.get (7782). Si la clave todavía es «work» y durante esa espera accounts_refresh descubre uuid-work, noteSeatKeys migra las entradas existentes. Después, rebuildSeats confirma y guarda su variable local «work», ya obsoleta. Los siguientes descubrimientos no vuelven a migrarla porque seatKeys ya contiene uuid-work. Las nuevas reservas consultan uuid-work y no descuentan ese turno.",
+      "fix": "Resuelve o actualiza la clave después de la última espera, inmediatamente antes de confirmar y guardar, conservando la identidad de los presupuestos que ya eran UUID. Añade un caso que retenga threads.get, migre el nombre a UUID y compruebe que otro turno espera al llenarse esa cuenta."
+    },
+    {
+      "id": "RS-005",
+      "severity": "medium",
+      "path": "server.ts:7748",
+      "evidence": "Sigue abierto el defecto reconocido en la disposición RS-005: un turno corre en A, su proyecto pasa a B y, mientras el plugin está apagado, termina y empieza otro turno del mismo hilo en B. startedBefore se acepta únicamente por threadId y cuenta el nuevo turno en A, dejando B aparentemente libre. El comentario documenta el fallo, pero no lo evita. Además, latestTurn (6645–6660) ya obtiene requestId y retryAttempt del registro de bb.",
+      "fix": "Persiste una identidad de solicitud/intento junto con la cuenta y valida que corresponde al turno actual antes de reutilizarla. Aprovecha el registro que consulta latestTurn; ante una identidad distinta, aplica el fallback del proyecto. Cubre el cambio de turno durante una recarga."
+    }
+  ],
+  "coverage": [
+    "Plan leído y SHA256 contrastado; los ocho archivos del manifiesto coinciden con sus hashes.",
+    "Cambios de server.ts, cinco tests añadidos, distribución generada, changelog y versiones de package.json/package-lock.json.",
+    "Callers de confirmSeat/releaseSeat: actividad, fin, fallo, archivo, borrado y cancelación; reservas, admisión y caducidad en src/seats.ts.",
+    "Escritores relacionados: descubrimiento, refresco, migración de claves, cambios de ajustes y persistencia serializada; recuentos completos e incompletos.",
+    "Tests adyacentes de recarga, lecturas lentas, fin durante el recuento, alias y reservas externas; lectura de latestTurn."
+  ],
+  "limitations": [
+    "Revisión estática: no se han ejecutado tests, build ni mutantes; no se confirma el resultado anunciado en el plan.",
+    "El SDK instalado no está disponible en node_modules; no se ha contrastado su comportamiento real de descarga ni el vaciado de escrituras pendientes."
+  ]
+}

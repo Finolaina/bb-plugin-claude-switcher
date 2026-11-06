@@ -1,0 +1,32 @@
+{
+  "verdict": "REVISE",
+  "summary": "Dos defectos permiten volver a atribuir turnos a una cuenta incorrecta tras recargar.",
+  "findings": [
+    {
+      "id": "RS-004",
+      "severity": "medium",
+      "path": "server.ts:1389",
+      "evidence": "noteSeatKeys (904–912) migra las plazas mediante seats.rekey, pero runningSeats conserva la clave anterior. Escenario: un turno arranca con clave «main» porque aún no se conoce su UUID; un refresco descubre uuid-A y migra la plaza; el proyecto pasa a spare y la cuenta por defecto se renombra a home. Tras recargar, «main» ya no coincide con ningún nombre ni UUID y rebuildSeats atribuye el turno a spare, aunque uuid-A sigue disponible como home. RS-001 solo cubre que el nombre antiguo siga existiendo.",
+      "fix": "Actualizar también las claves de runningSeats y startedBefore cuando se migra el presupuesto de plazas, y persistir la migración. Cubrir la secuencia nombre → UUID → cambio de nombre → recarga."
+    },
+    {
+      "id": "RS-005",
+      "severity": "medium",
+      "path": "server.ts:7738",
+      "evidence": "La entrada persistida identifica únicamente el hilo, sin identificar el turno. Un hilo arranca en A, su proyecto pasa a B y se desactiva el plugin. Mientras está desactivado, termina ese turno y empieza otro del mismo hilo en B. Al reactivarlo, rebuildSeats encuentra el hilo activo y reutiliza A sin comprobar que sea el mismo turno. Incluso la consulta adicional de 7768–7777 solo comprueba el estado. B queda infracontada y A retiene una plaza ficticia.",
+      "fix": "Persistir una identidad del turno o intento junto con la cuenta y verificarla antes de restaurar la plaza. Si pertenece a otro turno, descartar la entrada y aplicar la reconstrucción correspondiente. Añadir cobertura para finalización y nuevo turno mientras el plugin está desactivado."
+    }
+  ],
+  "coverage": [
+    "Plan leído y SHA256 verificado; los ocho archivos del manifiesto coinciden con sus hashes.",
+    "Revisados los cambios de server.ts, los cuatro tests añadidos, versiones, changelog y código pertinente del bundle distribuido.",
+    "Trazados confirmación, liberación, reservas, caducidad, cancelación, eventos de hilo, reconstrucción inicial y recuentos posteriores.",
+    "Revisados descubrimiento de cuentas, cambios de nombre, alias por UUID y Seats.rekey en src/accounts.ts y src/seats.ts.",
+    "Analizadas la serialización local de escrituras, las instantáneas completas por actualización y la conservación de entradas durante recuentos incompletos."
+  ],
+  "limitations": [
+    "Revisión estática: no se han ejecutado tests, build ni mutantes, ni se han editado archivos o delegado trabajo.",
+    "El SDK y su implementación de recarga no están instalados; no se han verificado sus garantías sobre escrituras pendientes entre instancias.",
+    "La correspondencia completa del bundle con las fuentes no se ha comprobado mediante reconstrucción."
+  ]
+}

@@ -14445,6 +14445,164 @@ describe("seats per account: threads wait for a free one", () => {
     expect((await ask(h, "t9")).action).toBe("wait");
   });
 
+  it("a reload counts a running thread on the account it started on, not on the one its project moved to since (limpieza 2026-11-06, n.º 86)", async () => {
+    const h = await host(ALL_FREE, {
+      settings: { ...OFF, seatsMax: 2 },
+      threads: { r1: { status: "active" } },
+    });
+    dispose = () => h.harness.dispose();
+    await vi.waitFor(async () =>
+      expect((await seatsOf(h))?.main).toMatchObject({ running: 1 }),
+    );
+    // Its project moves while it works: the turn keeps running on main.
+    expect((await h.harness.behavior.runCli(["use", "proj-1", "spare"])).exitCode).toBe(0);
+    const again = await h.harness.lifecycle.reload((bb) => createPlugin(bb, h.pluginDeps));
+    await vi.waitFor(async () =>
+      expect(again.harness.logEntries.some((e) => e.message.startsWith("seats counted after loading"))).toBe(true),
+    );
+    const seats = await seatsOf(again);
+    expect(seats?.main).toMatchObject({ running: 1 });
+    expect(seats?.spare?.running ?? 0).toBe(0);
+    // Its turn ends: the next reload counts nothing for it.
+    await again.harness.behavior.emitThreadEvent("thread.idle", { thread: thread({ id: "r1", projectId: "proj-1" }) });
+    expect((await seatsOf(again))?.main?.running ?? 0).toBe(0);
+  });
+
+  it("a stored start on an account no longer found counts the thread on its project's account, as before (n.º 86)", async () => {
+    const h = await host(ALL_FREE, {
+      settings: { ...OFF, seatsMax: 2 },
+      threads: { r1: { status: "active" } },
+      kvPreset: { "running-seats": { r1: "gone-account" } },
+    });
+    dispose = () => h.harness.dispose();
+    await vi.waitFor(async () =>
+      expect((await seatsOf(h))?.main).toMatchObject({ running: 1 }),
+    );
+    expect(await h.bb.storage.kv.get("running-seats")).toEqual({ r1: "uuid-main" });
+  });
+
+  it("a start stored by the account's name, before its login was known, still counts there (Codex RS-001)", async () => {
+    const h = await host(ALL_FREE, {
+      settings: { ...OFF, seatsMax: 2 },
+      threads: { r1: { status: "active" } },
+      kvPreset: { "running-seats": { r1: "spare" } },
+    });
+    dispose = () => h.harness.dispose();
+    await vi.waitFor(async () =>
+      expect((await seatsOf(h))?.spare).toMatchObject({ running: 1 }),
+    );
+    expect((await seatsOf(h))?.main?.running ?? 0).toBe(0);
+  });
+
+  it("a count that cannot list the threads keeps where the running turns started, for the next count (Codex RS-002)", async () => {
+    const h = await host(ALL_FREE, {
+      settings: { ...OFF, seatsMax: 2 },
+      threads: { r1: { status: "active" } },
+      kvPreset: { "running-seats": { r1: "uuid-spare" } },
+      beforeThreadsList: async () => {
+        throw new Error("bb is down");
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await vi.waitFor(
+      () =>
+        expect(h.harness.logEntries.some((e) => e.message.startsWith("seats counted after loading"))).toBe(true),
+      { timeout: 20_000 },
+    );
+    expect(await h.bb.storage.kv.get("running-seats")).toEqual({ r1: "uuid-spare" });
+  });
+
+  it("a turn stored on an account's name follows it to its login once known (Codex RS-004)", async () => {
+    const first = await host(ALL_FREE, { settings: { ...OFF, seatsMax: 2 } });
+    dispose = () => first.harness.dispose();
+    // work's login not known after a reload: its seats go by its name.
+    first.files[`${ACCOUNTS}/work/.claude.json`] = JSON.stringify({});
+    const h = await first.harness.lifecycle.reload((bb) => createPlugin(bb, first.pluginDeps));
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect((await h.harness.behavior.runCli(["use", "proj-1", "work"])).exitCode).toBe(0);
+    expect((await ask(h, "t1")).action).toBe("proceed");
+    await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "t1", projectId: "proj-1" }) });
+    await vi.waitFor(async () => expect(await h.bb.storage.kv.get("running-seats")).toEqual({ t1: "work" }));
+    first.files[`${ACCOUNTS}/work/.claude.json`] = claudeJson("work@example.com", "uuid-work");
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await vi.waitFor(async () => expect(await h.bb.storage.kv.get("running-seats")).toEqual({ t1: "uuid-work" }));
+  });
+
+  it("a login found while a reload counts a turn renames its key before it is counted (Codex RS-006)", async () => {
+    let clock = NOW;
+    let racing = false;
+    let h: Awaited<ReturnType<typeof host>> | null = null;
+    const first = await host(ALL_FREE, {
+      settings: { ...OFF, seatsMax: 1 },
+      clock: () => clock,
+      threads: { r1: { status: "active", projectId: "proj-1" } },
+      // The project's read takes long: the count asks bb again for the turn.
+      beforeEnvRead: async () => {
+        if (racing) clock += 2_000; // SEAT_COUNT_RETRY_MS
+      },
+      // Meanwhile work's login is found.
+      beforeThreadGet: async () => {
+        if (!racing || h === null) return;
+        racing = false;
+        first.files[`${ACCOUNTS}/work/.claude.json`] = claudeJson("work@example.com", "uuid-work");
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+      },
+    });
+    dispose = () => first.harness.dispose();
+    await vi.waitFor(() =>
+      expect(first.harness.logEntries.some((e) => e.message.startsWith("seats counted after loading"))).toBe(true),
+    );
+    // r1 started on work, by its name (its login not known then).
+    first.files[`${ACCOUNTS}/work/.claude.json`] = JSON.stringify({});
+    await first.bb.storage.kv.set("running-seats", { r1: "work" });
+    racing = true;
+    h = await first.harness.lifecycle.reload((bb) => createPlugin(bb, first.pluginDeps));
+    await vi.waitFor(() =>
+      expect(h!.harness.logEntries.some((e) => e.message.startsWith("seats counted after loading"))).toBe(true),
+    );
+    expect(racing).toBe(false);
+    expect(await h.bb.storage.kv.get("running-seats")).toEqual({ r1: "uuid-work" });
+    // work is full: a thread of a project put on work waits.
+    expect((await h.harness.behavior.runCli(["use", "proj-2", "work"])).exitCode).toBe(0);
+    expect((await ask(h, "t2", "proj-2")).action).toBe("wait");
+  });
+
+  it("a load that cannot read the stored starts writes nothing over them; once storage reads again, it keeps them and adds the new turns (Astra R4-001, RS-007)", async () => {
+    let failing = true;
+    const h = await host(ALL_FREE, {
+      settings: { ...OFF, seatsMax: 3 },
+      threads: { r1: { status: "active" }, r2: { status: "active" } },
+      kvPreset: { "running-seats": { r1: "uuid-spare", r2: "uuid-work" } },
+    });
+    dispose = () => h.harness.dispose();
+    // The next load cannot read storage at first.
+    let get: (key: string) => Promise<unknown> = async () => undefined;
+    const again = await h.harness.lifecycle.reload((bb) => {
+      const real = bb.storage.kv.get.bind(bb.storage.kv);
+      get = real;
+      bb.storage.kv.get = (async (key: string) => {
+        if (failing && key === "running-seats") throw new Error("storage is slow");
+        return real(key);
+      }) as typeof bb.storage.kv.get;
+      return createPlugin(bb, h.pluginDeps);
+    });
+    await vi.waitFor(() =>
+      expect(again.harness.logEntries.some((e) => e.message.startsWith("seats counted after loading"))).toBe(true),
+    );
+    // Counted on its project's account, as before 0.2.45; nothing written.
+    expect((await seatsOf(again))?.main).toMatchObject({ running: 2 });
+    expect(await get("running-seats")).toEqual({ r1: "uuid-spare", r2: "uuid-work" });
+    // Storage reads again; r2's turn ends meanwhile and t2's starts:
+    // r1 keeps where it was stored, not its project's account.
+    failing = false;
+    await again.harness.behavior.emitThreadEvent("thread.idle", { thread: thread({ id: "r2", projectId: "proj-1" }) });
+    expect((await ask(again, "t2")).action).toBe("proceed");
+    await again.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "t2", projectId: "proj-1" }) });
+    await vi.waitFor(async () =>
+      expect(await get("running-seats")).toEqual({ r1: "uuid-spare", t2: "uuid-main" }),
+    );
+  });
+
   it("an account's kind comes from its organizationType; unknown, from its windows", async () => {
     const h = await host(
       { ...ALL_FREE, main: () => Response.json(payload(10, 40)) },

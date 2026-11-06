@@ -1,0 +1,38 @@
+{
+  "verdict": "REVISE",
+  "summary": "Hay pérdidas de la cuenta de origen al cambiar claves o fallar el recuento, y los artefactos publicados están desactualizados.",
+  "findings": [
+    {
+      "id": "RS-001",
+      "severity": "medium",
+      "path": "server.ts:1387",
+      "evidence": "runningSeats conserva la clave recibida al confirmar. Sin embargo, noteSeatKeys (904–911) solo aplica seats.rekey: no actualiza el mapa persistido. Si un turno se cuenta inicialmente por nombre, después se descubre su accountUuid y su proyecto se mueve, la siguiente recarga rechaza el nombre guardado (7738) y lo atribuye al destino del proyecto, dejando libre una plaza que sigue ocupada en origen.",
+      "fix": "Propagar la migración de claves a runningSeats y startedBefore y persistirla. Resolver también las claves por nombre guardadas antes de descubrir el UUID durante la carga."
+    },
+    {
+      "id": "RS-002",
+      "severity": "medium",
+      "path": "server.ts:7780",
+      "evidence": "El finally vacía startedBefore y sobrescribe KV_RUNNING incluso si falla la enumeración de hilos o una comprobación de estado. Ejemplo: un turno sigue en A, su proyecto está en B y KV guarda A; threads.list agota sus reintentos y se escribe {}. Cuando reserve solicita otro recuento (7241), o tras otra recarga, el turno se cuenta definitivamente en B porque se ha borrado la única evidencia de A.",
+      "fix": "Conservar las asociaciones cuyo estado no se haya podido comprobar. Podar solo los hilos confirmados como terminados o ausentes en una enumeración completa, respetando los eventos de finalización y las confirmaciones nuevas."
+    },
+    {
+      "id": "RS-003",
+      "severity": "medium",
+      "path": "package.json:3",
+      "evidence": "La versión pasa a 0.2.45, pero dist/server.meta.json y dist/app.meta.json siguen declarando 0.2.44; dist/server.js tampoco contiene running-seats. El workflow .github/workflows/check.yml reconstruye y exige que dist no cambie (27–29), por lo que estos artefactos incumplen la comprobación del repositorio.",
+      "fix": "Regenerar y añadir dist con el procedimiento documentado: npm ci y env -u BB_CLI npx -y --package bb-app@0.45.0 bb plugin build."
+    }
+  ],
+  "coverage": [
+    "Plan y hashes SHA256 de los cinco archivos del manifiesto verificados.",
+    "Cambios de server.ts, los dos tests añadidos, CHANGELOG.md y metadatos de versión revisados.",
+    "Trazados confirmSeat, releaseSeat, countUnseated, eventos de inicio, fin, fallo y cancelación, recuento inicial y reintento desde reserve.",
+    "Revisados Seats, descubrimiento de cuentas, rekey, cambios de ajustes, cola de escrituras KV y callbacks de disposición.",
+    "Contrastados los artefactos dist y el workflow de integración continua."
+  ],
+  "limitations": [
+    "Revisión estática: no he ejecutado tests, build ni mutantes; los resultados afirmados en el plan no están verificados.",
+    "Sin ejecución en bb ni SDK instalado, no se han comprobado las garantías del host sobre escrituras pendientes durante una recarga."
+  ]
+}

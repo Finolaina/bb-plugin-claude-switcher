@@ -1,0 +1,25 @@
+{
+  "verdict": "REVISE",
+  "summary": "Un fallo transitorio al leer KV desactiva la persistencia durante toda la sesión y vuelve a permitir atribuciones incorrectas tras recargar.",
+  "findings": [
+    {
+      "id": "RS-007",
+      "severity": "medium",
+      "path": "server.ts:1331",
+      "evidence": "runningUnread se activa ante un fallo de lectura inicial (1699) y nunca se restablece. Aunque KV se recupere, tampoco se guardan los turnos nuevos confirmados por confirmSeat. Escenario: falla esa lectura; después un hilo nuevo arranca en A, su proyecto pasa a B y se recarga mientras sigue el mismo turno. Como su entrada nunca se escribió, rebuildSeats lo cuenta en B y deja una plaza aparentemente libre en A. No requiere sustituir el turno durante la descarga ni depende del límite aceptado RS-005. El test de R4-001 comprueba precisamente que el nuevo turno no se guarda, pero no comprueba su siguiente recarga.",
+      "fix": "Reintentar la lectura y reconciliar las altas y bajas observadas durante la sesión antes de reactivar las escrituras. Conservar las asociaciones antiguas desconocidas sin sobrescribirlas con atribuciones inferidas del proyecto. Añadir cobertura para fallo transitorio, turno nuevo confirmado, movimiento del proyecto y posterior recarga."
+    }
+  ],
+  "coverage": [
+    "Plan leído; SHA256 del plan y de los 13 archivos del manifiesto verificados.",
+    "Revisados los cambios de fuente, los siete tests añadidos, documentación, revisiones anteriores, versiones y metadatos; inspección focalizada del código correspondiente en dist/server.js.",
+    "Trazados confirmación, liberación, reservas, cancelaciones, eventos de inicio/fin/fallo/borrado, reconstrucción y recuentos posteriores.",
+    "Revisados src/seats.ts, descubrimiento de cuentas, migración de claves, cambios de ajustes y de cuenta del proyecto, serialización de escrituras y disposición."
+  ],
+  "limitations": [
+    "Revisión estática: no he ejecutado tests, build ni mutantes, modificado archivos o delegado.",
+    "El SDK no está instalado; no se han verificado las garantías del host sobre escrituras pendientes durante la descarga.",
+    "No se ha reconstruido el bundle ni auditado exhaustivamente sus dependencias.",
+    "RS-005 se mantiene como límite aceptado; no se ha demostrado el coste de consultar latestTurn."
+  ]
+}

@@ -2,7 +2,17 @@
 
 - [ ] Tras reescribir el historial sin nombres de proyectos (Aitor, 2026-11-03 ~19:15: «Sí, borrarlos del historial»): confirmar que GitHub Support purgó las vistas en caché de los commits viejos (d01559a y los de la rama de 0.2.37). Estado en `docs/plazas-2026-11-03/START-preguntas-abiertas.md`.
 
-## Estado de la 0.2.45 (2026-11-06): modelo de cada proyecto sembrado al cargar
+## Estado de la 0.2.46 (2026-11-06): recarga, fusionada en `main`
+
+Limpieza del 2026-11-06, n.º 86 (decisión de Fable, hilo thr_seruqz9pb5; Aitor 12:25: «Puedes resolver hilos o decisiones de cosas que pueden estar pendientes…»). Hecha primero como 0.2.45 en `fix/limpieza-recarga` (72cdad4, historia por rondas); otro hilo publicó antes su 0.2.45, así que sale como 0.2.46 aplicada sobre 92076b5.
+
+- [x] Una recarga cu- [x] Una recarga cuenta cada turno en la cuenta donde arrancó (`running-seats`). Seis rondas (Codex Sol r1-r3, Astra r4-r6) sobre la versión anterior y una (Astra r7) sobre el montaje encima de la 0.2.45 publicada, ninguna con high; respuestas en `docs/recarga-2026-11-06/`. `npm run check` 1324 verdes.
+- [x] Subida, fusión en `main`, etiqueta `v0.2.46` e instalación: decisión de Fable del 2026-11-06 (hilo thr_zrxf6nnbek, R-5/6: «si sale sin high fusiona, publica la 0.2.46 e instálala en bb»). La subida va con `GH_TOKEN="$(env -u GH_TOKEN gh auth token --user Finolaina)"` (la sesión trae el de mariscalai, que da 403).
+- [ ] Techos RS-005 (la entrada nombra el hilo, no el turno) y RS-008 (tras una lectura fallida al cargar): CLAUDE.md, viñeta de la recarga. Astra r7 los vuelve a marcar como medium (REV46-001 y REV46-002); arreglarlos pide guardar el turno junto al hilo.
+- [x] n.º 101: los 3 commits del PR #4 (26822ba) subidos a `despacho/switcher-reserva-rebote-limpia` el 2026-11-06 (misma decisión de Fable).
+- [ ] n.º 80, PR #4 («Rebote de la reserva»): fuera de la decisión del 2026-11-06 («Rehacer el PR #4 sobre la versión actual no entra en esta decisión», hilo thr_zrxf6nnbek). No se fusiona tal cual: está sobre 4a53435 (2026-11-04) y choca con la 0.2.41-0.2.46; sus pruebas «rebote» pegadas sobre `main` fallan 9 de 11. Rehacerlo sobre `main`: marcha fina, unas 3-4 h con revisión (cuenta nuestra). Necesita una decisión nueva.
+
+45 (2026-11-06): modelo de cada proyecto sembrado al cargar
 
 Página de limpieza del 2026-11-06, punto 60 (Aitor, 12:25: «Puedes resolver hilos o decisiones de cosas que pueden estar pendientes, atascadas o ocupando hilos…»; Fable: «terminar tal como lo propone la página»). Cierra el medium de la pasada final de Fable sobre la 0.2.39 (más abajo).
 
