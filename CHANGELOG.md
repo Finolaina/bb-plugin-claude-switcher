@@ -204,6 +204,14 @@ Revisión (Astra r6: 1 high y 1 medium, `docs/reparto-por-hueco-2026-11-07/astra
   capaz, se queda como bloqueada. El consejo «pasa este hilo a Opus» de un
   Fable que falla en una cuenta marcada entera apunta ahora a la cuenta
   donde correría Opus, no a la marcada.
+- El atado de un movimiento se suelta cuando terminan a la vez el despacho y
+  la escritura de la variable, o a los `SEAT_TTL_MS`, lo que llegue antes.
+  Con la escritura de Ultra A (90/53) a Ultra B (10/12) retenida más de 3 s,
+  el despacho se rendía y soltaba el atado: un hermano de Opus escribía la
+  Team y la escritura vieja la pisaba con B (Team → B → Team). Ahora ese
+  hermano espera y, cuando aterriza la escritura, va a la Team. Cada atado
+  tiene dueño: la escritura vieja que aterriza pasados los 90 s no suelta el
+  de un movimiento posterior (medium 2).
 
 ## [0.2.47] - 2026-11-06
 

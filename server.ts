@@ -1226,21 +1226,28 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * siblingAdmitted ties a project for from the first time: a write that
    * never answers held the project for ever (Astra r5 medium 3).
    */
-  const seatMoving = new Map<string, number>();
+  const seatMoving = new Map<string, { since: number }>();
   const heldForMove = new Set<string>();
   function moving(projectId: string): boolean {
-    const since = seatMoving.get(projectId);
-    return since !== undefined && deps.now() - since < SEAT_TTL_MS;
+    const hold = seatMoving.get(projectId);
+    return hold !== undefined && deps.now() - hold.since < SEAT_TTL_MS;
   }
   /**
-   * The project each dispatch's move holds, till that dispatch ends, given
-   * up or not: the move's history is stored after its write, and until its
-   * thread is told to start no siblingAdmitted protects it (Astra r4
-   * medium 2). Set before anything is awaited (Astra r5 medium 3).
+   * The move each dispatch holds its project for, till that dispatch ends,
+   * given up or not, and the move's variable write has ended: the move's
+   * history is stored after its write, and until its thread is told to
+   * start no siblingAdmitted protects it (Astra r4 medium 2). Set before
+   * anything is awaited (Astra r5 medium 3). A write still under way when
+   * the dispatch gives up would land on top of a sibling's move (Astra r6
+   * medium 2).
    */
-  const heldMoves = new Map<string, string>();
-  function releaseMove(projectId: string): void {
-    seatMoving.delete(projectId);
+  const heldMoves = new Map<
+    string,
+    { projectId: string; hold: { since: number }; written: Promise<unknown> }
+  >();
+  /** Ends `hold`, unless another move holds the project since. */
+  function releaseMove(projectId: string, hold: { since: number }): void {
+    if (seatMoving.get(projectId) === hold) seatMoving.delete(projectId);
     wakeHeldForMove(projectId);
   }
   function wakeHeldForMove(projectId: string): void {
@@ -5497,8 +5504,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // Before a turn the hold lasts till the dispatch ends (see heldMoves):
     // its thread is told to start by then, and siblingAdmitted takes over.
     const handedOver = seatMove && when === "before";
-    if (seatMove) seatMoving.set(projectId, now);
-    if (handedOver) heldMoves.set(thread.id, projectId);
+    const hold = { since: now };
+    if (seatMove) seatMoving.set(projectId, hold);
+    const held = { projectId, hold, written: Promise.resolve() as Promise<unknown> };
+    if (handedOver) heldMoves.set(thread.id, held);
     const to = accountOrDefault(decision.account);
     try {
       if (claim !== null) {
@@ -5506,11 +5515,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         reserveSeat(thread.id, claim, now);
       }
       // The sessions are not waited for: see applyAccount (Fable, 2026-10-29).
-      await applyAccount(projectId, to, from, {
+      held.written = applyAccount(projectId, to, from, {
         share: false,
         forThread: thread.id,
         keepPin: otherModel(model),
       });
+      await held.written;
       await markHandled(projectId);
       // A move for a crowded seat is a new home, not an excursion: a turn in
       // the preferred model going back would take the project to the full
@@ -5552,7 +5562,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         thread.id,
       );
     } finally {
-      if (seatMove && !handedOver) releaseMove(projectId);
+      if (seatMove && !handedOver) releaseMove(projectId, hold);
     }
     return {
       account: decision.account,
@@ -5877,11 +5887,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     try {
       decision = await dispatchDecision(ctx);
     } finally {
-      // The move this dispatch made stops holding its project (see heldMoves).
+      // The move this dispatch made stops holding its project once its
+      // write has ended too (see heldMoves).
       const held = heldMoves.get(ctx.thread.id);
       if (held !== undefined) {
         heldMoves.delete(ctx.thread.id);
-        releaseMove(held);
+        const release = () => releaseMove(held.projectId, held.hold);
+        void held.written.then(release, release);
       }
     }
     if (decision.action === "wait") {

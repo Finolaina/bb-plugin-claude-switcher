@@ -21612,6 +21612,111 @@ describe("reparto por hueco 2026-11-07", () => {
     // turn goes. Its hold ends with the dispatch: an Opus sibling 1 min
     // later is not told "this project is being moved", and goes to the Team
     // seat with 2 free.
+    // Astra r6 medium 2: the move's variable write itself is held past the
+    // dispatch's limit, which gives up. The hold lasts till that write ends:
+    // an Opus sibling asking meanwhile waits, and once the write lands it
+    // goes to the Team seat. Before: Team, then the old write's work on top,
+    // then Team again.
+    it("a move whose variable write outlasts its dispatch holds the project till the write ends (Astra r6 medium 2)", async () => {
+      let gate: Promise<void> | null = null;
+      let open = () => {};
+      const h = await host(
+        {
+          main: () => Response.json(payload(5, 100, 100)),
+          spare: () => Response.json(payload(5, 90, 53)), // room -13.5
+          work: () => Response.json(payload(5, 10, 12)), // room 46
+          team: () => Response.json(payload(0, 2, 0)),
+        },
+        {
+          dirs: () => ["spare", "work", "team"],
+          settings: { preferredModel: "Fable", seatsMax: 4, seatsTeam: 2, stuckMoveMinutes: 10 },
+          presetEnv: { "proj-1": on("spare") },
+          beforeSet: async () => {
+            const held = gate;
+            gate = null;
+            if (held !== null) await held;
+          },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "team");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      gate = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      vi.useFakeTimers();
+      try {
+        const fable = dispatch(h, "f", "proj-1", FABLE_ID);
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect((await fable).action).toBe("wait");
+        const early = dispatch(h, "o", "proj-1", OPUS);
+        await vi.advanceTimersByTimeAsync(100);
+        expect(await early).toMatchObject({ action: "wait", reason: "Waiting: this project is being moved to another account" });
+        open();
+        await vi.advanceTimersByTimeAsync(100);
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(h.envSet.filter((e) => e.projectId === "proj-1").map((e) => e.note)).toEqual([ownNote("work")]);
+      expect(await dispatch(h, "o", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet.filter((e) => e.projectId === "proj-1").map((e) => e.note)).toEqual([ownNote("work"), ownNote("team")]);
+    });
+
+    // The same with the first write held past SEAT_TTL_MS: its hold ends
+    // there, and a sibling's move holds the project with its own write still
+    // under way. The old write landing ends its own hold, not the newer one:
+    // a third Opus turn still waits.
+    it("a write landing past SEAT_TTL_MS does not end a newer move's hold (Astra r6 medium 2)", async () => {
+      let clock = NOW;
+      const gates: Promise<void>[] = [];
+      const opens: (() => void)[] = [];
+      const gated = () => {
+        gates.push(new Promise<void>((resolve) => opens.push(resolve)));
+      };
+      const h = await host(
+        {
+          main: () => Response.json(payload(5, 100, 100)),
+          spare: () => Response.json(payload(5, 90, 53)), // room -13.5
+          work: () => Response.json(payload(5, 10, 12)), // room 46
+          team: () => Response.json(payload(0, 2, 0)),
+        },
+        {
+          clock: () => clock,
+          dirs: () => ["spare", "work", "team"],
+          settings: { preferredModel: "Fable", seatsMax: 4, seatsTeam: 2, stuckMoveMinutes: 10 },
+          presetEnv: { "proj-1": on("spare") },
+          beforeSet: async () => {
+            const held = gates.shift();
+            if (held !== undefined) await held;
+          },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "team");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      vi.useFakeTimers();
+      try {
+        gated();
+        const fable = dispatch(h, "f", "proj-1", FABLE_ID);
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect((await fable).action).toBe("wait");
+        clock = NOW + SEAT_TTL_MS;
+        gated();
+        const second = dispatch(h, "o", "proj-1", OPUS);
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect((await second).action).toBe("wait");
+        opens[0]!();
+        await vi.advanceTimersByTimeAsync(100);
+        const third = dispatch(h, "o3", "proj-1", OPUS);
+        await vi.advanceTimersByTimeAsync(100);
+        expect(await third).toMatchObject({ action: "wait", reason: "Waiting: this project is being moved to another account" });
+        opens[1]!();
+        await vi.advanceTimersByTimeAsync(100);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("a move whose history never lands stops holding the project when its dispatch ends (Astra r5 medium 3)", async () => {
       let clock = NOW;
       const h = await host(
