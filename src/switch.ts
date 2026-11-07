@@ -588,6 +588,14 @@ export interface PlacementInput {
   /** See ChoiceOptions.noTeamTakes. */
   noTeamTakes?: (model: string) => boolean;
   /**
+   * As SwitchInput.limitedUntil: a marked account other than the current
+   * one is no destination, and is waited for no sooner than its mark ends
+   * (reserveWait). The retry a switch sent away is placed again before it
+   * starts, and went back to the Team seat that had just failed (Astra r5
+   * medium 1).
+   */
+  limitedUntil?: (name: string) => number | null;
+  /**
    * The account the project left for a turn in another model (its excursion),
    * for a turn in the reserved model to go back to; null when the caller
    * rules it out (left ahead of the limit and still above the share).
@@ -752,7 +760,9 @@ export function bestAccount(
  * as soon as it can run it.
  */
 export function decidePlacement(input: PlacementInput): PlacementDecision {
-  const accounts = input.accounts.map((a) => settle(a, input.now));
+  const accounts = input.accounts
+    .filter((a) => !markedOut(input, a.name))
+    .map((a) => settle(a, input.now));
   const options = {
     preferredModel: input.preferredModel,
     reserveModel: input.reserveModel,
@@ -873,7 +883,7 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     // server then asks for one seat, which a Max or Ultra may have (B4).
     const choice = holdsForReserve(options)
       ? (pick(roomy.filter((a) => !afterTeams(a, options))) ??
-        pick(unreadTeamSeats(input)) ??
+        pick(destinationTeamSeats(input)) ??
         (input.seatsWantedOnly === true && wanted > 1 ? null : pick(roomy)))
       : choosingReserve(options) && options.reserveShare !== undefined
         ? (pick(roomy.filter((a) => a.team !== true)) ??
@@ -945,7 +955,7 @@ function chooseTeamsFirst(
       options,
       input.freeSeats,
     ) ??
-    chooseSeated(unreadTeamSeats(input), options, input.freeSeats) ??
+    chooseSeated(destinationTeamSeats(input), options, input.freeSeats) ??
     chooseSeated(measured, options, input.freeSeats)
   );
 }
@@ -955,6 +965,19 @@ function chooseTeamsFirst(
  * the reserve needs. What an incomplete answer did say still counts (Astra
  * FINAL-002, FINAL-R8-002); only a window it left out reads as free.
  */
+/** The unread Team seats a placement may move to: none marked (see PlacementInput.limitedUntil). */
+function destinationTeamSeats(input: PlacementInput): AccountUsage[] {
+  return unreadTeamSeats(input).filter((a) => !markedOut(input, a.name));
+}
+
+/** `name` is not the current account and a mark keeps it out (see PlacementInput.limitedUntil). */
+function markedOut(
+  input: Pick<PlacementInput, "currentAccount" | "limitedUntil">,
+  name: string,
+): boolean {
+  return name !== input.currentAccount && (input.limitedUntil?.(name) ?? null) !== null;
+}
+
 export function unreadTeamSeats(
   input: Pick<PlacementInput, "accounts" | "unreadTeams" | "currentAccount" | "now">,
 ): AccountUsage[] {
@@ -1003,8 +1026,10 @@ export function reserveWait(
   ]) {
     if (raw.name === input.currentAccount) continue;
     const account = settle(raw, input.now);
-    const at = freeAt(account, input.preferredModel);
-    if (at === null) continue;
+    const free = freeAt(account, input.preferredModel);
+    if (free === null) continue;
+    // A marked account frees no sooner than its mark ends.
+    const at = Math.max(free, input.limitedUntil?.(raw.name) ?? free);
     // As in decideSwitch: judged as the account will be when the turn is
     // sent, a Max account whose reserved window resets keeps it again.
     const sendBy = Math.max(at, input.now) + RESET_BUFFER_MS + RESET_JITTER_MS;

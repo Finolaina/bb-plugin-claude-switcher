@@ -21837,6 +21837,43 @@ describe("reparto por hueco 2026-11-07", () => {
         expect(h.queued).toEqual([]);
       });
 
+      // Astra r5 medium 1: spare reads 20 % of session but answered another
+      // Opus turn with a 429 till +2 h; main gives no overflow (100). The
+      // wait is not released on spare: it keeps waiting.
+      it("is not released on a Team seat marked by another turn's 429 (Astra r5 medium 1)", async () => {
+        const h = await host(
+          {
+            main: () => Response.json(payload(5, 10, 12)),
+            spare: () => Response.json(payload(20, 10, 0)),
+            work: () => Response.json(payload(100, 10, 0)),
+          },
+          {
+            listed: [],
+            settings: { preferredModel: "Fable", opusOverflowRoom: 100 },
+            presetEnv: { "proj-1": on("work"), "proj-2": on("spare") },
+            queued: [retryRow()],
+            threads: { "thread-1": { status: "error" }, "thread-2": { projectId: "proj-2" } },
+            threadEvents: {
+              "thread-1": [
+                { id: "evt_creq_r1", scope: { kind: "thread" }, threadId: "thread-1", seq: 1, createdAt: NOW - HOUR, type: "client/turn/requested", data: { requestId: "creq_r1", execution: { model: OPUS } } },
+              ],
+              "thread-2": [
+                { id: "evt_creq_2", scope: { kind: "thread" }, threadId: "thread-2", seq: 1, createdAt: NOW - 60_000, type: "client/turn/requested", data: { requestId: "creq_2", execution: { model: OPUS } } },
+              ],
+            },
+          },
+        );
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "spare", "work");
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "thread-2", requestId: "creq_2" }));
+        await onePass(h);
+        await onePass(h);
+        expect(h.retries.filter((r) => r.threadId === "thread-1")).toEqual([]);
+        expect(h.queued.map((r) => r.id)).toContain("r1");
+        expect(h.envSet.filter((e) => e.projectId === "proj-1")).toEqual([]);
+      });
+
       it("with opusOverflowRoom 100 it keeps waiting, as in 0.2.44", async () => {
         const h = await waitingHost([], { opusOverflowRoom: 100 });
         dispose = () => h.harness.dispose();
@@ -21969,6 +22006,40 @@ describe("reparto por hueco 2026-11-07", () => {
         await active(h, "thread-1");
         expect(await where(h)).toBe("main");
         expect(h.retries).toHaveLength(2);
+      });
+
+      // Astra r5 medium 1: work (a Team seat read at 20/10) answers 429 for
+      // two hours; the retry goes to main (10/12, room 46). Before it is
+      // sent, main's one seat is taken; spare (20/20, room 40) has its one
+      // free. The placement of the retry does not take the project back to
+      // work: it goes to spare.
+      it("a retry whose Ultra filled before it was sent is not placed back on the marked Team seat: it goes to the other Ultra (Astra r5 medium 1)", async () => {
+        const h = await host(
+          {
+            main: () => Response.json(payload(5, 10, 12)), // room 46
+            spare: () => Response.json(payload(5, 20, 20)), // room 40
+            work: () => Response.json(payload(20, 10, 0)),
+          },
+          {
+            settings: { preferredModel: "Fable", seatsTeam: 2, seatsMax: 1, opusOverflowRoom: 15 },
+            presetEnv: { "proj-1": on("work"), "proj-2": on("main") },
+            threadEvents: {
+              "thread-1": [
+                { id: "evt_creq_1", scope: { kind: "thread" }, threadId: "thread-1", seq: 1, createdAt: NOW - 60_000, type: "client/turn/requested", data: { requestId: "creq_1", execution: { model: OPUS } } },
+              ],
+            },
+          },
+        );
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "work");
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+        expect(h.retries.at(-1)).toMatchObject({ reason: "Switched to account main (Opus)" });
+        expect(await dispatch(h, "f", "proj-2", FABLE_ID)).toEqual({ action: "proceed" });
+        await active(h, "f", "proj-2");
+        expect(await where(h, "proj-2")).toBe("main");
+        expect(await dispatch(h, "thread-1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+        expect(await where(h)).toBe("spare");
       });
 
       // Astra r4 medium 3: one mark per scope. work read with Fable at 100 %:

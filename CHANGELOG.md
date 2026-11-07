@@ -170,6 +170,16 @@ Revisión (Astra r5: 0 high y 3 medium, `docs/reparto-por-hueco-2026-11-07/astra
   reinicio (30 min) un segundo después de otro con reinicio a +120 min ya no
   acorta la marca, y a los 31 min ningún Opus vuelve a esa Team. Corte
   probado a 120 min − 1 ms y a 120 min (medium 2).
+- La colocación antes de un turno tampoco elige una cuenta con marca
+  vigente para el modelo, leída o Team conocida por su login: el reintento
+  que el fallo llevó a la Ultra A (10/12, hueco 46), con su única plaza
+  ocupada antes del despacho, va a la Ultra B (20/20, hueco 40) libre, en vez
+  de volver a la Team que acaba de fallar. La espera adelantada
+  (`moveUpWait`) tampoco suelta un reintento en una Team marcada por el 429
+  de otro turno, y `reserveWait` no espera una cuenta marcada antes de que
+  acabe su marca. En la colocación la marca cuenta para todos los modelos;
+  en el juicio del fallo sigue siendo solo de Opus y Sonnet (medium 1).
+  Límite: el rescate de un proyecto varado no mira las marcas.
 
 ## [0.2.47] - 2026-11-06
 

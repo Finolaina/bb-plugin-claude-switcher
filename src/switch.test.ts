@@ -2633,6 +2633,39 @@ describe("Opus overflows to the Ultra with room (0.2.48, B5)", () => {
     expect(reserveWait({ ...held, accounts: [outTeam, fullTeam, tight, roomy] })).toEqual({ account: "spare", at: 0 });
   });
 
+  // Astra r5 medium 1: a mark from an earlier 429 (server's limitedAt) keeps
+  // an account out of the placement's destinations, read or known by its
+  // login, as out of a switch's; the current account is still judged on its
+  // numbers; reserveWait waits for a marked one no sooner than its mark.
+  describe("with an account marked by an earlier failure (Astra r5 medium 1)", () => {
+    const marked = (name: string, until: number) => (n: string) => (n === name ? until : null);
+
+    it("an unread Team seat marked is no destination: to the Ultra with room", () => {
+      expect(decidePlacement(base({ unreadTeams: ["fresh"], limitedUntil: marked("fresh", NOW + HOUR) }))).toEqual({
+        kind: "move",
+        account: "roomy",
+        why: "current-blocked",
+      });
+    });
+
+    it("the Ultra with room marked is no destination: kept where it is", () => {
+      expect(decidePlacement(base({ limitedUntil: marked("roomy", NOW + HOUR) }))).toEqual({ kind: "keep", why: "current-blocked" });
+    });
+
+    // Its login says Ultra: judged as unread, it would be kept as one that
+    // spends the reserve ("current-reserved").
+    it("a project on a marked Ultra is judged on its numbers: it stays", () => {
+      const placed = base({ currentAccount: "roomy", limitedUntil: marked("roomy", NOW + HOUR), unreadKeepsReserve: (n) => n === "roomy" });
+      expect(decidePlacement(placed)).toEqual({ kind: "keep" });
+    });
+
+    it("reserveWait: the Ultra marked till +3 h waits behind the Team out for an hour; marked till +30 min, it frees then", () => {
+      const held = base({ currentAccount: "tight", accounts: [outTeam, tight, roomy] });
+      expect(reserveWait({ ...held, limitedUntil: marked("roomy", NOW + 3 * HOUR) })).toEqual({ account: "work", at: NOW + HOUR });
+      expect(reserveWait({ ...held, limitedUntil: marked("roomy", NOW + HOUR / 2) })).toEqual({ account: "roomy", at: NOW + HOUR / 2 });
+    });
+  });
+
   it("after a failure on a Team seat, the switch goes to the Ultra with room", () => {
     expect(
       decideSwitch(

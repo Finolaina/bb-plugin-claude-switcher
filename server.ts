@@ -1602,10 +1602,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * Scope "": the whole account's; a model's name, lower case: that model's
    * alone, its own window explaining the limit (see limitScope; Astra r3
    * medium 2). Until then such an account is no Team seat that takes a turn
-   * held off the reserve (noTeamTakes) and no destination of a retry
-   * (decideSwitch): its read lags the 429, so no read ends a mark (Astra r4
-   * high 1). Elsewhere its numbers decide, and a turn may fail there once,
-   * as before. In memory: a reload forgets them.
+   * held off the reserve (noTeamTakes), no destination of a retry
+   * (decideSwitch), of a placement before a turn nor of a wait moved up
+   * (moveUpWait; Astra r5 medium 1): its read lags the 429, so no read ends
+   * a mark (Astra r4 high 1). Elsewhere (the rescue of a stranded project)
+   * its numbers decide, and a turn may fail there once, as before. In
+   * memory: a reload forgets them.
    */
   const limitedAt = new Map<string, Map<string, number>>();
   /** Until when `name`'s marks stand for a turn in `model` (see limitedAt); null: none does. */
@@ -5060,6 +5062,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       accounts: measured,
       preferredModel: model,
       ...reserveFor(threadId, now),
+      // An account whose mark stands for the model is no destination (Astra
+      // r5 medium 1). For every model, unlike decideSwitch, where a Fable
+      // turn is judged on its numbers (see the judge).
+      limitedUntil: (name: string) => limitedUntil(name, model),
       excursionFrom: wayHome(projectId, model, measured, now),
       freeSeats:
         own === null
@@ -7175,10 +7181,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         );
       return;
     }
-    // The choice of any move, B5 included (Codex r1 high 1).
+    // The choice of any move, B5 included (Codex r1 high 1); never an
+    // account whose mark stands for the model (Astra r5 medium 1).
     const to =
       chooseAccount(
-        measured.filter((a) => a.name !== fromName).map((a) => settle(a, now)),
+        measured
+          .filter((a) => a.name !== fromName && limitedUntil(a.name, model) === null)
+          .map((a) => settle(a, now)),
         {
           preferredModel: model,
           ...reserveFor(threadId, now),
