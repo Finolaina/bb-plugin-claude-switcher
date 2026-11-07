@@ -104,6 +104,8 @@ function fakes(
    * the rotated login not written back (the store refuses the write).
    */
   unwritable: () => string[] = () => [],
+  /** What a read of an account's login store waits for first, if anything. */
+  storeGate: (name: string) => Promise<void> | undefined = () => undefined,
 ) {
   const files: Record<string, string> = {
     [`${HOME}/.claude.json`]: claudeJson("main@example.com", "uuid-main"),
@@ -135,6 +137,7 @@ function fakes(
     home: HOME,
     async exec(args) {
       const name = services[args[args.indexOf("-s") + 1]!];
+      if (name !== undefined) await storeGate(name);
       if (args[0] !== "find-generic-password" || name === undefined)
         return { code: 44, stdout: "" };
       if (unreadable().includes(name)) return { code: 51, stdout: "" };
@@ -348,6 +351,8 @@ interface HostOptions {
   unreadable?: () => string[];
   /** Accounts whose refreshed login cannot be written back (see fakes). */
   unwritable?: () => string[];
+  /** What a read of an account's login store waits for first (see fakes). */
+  storeGate?: (name: string) => Promise<void> | undefined;
   clock?: () => number;
   /** What threads.get answers per thread, over a visible Claude Code thread of the user. */
   threads?: Record<string, Partial<ThreadResponse>>;
@@ -459,6 +464,7 @@ async function host(
     options.dirs ?? (() => ["spare", "work"]),
     options.unreadable,
     options.unwritable,
+    options.storeGate,
   );
   const { loginIo, logins, made, links } = fakeLoginIo(
     options.accountEntries ??
@@ -21513,6 +21519,53 @@ describe("reparto por hueco 2026-11-07", () => {
         }
         return set(key, value as never);
       };
+      expect(await dispatch(h, "f", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      expect(opus).not.toBeNull();
+      expect((await opus!).action).toBe("wait");
+      expect(h.envSet.filter((e) => e.projectId === "proj-1").map((e) => e.note)).toEqual([ownNote("work")]);
+    });
+
+    // The same window after the history: the default's login store cannot
+    // be read, so the dispatch looks at it once more after the move is
+    // recorded, and its thread is not told to start till that look ends.
+    // An Opus sibling placed meanwhile still waits (Astra r4 medium 2).
+    it("a move for room holds the project after its history, while the default's login is looked at, till its thread is told to start (Astra r4 medium 2)", async () => {
+      let gate: Promise<void> | null = null;
+      let open = () => {};
+      const h = await host(
+        {
+          main: () => Response.json(payload(5, 100, 100)),
+          spare: () => Response.json(payload(5, 90, 53)), // room -13.5
+          work: () => Response.json(payload(5, 10, 12)), // room 46
+          team: () => Response.json(payload(0, 2, 0)),
+        },
+        {
+          dirs: () => ["spare", "work", "team"],
+          settings: { preferredModel: "Fable", seatsMax: 4, seatsTeam: 2, stuckMoveMinutes: 10 },
+          presetEnv: { "proj-1": on("spare") },
+          unreadable: () => ["main"],
+          storeGate: (name) => (name === "main" && gate !== null ? gate : undefined),
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "team");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      let opus: Promise<{ action: string; reason?: string }> | null = null;
+      const set = h.bb.storage.kv.set.bind(h.bb.storage.kv);
+      h.bb.storage.kv.set = async (key: string, value: unknown) => {
+        const done = await set(key, value as never);
+        if (key === "last-switch" && opus === null) {
+          // The history is stored; the look at main is still held.
+          setTimeout(() => {
+            opus = dispatch(h, "o", "proj-1", OPUS);
+            setTimeout(open, 50);
+          }, 0);
+        }
+        return done;
+      };
+      gate = new Promise<void>((resolve) => {
+        open = resolve;
+      });
       expect(await dispatch(h, "f", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
       expect(opus).not.toBeNull();
       expect((await opus!).action).toBe("wait");
