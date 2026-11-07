@@ -36,6 +36,10 @@ export const HISTORIAL_MIGRATIONS = [
     line TEXT NOT NULL
   )`,
   `CREATE INDEX stuck_at ON stuck (at)`,
+  // The preferred model's own weekly %, next to the general one: an Ultra
+  // whose general weekly runs out with Fable half spent (Aitor 2026-11-07:
+  // «se sigue disparando el tema la cuenta semanal y fable se queda sin gastar»).
+  `ALTER TABLE seat_samples ADD COLUMN preferred_weekly REAL`,
 ];
 
 /** What this module needs of a better-sqlite3 handle. */
@@ -63,6 +67,8 @@ export interface SampleRow {
   weekly: number | null;
   sessionResets: number | null;
   weeklyResets: number | null;
+  /** The preferred model's own weekly % (Fable); null without one, or in samples kept before 0.2.48. */
+  preferredWeekly: number | null;
 }
 
 export interface StuckRow {
@@ -83,8 +89,8 @@ export interface StuckRow {
 export function addSample(db: HistorialDb, r: SampleRow): void {
   db.prepare(
     `INSERT OR IGNORE INTO seat_samples
-      (at, account, running, reserved, external, waiting, capacity, session, weekly, session_resets, weekly_resets)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (at, account, running, reserved, external, waiting, capacity, session, weekly, session_resets, weekly_resets, preferred_weekly)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     r.at,
     r.account,
@@ -97,6 +103,7 @@ export function addSample(db: HistorialDb, r: SampleRow): void {
     r.weekly,
     r.sessionResets,
     r.weeklyResets,
+    r.preferredWeekly,
   );
 }
 
@@ -135,6 +142,7 @@ interface SampleDbRow {
   weekly: number | null;
   session_resets: number | null;
   weekly_resets: number | null;
+  preferred_weekly: number | null;
 }
 
 /** Samples from `since` on, oldest first, by account. */
@@ -155,6 +163,7 @@ export function readSamples(db: HistorialDb, since: number): SampleRow[] {
     weekly: r.weekly,
     sessionResets: r.session_resets,
     weeklyResets: r.weekly_resets,
+    preferredWeekly: r.preferred_weekly,
   }));
 }
 

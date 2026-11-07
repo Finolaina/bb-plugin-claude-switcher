@@ -16127,6 +16127,23 @@ describe("bb claude-switcher seats", () => {
     expect(text.split("\n").filter((l) => /\tmain\t/.test(l))).toHaveLength(1);
   });
 
+  it("history --dias --json: each sample keeps the preferred model's weekly % (null without its own window), also after a reload", async () => {
+    const h = await host(
+      { main: () => Response.json(payload(10, 85, 52)), spare: () => Response.json(payload(10, 60)) },
+      { settings: { autoSwitch: false, preferredModel: "Fable" } },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const again = await h.harness.lifecycle.reload((bb) => createPlugin(bb, h.pluginDeps));
+    const json = JSON.parse((await again.harness.behavior.runCli(["history", "--dias", "1", "--json"])).stdout) as {
+      samples: { account: string; weekly: number | null; preferredWeekly: number | null }[];
+    };
+    expect(json.samples.map((r) => [r.account, r.weekly, r.preferredWeekly])).toEqual([
+      ["main", 85, 52],
+      ["spare", 60, null],
+    ]);
+  });
+
   it("a sample keeps its bb reservations and its holds from outside bb apart: the same before and after a reload (Codex ASIENTOS-003)", async () => {
     const h = await host(ALL_FREE, { settings: { autoSwitch: false, seatsMax: 2 } });
     dispose = () => h.harness.dispose();

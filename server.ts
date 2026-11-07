@@ -1835,7 +1835,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       let imported = false;
       try {
         for (const [name, [at, running, reserved, session, weekly, sessionResets, weeklyResets]] of fromKv)
-          addSample(historial, { at, account: name, running, reserved, external: null, waiting: null, capacity: null, session, weekly, sessionResets, weeklyResets });
+          addSample(historial, { at, account: name, running, reserved, external: null, waiting: null, capacity: null, session, weekly, sessionResets, weeklyResets, preferredWeekly: null });
         imported = true;
       } catch (error) {
         bb.log.warn(
@@ -2091,6 +2091,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         weekly: weekly.absent === true ? null : weekly.usedPercent,
         sessionResets: session.resetsAt,
         weeklyResets: weekly.absent === true ? null : weekly.resetsAt,
+        preferredWeekly: modelWindow({ name, ...m.usage }, current.preferredModel)?.usedPercent ?? null,
       }),
     );
   }

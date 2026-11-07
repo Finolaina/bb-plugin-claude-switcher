@@ -33,6 +33,7 @@ const sample = (at: number, o: Partial<SampleRow> = {}): SampleRow => ({
   weekly: 20,
   sessionResets: null,
   weeklyResets: null,
+  preferredWeekly: null,
   ...o,
 });
 
@@ -68,6 +69,26 @@ describe("historial de asientos (Aitor 2026-11-05: «que guarde los últimos dí
     expect(kept[0]!.at).toBe(NOW - 7 * DAY);
     expect(kept.at(-1)!.at).toBe(NOW);
     expect(readStuck(d, 0).map((r) => r.thread)).toEqual(["thr_nuevo"]);
+  });
+
+  it("guarda el % de la semanal del modelo preferido (Fable) de cada muestra; sin ventana propia, null (Aitor 2026-11-07: «fable se queda sin gastar»)", () => {
+    const d = db();
+    addSample(d, sample(NOW, { account: "viaulab", weekly: 85, preferredWeekly: 52 }));
+    addSample(d, sample(NOW, { account: "team1", weekly: 38, preferredWeekly: null }));
+    expect(readSamples(d, 0).map((r) => [r.account, r.weekly, r.preferredWeekly])).toEqual([
+      ["team1", 38, null],
+      ["viaulab", 85, 52],
+    ]);
+  });
+
+  it("las muestras guardadas antes de la columna del modelo preferido se leen con null", () => {
+    const d = new Database(":memory:");
+    for (const sql of HISTORIAL_MIGRATIONS.slice(0, 3)) d.exec(sql);
+    d.prepare(
+      `INSERT INTO seat_samples (at, account, running, reserved, session, weekly) VALUES (?, ?, 1, 0, 10, 85)`,
+    ).run(NOW, "viaulab");
+    for (const sql of HISTORIAL_MIGRATIONS.slice(3)) d.exec(sql);
+    expect(readSamples(d, 0).map((r) => [r.weekly, r.preferredWeekly])).toEqual([[85, null]]);
   });
 
   it("el corte: lo de 7 días justos se queda, 1 ms más viejo se va", () => {
