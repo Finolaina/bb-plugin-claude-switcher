@@ -2652,11 +2652,19 @@ describe("Opus overflows to the Ultra with room (0.2.48, B5)", () => {
       expect(decidePlacement(base({ limitedUntil: marked("roomy", NOW + HOUR) }))).toEqual({ kind: "keep", why: "current-blocked" });
     });
 
-    // Its login says Ultra: judged as unread, it would be kept as one that
-    // spends the reserve ("current-reserved").
-    it("a project on a marked Ultra is judged on its numbers: it stays", () => {
+    // Astra r6: its read lags the 429 that marked it, so it is not one the
+    // turn runs on: with another able (an Ultra with room 40), there; with
+    // none, kept as blocked. Its login says Ultra: judged as unread instead,
+    // it would be kept as one that spends the reserve ("current-reserved").
+    it("a project on a marked Ultra moves to another able; with none, kept as blocked (Astra r6)", () => {
       const placed = base({ currentAccount: "roomy", limitedUntil: marked("roomy", NOW + HOUR), unreadKeepsReserve: (n) => n === "roomy" });
-      expect(decidePlacement(placed)).toEqual({ kind: "keep" });
+      expect(decidePlacement(placed)).toEqual({ kind: "keep", why: "current-blocked" });
+      const other = ultra("other", 20, 20); // room 40
+      expect(decidePlacement({ ...placed, accounts: [outTeam, fullTeam, tight, roomy, other] })).toEqual({
+        kind: "move",
+        account: "other",
+        why: "current-blocked",
+      });
     });
 
     it("reserveWait: the Ultra marked till +3 h waits behind the Team out for an hour; marked till +30 min, it frees then", () => {

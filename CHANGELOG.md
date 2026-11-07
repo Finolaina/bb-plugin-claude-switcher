@@ -190,6 +190,21 @@ Revisión (Astra r5: 0 high y 3 medium, `docs/reparto-por-hueco-2026-11-07/astra
   no tiene despacho que lo suelte. Corte probado a 90 s − 1 ms y a 90 s
   (medium 3).
 
+Revisión (Astra r6: 1 high y 1 medium, `docs/reparto-por-hueco-2026-11-07/astra-r6.txt`):
+
+- La cuenta en la que está el proyecto tampoco cuenta como buena por su
+  lectura si tiene una marca vigente para el modelo. En la espera adelantada
+  (`moveUpWait`): con la Team leyendo 20/10 y un 429 hasta +120 min, y la
+  Ultra sin leer al fallar, el reintento esperaba en la Team hasta +120 min
+  15 s aunque al minuto la Ultra leyera 10/12 con hueco 46; ahora se suelta
+  allí en el siguiente refresco (high 1). En la colocación antes de un turno
+  (el mismo patrón en un camino vecino): un Opus de otro proyecto que está
+  en esa Team va a la Ultra con hueco en vez de quedarse a fallar, y el
+  historial dice que esa cuenta tiene un 429 sin reiniciar; sin otra cuenta
+  capaz, se queda como bloqueada. El consejo «pasa este hilo a Opus» de un
+  Fable que falla en una cuenta marcada entera apunta ahora a la cuenta
+  donde correría Opus, no a la marcada.
+
 ## [0.2.47] - 2026-11-06
 
 ### Changed

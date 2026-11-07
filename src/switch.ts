@@ -826,9 +826,12 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
       ? { kind: "keep", why: "current-reserved" }
       : { kind: "move", account: elsewhere.account, why: "current-reserved" };
   }
+  // A current account marked by a 429 does not run the turn whatever its
+  // read says: the read lags the 429 (Astra r6).
   const runs =
     !loggedOut &&
     current !== undefined &&
+    (input.limitedUntil?.(input.currentAccount) ?? null) === null &&
     isUsable(current) &&
     canRunModel(current, input.preferredModel);
   if (runs && (pinHolds || !spendsReservedWeekly(current, options))) {

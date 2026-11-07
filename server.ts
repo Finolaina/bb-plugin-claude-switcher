@@ -1662,6 +1662,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function whyOut(name: string, model: string): string {
     if (loggedOut(name)) return "is not logged in";
     if (refusing(name)) return "refused a turn";
+    if (limitedUntil(name, model) !== null)
+      return `answered ${model === "" ? "a turn" : model} with a usage limit that has not reset yet`;
     if (reservedFor(name, model) && canRunHere(name, model))
       return `would spend ${current.preferredModel}'s weekly`;
     const known = measuredAccounts(model).find((a) => a.name === name);
@@ -7148,6 +7150,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (
       !noLogin &&
       !refusing(fromName) &&
+      // Its read lags the 429 it marked: no account to keep the wait on by
+      // that read (Astra r6 high 1).
+      limitedUntil(fromName, model) === null &&
       (((here === undefined || here.unknown === true) &&
         // Unread, and it may spend the reserve: a Team seat that can take
         // the turn is looked for below (Codex r3 medium 3).
