@@ -6507,7 +6507,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const decision = decideSwitch(input);
     // The provider's word on the account the turn failed on stands past
     // this judgment: the retry's own placement reads it (see limitedAt).
-    if (!stuck && failedOn !== null && declineReason(event) === null)
+    // Judged on its failure, the event is a limit or a refusal (handleFailure
+    // ignores the rest); left in error, it may be hours old: no mark.
+    if (!stuck && failedOn !== null)
       limitedAt.set(failedOn, { at: now, until: reportedFreeAt(event) ?? Number.POSITIVE_INFINITY });
     // No Fable on any account, and an account with Opus: the thread is told
     // to switch (D3), whatever the decision's reason, naming where the

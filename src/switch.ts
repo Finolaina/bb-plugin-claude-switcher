@@ -259,7 +259,6 @@ export function reportedFreeAt(failure: PluginTurnFailedEvent): number | null {
 export function decideSwitch(input: SwitchInput): SwitchDecision {
   const declined = declineReason(input.failure, input.stuck === true);
   if (declined !== null) return { kind: "decline", reason: declined };
-  const rateLimits = input.failure.rateLimits;
 
   const accounts = input.accounts.map((a) => settle(a, input.now));
   const stuck = input.stuck === true;
