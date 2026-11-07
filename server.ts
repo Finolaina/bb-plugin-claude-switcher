@@ -652,6 +652,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         "A Haiku turn runs on a Max or Ultra account that can still run the preferred model only while that account's weekly and preferred-model windows are both at or under this share. Opus and Sonnet never run on a Max or Ultra account while Fable is preferred, whatever this says: they run on a Team seat or wait for one. 0 = never.",
       default: 50,
     },
+    // Aitor 2026-11-07 («la cuenta de viaulab, se sigue disparando el tema
+    // la cuenta semanal y fable se queda sin gastar»). 0.5 is our own count
+    // (a regression of the week's reads, ±40 %: reparto-fable PLAN §0), not
+    // a measure made for it; real reads will set it.
+    reserveShare: {
+      type: "number",
+      label: "Weekly the preferred model spends per point of its own window",
+      description:
+        "How many points of a Max or Ultra account's general weekly one point of the preferred model's own window spends (about 0.5 for Fable, our own count from a week of reads, ±40 %). With it, the room another model has on an account is (100 − weekly) − this × (100 − preferred): the preferred model goes to the account with the most such room, in steps of 10 points, and to a Team seat last; below 0, the account reaches 100 % of its weekly with the preferred model left unspent.",
+      default: 0.5,
+    },
     stuckMoveMinutes: {
       type: "number",
       label: "A project moved for a seat with threads at work stays (minutes)",
@@ -825,6 +836,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   const reserveOf = () => ({
     reserveModel: current.preferredModel,
     reserveSpareUpTo: current.otherModelUpTo,
+    reserveShare: current.reserveShare,
   });
   settings.onChange((next) => {
     const moved =
@@ -2897,6 +2909,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         measuredAccounts(),
         current.preferredModel,
         deps.now(),
+        current.preferredModel,
+        undefined,
+        undefined,
+        undefined,
+        current.reserveShare,
       ),
       history,
       forecasts: forecasts(),
@@ -6922,6 +6939,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       freeSeats,
       paceFilter(isBackground(thread)).savedForUser,
       current.otherModelUpTo,
+      current.reserveShare,
     );
     if (to === null) {
       // Nothing to release it on; the wait fires on its own at sendAt and

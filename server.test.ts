@@ -909,6 +909,7 @@ describe("claude accounts plugin", () => {
       "paceHoldsBackground",
       "preferredModel",
       "refreshMinutes",
+      "reserveShare",
       "seatsFollowLoad",
       "seatsMax",
       "seatsTeam",
@@ -20499,8 +20500,12 @@ describe("caminos 2026-11-04", () => {
       });
       fable = 100;
       h.envSet.length = 0;
+      h.envDeleted.length = 0;
       await onePass(h);
-      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+      // Judged for Fable: off spare. Since 0.2.48 (B2) Fable goes to the
+      // Ultra main (the default: a delete) rather than the Team seat work.
+      expect(h.envDeleted.at(-1)).toMatchObject({ projectId: "proj-1" });
+      expect(h.envSet).toEqual([]);
     });
 
     it("a tick joining a turn under way is noted like any message", async () => {
@@ -20510,8 +20515,11 @@ describe("caminos 2026-11-04", () => {
         action: "proceed",
       });
       fable = 100;
+      h.envDeleted.length = 0;
       await onePass(h);
-      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("work") });
+      // Judged for Fable: off spare, to the Ultra main since 0.2.48 (B2).
+      expect(h.envDeleted.at(-1)).toMatchObject({ projectId: "proj-1" });
+      expect(h.envSet).toEqual([]);
     });
 
     // Astra T-002: a project left unplaced when the first reads failed.
