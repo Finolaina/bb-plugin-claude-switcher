@@ -105,7 +105,9 @@ Revisión (Codex r2: 1 high y 1 medium, `docs/reparto-por-hueco-2026-11-07/codex
   devolvía el proyecto a la Team, que seguía leyendo 20 % de sesión: cuatro
   idas y vueltas y el quinto fallo en `attempts-exhausted`, con la Ultra con
   hueco 46 libre. La prueba recorre ahora la cadena entera: fallo, reintento,
-  despacho y turno en la Ultra (high 1).
+  despacho y turno en la Ultra (high 1). La marca vive en memoria (una
+  recarga la olvida) y solo cuenta para «ninguna Team capaz»: otro proyecto
+  que ya está en esa Team puede fallar allí una vez, como antes.
 - Con `stuckMoveMinutes` a 0, B3 tampoco mueve un proyecto con hilos
   trabajando, como ya no lo movía `crowded`: con un hermano activo y hueco
   −13,5 frente a 46, el siguiente turno de Fable se queda donde está. Sin
