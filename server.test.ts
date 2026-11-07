@@ -22591,6 +22591,66 @@ describe("reparto por hueco 2026-11-07", () => {
         );
       });
 
+      // Astra r7: the same with work unread (its usage endpoint answers 503;
+      // its login says Team): proj-2's Opus turn goes to main too.
+      it("an Opus turn of another project on an unread Team seat a 429 marked goes to the Ultra with room (Astra r7)", async () => {
+        const h = await host(
+          {
+            main: () => Response.json(payload(5, 10, 12)),
+            work: () => new Response("down", { status: 503 }),
+          },
+          {
+            dirs: () => ["work"],
+            settings: { preferredModel: "Fable", seatsTeam: 2, seatsMax: 4, opusOverflowRoom: 15 },
+            presetEnv: { "proj-1": on("work"), "proj-2": on("work") },
+            threadEvents: {
+              "thread-1": [
+                { id: "evt_creq_1", scope: { kind: "thread" }, threadId: "thread-1", seq: 1, createdAt: NOW - 60_000, type: "client/turn/requested", data: { requestId: "creq_1", execution: { model: OPUS } } },
+              ],
+            },
+          },
+        );
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "work");
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+        expect(h.retries.at(-1)).toMatchObject({ reason: "Switched to account main (Opus)" });
+        expect(await dispatch(h, "o2", "proj-2", OPUS)).toEqual({ action: "proceed" });
+        expect(await where(h, "proj-2")).toBe("main");
+      });
+
+      // Astra r7 (decideSwitch's early exit): proj-2 on work, which proj-1's
+      // 429 marked; thread-2's turn is sent past the checkpoint (no
+      // dispatch), so where it started is unknown, and fails. Its retry is
+      // not kept on work by work's read (20/10): it goes to main.
+      it("a turn whose start account is unknown, failing on the marked Team seat, is retried on the Ultra (Astra r7)", async () => {
+        const opusLog = (threadId: string, requestId: string) => [
+          { id: `evt_${requestId}`, scope: { kind: "thread" }, threadId, seq: 1, createdAt: NOW - 60_000, type: "client/turn/requested", data: { requestId, execution: { model: OPUS } } },
+        ];
+        const h = await host(
+          {
+            main: () => Response.json(payload(5, 10, 12)),
+            work: () => Response.json(payload(20, 10, 0)),
+          },
+          {
+            dirs: () => ["work"],
+            settings: { preferredModel: "Fable", seatsTeam: 2, seatsMax: 4, opusOverflowRoom: 15 },
+            presetEnv: { "proj-1": on("work"), "proj-2": on("work") },
+            threads: { "thread-2": { projectId: "proj-2" } },
+            threadEvents: { "thread-1": opusLog("thread-1", "creq_1"), "thread-2": opusLog("thread-2", "creq_2") },
+          },
+        );
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "work");
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+        expect(h.retries.at(-1)).toMatchObject({ reason: "Switched to account main (Opus)" });
+        await active(h, "thread-2", "proj-2");
+        await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "thread-2", requestId: "creq_2" }));
+        expect(h.retries.at(-1)).toMatchObject({ threadId: "thread-2", reason: "Switched to account main (Opus)" });
+        expect(await where(h, "proj-2")).toBe("main");
+      });
+
       // Astra r5 medium 2: a 429 on work till +120 min, and 1 s later another
       // one there with no reset (+30 min). The later end stands: at 31 min
       // and 1 ms before +120 min another Opus turn stays on main; at +120

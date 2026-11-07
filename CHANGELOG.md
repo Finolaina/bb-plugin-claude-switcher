@@ -213,6 +213,20 @@ Revisión (Astra r6: 1 high y 1 medium, `docs/reparto-por-hueco-2026-11-07/astra
   tiene dueño: la escritura vieja que aterriza pasados los 90 s no suelta el
   de un movimiento posterior (medium 2).
 
+Revisión (Astra r7: 0 high y 1 medium, `docs/reparto-por-hueco-2026-11-07/astra-r7.txt`):
+
+- Una Team sin leer (endpoint de uso en 503, login de Team) con un 429
+  vigente tampoco se queda el turno de otro proyecto que está en ella: la
+  salida temprana de la colocación para una cuenta sin lecturas mira antes la
+  marca, y ese Opus va a la Ultra con hueco 46 (medium 1).
+- La otra salida temprana con el mismo fallo, en el juicio: un turno cuyo
+  arranque no se conoce (enviado sin pasar por el despacho) que falla en un
+  proyecto sobre la Team marcada ya no se reintenta allí por su lectura
+  (20/10); va a la Ultra. Las demás salidas tempranas de la colocación, de
+  la espera adelantada y del juicio ya miraban la marca o no deciden destino;
+  la de un hilo que se quedó en error la ignora a propósito, como desde la
+  Codex r2.
+
 ## [0.2.47] - 2026-11-06
 
 ### Changed

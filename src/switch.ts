@@ -295,8 +295,11 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
   // log reports the account it failed on, not the one it sits on now. The
   // same when the account it ran on is unknown: the current account first,
   // on its measurements (code-reviewer r15).
+  const marked = (name: string): number | null =>
+    stuck ? null : (input.limitedUntil?.(name) ?? null);
   if (stuck || failedOn === null) {
-    const own = accounts.filter((a) => a.name === input.currentAccount);
+    // Not one a mark keeps out (Astra r7): its read lags the 429.
+    const own = accounts.filter((a) => a.name === input.currentAccount && marked(a.name) === null);
     // A pick by hand holds for the reserved model and Haiku, never for a
     // model held off the reserve (Aitor 2026-11-06, «sí o sí»).
     const here = chooseAccount(
@@ -313,8 +316,6 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
       };
     }
   }
-  const marked = (name: string): number | null =>
-    stuck ? null : (input.limitedUntil?.(name) ?? null);
   const others = accounts.filter(
     (a) =>
       a.name !== input.currentAccount &&
@@ -806,7 +807,10 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   // model held off the reserve goes to a Team seat or waits, pick or not
   // (Aitor 2026-11-06: «los Opus tienen que salir por Team sí o sí»).
   const pinHolds = input.pinned === true && !holdsForReserve(options);
-  if (!loggedOut && (current === undefined || current.unknown === true)) {
+  // A current account marked by a 429 does not run the turn whatever its
+  // read says, or with nothing read (Astra r6, r7): the read lags the 429.
+  const currentMarked = (input.limitedUntil?.(input.currentAccount) ?? null) !== null;
+  if (!loggedOut && !currentMarked && (current === undefined || current.unknown === true)) {
     if (
       pinHolds ||
       input.unreadKeepsReserve?.(input.currentAccount) !== true ||
@@ -826,12 +830,10 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
       ? { kind: "keep", why: "current-reserved" }
       : { kind: "move", account: elsewhere.account, why: "current-reserved" };
   }
-  // A current account marked by a 429 does not run the turn whatever its
-  // read says: the read lags the 429 (Astra r6).
   const runs =
     !loggedOut &&
     current !== undefined &&
-    (input.limitedUntil?.(input.currentAccount) ?? null) === null &&
+    !currentMarked &&
     isUsable(current) &&
     canRunModel(current, input.preferredModel);
   if (runs && (pinHolds || !spendsReservedWeekly(current, options))) {

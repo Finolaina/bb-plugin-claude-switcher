@@ -2667,6 +2667,17 @@ describe("Opus overflows to the Ultra with room (0.2.48, B5)", () => {
       });
     });
 
+    // Astra r7: the same on an unread Team seat (its login says Team): the
+    // early keep for an account with nothing measured looks at the mark
+    // first.
+    it("a project on an unread Team seat a 429 marked moves to the Ultra with room (Astra r7)", () => {
+      expect(decidePlacement(base({ currentAccount: "fresh", limitedUntil: marked("fresh", NOW + HOUR) }))).toEqual({
+        kind: "move",
+        account: "roomy",
+        why: "current-blocked",
+      });
+    });
+
     it("reserveWait: the Ultra marked till +3 h waits behind the Team out for an hour; marked till +30 min, it frees then", () => {
       const held = base({ currentAccount: "tight", accounts: [outTeam, tight, roomy] });
       expect(reserveWait({ ...held, limitedUntil: marked("roomy", NOW + 3 * HOUR) })).toEqual({ account: "work", at: NOW + HOUR });
@@ -2746,6 +2757,19 @@ describe("decideSwitch with an account marked by an earlier failure (Astra r3 hi
       kind: "wait",
       account: "work",
       sendAt: NOW + HOUR + BUFFER,
+    });
+  });
+
+  // Astra r7 (an early exit of decideSwitch): a failure whose account is
+  // unknown is judged on the current account's numbers first; a mark there
+  // keeps the retry off it.
+  it("a failure whose account is unknown does not retry on the current account its mark keeps out", () => {
+    const here = input({ failedAccount: null, accounts: [account("main"), account("work")] });
+    expect(decideSwitch(here)).toEqual({ kind: "retry", account: "main", model: null });
+    expect(decideSwitch({ ...here, limitedUntil: (n) => (n === "main" ? NOW + 2 * HOUR : null) })).toEqual({
+      kind: "switch",
+      account: "work",
+      model: null,
     });
   });
 
