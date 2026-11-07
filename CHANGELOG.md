@@ -40,6 +40,15 @@ project uses [Semantic Versioning](https://semver.org/).
   Ultra (`rebalance`, a mano y sin tocar proyectos con hilos trabajando)
   sigue sin mirar el atado.
 
+### Documentado
+
+- **B5 (Opus a la Ultra con hueco sin ninguna Team capaz) está apagado en
+  producción desde el 2026-11-07**: `opusOverflowRoom` vale 100 allí por
+  decisión de Aitor, «Por el momento vamos a esperar a que opus espere
+  siempre a una cuenta Team o a una Ultra que tenga fable al 100% y solo
+  quede el semanal». Sigue valiendo la excepción de la 0.2.47. Sin cambios
+  de código.
+
 ## [0.2.48] - 2026-11-07
 
 ### Cambiado
