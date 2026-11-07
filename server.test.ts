@@ -21451,6 +21451,38 @@ describe("reparto por hueco 2026-11-07", () => {
       expect(h.envSet.filter((e) => e.projectId === "proj-1").map((e) => e.note)).toEqual([ownNote("team")]);
     });
 
+    // The seat a move for room goes to is its own from the decision (Codex r1
+    // medium 2): with one seat per Max/Ultra, another project's Fable turn on
+    // work decided while the move is written does not take that seat too.
+    it("a move for room claims its seat on the destination while it is written (Codex r1 medium 2)", async () => {
+      let other: Promise<{ action: string; reason?: string }> | null = null;
+      const h = await host(
+        {
+          main: () => Response.json(payload(5, 100, 100)),
+          spare: () => Response.json(payload(5, 90, 53)), // room -13.5
+          work: () => Response.json(payload(5, 10, 12)), // room 46
+        },
+        {
+          dirs: () => ["spare", "work"],
+          settings: { preferredModel: "Fable", seatsMax: 1, seatsFollowLoad: false, stuckMoveMinutes: 10 },
+          presetEnv: { "proj-1": on("spare"), "proj-2": on("work") },
+          beforeSet: async () => {
+            if (other === null) {
+              other = dispatch(h, "g", "proj-2", FABLE_ID);
+              await other;
+            }
+          },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "f", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      expect(await where(h, "proj-1")).toBe("work");
+      expect(other).not.toBeNull();
+      await other!;
+      expect(await where(h, "proj-2")).not.toBe("work");
+    });
+
     it("an Opus turn is not this rule's", async () => {
       const h = await start(() => 86);
       teamLogin(h, "work");

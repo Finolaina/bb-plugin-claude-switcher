@@ -144,7 +144,7 @@ M = [
     ("r1 medium 2", "un movimiento por hueco no reserva su plaza", V,
      "      decision.why === \"current-full\" || decision.why === \"fable-room\"\n",
      "      decision.why === \"current-full\"\n",
-     VT, "Codex r1 medium 2"),
+     VT, "claims its seat on the destination"),
     ("r1 medium 3", "crowded solo mira sus propios movimientos", V,
      "    if (movedRecently(thread.projectId, now)) return null;\n",
      "    const last = crowdedMoves.get(thread.projectId)?.at;\n    if (last !== undefined && now - last <= limit) return null;\n",
