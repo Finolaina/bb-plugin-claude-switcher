@@ -1,0 +1,13 @@
+HEAD 613a8d105254921ac378dea72170dfa394343a82
+MUERE      panel · la semana de una Team no la agota · src/panel.test.ts 'team4, 2026-11-07' · Tests  1 failed | 29 skipped (30)
+MUERE      panel · sin barra de semana en una Team · src/panel.test.ts 'team4, 2026-11-07' · Tests  1 failed | 29 skipped (30)
+MUERE      panel · agotada por la semana, sigue diciendo sus hilos · src/panel.test.ts 'team4, 2026-11-07' · Tests  1 failed | 29 skipped (30)
+MUERE      panel · agotada por la semana, su barra sigue siendo la de 5 h · src/panel.test.ts 'team4, 2026-11-07' · Tests  1 failed | 29 skipped (30)
+MUERE      panel · corte: la semana agota desde el 99 % · src/panel.test.ts 'team4, 2026-11-07' · Tests  1 failed | 29 skipped (30)
+MUERE      panel · corte: la semana no agota ni al 100 % · src/panel.test.ts 'team4, 2026-11-07' · Tests  1 failed | 29 skipped (30)
+MUERE      panel · parte del día en la semana de una Team · src/panel.test.ts 'team4, 2026-11-07' · Tests  1 failed | 29 skipped (30)
+MUERE      panel de bb · ninguna semanal en una Team · src/usage-source.test.ts 'team4, 2026-11-07' · Tests  1 failed | 8 skipped (9)
+MUERE      panel de bb · la semanal incompleta de una Team se enseña · src/usage-source.test.ts 'BARS-001' · Tests  1 failed | 8 skipped (9)
+MUERE      atado · el cambio anticipado escribe encima de un movimiento en curso · server.test.ts 'the move ahead does not move a project while another move of it is written' · Tests  1 failed | 878 skipped (879)
+SIN MUTAR  rc=0 · Tests  1504 passed | 1 skipped (1505)
+mutantes: 10, sin morir o sin aplicar: 0
