@@ -481,6 +481,9 @@ async function host(
       // it on.
       otherModelUpTo: 0,
       stuckMoveMinutes: 0,
+      // Off here: the tests before 0.2.48 judge Opus and Sonnet as only by
+      // Team («sí o sí», 2026-11-06); those of B5 turn it on.
+      opusOverflowRoom: 100,
       ...options.settings,
     },
     sdk: {
@@ -905,6 +908,7 @@ describe("claude accounts plugin", () => {
       "defaultAccountName",
       "loginPrivateWindow",
       "maximumWaitHours",
+      "opusOverflowRoom",
       "otherModelUpTo",
       "paceHoldsBackground",
       "preferredModel",
@@ -21296,6 +21300,95 @@ describe("reparto por hueco 2026-11-07", () => {
       expect((await dispatch(h, "b", "proj-1", FABLE_ID)).action).toBe("wait");
       expect(await where(h)).toBe("main");
       expect(h.envSet).toEqual([]);
+    });
+  });
+
+  describe("B5 [SUPUESTO]: Opus with no Team seat able takes the Ultra with room", () => {
+    const MINUTE = 60_000;
+    /**
+     * main (the default, an Ultra) at `mainUsage`; spare and work Team seats
+     * with 1 seat each, taken by Opus threads of proj-2 and proj-3; proj-1
+     * on spare.
+     */
+    const start = async (mainUsage: () => Payload, settings: Record<string, unknown> = {}) => {
+      let clock = NOW;
+      const h = await host(
+        {
+          main: () => Response.json(mainUsage()),
+          spare: () => Response.json(payload(0, 2, 0)),
+          work: () => Response.json(payload(0, 2, 0)),
+        },
+        {
+          clock: () => clock,
+          settings: { preferredModel: "Fable", seatsTeam: 1, seatsMax: 4, opusOverflowRoom: 15, ...settings },
+          presetEnv: { "proj-1": on("spare"), "proj-2": on("spare"), "proj-3": on("work") },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect((await dispatch(h, "o2", "proj-2", OPUS)).action).toBe("proceed");
+      await active(h, "o2", "proj-2");
+      expect((await dispatch(h, "o3", "proj-3", OPUS)).action).toBe("proceed");
+      await active(h, "o3", "proj-3");
+      return { h, at: (ms: number) => (clock = NOW + ms) };
+    };
+
+    it("every Team seat full and main at room 46: the Opus turn moves to main at once", async () => {
+      const { h } = await start(() => payload(5, 10, 12));
+      expect(await dispatch(h, "b", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("main");
+    });
+
+    it("cut: main at room 14.9 is no target, at 15 it is", async () => {
+      const tight = await start(() => payload(5, 80.1, 90));
+      expect((await dispatch(tight.h, "b", "proj-1", OPUS)).action).toBe("wait");
+      expect(await where(tight.h)).toBe("spare");
+      tight.h.harness.dispose();
+      const { h } = await start(() => payload(5, 80, 90));
+      expect(await dispatch(h, "b", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("main");
+    });
+
+    it("opusOverflowRoom 100 turns it off: the Opus turn waits for a Team seat, as in 0.2.44", async () => {
+      const { h } = await start(() => payload(5, 10, 12), { opusOverflowRoom: 100 });
+      expect((await dispatch(h, "b", "proj-1", OPUS)).action).toBe("wait");
+      expect(await where(h)).toBe("spare");
+    });
+
+    it("a Team seat that frees goes first", async () => {
+      const { h } = await start(() => payload(5, 10, 12));
+      await h.harness.behavior.emitThreadEvent("thread.idle", { thread: thread({ id: "o3", projectId: "proj-3" }) });
+      expect(await dispatch(h, "b", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("work");
+    });
+
+    it("held past maximumWaitHours, it takes the Ultra with the most room whatever it is (main at room 10)", async () => {
+      const { h, at } = await start(() => payload(5, 85, 90), { maximumWaitHours: 1 });
+      expect((await dispatch(h, "b", "proj-1", OPUS)).action).toBe("wait");
+      at(59 * MINUTE);
+      expect((await dispatch(h, "b", "proj-1", OPUS)).action).toBe("wait");
+      expect(await where(h)).toBe("spare");
+      at(60 * MINUTE);
+      expect(await dispatch(h, "b", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("main");
+    });
+
+    it("held past maximumWaitHours with opusOverflowRoom 100 or maximumWaitHours 0: it keeps waiting", async () => {
+      for (const settings of [{ maximumWaitHours: 1, opusOverflowRoom: 100 }, { maximumWaitHours: 0 }]) {
+        const { h, at } = await start(() => payload(5, 85, 90), settings);
+        expect((await dispatch(h, "b", "proj-1", OPUS)).action).toBe("wait");
+        at(7 * 60 * MINUTE);
+        expect((await dispatch(h, "b", "proj-1", OPUS)).action).toBe("wait");
+        expect(await where(h)).toBe("spare");
+        h.harness.dispose();
+      }
+    });
+
+    it("D8: with main not read whole it never takes Opus", async () => {
+      const { h } = await start(() => ({ ...payload(5, 10, 12), limits: [] }));
+      expect((await dispatch(h, "b", "proj-1", OPUS)).action).toBe("wait");
+      expect(await where(h)).toBe("spare");
     });
   });
 });

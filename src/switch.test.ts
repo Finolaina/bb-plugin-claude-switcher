@@ -2574,3 +2574,79 @@ describe("decidePlacement with the seats full, for Fable with a share (0.2.48, B
     expect(decidePlacement(full({ ultra: 1, team: 2 }, { reserveShare: undefined }))).toEqual({ kind: "move", account: "team", why: "current-full" });
   });
 });
+
+// PLAN §B5 [SUPUESTO] (2026-11-07): Opus with no Team able to take it goes to
+// the Ultra with the most room ≥ opusOverflowRoom, behind every Team seat,
+// measured or known by its login.
+describe("Opus overflows to the Ultra with room (0.2.48, B5)", () => {
+  const ultra = (name: string, weekly: number, fable: number) =>
+    account(name, {
+      weekly: { usedPercent: weekly, resetsAt: NOW + 48 * HOUR },
+      models: { Fable: { usedPercent: fable, resetsAt: NOW + 72 * HOUR } },
+    });
+  const outTeam = account("work", { team: true, session: { usedPercent: 100, resetsAt: NOW + HOUR } });
+  const fullTeam = account("spare", { team: true });
+  const roomy = ultra("roomy", 10, 12); // room 46
+  const tight = ultra("tight", 86, 53); // room -9.5
+  const base = (overrides: Partial<PlacementInput> = {}): PlacementInput => ({
+    currentAccount: "work",
+    isNew: false,
+    accounts: [outTeam, fullTeam, tight, roomy],
+    preferredModel: "Opus",
+    reserveModel: "Fable",
+    reserveShare: 0.5,
+    opusOverflowRoom: 15,
+    noTeamTakes: () => true,
+    freeSeats: (n) => (n === "spare" ? 0 : 4),
+    now: NOW,
+    ...overrides,
+  });
+
+  it("from a Team out of its session, every other Team full: to the Ultra with room 46", () => {
+    expect(decidePlacement(base())).toEqual({ kind: "move", account: "roomy", why: "current-blocked" });
+  });
+
+  it("an unread Team seat goes first", () => {
+    expect(decidePlacement(base({ unreadTeams: ["fresh"] }))).toEqual({ kind: "move", account: "fresh", why: "current-blocked" });
+  });
+
+  it("from a full Team seat (seats full), to the Ultra with room; none with room: it waits", () => {
+    const full = base({ currentAccount: "spare", accounts: [fullTeam, tight, roomy], seatsFull: true });
+    expect(decidePlacement(full)).toEqual({ kind: "move", account: "roomy", why: "current-full" });
+    expect(decidePlacement({ ...full, accounts: [fullTeam, tight] })).toEqual({ kind: "keep" });
+  });
+
+  it("opusOverflowRoom 100: kept where it is, as in 0.2.44", () => {
+    expect(decidePlacement(base({ opusOverflowRoom: 100 }))).toEqual({ kind: "keep", why: "current-blocked" });
+  });
+
+  it("a project on such an Ultra stays while no Team takes the turn, and goes to a Team seat once one does", () => {
+    expect(decidePlacement(base({ currentAccount: "roomy" }))).toEqual({ kind: "keep" });
+    const teamFree = base({ currentAccount: "roomy", noTeamTakes: () => false, freeSeats: () => 4 });
+    expect(decidePlacement(teamFree)).toEqual({ kind: "move", account: "spare", why: "current-reserved" });
+  });
+
+  it("reserveWait: the Ultra with room, free now, before a Team out for an hour; a Team free now still first", () => {
+    const held = base({ currentAccount: "tight", accounts: [outTeam, tight, roomy] });
+    expect(reserveWait(held)).toEqual({ account: "roomy", at: 0 });
+    expect(reserveWait({ ...held, opusOverflowRoom: 100 })).toEqual({ account: "work", at: NOW + HOUR });
+    expect(reserveWait({ ...held, accounts: [outTeam, fullTeam, tight, roomy] })).toEqual({ account: "spare", at: 0 });
+  });
+
+  it("after a failure on a Team seat, the switch goes to the Ultra with room", () => {
+    expect(
+      decideSwitch(
+        input({
+          currentAccount: "work",
+          accounts: [outTeam, fullTeam, tight, roomy],
+          preferredModel: "Opus",
+          reserveModel: "Fable",
+          reserveShare: 0.5,
+          opusOverflowRoom: 15,
+          noTeamTakes: () => true,
+          freeSeats: (n) => (n === "spare" ? 0 : 4),
+        }),
+      ),
+    ).toEqual({ kind: "switch", account: "roomy", model: "Opus" });
+  });
+});

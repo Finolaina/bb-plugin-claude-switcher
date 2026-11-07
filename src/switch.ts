@@ -70,6 +70,10 @@ export interface SwitchInput {
   reserveSpareUpTo?: number;
   /** See ChoiceOptions.reserveShare. */
   reserveShare?: number;
+  /** See ChoiceOptions.opusOverflowRoom. */
+  opusOverflowRoom?: number;
+  /** See ChoiceOptions.noTeamTakes. */
+  noTeamTakes?: (model: string) => boolean;
   /**
    * The project was put on the current account by hand: a thread left in
    * error is retried there whenever the account runs the model, whatever it
@@ -245,6 +249,8 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
     reserveModel: input.reserveModel,
     reserveSpareUpTo: input.reserveSpareUpTo,
     reserveShare: input.reserveShare,
+    opusOverflowRoom: input.opusOverflowRoom,
+    noTeamTakes: input.noTeamTakes,
     savedForUser: input.savedForUser,
   };
   // A failure just reported rules its account out. Left in error, the thread
@@ -543,6 +549,10 @@ export interface PlacementInput {
   reserveSpareUpTo?: number;
   /** See ChoiceOptions.reserveShare. */
   reserveShare?: number;
+  /** See ChoiceOptions.opusOverflowRoom. */
+  opusOverflowRoom?: number;
+  /** See ChoiceOptions.noTeamTakes. */
+  noTeamTakes?: (model: string) => boolean;
   /**
    * The account the project left for a turn in another model (its excursion),
    * for a turn in the reserved model to go back to; null when the caller
@@ -714,6 +724,8 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     reserveModel: input.reserveModel,
     reserveSpareUpTo: input.reserveSpareUpTo,
     reserveShare: input.reserveShare,
+    opusOverflowRoom: input.opusOverflowRoom,
+    noTeamTakes: input.noTeamTakes,
     savedForUser: input.savedForUser,
   };
   if (input.isNew) {
@@ -943,6 +955,8 @@ export function reserveWait(
     reserveModel: input.reserveModel,
     reserveSpareUpTo: input.reserveSpareUpTo,
     reserveShare: input.reserveShare,
+    opusOverflowRoom: input.opusOverflowRoom,
+    noTeamTakes: input.noTeamTakes,
   };
   // At the same time, a Team seat before a Max out of the reserved model
   // (Codex R047-R2-004).
@@ -993,6 +1007,8 @@ export function placedOn(input: PlacementInput): string | null {
         reserveModel: input.reserveModel,
         reserveSpareUpTo: input.reserveSpareUpTo,
         reserveShare: input.reserveShare,
+        opusOverflowRoom: input.opusOverflowRoom,
+        noTeamTakes: input.noTeamTakes,
       },
     )?.account ?? null
   );
@@ -1014,6 +1030,10 @@ export interface AheadInput {
   reserveSpareUpTo?: number;
   /** See ChoiceOptions.reserveShare. */
   reserveShare?: number;
+  /** See ChoiceOptions.opusOverflowRoom. */
+  opusOverflowRoom?: number;
+  /** See ChoiceOptions.noTeamTakes. */
+  noTeamTakes?: (model: string) => boolean;
   /** Share of a window (session, weekly or the preferred model's) at which the project moves ahead of the limit. */
   threshold: number;
   /** Seats free on an account: ahead of the limit, only an account with one is a target. */
@@ -1065,6 +1085,8 @@ export function decideAhead(input: AheadInput): AheadDecision {
     reserveModel: input.reserveModel,
     reserveSpareUpTo: input.reserveSpareUpTo,
     reserveShare: input.reserveShare,
+    opusOverflowRoom: input.opusOverflowRoom,
+    noTeamTakes: input.noTeamTakes,
     freeSeats: input.freeSeats,
     savedForUser: input.savedForUser,
   });

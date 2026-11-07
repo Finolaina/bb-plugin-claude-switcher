@@ -972,3 +972,77 @@ describe("the reserved model ranks by opusRoom (0.2.48, B2)", () => {
     expect(chooseAccount([spent("a", 80, 10), spent("b", 20, 60)], { ...opus, preferredModel: "Haiku" })?.account).toBe("a");
   });
 });
+
+// PLAN §B5 [SUPUESTO] (2026-11-07). Aitor: «los Opus tienen que salir por
+// Team sí o sí» (11-06) is the order, Team always first; «tampoco quiero que
+// hilos se queden parados … el trabajo prima» (11-07): with no Team able to
+// take it, Opus does not wait while an Ultra has general weekly Fable will
+// not need; «Esperar siempre» (11-03) stays for the Ultras without such room.
+describe("Opus with no Team able to take it: the Ultra with the most room (0.2.48, B5)", () => {
+  const ultra = (name: string, weekly: number, fable: number, more: Partial<AccountUsage> = {}) =>
+    account(name, {
+      weekly: { usedPercent: weekly, resetsAt: NOW + 48 * HOUR },
+      models: { Fable: { usedPercent: fable, resetsAt: NOW + 72 * HOUR } },
+      ...more,
+    });
+  const team = account("team", { team: true, models: { Fable: { usedPercent: 4, resetsAt: NOW + 48 * HOUR } } });
+  const opus = (more: Partial<ChoiceOptions> = {}): ChoiceOptions => ({
+    preferredModel: "Opus",
+    reserveModel: "Fable",
+    reserveShare: 0.5,
+    opusOverflowRoom: 15,
+    noTeamTakes: () => true,
+    freeSeats: (n) => (n === "team" ? 0 : 6),
+    ...more,
+  });
+
+  it("every Team full: Ultra A at room 46 goes, not B at -9.5", () => {
+    expect(chooseAccount([ultra("b", 86, 53), ultra("a", 10, 12), team], opus())?.account).toBe("a");
+  });
+
+  it("a Team seat with one seat goes first (no overflow while a Team takes it)", () => {
+    const free = { freeSeats: (n: string) => (n === "team" ? 1 : 6) };
+    expect(chooseAccount([ultra("a", 10, 12), team], opus({ ...free, noTeamTakes: () => false }))?.account).toBe("team");
+    // Even with the server's flag stale, the Team ranks first.
+    expect(chooseAccount([ultra("a", 10, 12), team], opus(free))?.account).toBe("team");
+  });
+
+  it("cut: room 14.9 waits, 15.0 enters", () => {
+    // (100 - 80.1) - 0.5 * 10 = 14.9; (100 - 80) - 0.5 * 10 = 15.
+    expect(chooseAccount([ultra("a", 80.1, 90), team], opus())).toBeNull();
+    expect(chooseAccount([ultra("a", 80, 90), team], opus())?.account).toBe("a");
+    expect(spendsReservedWeekly(ultra("a", 80.1, 90), opus())).toBe(true);
+    expect(spendsReservedWeekly(ultra("a", 80, 90), opus())).toBe(false);
+  });
+
+  it("an Ultra not read whole never takes it", () => {
+    expect(chooseAccount([ultra("a", 10, 12, { unknown: true }), team], opus())).toBeNull();
+    expect(spendsReservedWeekly(ultra("a", 10, 12, { unknown: true }), opus())).toBe(true);
+  });
+
+  it("opusOverflowRoom 100 turns it off; unset, no share or no flag too", () => {
+    expect(chooseAccount([ultra("a", 10, 12), team], opus({ opusOverflowRoom: 100 }))).toBeNull();
+    expect(chooseAccount([ultra("a", 0, 99), team], opus({ opusOverflowRoom: 100 }))).toBeNull();
+    expect(chooseAccount([ultra("a", 10, 12), team], opus({ opusOverflowRoom: undefined }))).toBeNull();
+    expect(chooseAccount([ultra("a", 10, 12), team], opus({ reserveShare: undefined }))).toBeNull();
+    expect(chooseAccount([ultra("a", 10, 12), team], opus({ noTeamTakes: () => false }))).toBeNull();
+    expect(chooseAccount([ultra("a", 10, 12), team], opus({ noTeamTakes: undefined }))).toBeNull();
+  });
+
+  it("the flag is asked for the turn's model", () => {
+    const asked: string[] = [];
+    chooseAccount([ultra("a", 10, 12), team], opus({ noTeamTakes: (m) => (asked.push(m), true) }));
+    expect(asked.length).toBeGreaterThan(0);
+    expect(new Set(asked)).toEqual(new Set(["Opus"]));
+  });
+
+  it("Sonnet too; Haiku and Fable keep their rules", () => {
+    expect(chooseAccount([ultra("a", 10, 12), team], opus({ preferredModel: "Sonnet" }))?.account).toBe("a");
+    expect(spendsReservedWeekly(ultra("a", 60, 12), opus({ preferredModel: "Haiku", reserveSpareUpTo: 50 }))).toBe(true);
+    expect(spendsReservedWeekly(ultra("a", 10, 12), opus({ preferredModel: "Fable" }))).toBe(false);
+  });
+
+  it("a Team seat is never one: it spends nothing of Fable's anyway", () => {
+    expect(spendsReservedWeekly(team, opus())).toBe(false);
+  });
+});

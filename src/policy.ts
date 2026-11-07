@@ -82,6 +82,21 @@ export interface ChoiceOptions {
    * «fable se queda sin gastar»). Unset = the order before 0.2.48.
    */
   reserveShare?: number;
+  /**
+   * A model held off the reserve (Opus, Sonnet) with no Team seat able to
+   * take it (`noTeamTakes`) may run on a Max or Ultra account whose opusRoom
+   * is at least this, after every Team seat (reparto-fable PLAN §B5,
+   * [SUPUESTO]: Aitor 2026-11-07, «tampoco quiero que hilos se queden parados
+   * … el trabajo prima», with «sí o sí» of 2026-11-06 as the order). Unset,
+   * 100 or more = never (the rule of 0.2.44), and so without a share.
+   */
+  opusOverflowRoom?: number;
+  /**
+   * No Team seat, measured or known by its login, can take a turn in
+   * `model` now: its quota and a free seat (set by the server). Unset = a
+   * Team seat may: no Max or Ultra takes the turn for its room.
+   */
+  noTeamTakes?: (model: string) => boolean;
 }
 
 export interface Choice {
@@ -180,6 +195,7 @@ export function spendsReservedWeekly(
   // left of it and whatever its margin, also when it reports no weekly
   // (Codex r1 high 3): with no Team seat the turn waits.
   if (reserveSpentTillWeekly(account, options.reserveModel!)) return false;
+  if (overflowsByRoom(account, options)) return false;
   if (holdsForReserve(options)) return true;
   if (account.weekly.absent === true) return false;
   return (
@@ -219,7 +235,8 @@ export function reserveSpentTillWeekly(
 
 /**
  * A Max or Ultra account that takes a model held off the reserve only because
- * the reserved model is spent there until its weekly resets: it comes after
+ * the reserved model is spent there until its weekly resets, or because no
+ * Team seat can and it has room (overflowsByRoom, 0.2.48): it comes after
  * every Team seat, whatever their session or windows (Codex R047-002), for a
  * Team seat runs both models and a project with threads in each stays put.
  */
@@ -230,7 +247,31 @@ export function afterTeams(
   return (
     holdsForReserve(options) &&
     account.team !== true &&
-    reserveSpentTillWeekly(account, options.reserveModel!)
+    (reserveSpentTillWeekly(account, options.reserveModel!) ||
+      overflowsByRoom(account, options))
+  );
+}
+
+/**
+ * A Max or Ultra account that takes a model held off the reserve because no
+ * Team seat can and its opusRoom is at least `opusOverflowRoom` (see
+ * ChoiceOptions.opusOverflowRoom): what that turn spends is weekly the
+ * reserved model will not need. Never one not read whole (opusRoom null).
+ */
+export function overflowsByRoom(
+  account: AccountUsage,
+  options: ChoiceOptions,
+): boolean {
+  const threshold = options.opusOverflowRoom;
+  const share = options.reserveShare;
+  if (threshold === undefined || !(threshold < 100) || share === undefined)
+    return false;
+  if (!holdsForReserve(options) || account.team === true) return false;
+  const room = opusRoom(account, options.reserveModel!, share);
+  return (
+    room !== null &&
+    room >= threshold &&
+    options.noTeamTakes?.(options.preferredModel) === true
   );
 }
 

@@ -672,6 +672,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         "Before a turn in the preferred model on a Max or Ultra account whose room for another model (see above) is below 0, the project moves to a Max or Ultra account with a free seat and at least this many points more room. With another thread of the project at work, only below −10 and not within the minutes below of its last move. Needs the automatic choice. 0 or less = never.",
       default: 20,
     },
+    // PLAN §B5 (reparto-fable, 2026-11-07) [SUPUESTO]: Aitor 2026-11-07,
+    // «tampoco quiero que hilos se queden parados … el trabajo prima», with
+    // «los Opus tienen que salir por Team sí o sí» (2026-11-06) as the order.
+    // 15 is our own count, not a measure.
+    opusOverflowRoom: {
+      type: "number",
+      label: "Opus and Sonnet on a Max or Ultra with no Team seat able, from room (points)",
+      description:
+        "With no Team seat able to take an Opus or Sonnet turn (quota and a free seat), the turn runs on the Max or Ultra account with the most room for another model (see above) if that room is at least this, after every Team seat; with none, it waits for a Team seat as before, and a turn held that way longer than the maximum automatic wait takes the Ultra with the most room whatever it is. 100 = never (Opus and Sonnet only by Team, as before).",
+      default: 15,
+    },
     stuckMoveMinutes: {
       type: "number",
       label: "A project moved for a seat with threads at work stays (minutes)",
@@ -846,6 +857,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     reserveModel: current.preferredModel,
     reserveSpareUpTo: current.otherModelUpTo,
     reserveShare: current.reserveShare,
+    opusOverflowRoom: current.opusOverflowRoom,
+    noTeamTakes: (model: string) => noTeamTakes(model),
   });
   settings.onChange((next) => {
     const moved =
@@ -4967,7 +4980,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       isNew: false,
       accounts: measured,
       preferredModel: model,
-      ...reserveOf(),
+      ...reserveFor(threadId, now),
       excursionFrom: wayHome(projectId, model, measured, now),
       freeSeats:
         own === null
@@ -5117,12 +5130,59 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const settled = settle(usage, deps.now());
     return !(isUsable(settled) && canRunModel(settled, model));
   }
+  /**
+   * No Team seat, measured or known by its login, can take a turn in
+   * `model` now (see ChoiceOptions.noTeamTakes): unlocked, its session and
+   * windows under 100 %, and a seat free for the turn: one it holds, or one
+   * beyond the threads queued ahead of it (all of them, for no thread).
+   */
+  function noTeamTakes(model: string, threadId?: string): boolean {
+    const now = deps.now();
+    const measured = measuredAccounts(model);
+    const teams = [
+      ...measured
+        .filter((a) => a.team === true && a.unknown !== true)
+        .map((a) => settle(a, now)),
+      ...unreadTeamSeats({ accounts: measured, unreadTeams: unreadTeams(model), currentAccount: "", now }),
+    ];
+    return !teams.some((a) => {
+      if (!isUsable(a) || !canRunModel(a, model)) return false;
+      const key = seatKey(a.name);
+      if (threadId !== undefined && seats.seatOf(threadId)?.account === key) return true;
+      const queue = seats.queue(key);
+      const ahead = threadId === undefined ? -1 : queue.findIndex((q) => q.threadId === threadId);
+      return seats.free(key) > (ahead === -1 ? queue.length : ahead);
+    });
+  }
+  /**
+   * The choice options for a turn of `threadId` (see reserveOf): a Team seat
+   * it holds or is first in line for counts as one that takes it, and once
+   * its message has been held longer than maximumWaitHours any Max or Ultra
+   * with room known takes it behind the Team seats ([SUPUESTO], reparto-fable
+   * PLAN §B5: «esa espera respeta maximumWaitHours»). Off with
+   * opusOverflowRoom at 100 or more, or maximumWaitHours 0.
+   */
+  function reserveFor(threadId: string | undefined, now: number) {
+    const base = reserveOf();
+    if (threadId === undefined) return base;
+    const since = waitSince.get(threadId);
+    const overdue =
+      current.opusOverflowRoom < 100 &&
+      current.maximumWaitHours > 0 &&
+      since !== undefined &&
+      now - since >= current.maximumWaitHours * 3_600_000;
+    return {
+      ...base,
+      noTeamTakes: (model: string) => noTeamTakes(model, threadId),
+      ...(overdue ? { opusOverflowRoom: -Infinity } : {}),
+    };
+  }
   /** A turn in `model` goes to a Team seat only (see holdsForReserve). */
   function heldModel(model: string): boolean {
     return holdsForReserve({ preferredModel: model, ...reserveOf() });
   }
-  function heldOff(name: string, model: string, projectId?: string): boolean {
-    const options = { preferredModel: model, ...reserveOf() };
+  function heldOff(name: string, model: string, projectId?: string, threadId?: string): boolean {
+    const options = { preferredModel: model, ...reserveFor(threadId, deps.now()) };
     // A pick by hand no longer lets such a turn spend the reserve (Aitor
     // 2026-11-06, «sí o sí»): `projectId` is kept for the callers.
     if (!holdsForReserve(options)) return false;
@@ -5931,7 +5991,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         model !== null &&
         at !== null &&
         at.account !== null &&
-        heldOff(at.account, model, thread.projectId)
+        heldOff(at.account, model, thread.projectId, thread.id)
       ) {
         const reason = `Waiting to place ${model} again: the project is on ${at.account}, which keeps its weekly for ${current.preferredModel}`;
         bb.log.info(`thread ${thread.id}: its message waits (${reason})`);
