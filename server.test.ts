@@ -5919,6 +5919,22 @@ function teamPayload(session: number, fable: number): Payload {
   };
 }
 
+// Astra r2 low (2026-11-07): an answer with no weekly_all but a lock is
+// whole, its weekly unknown (`missing`). The views get that mark, so the
+// panel draws no week nobody measured.
+it("hands the views a weekly unknown under a lock with its missing mark (Astra r2 low)", async () => {
+  const locked = teamPayload(40, 85);
+  const h = await host({
+    main: () => Response.json(payload(5, 10, 12)),
+    work: () => Response.json({ ...locked, five_hour: { locked_reason: "abuse" }, seven_day: { locked_reason: null } }),
+  });
+  dispose = () => h.harness.dispose();
+  const state = (await h.harness.behavior.callRpc("accounts_refresh", null)) as State;
+  const work = state.accounts.find((a) => a.name === "work")!;
+  expect(work.usage).toMatchObject({ blocked: true, weekly: { usedPercent: 100, resetsAt: null, missing: true } });
+  expect(work.usage?.unknown).toBeUndefined();
+});
+
 describe("moving a project ahead of the limit for a thread in another model", () => {
   // The project's account (main) is a Team seat whose session is nearly
   // full; work is a Team seat with room; spare is a Max account that still
@@ -21780,6 +21796,62 @@ describe("reparto por hueco 2026-11-07", () => {
       expect(h.envSet.filter((e) => e.projectId === "proj-1").map((e) => e.note)).toEqual([ownNote("team")]);
       const history = ((await h.harness.behavior.callRpc("accounts_list", null)) as State).history;
       expect(history.filter((r) => r.projectId === "proj-1").map((r) => [r.from, r.to])).toEqual([["spare", "team"]]);
+    });
+
+    // The same for the move ahead of the limit, on in production since
+    // switchAheadOtherPercent is 95 there (2026-11-07). proj-1 sits on spare
+    // (96/60: room -16, and 96 % of its week, past the 95 for an Opus
+    // thread); work reads 5/10/12 (room 46). A Fable dispatch starts its
+    // move for room to work, its variable write held; meanwhile thread-1's
+    // Opus turn ends. The move ahead, reading spare still, does not write
+    // the Team seat over the move under way: one write, one move, and the
+    // next turn's end looks again. Before: work and team, two moves.
+    it("the move ahead does not move a project while another move of it is written (Astra r8 medium 2, the move ahead)", async () => {
+      let gate: Promise<void> | null = null;
+      let reached = false;
+      let open = () => {};
+      const h = await host(
+        {
+          main: () => Response.json(payload(5, 100, 100)),
+          spare: () => Response.json(payload(5, 96, 60)),
+          work: () => Response.json(payload(5, 10, 12)), // room 46
+          team: () => Response.json(payload(0, 2, 0)),
+        },
+        {
+          dirs: () => ["spare", "work", "team"],
+          settings: { preferredModel: "Fable", seatsMax: 4, seatsTeam: 5, switchAheadOtherPercent: 95 },
+          presetEnv: { "proj-1": on("spare") },
+          threadEvents: {
+            "thread-1": [
+              { id: "evt_creq_1", scope: { kind: "thread" }, threadId: "thread-1", seq: 1, createdAt: NOW - 60_000, type: "client/turn/requested", data: { requestId: "creq_1", execution: { model: OPUS } } },
+            ],
+          },
+          beforeSet: async () => {
+            const held = gate;
+            gate = null;
+            if (held === null) return;
+            reached = true;
+            await held;
+          },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "team");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      gate = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      const fable = dispatch(h, "f", "proj-1", FABLE_ID);
+      await vi.waitFor(() => expect(reached).toBe(true));
+      await h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: thread({ id: "thread-1", projectId: "proj-1" }),
+        lastAssistantText: null,
+      });
+      open();
+      expect(await fable).toEqual({ action: "proceed" });
+      expect(h.envSet.filter((e) => e.projectId === "proj-1").map((e) => e.note)).toEqual([ownNote("work")]);
+      const history = ((await h.harness.behavior.callRpc("accounts_list", null)) as State).history;
+      expect(history.filter((r) => r.projectId === "proj-1").map((r) => [r.from, r.to])).toEqual([["spare", "work"]]);
     });
 
     it("a move whose variable write outlasts its dispatch holds the project till the write ends (Astra r6 medium 2)", async () => {

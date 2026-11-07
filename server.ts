@@ -379,6 +379,11 @@ const windowSchema = z.object({
   resetsAt: z.number().nullable(),
   /** The provider reported no such window: a Team seat's general weekly. */
   absent: z.literal(true).optional(),
+  /**
+   * The answer lacked it (incomplete, or whole only for a lock): 100 % that
+   * nobody measured. The panel draws no such week (Astra r2 low).
+   */
+  missing: z.literal(true).optional(),
 });
 const accountStateSchema = z.object({
   name: z.string(),
@@ -4252,6 +4257,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       now,
     });
     if (decision.kind === "keep") return;
+    // Nor over another automatic move of the project under way (a
+    // dispatch's, its variable still being written): this read predates it.
+    // The next turn's end looks again (Astra r8 medium 2, the same guard as
+    // the rescue's; on in production: switchAheadOtherPercent 95, 2026-11-07).
+    if (moving(projectId)) {
+      bb.log.info(
+        `thread ${thread.id}: not moved ahead of the limit to ${decision.account}: another move of the project is under way; looked at again at the next turn's end`,
+      );
+      return;
+    }
     // Moved by something else while the sessions were shared: this
     // decision, taken on the account before, no longer holds.
     if (
@@ -5505,12 +5520,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // first sending it back): a second move in a row. Held, and placed again
     // on a fresh read (Codex/Astra ASIENTOS-R3-001/R3-002/R4-001/R5-001;
     // every move of placeTurn since Astra r3 medium 4).
-    // The failure's judgment, the refresh's rescue and moveUpWait look at it
-    // too (Astra r8 medium 2), and so does placeProject (Astra r9 medium).
-    // ponytail: moveAhead and rebalance do not look at it (Astra
-    // ASIENTOS-R6-001; moveAhead needs switchAheadPercent on, rebalance is
-    // by hand and skips projects with threads working); the way up is to
-    // check it where every automatic move is written.
+    // The failure's judgment, the refresh's rescue, moveUpWait and moveAhead
+    // look at it too (Astra r8 medium 2; moveAhead since 0.2.49), and so does
+    // placeProject (Astra r9 medium).
+    // ponytail: rebalance does not look at it (Astra ASIENTOS-R6-001; it is
+    // run by hand and skips projects with threads working); the way up is
+    // to check it where every automatic move is written.
     if (decision.account !== fromName && moving(projectId)) {
       heldForMove.add(projectId);
       turn.held = {

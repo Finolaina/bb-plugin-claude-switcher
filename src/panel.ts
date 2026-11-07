@@ -161,7 +161,7 @@ export function whenLong(
   return `${lang === "es" ? "el" : "on"} ${name} ${target.day}, ${target.time}`;
 }
 
-type Window = { usedPercent: number; resetsAt: number | null; absent?: true };
+type Window = { usedPercent: number; resetsAt: number | null; absent?: true; missing?: true };
 
 /** An account as the plugin's state carries it (State["accounts"][number]). */
 export interface PanelAccount {
@@ -385,13 +385,19 @@ export function accountRow(
   const ahead = (at: number | null): at is number => at !== null && at > now;
 
   // The window that orders the list and says when it is back: the week,
-  // or the 5 hours on a Team seat (it has no general week).
+  // or the 5 hours on a Team seat. A Team seat's general weekly, when its
+  // reading has one, stops it too (Aitor, 2026-11-07, team4: see the bars);
+  // one its reading lacks is absent, at 0 %, and stops nothing.
   const main = !whole ? null : team ? usage.session : usage.weekly;
+  // Never by a week nobody measured: an answer with no weekly_all but a
+  // lock is whole, its week `missing` at 100 % (Astra r2 low).
+  const weekOut =
+    whole && team && usage.weekly.missing !== true && usedOf(usage.weekly, now) >= 100;
   const limits = !whole
     ? []
     : [
         ...(usage.session.absent === true ? [] : [usage.session]),
-        ...(team ? [] : [usage.weekly]),
+        usage.weekly,
       ];
   const full = limits.filter((w) => usedOf(w, now) >= 100);
   const locked = whole && usage.blocked;
@@ -443,7 +449,9 @@ export function accountRow(
           : t.notMeasured,
     );
   else if (locked) parts.push(t.locked);
-  if (whole && team) {
+  // Out of its week, a Team seat says the week as an Ultra does (its bar),
+  // not its threads (2026-11-07).
+  if (whole && team && !weekOut) {
     if (seats !== undefined && seats.capacity > 0)
       parts.push(t.threads(seatsUsed(seats), seats.capacity));
   }
@@ -496,8 +504,15 @@ export function accountRow(
         ...(usage.session.absent === true
           ? []
           : [barOf("five", t.nameFive, usage.session, t.usedFive)]),
-        // Never on a Team seat: it has no general week (Aitor, 2026-11-02).
-        ...(team || usage.weekly.absent === true
+        // On a Team seat too when its reading has a general weekly (Aitor,
+        // 2026-11-07: «no entiendo por qué pone agotada si tiene fable»):
+        // team4 read 5 h 0 %, Fable 85 % and its week 100 %, and a Fable turn
+        // there answered «You've hit your weekly limit». The rule of
+        // 2026-11-02 («never on a Team seat») held while Team seats reported
+        // no week. No day's budget on it: the panel holds no Team seat back
+        // by its pace (weekUsed is 100 there).
+        // Nor a week nobody measured (`missing`, see weekOut), on any plan.
+        ...(usage.weekly.absent === true || usage.weekly.missing === true
           ? []
           : [
               barOf(
@@ -514,7 +529,8 @@ export function accountRow(
           ? []
           : [barOf("model", model[0], model[1], (n) => t.usedModel(model[0], n))]),
       ];
-  const bar = bars.find((b) => b.kind === (team ? "five" : "week")) ?? null;
+  // A Team seat's 5 hours, unless its week is what runs it out.
+  const bar = bars.find((b) => b.kind === (team && !weekOut ? "five" : "week")) ?? null;
   return {
     name: account.name,
     state,

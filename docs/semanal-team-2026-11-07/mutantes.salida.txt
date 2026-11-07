@@ -1,0 +1,17 @@
+HEAD 4f3a85a10956eecc967abc6997c85c22654ea5a9
+MUERE      panel · la semana de una Team no la agota · src/panel.test.ts 'team4, 2026-11-07' · Tests  1 failed | 29 skipped (30)
+MUERE      panel · sin barra de semana en una Team · src/panel.test.ts 'team4, 2026-11-07' · Tests  1 failed | 29 skipped (30)
+MUERE      panel · agotada por la semana, sigue diciendo sus hilos · src/panel.test.ts 'team4, 2026-11-07' · Tests  1 failed | 29 skipped (30)
+MUERE      panel · agotada por la semana, su barra sigue siendo la de 5 h · src/panel.test.ts 'team4, 2026-11-07' · Tests  1 failed | 29 skipped (30)
+MUERE      panel · corte: la semana agota desde el 99 % · src/panel.test.ts 'team4, 2026-11-07' · Tests  1 failed | 29 skipped (30)
+MUERE      panel · corte: la semana no agota ni al 100 % · src/panel.test.ts 'team4, 2026-11-07' · Tests  1 failed | 29 skipped (30)
+MUERE      panel · parte del día en la semana de una Team · src/panel.test.ts 'team4, 2026-11-07' · Tests  1 failed | 29 skipped (30)
+MUERE      panel · la barra pinta una semana desconocida (Astra r2) · src/panel.test.ts 'team4, 2026-11-07' · Tests  1 failed | 29 skipped (30)
+MUERE      panel · una semana desconocida agota la Team (Astra r2) · src/panel.test.ts 'team4, 2026-11-07' · Tests  1 failed | 29 skipped (30)
+MUERE      panel · el estado no lleva la marca missing a las vistas (Astra r2) · server.test.ts 'missing mark' · Tests  1 failed | 879 skipped (880)
+MUERE      panel de bb · ninguna semanal en una Team · src/usage-source.test.ts 'team4, 2026-11-07' · Tests  1 failed | 9 skipped (10)
+MUERE      panel de bb · la semanal incompleta de una Team se enseña · src/usage-source.test.ts 'BARS-001' · Tests  1 failed | 9 skipped (10)
+MUERE      panel de bb · una semanal medida sin reinicio se esconde (Codex Sol r1) · src/usage-source.test.ts 'measured without a reset' · Tests  1 failed | 9 skipped (10)
+MUERE      atado · el cambio anticipado escribe encima de un movimiento en curso · server.test.ts 'the move ahead does not move a project while another move of it is written' · Tests  1 failed | 879 skipped (880)
+SIN MUTAR  rc=0 · Tests  1506 passed | 1 skipped (1507)
+mutantes: 14, sin morir o sin aplicar: 0

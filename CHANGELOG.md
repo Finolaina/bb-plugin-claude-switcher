@@ -4,6 +4,67 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.49] - 2026-11-07
+
+### Corregido
+
+- **El panel enseña la semana de una Team cuando su lectura la trae.**
+  Aitor, 2026-11-07: «no entiendo por qué pone agotada si tiene fable,
+  revísalo por favor». team4 leía 5 h al 0 % (sin empezar), Fable al 85 % y
+  la semanal general al 100 % hasta el lunes 9 a las 17:00, y un turno de
+  Fable allí contestó «You've hit your weekly limit»: la semanal general de
+  una Team existe desde la 0.2.39 y frena todo, Fable incluido. El panel
+  seguía la regla del 2026-11-02 («nunca la semana en una Team», cuando las
+  Team no la daban): con los números de team4, reproducido en un test, su
+  fila decía «Libre · sin empezar» y no enseñaba ninguna semana. Ahora una Team con semanal en la
+  lectura tiene su barra «Semana» con su reinicio, cuenta como agotada si
+  esa semana está al 100 % (vuelve cuando se reinicia), y el menú y la línea
+  del hilo dicen la semana («Semana 100 % · vuelve lun 17:00») en vez de sus
+  hilos. Sin parte del día en esa barra: el panel no frena ninguna Team por
+  su ritmo. Una Team cuya lectura no trae semanal se ve como antes, y las
+  Ultra y Max no cambian. Astra r2 (low,
+  `docs/semanal-team-2026-11-07/astra-r2.txt`): una respuesta sin
+  `weekly_all` pero con un bloqueo explícito (`locked_reason`) se da por
+  completa y deja la semanal desconocida (`missing`, al 100 %); el panel
+  pintaba «Semana 100 %» sin que nadie la midiera. Ahora no dibuja esa
+  semana en ningún plan ni da una Team por agotada por ella: sigue agotada
+  por el bloqueo, que es lo que dice. Para eso el estado que reciben las
+  vistas lleva ya la marca `missing` de cada ventana: su esquema la quitaba,
+  y el panel nunca la habría visto (lo prueba un test del servidor).
+- **El panel de uso de bb también recibe la semanal de una Team** cuando su
+  lectura la midió, con reinicio o sin él (mismo patrón, en
+  `src/usage-source.ts`: la escondía por la misma regla del 2026-11-02; es el
+  panel del «Agotada» de la captura de Aitor). Una respuesta incompleta, que
+  deja la semanal desconocida (`missing`: un 100 % que nadie midió), sigue
+  sin semanal: es lo que protegía Codex BARS-001. Codex Sol r1 (medium,
+  `docs/semanal-team-2026-11-07/codex-r1.txt`): la primera versión pedía
+  además el reinicio, y una semanal medida al 100 % sin reinicio se
+  escondía; bb veía 0 % y 85 % y no el límite que frena la cuenta. El test
+  de BARS-001 usaba justo una medición válida sin reinicio; ahora usa la
+  respuesta incompleta que BARS-001 quería evitar. El panel propio no tenía
+  ese corte (lo cubre ahora un test).
+- **El cambio anticipado no mueve un proyecto mientras se escribe otro
+  movimiento suyo** (el mismo freno que el rescate y la espera adelantada
+  desde la 0.2.48). En la 0.2.48 quedó como límite porque se creía apagado
+  (`switchAheadPercent` y `switchAheadOtherPercent` valen 0 por defecto),
+  pero en producción `switchAheadOtherPercent` vale 95: está encendido para
+  los hilos de Opus. Con el proyecto en una Ultra al 96 % de su semana, un
+  despacho de Fable escribía su movimiento por hueco a otra Ultra y,
+  mientras, el final de un turno de Opus escribía la Team: dos movimientos,
+  y aterrizaba el primero encima. Ahora el final del turno no escribe, y el
+  final del siguiente turno lo vuelve a mirar. Límite: el reparto entre
+  Ultra (`rebalance`, a mano y sin tocar proyectos con hilos trabajando)
+  sigue sin mirar el atado.
+
+### Documentado
+
+- **B5 (Opus a la Ultra con hueco sin ninguna Team capaz) está apagado en
+  producción desde el 2026-11-07**: `opusOverflowRoom` vale 100 allí por
+  decisión de Aitor, «Por el momento vamos a esperar a que opus espere
+  siempre a una cuenta Team o a una Ultra que tenga fable al 100% y solo
+  quede el semanal». Sigue valiendo la excepción de la 0.2.47. Sin cambios
+  de código.
+
 ## [0.2.48] - 2026-11-07
 
 ### Cambiado

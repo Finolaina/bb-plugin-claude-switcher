@@ -368,7 +368,7 @@ describe("accountRow", () => {
     ).toMatchObject({ state: "out", line: "bloqueada por el proveedor" });
   });
 
-  it("draws a Team seat with its 5 hours and its Fable, never a week, with its threads", () => {
+  it("draws a Team seat with no weekly in its reading with its 5 hours and its Fable, no week, with its threads", () => {
     const row = accountRow(team("team2", 51, "2026-10-31T00:00:00+01:00", 89), seats(2, 2, 1), ES);
     expect(row).toMatchObject({
       state: "working",
@@ -390,16 +390,87 @@ describe("accountRow", () => {
     });
   });
 
-  it("never draws a week on a Team seat, even one the plan does not name (no general weekly)", () => {
+  it("draws no week on a Team seat whose reading has no general weekly, named Team or not", () => {
     const seat = team("t", 20, "2026-10-31T00:00:00+01:00", 30);
-    // Named Team, a weekly in the answer is still not drawn.
-    const withWeekly = { ...seat, usage: { ...seat.usage, weekly: win(55, NOW + 72 * H) } };
-    for (const account of [seat, { ...seat, plan: undefined }, withWeekly]) {
+    for (const account of [seat, { ...seat, plan: undefined }]) {
       const row = accountRow(account, undefined, ES);
       expect(row.team).toBe(true);
       expect(row.bars.map((b) => b.kind)).toEqual(["five", "model"]);
       expect(row.bars.map((b) => b.label).join(" ")).not.toMatch(/semana/);
     }
+  });
+
+  // Aitor, 2026-11-07: «no entiendo por qué pone agotada si tiene fable».
+  // team4 read 5 h 0 % (not started), its general weekly 100 % till Monday
+  // 17:00 and Fable 85 %; a Fable turn there answered «You've hit your weekly
+  // limit». A Team seat reports a general weekly since 0.2.39: the week is
+  // drawn when the reading has it, and says why the seat is out.
+  it("draws a Team seat's week when its reading has one, and says it when the week is what runs it out (team4, 2026-11-07)", () => {
+    const seat = team("team4", 0, null, 85);
+    const team4 = { ...seat, usage: { ...seat.usage, weekly: win(100, at("2026-11-02T17:00:00+01:00")) } };
+    const row = accountRow(team4, seats(0, 5), ES);
+    expect(row).toMatchObject({ state: "out", word: "Agotada", team: true, planShort: "Team", when: "vuelve lun 17:00" });
+    expect(row.bars.map((b) => [b.kind, b.figure, b.today, b.resets])).toEqual([
+      ["five", "0 %", 0, ""],
+      ["week", "100 %", 0, "se reinicia el lunes 2, 17:00"],
+      ["model", "85 %", 0, "se reinicia el lunes 2, 21:55"],
+    ]);
+    expect(row.bar).toMatchObject({ kind: "week", label: "Ha gastado el 100 % de la semana" });
+    expect(menuLine(row)).toBe("Semana 100 % · vuelve lun 17:00");
+    expect(threadLine(row)).toBe("Team · ha gastado el 100 % de la semana · vuelve lun 17:00");
+    expect(cardLine(row)).toBe("Team · vuelve lun 17:00");
+    expect(row.help).toContain("Ha gastado el 100 % de la semana · se reinicia el lunes 2, 17:00");
+    // Measured without a reset (the reset is optional in the answer): still
+    // its week, out, with no «vuelve» to give (Codex Sol r1 medium, its sibling).
+    const noReset = accountRow({ ...team4, usage: { ...team4.usage, weekly: win(100, null) } }, seats(0, 5), ES);
+    expect(noReset).toMatchObject({ state: "out", when: "", bar: { kind: "week", figure: "100 %" } });
+    expect(menuLine(noReset)).toBe("Semana 100 %");
+    // Astra r2 low: no weekly_all and the 5 hours locked («abuse»): the
+    // parser leaves the week unknown (100 %, `missing`) but the reading whole
+    // (a lock is proof). Out by the lock, with no week drawn: nobody measured
+    // it. The same for an Ultra.
+    const lockedSeat = {
+      ...team4,
+      usage: { ...team4.usage, blocked: true, session: win(40, at("2026-10-31T00:00:00+01:00")), weekly: { usedPercent: 100, resetsAt: null, missing: true as const } },
+    };
+    const locked = accountRow(lockedSeat, seats(0, 5), ES);
+    expect(locked).toMatchObject({ state: "out", line: "bloqueada por el proveedor · 0 de 5 hilos", bar: { kind: "five", figure: "40 %" } });
+    expect(locked.bars.map((b) => b.kind)).toEqual(["five", "model"]);
+    expect(locked.help).not.toMatch(/semana/);
+    expect(menuLine(locked)).toBe("bloqueada por el proveedor · 0 de 5 hilos");
+    const lockedUltra = ultra("u", 40, "2026-11-02T09:00:00+01:00", null);
+    const lockedU = accountRow(
+      { ...lockedUltra, usage: { ...lockedUltra.usage, blocked: true, weekly: { usedPercent: 100, resetsAt: null, missing: true as const } } },
+      undefined,
+      ES,
+    );
+    expect(lockedU).toMatchObject({ state: "out", line: "bloqueada por el proveedor" });
+    expect(lockedU.bars.map((b) => b.kind)).toEqual(["five", "model"]);
+    // The cut: at 99 % its week does not run it out; its 5 hours and threads speak.
+    const edge = accountRow({ ...team4, usage: { ...team4.usage, weekly: win(99, at("2026-11-02T17:00:00+01:00")) } }, seats(0, 5), ES);
+    expect(edge).toMatchObject({ state: "free", when: "sin empezar", line: "0 de 5 hilos", bar: { kind: "five" } });
+    expect(menuLine(edge)).toBe("5 h 0 % · sin empezar");
+    // A week with room: drawn, but the 5 hours still say when it is back.
+    const roomy = { ...seat, usage: { ...seat.usage, session: win(20, at("2026-10-31T00:00:00+01:00")), weekly: win(55, NOW + 72 * H) } };
+    const free = accountRow(roomy, seats(0, 5), ES);
+    expect(free).toMatchObject({ state: "free", when: "vuelve mañana 00:00", bar: { kind: "five" } });
+    expect(free.bars.map((b) => [b.kind, b.figure, b.today])).toEqual([
+      ["five", "20 %", 0],
+      ["week", "55 %", 0],
+      ["model", "85 %", 0],
+    ]);
+    expect(menuLine(free)).toBe("5 h 20 % · vuelve mañana 00:00");
+    // A pace sent for it does not shade a day's budget on its week.
+    const paced = accountRow({ ...roomy, pace: { budget: 10, spent: 2, dayPercent: 20, background: true } }, seats(0, 5), ES);
+    expect(paced.bars.find((b) => b.kind === "week")?.today).toBe(0);
+    expect(paced.state).toBe("free");
+  });
+
+  it("draws an Ultra out of its week as before", () => {
+    const row = accountRow(ultra("u", 100, "2026-11-02T09:00:00+01:00", { budget: 10, spent: 1 }), undefined, ES);
+    expect(row).toMatchObject({ state: "out", team: false, when: "vuelve lun 09:00", bar: { kind: "week", figure: "100 %" } });
+    expect(row.bars.map((b) => b.kind)).toEqual(["five", "week", "model"]);
+    expect(menuLine(row)).toBe("Semana 100 % · vuelve lun 09:00");
   });
 
   it("draws the preferred model's bar only when the account's usage has that window", () => {
@@ -564,7 +635,7 @@ describe("threadLine / menuLine", () => {
     expect(cardLine(aitor)).toBe("Ultra · sin tope de 5 h · vuelve lun 09:00");
     const team2 = accountRow(team("team2", 51, "2026-10-31T00:00:00+01:00", 89), seats(2, 2, 1), EN);
     expect(threadLine(team2)).toBe("Team · used 51 % of the 5 hours · back tomorrow 00:00");
-    // A Team seat's menu line is its 5 hours, never a week.
+    // A Team seat's menu line is its 5 hours (no weekly in its reading).
     expect(menuLine(team2)).toBe("5 h 51 % · back tomorrow 00:00");
     const mariscal = accountRow(
       { name: "mariscal", problem: { kind: "unauthenticated" }, usage: null, plan: "ultra", fiveHour: null },

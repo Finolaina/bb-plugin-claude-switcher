@@ -1,0 +1,8 @@
+VEREDICTO: 0 high, 1 medium, 0 low
+tokens used
+133,553
+- **medium — Se oculta una semanal real sin reinicio en bb.** [src/usage-source.ts:90](/home/aitor/Desarrollo/_wt/switcher-semanal-team/src/usage-source.ts:90). Escenario: Team con **5 h al 0 %, semanal al 100 %, `resetsAt: null` y Fable al 85 %**. `parseUsage` acepta esa lectura como completa: el reinicio es opcional. El panel propio muestra «Agotada · Semana 100 %», pero bb recibe únicamente las ventanas **0 % y 85 %**, ocultando el límite que impide trabajar. La condición debería distinguir una semanal medida de la desconocida (`missing: true`), conservando BARS-001. El [fixture de BARS-001](/home/aitor/Desarrollo/_wt/switcher-semanal-team/src/usage-source.test.ts:134) reproduce precisamente una medición válida sin reinicio, por lo que actualmente exige esa ocultación y deja pasar el fallo.
+
+Verificación: **39 tests de panel y adaptador pasan**, y typecheck correcto. Los tests de servidor no pudieron ejecutarse: su host necesita crear temporales y el entorno solo permite lectura.
+
+VEREDICTO: 0 high, 1 medium, 0 low
