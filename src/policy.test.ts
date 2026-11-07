@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   canRunModel,
   chooseAccount,
+  opusRoom,
   spendsNoWeekly,
   spendsReservedWeekly,
   type AccountUsage,
@@ -860,5 +861,40 @@ describe("Opus solo por Team (2026-11-06)", () => {
     expect(spendsReservedWeekly(ultra(50, 50), as("Haiku", 50))).toBe(false);
     expect(spendsReservedWeekly(ultra(51, 10), as("Haiku", 50))).toBe(true);
     expect(spendsReservedWeekly(ultra(0, 100), as("Haiku", 50))).toBe(false);
+  });
+});
+
+// Aitor 2026-11-07: «la cuenta de viaulab, se sigue disparando el tema la
+// cuenta semanal y fable se queda sin gastar». The general weekly an Ultra
+// has left beyond what its own Fable still needs (PLAN §B1, reparto-fable).
+describe("opusRoom: the general weekly left beyond what Fable needs (0.2.48)", () => {
+  const ultra = (weekly: number, fable: number, more: Partial<AccountUsage> = {}) =>
+    account("ultra", {
+      weekly: { usedPercent: weekly, resetsAt: NOW + 48 * HOUR },
+      models: { Fable: { usedPercent: fable, resetsAt: NOW + 48 * HOUR } },
+      ...more,
+    });
+
+  it("(100 - weekly) - share * (100 - Fable): the plan's three measured accounts", () => {
+    expect(opusRoom(ultra(86, 53), "Fable", 0.5)).toBeCloseTo(-9.5, 10);
+    expect(opusRoom(ultra(100, 65), "Fable", 0.5)).toBeCloseTo(-17.5, 10);
+    expect(opusRoom(ultra(10, 12), "Fable", 0.5)).toBeCloseTo(46, 10);
+  });
+
+  it("the share weighs Fable's room", () => {
+    expect(opusRoom(ultra(10, 12), "Fable", 0)).toBeCloseTo(90, 10);
+    expect(opusRoom(ultra(10, 12), "Fable", 1)).toBeCloseTo(2, 10);
+  });
+
+  it("the reserved model is matched case-insensitively", () => {
+    expect(opusRoom(ultra(86, 53), "fable", 0.5)).toBeCloseTo(-9.5, 10);
+  });
+
+  it("null for a Team seat, an incomplete read, no weekly, no window of the reserved model or no reserved model", () => {
+    expect(opusRoom(ultra(10, 12, { team: true }), "Fable", 0.5)).toBeNull();
+    expect(opusRoom(ultra(10, 12, { unknown: true, blocked: true }), "Fable", 0.5)).toBeNull();
+    expect(opusRoom(ultra(10, 12, { weekly: { usedPercent: 0, resetsAt: null, absent: true } }), "Fable", 0.5)).toBeNull();
+    expect(opusRoom(ultra(10, 12, { models: {} }), "Fable", 0.5)).toBeNull();
+    expect(opusRoom(ultra(10, 12), "", 0.5)).toBeNull();
   });
 });

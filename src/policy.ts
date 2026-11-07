@@ -227,6 +227,35 @@ export function afterTeams(
 }
 
 /**
+ * The general weekly a Max or Ultra account has left beyond what its own
+ * window of the reserved model still needs: `(100 − weekly) − share ·
+ * (100 − reserved)`, in points of the weekly (Aitor 2026-11-07, «se sigue
+ * disparando el tema la cuenta semanal y fable se queda sin gastar»).
+ * Positive: weekly another model may spend without taking any from the
+ * reserved model. Negative: the account reaches 100 % of its weekly with
+ * that much left to spend of the reserved model times `share`, lost at the
+ * reset. `share` is the weekly the reserved model spends per point of its
+ * own window (measured 0.45-0.6 per account, ±40 %, reparto-fable PLAN §0).
+ * Null for a Team seat, an incomplete read, no weekly reported, or no window
+ * of the reserved model: nothing to weigh.
+ */
+export function opusRoom(
+  account: AccountUsage,
+  reserve: string,
+  share: number,
+): number | null {
+  if (
+    account.team === true ||
+    account.unknown === true ||
+    account.weekly.absent === true
+  )
+    return null;
+  const own = modelWindow(account, reserve);
+  if (own === undefined) return null;
+  return 100 - account.weekly.usedPercent - share * (100 - own.usedPercent);
+}
+
+/**
  * The account keeps enough of the reserved model's weekly for a turn in
  * another model to run there (see ChoiceOptions.reserveSpareUpTo).
  */
