@@ -180,6 +180,15 @@ Revisión (Astra r5: 0 high y 3 medium, `docs/reparto-por-hueco-2026-11-07/astra
   acabe su marca. En la colocación la marca cuenta para todos los modelos;
   en el juicio del fallo sigue siendo solo de Opus y Sonnet (medium 1).
   Límite: el rescate de un proyecto varado no mira las marcas.
+- El atado de un movimiento antes de un turno se apunta antes de esperar
+  nada, y lo suelta el final del despacho aunque este se haya rendido. Con el
+  guardado del historial colgado, el despacho daba `proceed` a los 3 s y el
+  atado se quedaba sin dueño: un hermano de Opus oía «this project is being
+  moved» a los 1, 11 y 60 min con una Team con 2 plazas libres; ahora va a
+  esa Team. Ningún atado dura más de `SEAT_TTL_MS` (90 s, el tiempo que ata
+  `siblingAdmitted`), tampoco el de un movimiento después de un turno, que
+  no tiene despacho que lo suelte. Corte probado a 90 s − 1 ms y a 90 s
+  (medium 3).
 
 ## [0.2.47] - 2026-11-06
 

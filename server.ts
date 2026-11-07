@@ -1219,16 +1219,24 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return now - last <= limit;
   }
   /**
-   * Projects with a move for a seat under way, from its decision until it
-   * is recorded (crowdedMoves), and projects with a turn held meanwhile:
-   * asked again as the move ends, landed or not (Astra ASIENTOS-R4-001/002).
+   * Projects with a move under way, from its decision until it is recorded
+   * (crowdedMoves), with when it was decided, and projects with a turn held
+   * meanwhile: asked again as the move ends, landed or not (Astra
+   * ASIENTOS-R4-001/002). No hold outlives SEAT_TTL_MS, the time
+   * siblingAdmitted ties a project for from the first time: a write that
+   * never answers held the project for ever (Astra r5 medium 3).
    */
-  const seatMoving = new Set<string>();
+  const seatMoving = new Map<string, number>();
   const heldForMove = new Set<string>();
+  function moving(projectId: string): boolean {
+    const since = seatMoving.get(projectId);
+    return since !== undefined && deps.now() - since < SEAT_TTL_MS;
+  }
   /**
-   * The project each dispatch's move holds, till that dispatch ends: the
-   * move's history is stored after its write, and until its thread is told
-   * to start no siblingAdmitted protects it (Astra r4 medium 2).
+   * The project each dispatch's move holds, till that dispatch ends, given
+   * up or not: the move's history is stored after its write, and until its
+   * thread is told to start no siblingAdmitted protects it (Astra r4
+   * medium 2). Set before anything is awaited (Astra r5 medium 3).
    */
   const heldMoves = new Map<string, string>();
   function releaseMove(projectId: string): void {
@@ -1236,7 +1244,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     wakeHeldForMove(projectId);
   }
   function wakeHeldForMove(projectId: string): void {
-    if (seatMoving.has(projectId) || movesOf(projectId).inFlight > 0) return;
+    if (moving(projectId) || movesOf(projectId).inFlight > 0) return;
     if (!heldForMove.delete(projectId)) return;
     void bb.experimental_hooks
       .recheck("message.dispatch")
@@ -5457,7 +5465,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // ponytail: moves made outside placeTurn (moveAhead, a refresh) do not
     // look at it (Astra ASIENTOS-R6-001; needs switchAheadPercent on); the
     // way up is to check it where every automatic move is written.
-    if (decision.account !== fromName && seatMoving.has(projectId)) {
+    if (decision.account !== fromName && moving(projectId)) {
       heldForMove.add(projectId);
       turn.held = {
         sendAt: now + SEAT_RECHECK_MS,
@@ -5484,11 +5492,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // written, whatever its reason: an Opus turn's move to a Team seat crossed
     // a Fable sibling's move for room (Astra r3 medium 4).
     const seatMove = decision.account !== fromName;
-    if (seatMove) seatMoving.add(projectId);
-    const to = accountOrDefault(decision.account);
     // Before a turn the hold lasts till the dispatch ends (see heldMoves):
     // its thread is told to start by then, and siblingAdmitted takes over.
-    let handedOver = false;
+    const handedOver = seatMove && when === "before";
+    if (seatMove) seatMoving.set(projectId, now);
+    if (handedOver) heldMoves.set(thread.id, projectId);
+    const to = accountOrDefault(decision.account);
     try {
       if (claim !== null) {
         seatProjects.set(thread.id, projectId);
@@ -5540,10 +5549,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         // Its turn has not started: it runs on the new account.
         thread.id,
       );
-      if (seatMove && when === "before" && !turn.abandoned) {
-        heldMoves.set(thread.id, projectId);
-        handedOver = true;
-      }
     } finally {
       if (seatMove && !handedOver) releaseMove(projectId);
     }

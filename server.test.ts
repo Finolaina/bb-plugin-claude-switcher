@@ -24,6 +24,7 @@ import {
   MODEL_READ_LIMIT_MS,
   RESERVE_RECHECK_MS,
   SEAT_RECHECK_MS,
+  SEAT_TTL_MS,
   type State,
 } from "./server.js";
 import type { AccountsIo } from "./src/accounts.js";
@@ -10589,6 +10590,38 @@ describe("an Opus turn on a Max account that keeps Fable", () => {
         ["main", "work", "Moved to account work after a turn in Opus: main would spend Fable's weekly"],
       ]);
     });
+
+    // Astra r5 medium 3: no hold outlives SEAT_TTL_MS. The move after the
+    // Opus turn never records its history (no dispatch ends it); the Fable
+    // turn that would take the project back to main waits while the hold
+    // stands, 1 ms before SEAT_TTL_MS, and goes back at SEAT_TTL_MS.
+    for (const [after, held] of [[SEAT_TTL_MS - 1, true], [SEAT_TTL_MS, false]] as const)
+      it(`a move after the turn whose history never lands holds the project ${after} ms after: ${held} (Astra r5 medium 3)`, async () => {
+        let clock = NOW;
+        const h = await host(MAX_AND_SEAT, { settings: FABLE, threadEvents: logged(OPUS_ID), clock: () => clock });
+        dispose = () => h.harness.dispose();
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        let hung = false;
+        const set = h.bb.storage.kv.set.bind(h.bb.storage.kv);
+        h.bb.storage.kv.set = async (key: string, value: unknown) => {
+          if (key === "last-switch" && !hung) {
+            hung = true;
+            return new Promise<never>(() => {});
+          }
+          return set(key, value as never);
+        };
+        await started(h);
+        void ended(h);
+        await vi.waitFor(() => expect(hung).toBe(true));
+        expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([["proj-1", ownNote("work")]]);
+        clock = NOW + after;
+        const answer = await dispatch(h, "thread-2", FABLE_ID);
+        if (held) expect(answer).toMatchObject({ action: "wait", reason: "Waiting: this project is being moved to another account" });
+        else {
+          expect(answer).toEqual({ action: "proceed" });
+          expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-1"]);
+        }
+      });
 
     it("leaves it after a Fable turn", async () => {
       const h = await host(MAX_AND_SEAT, { settings: FABLE, threadEvents: logged(FABLE_ID) });
@@ -21570,6 +21603,54 @@ describe("reparto por hueco 2026-11-07", () => {
       expect(opus).not.toBeNull();
       expect((await opus!).action).toBe("wait");
       expect(h.envSet.filter((e) => e.projectId === "proj-1").map((e) => e.note)).toEqual([ownNote("work")]);
+    });
+
+    // Astra r5 medium 3: the move's history never lands (the first
+    // "last-switch" write hangs); the dispatch gives up at its limit and the
+    // turn goes. Its hold ends with the dispatch: an Opus sibling 1 min
+    // later is not told "this project is being moved", and goes to the Team
+    // seat with 2 free.
+    it("a move whose history never lands stops holding the project when its dispatch ends (Astra r5 medium 3)", async () => {
+      let clock = NOW;
+      const h = await host(
+        {
+          main: () => Response.json(payload(5, 100, 100)),
+          spare: () => Response.json(payload(5, 90, 53)), // room -13.5
+          work: () => Response.json(payload(5, 10, 12)), // room 46
+          team: () => Response.json(payload(0, 2, 0)),
+        },
+        {
+          clock: () => clock,
+          dirs: () => ["spare", "work", "team"],
+          settings: { preferredModel: "Fable", seatsMax: 4, seatsTeam: 2, stuckMoveMinutes: 10 },
+          presetEnv: { "proj-1": on("spare") },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "team");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      let hung = false;
+      const set = h.bb.storage.kv.set.bind(h.bb.storage.kv);
+      h.bb.storage.kv.set = async (key: string, value: unknown) => {
+        if (key === "last-switch" && !hung) {
+          hung = true;
+          return new Promise<never>(() => {});
+        }
+        return set(key, value as never);
+      };
+      vi.useFakeTimers();
+      try {
+        const answer = dispatch(h, "f", "proj-1", FABLE_ID);
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(await answer).toEqual({ action: "proceed" });
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(hung).toBe(true);
+      await active(h, "f", "proj-1");
+      clock = NOW + 60_000;
+      expect(await dispatch(h, "o", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet.filter((e) => e.projectId === "proj-1").map((e) => e.note)).toEqual([ownNote("work"), ownNote("team")]);
     });
 
     it("an Opus turn is not this rule's", async () => {
