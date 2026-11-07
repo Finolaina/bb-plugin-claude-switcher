@@ -21749,6 +21749,72 @@ describe("reparto por hueco 2026-11-07", () => {
           expect(await where(h, "proj-2")).toBe(to);
         });
 
+      // Only a usage limit just reported marks work: a failure that is no
+      // limit, or a thread left in error judged on a refresh (its failure may
+      // be hours old), leaves it to its numbers.
+      it("a failure that is no usage limit does not keep work out (Codex r2 high 1)", async () => {
+        const h = await failingHost({ refreshMinutes: 600 });
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "work");
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        await h.harness.behavior.emitThreadEvent(
+          "turn.failed",
+          failure({ errorInfo: { category: "server-error", providerCode: "overloaded", httpStatusCode: 529 } }),
+        );
+        expect(await dispatch(h, "o2", "proj-2", OPUS)).toEqual({ action: "proceed" });
+        expect(await where(h, "proj-2")).toBe("work");
+      });
+
+      it("a thread left in error, judged on a refresh, does not keep work out (Codex r2 high 1)", async () => {
+        const h = await host(
+          { main: () => Response.json(payload(5, 10, 12)), work: () => Response.json(payload(20, 10, 0)) },
+          {
+            dirs: () => ["work"],
+            settings: { preferredModel: "Fable", seatsTeam: 2, seatsMax: 4, opusOverflowRoom: 15, refreshMinutes: 600 },
+            presetEnv: { "proj-1": on("work") },
+            threads: { "thread-1": { status: "error" } },
+            threadEvents: {
+              "thread-1": [
+                { id: "evt_1", scope: { kind: "thread" }, threadId: "thread-1", seq: 1, createdAt: NOW - HOUR, type: "client/turn/requested", data: { requestId: "creq_1", execution: { model: OPUS } } },
+                {
+                  id: "evt_2",
+                  scope: { kind: "thread" },
+                  threadId: "thread-1",
+                  seq: 2,
+                  createdAt: NOW - HOUR,
+                  type: "provider/error",
+                  data: {
+                    providerThreadId: "p",
+                    threadId: "thread-1",
+                    message: "Provider error",
+                    detail: "You've hit your session limit",
+                    errorInfo: { category: "rate-limit", providerCode: "rate_limit_event", httpStatusCode: 429 },
+                  },
+                },
+                {
+                  id: "evt_3",
+                  scope: { kind: "thread" },
+                  threadId: "thread-1",
+                  seq: 3,
+                  createdAt: NOW - HOUR,
+                  type: "provider/rateLimits/updated",
+                  data: { providerThreadId: "p", threadId: "thread-1", rateLimits: failure().rateLimits },
+                },
+              ],
+            },
+          },
+        );
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "work");
+        const run = h.harness.behavior.runService("usage-refresh");
+        await vi.waitFor(() => expect(h.retries).toHaveLength(1));
+        run.controller.abort();
+        await run.done;
+        expect(h.retries[0]).toMatchObject({ threadId: "thread-1", turnRequestId: "creq_1" });
+        expect(await dispatch(h, "o2", "proj-2", OPUS)).toEqual({ action: "proceed" });
+        expect(await where(h, "proj-2")).toBe("work");
+      });
+
       it("a 429 with no reset reported keeps work out until a read says otherwise (Codex r2 high 1)", async () => {
         let clock = NOW;
         const h = await failingHost({ refreshMinutes: 600 }, () => clock);
