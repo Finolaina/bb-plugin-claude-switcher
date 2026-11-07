@@ -5310,7 +5310,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         ? {
             roomMoveGap: current.roomMoveGap,
             projectSeated: projectSeated(projectId, thread.id),
-            movedRecently: movedRecently(projectId, now),
+            // stuckMoveMinutes 0 keeps a project with threads at work where
+            // it is, as it keeps crowded off (Codex r2 medium 2).
+            movedRecently: !(current.stuckMoveMinutes > 0) || movedRecently(projectId, now),
           }
         : {}),
       // On the account the project moved to only (code-reviewer r3).

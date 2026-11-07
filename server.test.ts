@@ -21280,6 +21280,27 @@ describe("reparto por hueco 2026-11-07", () => {
       expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("spare") });
     });
 
+    // Codex r2 medium 2: stuckMoveMinutes 0 keeps a project with threads at
+    // work where it is; B3 too (main 90/53, room -13.5; spare 46). The cut:
+    // 0 stays, 1 moves. With no sibling at work, 0 does not hold it.
+    for (const [minutes, to] of [[0, null], [1, "spare"]] as const)
+      it(`with a sibling at work and stuckMoveMinutes ${minutes}, room -13.5 ${to === null ? "stays" : "moves"} (Codex r2 medium 2)`, async () => {
+        let weekly = 40;
+        const h = await start(() => weekly, { stuckMoveMinutes: minutes });
+        expect(await dispatch(h, "a", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+        await active(h, "a");
+        weekly = 90;
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        expect(await dispatch(h, "b", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+        expect(h.envSet.map((e) => e.note)).toEqual(to === null ? [] : [ownNote(to)]);
+      });
+
+    it("stuckMoveMinutes 0 with no sibling at work: room -13.5 still moves (Codex r2 medium 2)", async () => {
+      const h = await start(() => 90, { stuckMoveMinutes: 0 });
+      expect(await dispatch(h, "a", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      expect(h.envSet.map((e) => e.note)).toEqual([ownNote("spare")]);
+    });
+
     it("a move for room with siblings at work: no other within stuckMoveMinutes, one after", async () => {
       let clock = NOW;
       let spare: [number, number] = [10, 12];
