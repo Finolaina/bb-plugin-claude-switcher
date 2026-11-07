@@ -81,6 +81,10 @@ Revisión (Codex r1: 1 high y 4 medium, `docs/reparto-por-hueco-2026-11-07/codex
 - Un solo descanso entre movimientos de un proyecto con hilos trabajando,
   lo haga la regla que lo haga: tras moverse por hueco, `crowded` tampoco lo
   mueve dentro de `stuckMoveMinutes` (medium 3).
+- Un movimiento por hueco reserva su plaza en el destino y ata el proyecto
+  mientras se escribe, como uno por plaza: un hermano de Opus que decide con
+  la misma lectura espera y vuelve a preguntar, en vez de escribir otro
+  destino a la vez (medium 2).
 
 ## [0.2.47] - 2026-11-06
 

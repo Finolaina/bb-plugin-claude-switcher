@@ -5375,8 +5375,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // PLAZAS-R3-001). A move that fails leaves it as the message asks for
     // a seat where the project is (a seat elsewhere is given up); one
     // whose turn never starts is freed as any reservation is (SEAT_TTL_MS).
+    // A move for room claims its seat and holds the project's other moves
+    // the same way (Codex r1 medium 2): a sibling deciding on the same read
+    // would write another destination meanwhile.
     const claim =
-      decision.why === "current-full" ? seatKey(decision.account) : null;
+      decision.why === "current-full" || decision.why === "fable-room"
+        ? seatKey(decision.account)
+        : null;
     const seatMove = claim !== null && decision.account !== fromName;
     if (seatMove) seatMoving.add(projectId);
     const to = accountOrDefault(decision.account);

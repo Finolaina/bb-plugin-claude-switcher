@@ -21345,6 +21345,43 @@ describe("reparto por hueco 2026-11-07", () => {
       expect(await where(h)).toBe("work");
     });
 
+    // Codex r1 medium 2: while a move for room is being written, an Opus
+    // sibling deciding on the same read does not write another destination:
+    // it waits, and is placed again once the move lands.
+    it("a move for room holds the project's other moves while it is written (Codex r1 medium 2)", async () => {
+      let opus: Promise<{ action: string; reason?: string }> | null = null;
+      const h = await host(
+        {
+          main: () => Response.json(payload(5, 100, 100)),
+          spare: () => Response.json(payload(5, 90, 53)), // room -13.5
+          work: () => Response.json(payload(5, 10, 12)), // room 46
+          team: () => Response.json(payload(0, 2, 0)),
+        },
+        {
+          dirs: () => ["spare", "work", "team"],
+          settings: { preferredModel: "Fable", seatsMax: 4, seatsTeam: 2, stuckMoveMinutes: 10 },
+          presetEnv: { "proj-1": on("spare") },
+          beforeSet: async () => {
+            if (opus === null) {
+              opus = dispatch(h, "o", "proj-1", OPUS);
+              await opus;
+            }
+          },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "team");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "f", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      expect(opus).not.toBeNull();
+      expect((await opus!).action).toBe("wait");
+      expect(h.envSet.filter((e) => e.projectId === "proj-1").map((e) => e.note)).toEqual([ownNote("work")]);
+      // Asked again once f has started on work: the Team seat.
+      await active(h, "f");
+      expect(await dispatch(h, "o", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet.filter((e) => e.projectId === "proj-1").map((e) => e.note)).toEqual([ownNote("work"), ownNote("team")]);
+    });
+
     it("an Opus turn is not this rule's", async () => {
       const h = await start(() => 86);
       teamLogin(h, "work");
