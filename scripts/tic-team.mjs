@@ -12,24 +12,31 @@
 // 0 % y 0,0006 $ de coste de lista.
 //
 // No usa la lógica del plugin ni lo cambia: lee `bb claude-switcher health
-// --json` (la ventana de cada cuenta) y `list --json` (su carpeta). Una
-// lectura o un tic que falla sale con código 1, visible en `bb automation runs`.
+// --json` (la ventana de cada cuenta) y `list --json` (su carpeta y la hora de
+// su lectura). Una lectura o un tic que falla sale con código 1, visible en
+// `bb automation runs`.
 import { execFile } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { appendFile, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-/** Tras un tic, la lectura de uso puede tardar en verlo: no se repite antes de esto. */
+/** Tras un tic, no se repite antes de esto aunque la lectura siga sin ventana. */
 export const RETIC_MS = 30 * 60_000;
 /** Una lectura de uso más vieja no sirve para saber si hay ventana abierta. */
 export const VIEJO_MS = 30 * 60_000;
+/** Un cerrojo más viejo es de una pasada muerta: 5 tics de 2 min caben de sobra. */
+export const CERROJO_MS = 15 * 60_000;
 const BB_MS = 60_000;
 const CLAUDE_MS = 120_000;
-/** Variables de la sesión que lanza el script: con ellas claude se cree hijo de otra sesión. */
-const DE_LA_SESION = [
+/**
+ * Fuera del entorno de claude: lo que lo haría hijo de otra sesión y toda
+ * credencial que gane al login guardado en la carpeta de la cuenta (con ellas
+ * el tic iría a otra cuenta y diría «ok»; Codex r1).
+ */
+const FUERA = [
   "CLAUDECODE",
   "CLAUDE_CODE_ENTRYPOINT",
   "CLAUDE_AGENT_SDK_VERSION",
@@ -37,15 +44,32 @@ const DE_LA_SESION = [
   "CLAUDE_CODE_SESSION_ID",
   "CLAUDE_CONFIG_DIR",
   "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "CLAUDE_CODE_USE_BEDROCK",
+  "CLAUDE_CODE_USE_VERTEX",
+  "CLAUDE_CODE_USE_FOUNDRY",
+];
+export const ARGS = [
+  "-p", "Responde solo: ok",
+  "--model", "haiku",
+  "--tools", "",
+  "--strict-mcp-config",
+  "--setting-sources", "project",
+  "--no-session-persistence",
+  "--output-format", "json",
 ];
 
 const pct = (ventana) => ventana?.pctExacto ?? ventana?.pct ?? 0;
 
 /**
- * El juicio, puro. `carpetas`: {cuenta: CLAUDE_CONFIG_DIR}; `estado`: {ultimo: {cuenta: ms}}.
- * Devuelve las Team que reciben tic ahora y las que lo merecían pero no pueden.
+ * El juicio, puro. `lista`: {cuenta: {configDir, observedAt}} de `list --json`
+ * (configDir null = la cuenta por defecto, sin CLAUDE_CONFIG_DIR);
+ * `estado`: {ultimo: {cuenta: ms del último tic bueno}}.
+ * Devuelve las Team que reciben tic ahora y las que lo merecían pero no se pueden juzgar.
  */
-export function elegir({ health, carpetas, estado, ahora }) {
+export function elegir({ health, lista, estado, ahora }) {
   if (!Array.isArray(health?.cuentas) || typeof health.medido !== "string")
     throw new Error("la salud no tiene la forma esperada");
   const medido = Date.parse(health.medido);
@@ -58,14 +82,21 @@ export function elegir({ health, carpetas, estado, ahora }) {
     if (pct(c.semana) >= 100) continue;
     const vuelve = c.sesion?.vuelve ?? null;
     if (vuelve !== null && Date.parse(vuelve) > ahora) continue;
-    const anterior = estado.ultimo?.[c.nombre];
-    if (anterior !== undefined && ahora - anterior < RETIC_MS) continue;
-    const carpeta = carpetas[c.nombre];
-    if (!carpeta) {
+    const cuenta = lista[c.nombre];
+    if (cuenta === undefined) {
       saltadas.push({ cuenta: c.nombre, motivo: "sin carpeta" });
       continue;
     }
-    tics.push({ cuenta: c.nombre, carpeta });
+    // `medido` es la lectura más nueva de todas: la de esta cuenta puede ser vieja (Codex r1).
+    const leida = cuenta.observedAt;
+    if (typeof leida !== "number" || ahora - leida > VIEJO_MS) {
+      saltadas.push({ cuenta: c.nombre, motivo: "lectura vieja" });
+      continue;
+    }
+    const anterior = estado.ultimo?.[c.nombre];
+    // Sin ventana en una lectura de antes del tic no dice nada del tic.
+    if (anterior !== undefined && (leida <= anterior || ahora - anterior < RETIC_MS)) continue;
+    tics.push({ cuenta: c.nombre, carpeta: cuenta.configDir ?? null });
   }
   return { tics, saltadas };
 }
@@ -94,20 +125,12 @@ async function bb(args) {
 
 /** Un «ok» con Haiku en la cuenta: sin herramientas, sin MCP, sin ajustes de usuario ni sesión guardada. */
 async function tic({ carpeta }, vacia) {
-  const env = { ...process.env, CLAUDE_CONFIG_DIR: carpeta };
-  for (const v of DE_LA_SESION) if (v !== "CLAUDE_CONFIG_DIR") delete env[v];
-  const args = [
-    "-p", "Responde solo: ok",
-    "--model", "haiku",
-    "--tools", "",
-    "--strict-mcp-config",
-    "--setting-sources", "project",
-    "--no-session-persistence",
-    "--output-format", "json",
-  ];
+  const env = { ...process.env };
+  for (const v of FUERA) delete env[v];
+  if (carpeta !== null) env.CLAUDE_CONFIG_DIR = carpeta;
   let stdout;
   try {
-    ({ stdout } = await run(process.env.TIC_CLAUDE ?? "claude", args, {
+    ({ stdout } = await run(process.env.TIC_CLAUDE ?? "claude", ARGS, {
       cwd: vacia,
       env,
       timeout: CLAUDE_MS,
@@ -131,38 +154,72 @@ async function leerEstado(ruta) {
   }
 }
 
+/** Una sola pasada a la vez: dos solapadas darían dos tics a la misma cuenta (Codex r1). */
+async function cerrar(ruta, ahora) {
+  try {
+    await (await open(ruta, "wx")).close();
+    return true;
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+  }
+  if (ahora - (await stat(ruta)).mtimeMs < CERROJO_MS) return false;
+  console.error("cerrojo de una pasada muerta: se quita");
+  await rm(ruta, { force: true });
+  return cerrar(ruta, ahora);
+}
+
 export async function main({ dir = process.cwd(), ahora = Date.now() } = {}) {
   const health = JSON.parse(await bb(["claude-switcher", "health", "--json"]));
   const list = JSON.parse(await bb(["claude-switcher", "list", "--json"]));
   if (!Array.isArray(list.accounts)) throw new Error("la lista no tiene la forma esperada");
-  const carpetas = Object.fromEntries(list.accounts.map((a) => [a.name, a.configDir]));
-  const ruta = join(dir, "tic-team-estado.json");
-  const estado = await leerEstado(ruta);
-  const { tics, saltadas } = elegir({ health, carpetas, estado, ahora });
-  // Carpeta vacía: claude no encuentra ahí ningún CLAUDE.md ni ajustes de proyecto.
-  const vacia = join(dir, "tic-team-vacia");
-  await mkdir(vacia, { recursive: true });
-  const ultimo = { ...estado.ultimo };
-  let fallos = 0;
-  for (const t of tics) {
-    let linea;
-    try {
-      await tic(t, vacia);
-      ultimo[t.cuenta] = ahora;
-      linea = `${t.cuenta} ok`;
-    } catch (error) {
-      fallos += 1;
-      linea = `${t.cuenta} FALLO ${error.message}`;
-    }
-    console.log(`tic ${linea}`);
-    await appendFile(join(dir, "tic-team.log"), `${new Date(ahora).toISOString()} ${linea}\n`);
+  const lista = Object.fromEntries(
+    list.accounts.map((a) => [a.name, { configDir: a.configDir, observedAt: a.observedAt }]),
+  );
+  const cerrojo = join(dir, "tic-team.lock");
+  if (!(await cerrar(cerrojo, ahora))) {
+    console.log("otra pasada en marcha: esta no hace nada");
+    return 0;
   }
-  for (const s of saltadas) console.error(`sin tic ${s.cuenta}: ${s.motivo}`);
-  const temporal = `${ruta}.tmp`;
-  await writeFile(temporal, JSON.stringify({ ultimo }));
-  await rename(temporal, ruta);
-  console.log(`${tics.length - fallos} ${tics.length - fallos === 1 ? "tic" : "tics"}, ${fallos} fallos`);
-  return fallos > 0 || saltadas.length > 0 ? 1 : 0;
+  try {
+    const ruta = join(dir, "tic-team-estado.json");
+    const estado = await leerEstado(ruta);
+    const { tics, saltadas } = elegir({ health, lista, estado, ahora });
+    // En /tmp: claude busca CLAUDE.md hacia arriba desde su carpeta, y la del
+    // servidor de bb cuelga de la casa, que tiene uno (Codex r1).
+    const vacia = join(tmpdir(), "tic-team-vacia");
+    await mkdir(vacia, { recursive: true });
+    const ultimo = { ...estado.ultimo };
+    let fallos = 0;
+    let buenos = 0;
+    for (const t of tics) {
+      let linea;
+      try {
+        await tic(t, vacia);
+        ultimo[t.cuenta] = Date.now();
+        // Guardado tic a tic: un fallo después no hace repetir los ya dados.
+        const temporal = `${ruta}.${process.pid}.tmp`;
+        await writeFile(temporal, JSON.stringify({ ultimo }));
+        await rename(temporal, ruta);
+        buenos += 1;
+        linea = `${t.cuenta} ok`;
+      } catch (error) {
+        fallos += 1;
+        linea = `${t.cuenta} FALLO ${error.message}`;
+      }
+      console.log(`tic ${linea}`);
+      try {
+        await appendFile(join(dir, "tic-team.log"), `${new Date().toISOString()} ${linea}\n`);
+      } catch (error) {
+        fallos += 1;
+        console.error(`registro no escrito: ${error.message}`);
+      }
+    }
+    for (const s of saltadas) console.error(`sin tic ${s.cuenta}: ${s.motivo}`);
+    console.log(`${buenos} ${buenos === 1 ? "tic" : "tics"}, ${fallos} fallos`);
+    return fallos > 0 || saltadas.length > 0 ? 1 : 0;
+  } finally {
+    await rm(cerrojo, { force: true });
+  }
 }
 
 /** Ejecutado y no importado (por los tests); por un enlace, `argv[1]` es el enlace. */
