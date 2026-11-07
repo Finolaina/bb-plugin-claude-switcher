@@ -67,11 +67,17 @@ y medidas: reparto-fable, PLAN §0, §A y §B (almacenamiento del hilo).
 Límites conocidos: los subagentes de Opus dentro de un hilo de Fable siguen
 sin verse (corren en la cuenta del hilo); un Opus llevado a una Ultra por B5
 queda anotado como excursión, y el siguiente turno de Fable puede volver a la
-Team de la que salió; liberar una espera de Opus (`bestAccount` al soltarla)
-no mira B5, y la espera se coloca cuando vence; la plaza de destino de B3 es
+Team de la que salió; la plaza de destino de B3 es
 una plaza libre, no una por delante de la cola; los relojes de B3 y del tope
 de espera de B5 viven en memoria y una recarga los pone a cero; tras un fallo
 en una Team, la marca «ninguna Team capaz» se juzga con la última lectura.
+
+Revisión (Codex r1: 1 high y 4 medium, `docs/reparto-por-hueco-2026-11-07/codex-r1.txt`):
+
+- Un reintento de Opus programado (a 120 min, con todas las Team al 100 % de
+  sesión) se suelta en la Ultra con hueco en el siguiente refresco: la espera
+  adelantada (`moveUpWait`) elige con las mismas opciones que cualquier
+  movimiento, B5 incluido (high 1).
 
 ## [0.2.47] - 2026-11-06
 

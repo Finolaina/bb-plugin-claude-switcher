@@ -21459,6 +21459,78 @@ describe("reparto por hueco 2026-11-07", () => {
       }
     });
 
+    // Codex r1 high 1 (2026-11-07): a timed retry of an Opus turn, 120 min
+    // away, every Team at 100 % of its session and main at room 46 with seats:
+    // it is released on main at once, not left to wait the two hours.
+    describe("a timed Opus retry with every Team out (Codex r1 high 1)", () => {
+      const retryRow = (): QueuedRow => ({
+        id: "r1",
+        threadId: "thread-1",
+        payload: { kind: "retry", attempt: 2, reason: "Waiting for Opus on work", retryOfTurnRequestId: "creq_r1" },
+        sendAt: NOW + 2 * HOUR,
+        waitingOn: { kind: "time" },
+        createdAt: NOW - 60_000,
+        model: OPUS,
+      });
+      const waitingHost = (listed: string[] | undefined, settings: Record<string, unknown> = {}) =>
+        host(
+          {
+            main: () => Response.json(payload(5, 10, 12)),
+            spare: () => Response.json(payload(100, 10, 0)),
+            work: () => Response.json(payload(100, 10, 0)),
+          },
+          {
+            ...(listed === undefined ? {} : { listed }),
+            settings: { preferredModel: "Fable", opusOverflowRoom: 15, ...settings },
+            presetEnv: { "proj-1": on("work") },
+            queued: [retryRow()],
+            threads: { "thread-1": { status: "error" } },
+            threadEvents: {
+              "thread-1": [
+                {
+                  id: "evt_creq_r1",
+                  scope: { kind: "thread" },
+                  threadId: "thread-1",
+                  seq: 1,
+                  createdAt: NOW - HOUR,
+                  type: "client/turn/requested",
+                  data: { requestId: "creq_r1", execution: { model: OPUS } },
+                },
+              ],
+            },
+          },
+        );
+      const onePass = async (h: Awaited<ReturnType<typeof host>>) => {
+        const before = h.usageCalls.length;
+        const run = h.harness.behavior.runService("usage-refresh");
+        await vi.waitFor(() => expect(h.usageCalls).toHaveLength(before + 3));
+        run.controller.abort();
+        await run.done;
+      };
+      for (const [label, listed] of [["no project listed (the wait alone)", [] as string[]], ["with the rescue of the listed projects", undefined]] as const)
+        it(`is released on main within two passes, ${label}`, async () => {
+          const h = await waitingHost(listed);
+          dispose = () => h.harness.dispose();
+          teamLogin(h, "spare", "work");
+          await onePass(h);
+          await onePass(h);
+          expect(h.retries).toEqual([expect.objectContaining({ threadId: "thread-1", turnRequestId: "creq_r1" })]);
+          expect(h.queued).toEqual([]);
+          // main is the default account: the move is the variable deleted.
+          expect(h.envDeleted.filter((e) => e.projectId === "proj-1")).toHaveLength(1);
+        });
+
+      it("with opusOverflowRoom 100 it keeps waiting, as in 0.2.44", async () => {
+        const h = await waitingHost([], { opusOverflowRoom: 100 });
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "spare", "work");
+        await onePass(h);
+        await onePass(h);
+        expect(h.retries).toEqual([]);
+        expect(h.queued.map((r) => r.id)).toEqual(["r1"]);
+      });
+    });
+
     it("D8: with main not read whole it never takes Opus", async () => {
       const { h } = await start(() => ({ ...payload(5, 10, 12), limits: [] }));
       expect((await dispatch(h, "b", "proj-1", OPUS)).action).toBe("wait");

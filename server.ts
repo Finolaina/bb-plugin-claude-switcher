@@ -7015,7 +7015,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         (pins.get(projectId) === fromName &&
         !holdsForReserve({ preferredModel: model, ...reserveOf() })
           ? bestAccount([here], model, now)
-          : bestAccount([here], model, now, current.preferredModel, undefined, undefined, current.otherModelUpTo)) === fromName))
+          : // With every choice option, B5 included: an Opus retry on an
+            // Ultra with room and no Team able runs there (Codex r1 high 1).
+            chooseAccount([settle(here, now)], {
+              preferredModel: model,
+              ...reserveFor(threadId, now),
+            })?.account) === fromName))
     ) {
       // It waited on the account the project was on before.
       const changed = accountChangedAt.get(projectId);
@@ -7035,16 +7040,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         );
       return;
     }
-    const to = bestAccount(
-      measured.filter((a) => a.name !== fromName),
-      model,
-      now,
-      current.preferredModel,
-      freeSeats,
-      paceFilter(isBackground(thread)).savedForUser,
-      current.otherModelUpTo,
-      current.reserveShare,
-    );
+    // The choice of any move, B5 included (Codex r1 high 1).
+    const to =
+      chooseAccount(
+        measured.filter((a) => a.name !== fromName).map((a) => settle(a, now)),
+        {
+          preferredModel: model,
+          ...reserveFor(threadId, now),
+          freeSeats,
+          savedForUser: paceFilter(isBackground(thread)).savedForUser,
+        },
+      )?.account ?? null;
     if (to === null) {
       // Nothing to release it on; the wait fires on its own at sendAt and
       // is placed then (code-reviewer r2, CR2-05).
