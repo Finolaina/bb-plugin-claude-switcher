@@ -126,7 +126,7 @@ M = [
      VT, "held past maximumWaitHours with opusOverflowRoom 100"),
     ("B5 tope", "maximumWaitHours 0 no apaga la salida", V, "      current.maximumWaitHours > 0 &&\n", "",
      VT, "held past maximumWaitHours with opusOverflowRoom 100"),
-    ("B5 tope", "la colocación no mira la espera del hilo", V, "      preferredModel: model,\n      ...reserveFor(threadId, now),\n      excursionFrom:", "      preferredModel: model,\n      ...reserveOf(),\n      excursionFrom:",
+    ("B5 tope", "la colocación no mira la espera del hilo", V, "      preferredModel: model,\n      ...reserveFor(threadId, now),\n      // An account whose mark", "      preferredModel: model,\n      ...reserveOf(),\n      // An account whose mark",
      VT, "held past maximumWaitHours, it takes"),
     ("B5 tope", "el control al arrancar no mira la espera del hilo", V,
      "    const options = { preferredModel: model, ...reserveFor(threadId, deps.now()) };\n",
