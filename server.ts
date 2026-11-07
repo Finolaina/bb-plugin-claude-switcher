@@ -117,6 +117,7 @@ import {
   holdsForReserve,
   isUsable,
   modelWindow,
+  opusRoom,
   reserveToSpare,
   reserving,
   spendsReservedWeekly,
@@ -663,6 +664,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         "How many points of a Max or Ultra account's general weekly one point of the preferred model's own window spends (about 0.5 for Fable, our own count from a week of reads, ±40 %). With it, the room another model has on an account is (100 − weekly) − this × (100 − preferred): the preferred model goes to the account with the most such room, in steps of 10 points, and to a Team seat last; below 0, the account reaches 100 % of its weekly with the preferred model left unspent.",
       default: 0.5,
     },
+    // PLAN §B3 (reparto-fable, 2026-11-07); 20 is our own count, not a measure.
+    roomMoveGap: {
+      type: "number",
+      label: "Move a preferred-model turn for room, gap (points)",
+      description:
+        "Before a turn in the preferred model on a Max or Ultra account whose room for another model (see above) is below 0, the project moves to a Max or Ultra account with a free seat and at least this many points more room. With another thread of the project at work, only below −10 and not within the minutes below of its last move. Needs the automatic choice. 0 or less = never.",
+      default: 20,
+    },
     stuckMoveMinutes: {
       type: "number",
       label: "A project moved for a seat with threads at work stays (minutes)",
@@ -1180,6 +1189,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
   /** When each project last moved for a crowded seat (see crowded): not again within stuckMoveMinutes. */
   const crowdedMoves = new Map<string, { at: number; to: string }>();
+  /** When each project last moved for room (see roomMove in src/switch.ts). */
+  const roomMoves = new Map<string, number>();
+  /** The project moved for a seat or for room within stuckMoveMinutes. */
+  function movedRecently(projectId: string, now: number): boolean {
+    const limit = current.stuckMoveMinutes * 60_000;
+    const last = Math.max(crowdedMoves.get(projectId)?.at ?? -Infinity, roomMoves.get(projectId) ?? -Infinity);
+    return now - last <= limit;
+  }
   /**
    * Projects with a move for a seat under way, from its decision until it
    * is recorded (crowdedMoves), and projects with a turn held meanwhile:
@@ -5195,6 +5212,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         : {}),
       pinned: pins.get(projectId) === fromName,
       projectSeats: projectWants(thread, seatKey(fromName)),
+      // Only before a real turn: a tick never moves (see placeTurn's refusal).
+      ...(when === "before" && current.autoSwitch && current.roomMoveGap > 0
+        ? {
+            roomMoveGap: current.roomMoveGap,
+            projectSeated: projectSeated(projectId, thread.id),
+            movedRecently: movedRecently(projectId, now),
+          }
+        : {}),
       // On the account the project moved to only (code-reviewer r3).
       justMovedHere:
         crowdedMoves.get(projectId)?.to === fromName &&
@@ -5312,6 +5337,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         if (excursions.get(projectId)?.from === fromName) excursions.delete(projectId);
         crowdedMoves.set(projectId, { at: now, to: decision.account });
       } else noteMove(projectId, fromName, decision.account, model, before);
+      if (decision.why === "fable-room") roomMoves.set(projectId, now);
     } finally {
       if (seatMove) {
         seatMoving.delete(projectId);
@@ -5321,6 +5347,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const reason =
       busy !== null && decision.why === "current-full"
         ? busyReason(busy, fromName, decision.account, roomThere, fullHere, model, input.pinned === true)
+        : decision.why === "fable-room"
+        ? roomReason(fromName, decision.account, model)
         : decision.why === "back-from-excursion"
         ? `Moved back to account ${decision.account} before the turn: ${fromName} was an excursion for ${excursion?.model ?? "another model"}`
         : decision.why === "current-reserved" &&
@@ -5354,6 +5382,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     };
   }
 
+  /** What the history says of a move for room (see roomMove), in plain Spanish. */
+  function roomReason(from: string, to: string, model: string): string {
+    const now = deps.now();
+    const measured = measuredAccounts(model);
+    const room = (name: string) => {
+      const a = measured.find((m) => m.name === name);
+      const r = a === undefined ? null : opusRoom(settle(a, now), current.preferredModel, current.reserveShare);
+      return r === null ? "?" : String(Math.round(r * 10) / 10).replace(".", ",");
+    };
+    return `Movido a ${to} antes del turno: ${from} se queda sin semanal antes de gastar su ${current.preferredModel} (hueco ${room(from)}) y ${to} tiene hueco ${room(to)} (hueco = semanal libre − ${String(current.reserveShare).replace(".", ",")} × ${current.preferredModel} libre)`;
+  }
   /** What the history says of a move for a crowded seat (see crowded), in plain Spanish for whoever reads it. */
   function busyReason(
     busy: NonNullable<ReturnType<typeof crowded>>,

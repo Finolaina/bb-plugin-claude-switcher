@@ -9,6 +9,8 @@ import type { PluginTurnFailedEvent } from "@get-bb/plugin-sdk";
 import {
   canRunModel,
   chooseAccount,
+  choosingReserve,
+  opusRoom,
   afterTeams,
   holdsForReserve,
   isUsable,
@@ -510,7 +512,13 @@ export type PlacementDecision =
         /** A turn in the reserved model: back to the account the project left for another model. */
         | "back-from-excursion"
         /** The turn would wait for a seat where the project is: another account has one free. */
-        | "current-full";
+        | "current-full"
+        /**
+         * A turn in the reserved model on an account whose general weekly
+         * runs out before the reserved model does: another has more room
+         * (see roomMove).
+         */
+        | "fable-room";
     };
 
 export interface PlacementInput {
@@ -606,6 +614,58 @@ export interface PlacementInput {
    * holds until the account is out for real). Seats still move it.
    */
   pinned?: boolean;
+  /**
+   * Points of opusRoom another account must have over the current one for a
+   * turn in the reserved model to move there (see roomMove). Unset = never
+   * moved for room.
+   */
+  roomMoveGap?: number;
+  /** Another thread of the project has a turn under way or holds a seat. */
+  projectSeated?: boolean;
+  /** The project moved for a seat or for room within stuckMoveMinutes. */
+  movedRecently?: boolean;
+}
+
+/**
+ * With a sibling at work, a move for room only below this room: the move
+ * takes its next turns along (our own count, reparto-fable PLAN §B3).
+ */
+export const ROOM_MOVE_WITH_SIBLINGS = -10;
+
+/**
+ * Where a turn in the reserved model goes for room (Aitor 2026-11-07, «fable
+ * se queda sin gastar»): its account is a Max or Ultra with opusRoom below
+ * 0, so its general weekly will reach 100 % with the reserved model unspent,
+ * and another Max or Ultra, read whole, able to run it and with a free seat,
+ * has at least `roomMoveGap` points more; the best of those by rank. With a
+ * sibling at work only below ROOM_MOVE_WITH_SIBLINGS and not within
+ * stuckMoveMinutes of the project's last move. Never to a Team seat: the
+ * weekly the reserved model spends there is Opus's. Null: stay.
+ */
+function roomMove(
+  current: AccountUsage,
+  accounts: AccountUsage[],
+  input: PlacementInput,
+  options: ChoiceOptions,
+): string | null {
+  const gap = input.roomMoveGap;
+  const share = options.reserveShare;
+  if (gap === undefined || share === undefined || !choosingReserve(options))
+    return null;
+  const reserve = options.reserveModel!;
+  const here = opusRoom(current, reserve, share);
+  if (here === null || here >= 0) return null;
+  if (
+    input.projectSeated === true &&
+    (here >= ROOM_MOVE_WITH_SIBLINGS || input.movedRecently === true)
+  )
+    return null;
+  const ahead = accounts.filter((a) => {
+    if (a.name === input.currentAccount) return false;
+    const room = opusRoom(a, reserve, share);
+    return room !== null && room >= here + gap;
+  });
+  return chooseSeated(ahead, options, input.freeSeats)?.account ?? null;
 }
 
 /** The account a project would best run on now, for the thread header. */
@@ -716,6 +776,11 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     isUsable(current) &&
     canRunModel(current, input.preferredModel);
   if (runs && (pinHolds || !spendsReservedWeekly(current, options))) {
+    // A pick by hand holds the reserved model where it is.
+    const forRoom =
+      input.pinned === true ? null : roomMove(current, accounts, input, options);
+    if (forRoom !== null)
+      return { kind: "move", account: forRoom, why: "fable-room" };
     if (
       !pinHolds &&
       input.justMovedHere !== true &&

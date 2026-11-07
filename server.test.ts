@@ -910,6 +910,7 @@ describe("claude accounts plugin", () => {
       "preferredModel",
       "refreshMinutes",
       "reserveShare",
+      "roomMoveGap",
       "seatsFollowLoad",
       "seatsMax",
       "seatsTeam",
@@ -21127,6 +21128,117 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
       expect((await h.harness.behavior.runCli(["release"])).exitCode).toBe(0);
       expect(await dispatch(h, "t1", "proj-1")).toEqual({ action: "proceed" });
       expect(moves(h).at(-1)).toMatchObject({ note: ownNote("spare") });
+    });
+  });
+});
+
+// Reparto por hueco (0.2.48). Aitor 2026-11-07: «la cuenta de viaulab, se
+// sigue disparando el tema la cuenta semanal y fable se queda sin gastar»;
+// «tampoco quiero que hilos se queden parados, si una cuenta se queda sin
+// cuota tiene que saltar a otra, el trabajo prima». Rooms with share 0.5:
+// (100 − weekly) − 0.5 × (100 − Fable).
+describe("reparto por hueco 2026-11-07", () => {
+  const FABLE_ID = "claude-fable-5-1";
+  const OPUS = "claude-opus-5-5";
+  const TICK =
+    "calor: tic de caché #97d91f3e-4f58-4569-a477-00e157c210c2. Responde exactamente «calor ok», sin usar herramientas y sin razonar más.";
+  const on = (name: string) => [
+    { name: ENV_VAR, note: ownNote(name), secret: true, value: null },
+  ];
+  const teamLogin = (h: Awaited<ReturnType<typeof host>>, ...names: string[]) => {
+    for (const name of names)
+      h.files[`${ACCOUNTS}/${name}/.claude.json`] = JSON.stringify({
+        oauthAccount: {
+          accountUuid: `uuid-${name}`,
+          emailAddress: `${name}@example.com`,
+          organizationType: "claude_team",
+        },
+      });
+  };
+  const dispatch = (
+    h: Awaited<ReturnType<typeof host>>,
+    threadId: string,
+    projectId: string,
+    model: string,
+    text?: string,
+  ) =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: threadId, projectId }),
+        requestedExecution: { providerId: "claude-code", model },
+        attempt: "start-turn",
+        ...(text === undefined ? {} : { input: { text } }),
+      }),
+    ) as Promise<{ action: string; reason?: string; sendAt?: number }>;
+  const history = async (h: Awaited<ReturnType<typeof host>>) =>
+    ((await h.harness.behavior.callRpc("accounts_list", null)) as State).history.map((r) => r.reason);
+  const where = async (h: Awaited<ReturnType<typeof host>>, projectId = "proj-1") => {
+    const p = ((await h.harness.behavior.callRpc("accounts_list", null)) as State).projects.find((p) => p.id === projectId);
+    return p === undefined ? undefined : (p.account ?? "main");
+  };
+  const active = (h: Awaited<ReturnType<typeof host>>, threadId: string, projectId = "proj-1") =>
+    h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: threadId, projectId }) });
+
+  describe("B3: a Fable turn moves for room", () => {
+    /** main (the default) at `mainWeekly`/53 %, spare 10/12 (room 46), work 90/90 (room 5). */
+    const start = async (mainWeekly: () => number, settings: Record<string, unknown> = {}) => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(5, mainWeekly(), 53)),
+          spare: () => Response.json(payload(5, 10, 12)),
+          work: () => Response.json(payload(5, 90, 90)),
+        },
+        { settings: { preferredModel: "Fable", seatsMax: 4, stuckMoveMinutes: 10, ...settings } },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      return h;
+    };
+
+    it("main at room -9.5 and spare at 46: the turn moves the project to spare, and the history says why", async () => {
+      const h = await start(() => 86);
+      expect(await dispatch(h, "t1", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("spare") });
+      expect((await history(h))[0]).toBe(
+        "Movido a spare antes del turno: main se queda sin semanal antes de gastar su Fable (hueco -9,5) y spare tiene hueco 46 (hueco = semanal libre − 0,5 × Fable libre)",
+      );
+    });
+
+    it("roomMoveGap 0 turns it off", async () => {
+      const h = await start(() => 86, { roomMoveGap: 0 });
+      expect(await dispatch(h, "t1", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("a Calor tick does not move for room", async () => {
+      const h = await start(() => 86);
+      expect((await dispatch(h, "t1", "proj-1", FABLE_ID, TICK)).action).toBe("reject");
+      expect(h.envSet).toEqual([]);
+    });
+
+    it("with a sibling at work, -9.5 stays and -13.5 moves", async () => {
+      let weekly = 40; // room 36.5: no move
+      const h = await start(() => weekly);
+      expect(await dispatch(h, "a", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      await active(h, "a");
+      expect(h.envSet).toEqual([]);
+      weekly = 86;
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "b", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      await active(h, "b");
+      expect(h.envSet).toEqual([]);
+      weekly = 90;
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "c", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("spare") });
+    });
+
+    it("an Opus turn is not this rule's", async () => {
+      const h = await start(() => 86);
+      teamLogin(h, "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("proceed");
+      expect(await where(h)).toBe("work");
     });
   });
 });

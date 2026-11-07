@@ -2438,3 +2438,92 @@ describe("Opus solo por Team: placement of a project pinned to an Ultra (2026-11
     expect(place("Fable", 1)).toEqual({ kind: "keep" });
   });
 });
+
+// PLAN §B3 (reparto-fable, 2026-11-07; Aitor: «fable se queda sin gastar»):
+// a Fable turn on a Max/Ultra whose general weekly will run out before its
+// Fable does moves to one with at least roomMoveGap more room and a seat.
+describe("decidePlacement moves a Fable turn by room (0.2.48, B3)", () => {
+  const ultra = (name: string, weekly: number, fable: number, more: Partial<AccountUsage> = {}) =>
+    account(name, {
+      weekly: { usedPercent: weekly, resetsAt: NOW + 48 * HOUR },
+      models: { Fable: { usedPercent: fable, resetsAt: NOW + 48 * HOUR } },
+      ...more,
+    });
+  const viaulab = ultra("viaulab", 86, 53); // room -9.5
+  const siloeads = ultra("siloeads", 10, 12); // room 46
+  const turn = (overrides: Partial<PlacementInput> = {}): PlacementInput => ({
+    currentAccount: "viaulab",
+    isNew: false,
+    accounts: [viaulab, siloeads],
+    preferredModel: "Fable",
+    reserveModel: "Fable",
+    reserveShare: 0.5,
+    roomMoveGap: 20,
+    freeSeats: () => 4,
+    now: NOW,
+    ...overrides,
+  });
+  const move = (account: string) => ({ kind: "move", account, why: "fable-room" });
+
+  it("current -9.5 and another at 46 with a seat: moves", () => {
+    expect(decidePlacement(turn())).toEqual(move("siloeads"));
+  });
+
+  it("cut of the gap: another at -9.5 + 20 = 10.5 moves, at 10.4 and at 9 it stays", () => {
+    expect(decidePlacement(turn({ accounts: [viaulab, ultra("b", 89, 99)] }))).toEqual(move("b"));
+    expect(decidePlacement(turn({ accounts: [viaulab, ultra("b", 89.1, 99)] }))).toEqual({ kind: "keep" });
+    expect(decidePlacement(turn({ accounts: [viaulab, ultra("b", 90.5, 99)] }))).toEqual({ kind: "keep" });
+  });
+
+  it("cut of the current room: -0.5 moves, 0 and +1 stay", () => {
+    expect(decidePlacement(turn({ accounts: [ultra("viaulab", 50.5, 0), siloeads] }))).toEqual(move("siloeads"));
+    expect(decidePlacement(turn({ accounts: [ultra("viaulab", 50, 0), siloeads] }))).toEqual({ kind: "keep" });
+    expect(decidePlacement(turn({ accounts: [ultra("viaulab", 49, 0), siloeads] }))).toEqual({ kind: "keep" });
+  });
+
+  it("with a sibling at work, only below -10: -9 and -10 stay, -10.5 moves", () => {
+    const at = (weekly: number) => turn({ projectSeated: true, accounts: [ultra("viaulab", weekly, 0), siloeads] });
+    expect(decidePlacement(at(59))).toEqual({ kind: "keep" });
+    expect(decidePlacement(at(60))).toEqual({ kind: "keep" });
+    expect(decidePlacement(at(60.5))).toEqual(move("siloeads"));
+  });
+
+  it("with a sibling at work, not within stuckMoveMinutes of the project's last move", () => {
+    expect(
+      decidePlacement(turn({ projectSeated: true, movedRecently: true, accounts: [ultra("viaulab", 70, 0), siloeads] })),
+    ).toEqual({ kind: "keep" });
+    // Alone, a recent move does not hold it: nothing else moves with it.
+    expect(decidePlacement(turn({ movedRecently: true }))).toEqual(move("siloeads"));
+  });
+
+  it("the account with the most room among those far enough ahead, with a seat", () => {
+    const mariscal = ultra("mariscal", 30, 30); // room 35
+    expect(decidePlacement(turn({ accounts: [viaulab, mariscal, siloeads] }))).toEqual(move("siloeads"));
+    expect(
+      decidePlacement(turn({ accounts: [viaulab, mariscal, siloeads], freeSeats: (n) => (n === "siloeads" ? 0 : 4) })),
+    ).toEqual(move("mariscal"));
+    expect(decidePlacement(turn({ freeSeats: (n) => (n === "siloeads" ? 0 : 4) }))).toEqual({ kind: "keep" });
+  });
+
+  it("never to a Team seat, an unread account or one that cannot run Fable", () => {
+    const team = account("team", { team: true, models: { Fable: { usedPercent: 0, resetsAt: NOW + 48 * HOUR } } });
+    expect(decidePlacement(turn({ accounts: [viaulab, team] }))).toEqual({ kind: "keep" });
+    expect(
+      decidePlacement(turn({ accounts: [viaulab, ultra("siloeads", 10, 12, { unknown: true, blocked: true })] })),
+    ).toEqual({ kind: "keep" });
+    expect(decidePlacement(turn({ accounts: [viaulab, ultra("siloeads", 10, 100)] }))).toEqual({ kind: "keep" });
+  });
+
+  it("a pick by hand, an Opus turn, no gap or no share: no move by room", () => {
+    expect(decidePlacement(turn({ pinned: true }))).toEqual({ kind: "keep" });
+    expect(decidePlacement(turn({ roomMoveGap: undefined }))).toEqual({ kind: "keep" });
+    expect(decidePlacement(turn({ reserveShare: undefined }))).toEqual({ kind: "keep" });
+    expect(decidePlacement(turn({ preferredModel: "Opus" }))).not.toEqual(move("siloeads"));
+  });
+
+  it("D8: with the reads down (the current account unknown) it does not move", () => {
+    expect(
+      decidePlacement(turn({ accounts: [ultra("viaulab", 86, 53, { unknown: true, blocked: true }), siloeads] })),
+    ).toEqual({ kind: "keep" });
+  });
+});
