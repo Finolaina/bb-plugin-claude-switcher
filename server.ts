@@ -5151,8 +5151,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * `model` now (see ChoiceOptions.noTeamTakes): unlocked, its session and
    * windows under 100 %, and a seat free for the turn: one it holds, or one
    * beyond the threads queued ahead of it (all of them, for no thread).
+   * `ruledOut`: the account a turn just failed on, never one that takes it
+   * whatever its read says (Codex r1 medium 5; see SwitchInput.noTeamTakes).
    */
-  function noTeamTakes(model: string, threadId?: string): boolean {
+  function noTeamTakes(model: string, threadId?: string, ruledOut?: string | null): boolean {
     const now = deps.now();
     const measured = measuredAccounts(model);
     const teams = [
@@ -5162,6 +5164,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       ...unreadTeamSeats({ accounts: measured, unreadTeams: unreadTeams(model), currentAccount: "", now }),
     ];
     return !teams.some((a) => {
+      if (a.name === ruledOut) return false;
       if (!isUsable(a) || !canRunModel(a, model)) return false;
       const key = seatKey(a.name);
       if (threadId !== undefined && seats.seatOf(threadId)?.account === key) return true;
@@ -6473,6 +6476,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       accounts: measuredAccounts(model),
       preferredModel: model,
       ...reserveOf(),
+      noTeamTakes: (m: string, ruledOut: string | null) => noTeamTakes(m, undefined, ruledOut),
       maximumWaitMs:
         current.maximumWaitHours > 0
           ? current.maximumWaitHours * 3_600_000

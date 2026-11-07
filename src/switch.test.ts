@@ -2649,4 +2649,34 @@ describe("Opus overflows to the Ultra with room (0.2.48, B5)", () => {
       ),
     ).toEqual({ kind: "switch", account: "roomy", model: "Opus" });
   });
+
+  // Codex r1 medium 5: the Team that just refused the turn is no Team that
+  // takes it, though its read says it would; left in error, nothing is
+  // ruled out (the measurements judge).
+  it("noTeamTakes is asked with the account that just failed ruled out", () => {
+    const asked: (string | null | undefined)[] = [];
+    const liveTeam = account("work", { team: true, session: { usedPercent: 20, resetsAt: NOW + HOUR } });
+    const judged = (stuck: boolean) =>
+      decideSwitch(
+        input({
+          currentAccount: "work",
+          accounts: [liveTeam, roomy],
+          preferredModel: "Opus",
+          reserveModel: "Fable",
+          reserveShare: 0.5,
+          opusOverflowRoom: 15,
+          stuck,
+          noTeamTakes: (_model, ruledOut) => {
+            asked.push(ruledOut);
+            return ruledOut === "work";
+          },
+          freeSeats: () => 4,
+        }),
+      );
+    expect(judged(false)).toEqual({ kind: "switch", account: "roomy", model: "Opus" });
+    expect(asked).toContain("work");
+    asked.length = 0;
+    expect(judged(true)).toEqual({ kind: "retry", account: "work", model: "Opus" });
+    expect(asked.every((a) => a === null)).toBe(true);
+  });
 });

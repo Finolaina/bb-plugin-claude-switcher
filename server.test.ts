@@ -21605,6 +21605,63 @@ describe("reparto por hueco 2026-11-07", () => {
       });
     });
 
+    // Codex r1 medium 5 (2026-11-07): the only Team answers an Opus turn with
+    // a 429 blocked for two hours while its read still says 20 % of session,
+    // 10 % weekly and a seat free; main is at 10/12 (room 46). The Team that
+    // just refused the turn does not veto main: the turn moves there at once,
+    // no retry two hours away.
+    describe("the Team that just failed the turn does not veto the overflow (Codex r1 medium 5)", () => {
+      const failingHost = (settings: Record<string, unknown> = {}) =>
+        host(
+          {
+            main: () => Response.json(payload(5, 10, 12)),
+            work: () => Response.json(payload(20, 10, 0)),
+          },
+          {
+            dirs: () => ["work"],
+            settings: { preferredModel: "Fable", seatsTeam: 2, seatsMax: 4, opusOverflowRoom: 15, ...settings },
+            presetEnv: { "proj-1": on("work") },
+            threadEvents: {
+              "thread-1": [
+                {
+                  id: "evt_creq_1",
+                  scope: { kind: "thread" },
+                  threadId: "thread-1",
+                  seq: 1,
+                  createdAt: NOW - 60_000,
+                  type: "client/turn/requested",
+                  data: { requestId: "creq_1", execution: { model: OPUS } },
+                },
+              ],
+            },
+          },
+        );
+
+      it("moves to main and retries at once", async () => {
+        const h = await failingHost();
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "work");
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        const { errors } = await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+        expect(errors).toEqual([]);
+        expect(h.queued).toEqual([]);
+        expect(h.retries).toEqual([expect.objectContaining({ threadId: "thread-1", turnRequestId: "creq_1", reason: "Switched to account main (Opus)" })]);
+        // main is the default account: the move is the variable deleted.
+        expect(h.envDeleted.filter((e) => e.projectId === "proj-1")).toHaveLength(1);
+      });
+
+      it("with opusOverflowRoom 100 it waits for work, as in 0.2.44", async () => {
+        const h = await failingHost({ opusOverflowRoom: 100 });
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "work");
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+        expect(h.retries).toEqual([expect.objectContaining({ reason: "Waiting for Opus on work" })]);
+        expect(h.retries[0]!.sendAt! >= NOW + 2 * HOUR).toBe(true);
+        expect(h.envDeleted).toEqual([]);
+      });
+    });
+
     // Codex r1 medium 4: main read at 10/12 (room 46), then every query
     // answers 503 for 31 min (refreshMinutes 5): the old read gives no room.
     it("D8: with the usage endpoint down 31 min after a good read, main gives no room (Codex r1 medium 4)", async () => {

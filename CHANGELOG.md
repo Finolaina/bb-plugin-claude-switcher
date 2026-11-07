@@ -69,8 +69,7 @@ sin verse (corren en la cuenta del hilo); un Opus llevado a una Ultra por B5
 queda anotado como excursión, y el siguiente turno de Fable puede volver a la
 Team de la que salió; la plaza de destino de B3 es
 una plaza libre, no una por delante de la cola; los relojes de B3 y del tope
-de espera de B5 viven en memoria y una recarga los pone a cero; tras un fallo
-en una Team, la marca «ninguna Team capaz» se juzga con la última lectura.
+de espera de B5 viven en memoria y una recarga los pone a cero.
 
 Revisión (Codex r1: 1 high y 4 medium, `docs/reparto-por-hueco-2026-11-07/codex-r1.txt`):
 
@@ -90,6 +89,12 @@ Revisión (Codex r1: 1 high y 4 medium, `docs/reparto-por-hueco-2026-11-07/codex
   `health` (`huecoOpus` nulo). Antes, con el endpoint de uso caído 31 min
   tras una lectura buena, la Ultra seguía dando hueco 46 y Opus iba a ella;
   ahora espera una Team (medium 4).
+- La Team que acaba de rechazar un turno de Opus no cuenta como Team capaz,
+  aunque su lectura diga que sí: con la única Team devolviendo un 429
+  bloqueado dos horas y su lectura en 20 % de sesión con plaza libre, el
+  turno pasa a la Ultra con hueco 46 en el acto, en vez de reintentarse a las
+  dos horas. Un hilo que se quedó en error se sigue juzgando con las
+  lecturas (medium 5).
 
 ## [0.2.47] - 2026-11-06
 

@@ -72,8 +72,12 @@ export interface SwitchInput {
   reserveShare?: number;
   /** See ChoiceOptions.opusOverflowRoom. */
   opusOverflowRoom?: number;
-  /** See ChoiceOptions.noTeamTakes. */
-  noTeamTakes?: (model: string) => boolean;
+  /**
+   * See ChoiceOptions.noTeamTakes. `ruledOut`: the account the turn just
+   * failed on, never a Team that takes it (Codex r1 medium 5); null for a
+   * thread left in error or a failure on an account unknown.
+   */
+  noTeamTakes?: (model: string, ruledOut: string | null) => boolean;
   /**
    * The project was put on the current account by hand: a thread left in
    * error is retried there whenever the account runs the model, whatever it
@@ -244,13 +248,20 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
     input.failedAccount === undefined
       ? input.currentAccount
       : input.failedAccount;
+  // The Team that just refused the turn takes no part in «no Team takes
+  // it», as it is no destination below (Codex r1 medium 5).
+  const ruledOut = stuck ? null : failedOn;
+  const teamTakes = input.noTeamTakes;
   const options = {
     preferredModel: input.preferredModel,
     reserveModel: input.reserveModel,
     reserveSpareUpTo: input.reserveSpareUpTo,
     reserveShare: input.reserveShare,
     opusOverflowRoom: input.opusOverflowRoom,
-    noTeamTakes: input.noTeamTakes,
+    noTeamTakes:
+      teamTakes === undefined
+        ? undefined
+        : (model: string) => teamTakes(model, ruledOut),
     savedForUser: input.savedForUser,
   };
   // A failure just reported rules its account out. Left in error, the thread
