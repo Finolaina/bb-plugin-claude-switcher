@@ -4772,6 +4772,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
       return;
     }
+    // Nor over another automatic move of the project under way (a
+    // dispatch's, its variable still being written): this read predates it.
+    // The next refresh looks again (Astra r8 medium 2, the same guard as the
+    // failure's judgment).
+    if (moving(projectId)) {
+      bb.log.info(
+        `project ${projectName}: left on ${fromName}: another move of the project is under way; looked at again at the next refresh`,
+      );
+      return;
+    }
     // Decided for the model of the project's latest turn as known now: a
     // message or a turn of it while the sessions are shared, or the end of
     // a turn (whatever model its log names, read later or not), may change

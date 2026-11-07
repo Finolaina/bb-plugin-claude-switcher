@@ -21685,6 +21685,54 @@ describe("reparto por hueco 2026-11-07", () => {
       ]);
     });
 
+    // The same for the refresh's rescue (Astra r8 medium 2, its sibling):
+    // proj-1 sits on spare, out for Fable (100/100). A Fable dispatch starts
+    // its move to work (room 46), its variable write held; the refresh's
+    // rescue, which reads spare still, does not write over it: one move in
+    // the history, the next refresh looks again. Before: work twice.
+    it("the rescue does not move a project while another move of it is written (Astra r8 medium 2, the rescue)", async () => {
+      let gate: Promise<void> | null = null;
+      let reached = false;
+      let open = () => {};
+      const h = await host(
+        {
+          main: () => Response.json(payload(5, 100, 100)),
+          spare: () => Response.json(payload(5, 100, 100)),
+          work: () => Response.json(payload(5, 10, 12)), // room 46
+        },
+        {
+          dirs: () => ["spare", "work"],
+          settings: { preferredModel: "Fable", seatsMax: 4, seatsTeam: 5 },
+          presetEnv: { "proj-1": on("spare") },
+          beforeSet: async () => {
+            const held = gate;
+            gate = null;
+            if (held === null) return;
+            reached = true;
+            await held;
+          },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      gate = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      const fable = dispatch(h, "f", "proj-1", FABLE_ID);
+      await vi.waitFor(() => expect(reached).toBe(true));
+      const left = () =>
+        h.harness.logEntries.some((e) => e.message.startsWith("project proj-1: left on spare: another move of the project is under way"));
+      const run = h.harness.behavior.runService("usage-refresh");
+      await vi.waitFor(() => expect(left() || h.envSet.length > 0).toBe(true));
+      run.controller.abort();
+      await run.done;
+      open();
+      expect(await fable).toEqual({ action: "proceed" });
+      expect(h.envSet.filter((e) => e.projectId === "proj-1").map((e) => e.note)).toEqual([ownNote("work")]);
+      const history = ((await h.harness.behavior.callRpc("accounts_list", null)) as State).history;
+      expect(history.filter((r) => r.projectId === "proj-1").map((r) => [r.from, r.to])).toEqual([["spare", "work"]]);
+    });
+
     it("a move whose variable write outlasts its dispatch holds the project till the write ends (Astra r6 medium 2)", async () => {
       let gate: Promise<void> | null = null;
       let open = () => {};
