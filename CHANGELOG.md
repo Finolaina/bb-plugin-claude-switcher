@@ -84,8 +84,8 @@ Revisión (Codex r1: 1 high y 4 medium, `docs/reparto-por-hueco-2026-11-07/codex
   mientras se escribe, como uno por plaza: un hermano de Opus que decide con
   la misma lectura espera y vuelve a preguntar, en vez de escribir otro
   destino a la vez (medium 2).
-- Una lectura que no está fresca (su última consulta falló o tiene más de dos
-  refrescos) no da hueco: ni para B5, ni para los tramos de Fable, ni en
+- Una lectura que no está fresca (de más de dos refrescos, es decir, con las
+  consultas fallando desde entonces) no da hueco: ni para B5, ni para los tramos de Fable, ni en
   `health` (`huecoOpus` nulo). Antes, con el endpoint de uso caído 31 min
   tras una lectura buena, la Ultra seguía dando hueco 46 y Opus iba a ella;
   ahora espera una Team (medium 4).

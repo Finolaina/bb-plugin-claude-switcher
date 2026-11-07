@@ -41,9 +41,9 @@ export interface AccountUsage {
    */
   team?: true;
   /**
-   * The latest query of the account failed, or its read is older than two
-   * refreshes: its numbers still let it run as before, but give no room
-   * (opusRoom), for its quota may have moved elsewhere since (Codex r1
+   * The account's read is older than two refreshes (its queries have been
+   * failing since): its numbers still let it run as before, but give no
+   * room (opusRoom), for its quota may have moved elsewhere since (Codex r1
    * medium 4). Set where the reads are known (measuredAccounts).
    */
   stale?: true;

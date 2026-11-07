@@ -2860,15 +2860,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function maxReadAgeMs(): number {
     return 2 * Math.max(1, current.refreshMinutes) * 60_000;
   }
-  /** The account's latest query failed, or its read is older than two refreshes (see AccountUsage.stale). */
+  /** The account's read is older than two refreshes, or there is none (see AccountUsage.stale). */
   function readStale(name: string): boolean {
     const m = collector.get(name);
-    return (
-      m === undefined ||
-      m.problem !== null ||
-      m.observedAt === null ||
-      deps.now() - m.observedAt > maxReadAgeMs()
-    );
+    return m?.observedAt == null || deps.now() - m.observedAt > maxReadAgeMs();
   }
 
   /** Measurements recent enough to decide on (see maxReadAgeMs). */

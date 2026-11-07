@@ -21692,6 +21692,31 @@ describe("reparto por hueco 2026-11-07", () => {
       expect(report.cuentas.find((c: { nombre: string }) => c.nombre === "main")).toMatchObject({ huecoOpus: null, fablePerdida: null });
     });
 
+    // The cut of a fresh read: two refreshes (refreshMinutes 5: 10 min) after
+    // main's read it still gives room; one millisecond more, none.
+    for (const [age, action] of [[10 * 60_000, "proceed"], [10 * 60_000 + 1, "wait"]] as const)
+      it(`D8: main read ${age} ms ago, no query since: Opus ${action === "proceed" ? "takes it" : "waits"} (Codex r1 medium 4)`, async () => {
+        let clock = NOW;
+        const h = await host(
+          { main: () => Response.json(payload(5, 10, 12)), spare: () => Response.json(payload(0, 2, 0)), work: () => Response.json(payload(0, 2, 0)) },
+          {
+            clock: () => clock,
+            settings: { preferredModel: "Fable", seatsTeam: 1, seatsMax: 4, opusOverflowRoom: 15, refreshMinutes: 5 },
+            presetEnv: { "proj-1": on("spare"), "proj-2": on("spare"), "proj-3": on("work") },
+          },
+        );
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "spare", "work");
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        expect((await dispatch(h, "o2", "proj-2", OPUS)).action).toBe("proceed");
+        await active(h, "o2", "proj-2");
+        expect((await dispatch(h, "o3", "proj-3", OPUS)).action).toBe("proceed");
+        await active(h, "o3", "proj-3");
+        clock = NOW + age;
+        expect((await dispatch(h, "b", "proj-1", OPUS)).action).toBe(action);
+        expect(await where(h)).toBe(action === "proceed" ? "main" : "spare");
+      });
+
     it("D8: with main not read whole it never takes Opus", async () => {
       const { h } = await start(() => ({ ...payload(5, 10, 12), limits: [] }));
       expect((await dispatch(h, "b", "proj-1", OPUS)).action).toBe("wait");
