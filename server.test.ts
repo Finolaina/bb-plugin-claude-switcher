@@ -21270,6 +21270,39 @@ describe("reparto por hueco 2026-11-07", () => {
       expect(h.envSet.at(-1)).toMatchObject({ projectId: "proj-1", note: ownNote("spare") });
     });
 
+    it("a move for room with siblings at work: no other within stuckMoveMinutes, one after", async () => {
+      let clock = NOW;
+      let spare: [number, number] = [10, 12];
+      let work: [number, number] = [90, 90];
+      const h = await host(
+        {
+          main: () => Response.json(payload(5, 90, 53)), // room -13.5
+          spare: () => Response.json(payload(5, ...spare)),
+          work: () => Response.json(payload(5, ...work)),
+        },
+        { clock: () => clock, settings: { preferredModel: "Fable", seatsMax: 4, stuckMoveMinutes: 10 } },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      // a starts on main: alone, it moves the project to spare.
+      expect(await dispatch(h, "a", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      await active(h, "a");
+      expect(await where(h)).toBe("spare");
+      // spare drops to room -13.5, work rises to 46: b, with a at work, stays 5 min on…
+      spare = [90, 53];
+      work = [10, 12];
+      clock = NOW + 5 * 60_000;
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "b", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      await active(h, "b");
+      expect(await where(h)).toBe("spare");
+      // …and c moves it once the 10 min are past.
+      clock = NOW + 10 * 60_000 + 1;
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "c", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("work");
+    });
+
     it("an Opus turn is not this rule's", async () => {
       const h = await start(() => 86);
       teamLogin(h, "work");
@@ -21288,7 +21321,8 @@ describe("reparto por hueco 2026-11-07", () => {
           spare: () => Response.json(payload(5, 10, 12)),
           work: () => Response.json(payload(0, 2, 0)),
         },
-        { settings: { preferredModel: "Fable", seatsMax: 1, seatsTeam: 2, stuckMoveMinutes: 10, ...settings } },
+        // otherModelUpTo on: the reason must not speak of a Fable margin for a Fable turn.
+        { settings: { preferredModel: "Fable", seatsMax: 1, seatsTeam: 2, stuckMoveMinutes: 10, otherModelUpTo: 50, ...settings } },
       );
       dispose = () => h.harness.dispose();
       teamLogin(h, "work");

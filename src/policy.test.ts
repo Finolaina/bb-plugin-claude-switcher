@@ -1023,6 +1023,13 @@ describe("Opus with no Team able to take it: the Ultra with the most room (0.2.4
   it("opusOverflowRoom 100 turns it off; unset, no share or no flag too", () => {
     expect(chooseAccount([ultra("a", 10, 12), team], opus({ opusOverflowRoom: 100 }))).toBeNull();
     expect(chooseAccount([ultra("a", 0, 99), team], opus({ opusOverflowRoom: 100 }))).toBeNull();
+    // Room 100: weekly 0, Fable 100 whose window resets a day before the weekly (not 0.2.47's case).
+    const hundred = account("a", {
+      weekly: { usedPercent: 0, resetsAt: NOW + 72 * HOUR },
+      models: { Fable: { usedPercent: 100, resetsAt: NOW + 48 * HOUR } },
+    });
+    expect(chooseAccount([hundred, team], opus({ opusOverflowRoom: 100 }))).toBeNull();
+    expect(chooseAccount([hundred, team], opus({ opusOverflowRoom: 99.9 }))?.account).toBe("a");
     expect(chooseAccount([ultra("a", 10, 12), team], opus({ opusOverflowRoom: undefined }))).toBeNull();
     expect(chooseAccount([ultra("a", 10, 12), team], opus({ reserveShare: undefined }))).toBeNull();
     expect(chooseAccount([ultra("a", 10, 12), team], opus({ noTeamTakes: () => false }))).toBeNull();
@@ -1038,7 +1045,8 @@ describe("Opus with no Team able to take it: the Ultra with the most room (0.2.4
 
   it("Sonnet too; Haiku and Fable keep their rules", () => {
     expect(chooseAccount([ultra("a", 10, 12), team], opus({ preferredModel: "Sonnet" }))?.account).toBe("a");
-    expect(spendsReservedWeekly(ultra("a", 60, 12), opus({ preferredModel: "Haiku", reserveSpareUpTo: 50 }))).toBe(true);
+    // Room 20 ≥ 15, weekly 60 over Haiku's margin of 50: still Fable's for Haiku.
+    expect(spendsReservedWeekly(ultra("a", 60, 60), opus({ preferredModel: "Haiku", reserveSpareUpTo: 50 }))).toBe(true);
     expect(spendsReservedWeekly(ultra("a", 10, 12), opus({ preferredModel: "Fable" }))).toBe(false);
   });
 
