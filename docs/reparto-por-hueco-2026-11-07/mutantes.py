@@ -41,6 +41,11 @@ M = [
      VT, "B2: a new project goes to the Ultra with the most room"),
     ("B2 orden", "Fable en una Team no va la última (servidor)", P, "    reserveOnTeam,\n", "    0,\n",
      VT, "T-tic"),
+    ("B2 orden", "un proyecto nuevo se coloca sin la reserva", V,
+     "      // The share ranks a new project by room (0.2.48, B2): without the\n"
+     "      // reserve here the choice was by deadline alone (PLAN §A row 1).\n"
+     "      ...reserveOf(),\n", "",
+     VT, "B2: a new project goes to the Ultra with the most room"),
     ("B2 orden", "tramos redondeados en vez de truncados (9,9 y 10 en el mismo)", P,
      "  return room === null ? 0 : -Math.floor(room / ROOM_TIER);\n", "  return room === null ? 0 : -Math.round(room / ROOM_TIER);\n",
      PT, "cut: room 9.9 and 10.0"),
