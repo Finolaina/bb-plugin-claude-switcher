@@ -21755,6 +21755,76 @@ describe("reparto por hueco 2026-11-07", () => {
         expect(h.retries).toHaveLength(2);
       });
 
+      // Astra r3 medium 2: the mark is the failed model's when work's read
+      // explains the 429 by that model's own window (Fable at 100 %, session
+      // 20 %, weekly 10 %): an Opus turn of another project on main (room
+      // 46) still goes to work, Team first. Read with Fable free, the 429 is
+      // taken for the whole account: that Opus turn stays on main.
+      for (const [fable, to] of [[100, "work"], [0, "main"]] as const)
+        it(`a Fable turn's 429 on work read with Fable at ${fable} %: another project's Opus turn goes to ${to} (Astra r3 medium 2)`, async () => {
+          const h = await host(
+            { main: () => Response.json(payload(5, 10, 12)), work: () => Response.json(payload(20, 10, fable)) },
+            {
+              dirs: () => ["work"],
+              settings: { preferredModel: "Fable", seatsTeam: 2, seatsMax: 4, opusOverflowRoom: 15 },
+              presetEnv: { "proj-1": on("work") },
+              threadEvents: {
+                "thread-1": [
+                  { id: "evt_creq_1", scope: { kind: "thread" }, threadId: "thread-1", seq: 1, createdAt: NOW - 60_000, type: "client/turn/requested", data: { requestId: "creq_1", execution: { model: FABLE_ID } } },
+                ],
+              },
+            },
+          );
+          dispose = () => h.harness.dispose();
+          teamLogin(h, "work");
+          await h.harness.behavior.callRpc("accounts_refresh", null);
+          await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+          expect(await dispatch(h, "o2", "proj-2", OPUS)).toEqual({ action: "proceed" });
+          expect(await where(h, "proj-2")).toBe(to);
+        });
+
+      // With the session or the general weekly full too (resetting at +1 h),
+      // the 429 may be theirs: the mark is the whole account's. At +90 min
+      // work's read, settled, runs Opus again, but its 429 (till +5 h) still
+      // stands: the Opus turn stays on main.
+      for (const full of ["session", "weekly_all"] as const)
+        it(`a Fable turn's 429 on work read with Fable and the ${full} window full: the mark is the whole account's (Astra r3 medium 2)`, async () => {
+          let clock = NOW;
+          const at = (ms: number) => new Date(NOW + ms).toISOString();
+          const workRead = {
+            limits: [
+              { kind: "session", percent: full === "session" ? 100 : 20, resets_at: at(HOUR) },
+              { kind: "weekly_all", percent: full === "weekly_all" ? 100 : 10, resets_at: at(HOUR) },
+              { kind: "weekly_scoped", percent: 100, resets_at: at(4 * HOUR), scope: { model: { display_name: "Fable" } } },
+            ],
+            five_hour: { locked_reason: null },
+            seven_day: { locked_reason: null },
+          };
+          const h = await host(
+            { main: () => Response.json(payload(5, 10, 12)), work: () => Response.json(workRead) },
+            {
+              clock: () => clock,
+              dirs: () => ["work"],
+              settings: { preferredModel: "Fable", seatsTeam: 2, seatsMax: 4, opusOverflowRoom: 15, refreshMinutes: 600 },
+              presetEnv: { "proj-1": on("work") },
+              threadEvents: {
+                "thread-1": [
+                  { id: "evt_creq_1", scope: { kind: "thread" }, threadId: "thread-1", seq: 1, createdAt: NOW - 60_000, type: "client/turn/requested", data: { requestId: "creq_1", execution: { model: FABLE_ID } } },
+                ],
+              },
+            },
+          );
+          dispose = () => h.harness.dispose();
+          teamLogin(h, "work");
+          await h.harness.behavior.callRpc("accounts_refresh", null);
+          const f = failure();
+          f.rateLimits!.windows[0]!.resetsAtMs = NOW + 5 * HOUR;
+          await h.harness.behavior.emitThreadEvent("turn.failed", f);
+          clock = NOW + 90 * 60_000;
+          expect(await dispatch(h, "o2", "proj-2", OPUS)).toEqual({ action: "proceed" });
+          expect(await where(h, "proj-2")).toBe("main");
+        });
+
       // Out until the 429's own reset (NOW + 2 h), reads kept fresh by
       // refreshMinutes 600 and none made since: another project's Opus turn
       // on main stays there 1 ms before it, and goes to work at it.

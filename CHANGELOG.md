@@ -121,6 +121,11 @@ Revisión (Astra r3: 1 high y 3 medium, `docs/reparto-por-hueco-2026-11-07/astra
   work a spare y de spare a la Ultra con hueco 46, donde corre el turno.
   Antes iba de work a spare y de spare a work hasta agotar los intentos
   (high 1).
+- La marca es del modelo que falló cuando la lectura de la cuenta lo explica
+  por la ventana propia de ese modelo (Fable al 100 % con sesión y semanal
+  general por debajo): un Opus de otro proyecto sigue yendo a esa Team, Team
+  primero. Si la sesión o la semanal general también están llenas, o la
+  lectura no explica el 429, la marca es de toda la cuenta (medium 2).
 
 ## [0.2.47] - 2026-11-06
 

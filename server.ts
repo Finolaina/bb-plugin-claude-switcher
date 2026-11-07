@@ -122,6 +122,7 @@ import {
   reserveToSpare,
   reserving,
   spendsReservedWeekly,
+  type AccountUsage,
 } from "./src/policy.js";
 import {
   usageFetchMethod,
@@ -1587,20 +1588,40 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * the failure may still show room the provider refused, and the retry's
    * placement would take the project back there (Codex r2 high 1). Only
    * there: elsewhere its numbers decide, and a turn may fail there once,
-   * as before. In memory: a reload forgets it.
+   * as before. In memory: a reload forgets it. `model`: the mark is that
+   * model's alone (its own window explains the limit, see limitScope);
+   * null: the whole account's (Astra r3 medium 2).
    */
-  const limitedAt = new Map<string, { at: number; until: number }>();
-  /** `name`'s reported limit still stands (see limitedAt). */
-  function limited(name: string): boolean {
-    return limitedUntil(name) !== null;
+  const limitedAt = new Map<string, { at: number; until: number; model: string | null }>();
+  /** `name`'s reported limit still stands for a turn in `model` (see limitedAt). */
+  function limited(name: string, model: string): boolean {
+    return limitedUntil(name, model) !== null;
   }
-  /** Until when `name`'s reported limit stands (see limitedAt); null: it does not. */
-  function limitedUntil(name: string): number | null {
+  /** Until when `name`'s reported limit stands for a turn in `model` (see limitedAt); null: it does not. */
+  function limitedUntil(name: string, model: string): number | null {
     const mark = limitedAt.get(name);
     if (mark === undefined) return null;
+    if (mark.model !== null && mark.model.toLowerCase() !== model.toLowerCase()) return null;
     const read = collector.get(name)?.observedAt;
     return deps.now() < mark.until && !(read != null && read > mark.at)
       ? mark.until
+      : null;
+  }
+  /**
+   * Whose a usage limit on `account` is, by its read as the turn in `model`
+   * failed: that model's when its own window is full while the session and
+   * the general weekly are not (a Fable window at 100 % takes no Team seat
+   * from Opus); otherwise, or unread, the whole account's (null).
+   */
+  function limitScope(account: AccountUsage | undefined, model: string, now: number): string | null {
+    if (account === undefined || account.unknown === true || model === "") return null;
+    const a = settle(account, now);
+    const own = modelWindow(a, model);
+    return own !== undefined &&
+      own.usedPercent >= 100 &&
+      a.session.usedPercent < 100 &&
+      a.weekly.usedPercent < 100
+      ? model
       : null;
   }
   function refusing(name: string): boolean {
@@ -5184,7 +5205,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       ...unreadTeamSeats({ accounts: measured, unreadTeams: unreadTeams(model), currentAccount: "", now }),
     ];
     return !teams.some((a) => {
-      if (a.name === ruledOut || limited(a.name)) return false;
+      if (a.name === ruledOut || limited(a.name, model)) return false;
       if (!isUsable(a) || !canRunModel(a, model)) return false;
       const key = seatKey(a.name);
       if (threadId !== undefined && seats.seatOf(threadId)?.account === key) return true;
@@ -6501,7 +6522,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       noTeamTakes: (m: string, ruledOut: string | null) => noTeamTakes(m, undefined, ruledOut),
       // A Team seat marked by an earlier failure is no destination either
       // (Astra r3 high 1).
-      limitedUntil,
+      limitedUntil: (name: string) => limitedUntil(name, model),
       maximumWaitMs:
         current.maximumWaitHours > 0
           ? current.maximumWaitHours * 3_600_000
@@ -6519,7 +6540,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // Judged on its failure, the event is a limit or a refusal (handleFailure
     // ignores the rest); left in error, it may be hours old: no mark.
     if (!stuck && failedOn !== null)
-      limitedAt.set(failedOn, { at: now, until: reportedFreeAt(event) ?? Number.POSITIVE_INFINITY });
+      limitedAt.set(failedOn, {
+        at: now,
+        until: reportedFreeAt(event) ?? Number.POSITIVE_INFINITY,
+        model: limitScope(input.accounts.find((a) => a.name === failedOn), model, now),
+      });
     // No Fable on any account, and an account with Opus: the thread is told
     // to switch (D3), whatever the decision's reason, naming where the
     // dispatch would run its Opus turn (Sol B2-002: the same placement).
