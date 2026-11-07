@@ -4812,6 +4812,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     adviceOver(thread.id);
     forgetWait(thread.id);
     toldToStart.delete(thread.id);
+    overdueTold.delete(thread.id);
     // A hidden thread's turn too: it runs on the project's account, and
     // keeps the project there (Codex PLAZAS-R2-003).
     if (thread.providerId === CLAUDE_CODE_PROVIDER) {
@@ -4925,6 +4926,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     adviceOver(thread.id);
     forgetWait(thread.id);
     toldToStart.delete(thread.id);
+    overdueTold.delete(thread.id);
     stuckSaid.delete(thread.id);
     // Forgotten in storage too, or the stored list only grows (Codex r8,
     // IR8-004).
@@ -5225,17 +5227,29 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function reserveFor(threadId: string | undefined, now: number) {
     const base = reserveOf();
     if (threadId === undefined) return base;
-    const since = waitSince.get(threadId);
-    const overdue =
-      current.opusOverflowRoom < 100 &&
-      current.maximumWaitHours > 0 &&
-      since !== undefined &&
-      now - since >= current.maximumWaitHours * 3_600_000;
     return {
       ...base,
       noTeamTakes: (model: string) => noTeamTakes(model, threadId),
-      ...(overdue ? { opusOverflowRoom: -Infinity } : {}),
+      ...(overdue(threadId, now) ? { opusOverflowRoom: -Infinity } : {}),
     };
+  }
+  /**
+   * Threads let out by maximumWaitHours (see reserveFor) and told to start,
+   * until a turn of theirs runs: asked again before it starts (another
+   * plugin held the message), the way out still stands, and the hour is not
+   * counted anew (Astra r3 medium 3).
+   */
+  const overdueTold = new Set<string>();
+  /** The thread's message has been held past maximumWaitHours, or it was let out for that and has not started (see reserveFor). */
+  function overdue(threadId: string, now: number): boolean {
+    const since = waitSince.get(threadId);
+    return (
+      current.opusOverflowRoom < 100 &&
+      current.maximumWaitHours > 0 &&
+      (overdueTold.has(threadId) ||
+        (since !== undefined &&
+          now - since >= current.maximumWaitHours * 3_600_000))
+    );
   }
   /** A turn in `model` goes to a Team seat only (see holdsForReserve). */
   function heldModel(model: string): boolean {
@@ -5826,6 +5840,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       waitAsked.set(ctx.thread.id, now);
       toldToStart.delete(ctx.thread.id);
     } else if (ctx.attempt === "start-turn") {
+      if (decision.action === "proceed" && overdue(ctx.thread.id, deps.now()))
+        overdueTold.add(ctx.thread.id);
       forgetWait(ctx.thread.id);
       if (decision.action !== "proceed") toldToStart.delete(ctx.thread.id);
     }

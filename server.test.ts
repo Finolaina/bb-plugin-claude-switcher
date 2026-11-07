@@ -21542,6 +21542,26 @@ describe("reparto por hueco 2026-11-07", () => {
       expect(await where(h)).toBe("main");
     });
 
+    // Astra r3 medium 3: told to start on main past the hour, its message is
+    // held by another plugin and bb asks again 1 ms later, before the turn
+    // starts: it still goes, the hour is not counted anew. Once a turn of it
+    // has run, the next one waits from zero.
+    it("let out past maximumWaitHours, asked again 1 ms later before it starts: it still proceeds (Astra r3 medium 3)", async () => {
+      const { h, at } = await start(() => payload(5, 85, 90), { maximumWaitHours: 1 });
+      expect((await dispatch(h, "b", "proj-1", OPUS)).action).toBe("wait");
+      at(60 * MINUTE);
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "b", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      at(60 * MINUTE + 1);
+      expect(await dispatch(h, "b", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("main");
+      // It ran: its next turn is held from zero, and goes back to wait for
+      // a Team seat.
+      await active(h, "b");
+      await h.harness.behavior.emitThreadEvent("thread.idle", { thread: thread({ id: "b", projectId: "proj-1" }) });
+      expect((await dispatch(h, "b", "proj-1", OPUS)).action).toBe("wait");
+    });
+
     it("held past maximumWaitHours with opusOverflowRoom 100 or maximumWaitHours 0: it keeps waiting", async () => {
       for (const settings of [{ maximumWaitHours: 1, opusOverflowRoom: 100 }, { maximumWaitHours: 0 }]) {
         const { h, at } = await start(() => payload(5, 85, 90), settings);

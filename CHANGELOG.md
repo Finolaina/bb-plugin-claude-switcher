@@ -126,6 +126,10 @@ Revisión (Astra r3: 1 high y 3 medium, `docs/reparto-por-hueco-2026-11-07/astra
   general por debajo): un Opus de otro proyecto sigue yendo a esa Team, Team
   primero. Si la sesión o la semanal general también están llenas, o la
   lectura no explica el 429, la marca es de toda la cuenta (medium 2).
+- La salida por `maximumWaitHours` se mantiene hasta que el turno arranca: si
+  otro plugin retiene el mensaje y bb vuelve a preguntar 1 ms después, el
+  turno sigue saliendo hacia la Ultra en vez de empezar otra hora de espera.
+  Cuando un turno suyo ha corrido, el siguiente cuenta desde cero (medium 3).
 
 ## [0.2.47] - 2026-11-06
 
