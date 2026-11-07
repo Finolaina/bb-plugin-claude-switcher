@@ -100,8 +100,7 @@ Revisión (Codex r2: 1 high y 1 medium, `docs/reparto-por-hueco-2026-11-07/codex
 
 - El descarte de la Team que acaba de fallar ya no termina con el juicio:
   esa Team no cuenta como capaz hasta el reinicio que dice el propio 429
-  (sin reinicio, hasta que llegue una lectura nueva), o hasta que una lectura
-  hecha después del fallo diga otra cosa. Antes, el despacho del reintento
+  (desde Astra r4, ninguna lectura la levanta: ver abajo). Antes, el despacho del reintento
   devolvía el proyecto a la Team, que seguía leyendo 20 % de sesión: cuatro
   idas y vueltas y el quinto fallo en `attempts-exhausted`, con la Ultra con
   hueco 46 libre. La prueba recorre ahora la cadena entera: fallo, reintento,
@@ -120,7 +119,8 @@ Revisión (Astra r3: 1 high y 3 medium, `docs/reparto-por-hueco-2026-11-07/astra
   que leen 20 % de sesión pero devuelven 429 dos horas, el reintento va de
   work a spare y de spare a la Ultra con hueco 46, donde corre el turno.
   Antes iba de work a spare y de spare a work hasta agotar los intentos
-  (high 1).
+  (high 1). Vale para los turnos que guardan la reserva (Opus, Sonnet); uno
+  de Fable se juzga con los números, como antes de la 0.2.48.
 - La marca es del modelo que falló cuando la lectura de la cuenta lo explica
   por la ventana propia de ese modelo (Fable al 100 % con sesión y semanal
   general por debajo): un Opus de otro proyecto sigue yendo a esa Team, Team
@@ -135,6 +135,23 @@ Revisión (Astra r3: 1 high y 3 medium, `docs/reparto-por-hueco-2026-11-07/astra
   escribiendo su traslado a una Team, un hermano de Fable que lo movería por
   hueco espera y vuelve a preguntar, en vez de escribir otra Ultra en medio.
   El texto de esa espera ya no dice «for a seat» (medium 4).
+
+Revisión (Astra r4: 1 high y 3 medium, `docs/reparto-por-hueco-2026-11-07/astra-r4.txt`):
+
+- La marca de una cuenta que acaba de dar un 429 ya no la levanta ninguna
+  lectura: el endpoint de uso va por detrás del 429, y cada fallo vuelve a
+  leer las cuentas antes de juzgar, así que una lectura con los mismos
+  números quitaba la marca. Con dos Team en 429 dos horas y el reloj
+  avanzando 1 s entre fallos, el reintento volvía a ir de work a spare y de
+  spare a work hasta agotar los intentos. Ahora la marca dura hasta el
+  reinicio que dice el 429 y, sin reinicio, 30 min (`LIMIT_NO_RESET_MS`,
+  [SUPUESTO]: no había un retraso de bb ni nuestro que encajara). Fuera el
+  código de «una lectura posterior la desmiente» y el de la marca sin fin
+  (high 1).
+- Cada cuenta guarda una marca de la cuenta entera y una por modelo, cada
+  una con su vencimiento: un fallo de Fable por su ventana ya no pisa la
+  marca de cuenta que dejó antes un Opus, y el reintento de Opus no vuelve a
+  esa Team (medium 3).
 
 ## [0.2.47] - 2026-11-06
 

@@ -154,6 +154,12 @@ export const PROJECTS_FRESH_MS = 30_000;
  * its usage still measures fine.
  */
 export const REFUSAL_MS = 6 * 60 * 60_000;
+/**
+ * How long a usage limit with no reset reported keeps its account marked
+ * (see limitedAt). [SUPUESTO] 30 min: no default of bb's or ours fits, and
+ * the next turn there may fail once more after it (Astra r4 high 1).
+ */
+export const LIMIT_NO_RESET_MS = 30 * 60_000;
 /** A measurement older than this is taken again before moving a project ahead of the limit. */
 export const AHEAD_FRESH_MS = 60_000;
 /** bb fails a dispatch whose checkpoint takes 10 s: the placement before a turn is left behind well before. */
@@ -1581,31 +1587,31 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** When each account last refused a turn (in memory: a reload forgets it). */
   const refusedAt = new Map<string, number>();
   /**
-   * The accounts a turn just failed on with a usage limit, and until when
-   * the provider says so (Infinity: no reset reported). Until then, or until
-   * a read made after the failure says otherwise, such a Team seat is none
-   * that takes a turn held off the reserve (noTeamTakes): a read from before
-   * the failure may still show room the provider refused, and the retry's
-   * placement would take the project back there (Codex r2 high 1). Only
-   * there: elsewhere its numbers decide, and a turn may fail there once,
-   * as before. In memory: a reload forgets it. `model`: the mark is that
-   * model's alone (its own window explains the limit, see limitScope);
-   * null: the whole account's (Astra r3 medium 2).
+   * The usage limits turns just failed on, per account and scope, each
+   * until the reset its 429 reported (none reported: LIMIT_NO_RESET_MS).
+   * Scope "": the whole account's; a model's name, lower case: that model's
+   * alone, its own window explaining the limit (see limitScope; Astra r3
+   * medium 2). Until then such an account is no Team seat that takes a turn
+   * held off the reserve (noTeamTakes) and no destination of a retry
+   * (decideSwitch): its read lags the 429, so no read ends a mark (Astra r4
+   * high 1). Elsewhere its numbers decide, and a turn may fail there once,
+   * as before. In memory: a reload forgets them.
    */
-  const limitedAt = new Map<string, { at: number; until: number; model: string | null }>();
-  /** `name`'s reported limit still stands for a turn in `model` (see limitedAt). */
-  function limited(name: string, model: string): boolean {
-    return limitedUntil(name, model) !== null;
-  }
-  /** Until when `name`'s reported limit stands for a turn in `model` (see limitedAt); null: it does not. */
+  const limitedAt = new Map<string, Map<string, number>>();
+  /** Until when `name`'s marks stand for a turn in `model` (see limitedAt); null: none does. */
   function limitedUntil(name: string, model: string): number | null {
-    const mark = limitedAt.get(name);
-    if (mark === undefined) return null;
-    if (mark.model !== null && mark.model.toLowerCase() !== model.toLowerCase()) return null;
-    const read = collector.get(name)?.observedAt;
-    return deps.now() < mark.until && !(read != null && read > mark.at)
-      ? mark.until
-      : null;
+    const now = deps.now();
+    let until: number | null = null;
+    for (const [scope, end] of limitedAt.get(name) ?? [])
+      if ((scope === "" || scope === model.toLowerCase()) && now < end)
+        until = Math.max(until ?? end, end);
+    return until;
+  }
+  /** Marks `name` for `scope` till `until`; a later mark of the same scope never shortens it (see limitedAt). */
+  function markLimited(name: string, scope: string, until: number): void {
+    const marks = limitedAt.get(name) ?? new Map<string, number>();
+    marks.set(scope, Math.max(marks.get(scope) ?? until, until));
+    limitedAt.set(name, marks);
   }
   /**
    * Whose a usage limit on `account` is, by its read as the turn in `model`
@@ -5207,7 +5213,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       ...unreadTeamSeats({ accounts: measured, unreadTeams: unreadTeams(model), currentAccount: "", now }),
     ];
     return !teams.some((a) => {
-      if (a.name === ruledOut || limited(a.name, model)) return false;
+      if (a.name === ruledOut || limitedUntil(a.name, model) !== null) return false;
       if (!isUsable(a) || !canRunModel(a, model)) return false;
       const key = seatKey(a.name);
       if (threadId !== undefined && seats.seatOf(threadId)?.account === key) return true;
@@ -6540,8 +6546,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       ...reserveOf(),
       noTeamTakes: (m: string, ruledOut: string | null) => noTeamTakes(m, undefined, ruledOut),
       // A Team seat marked by an earlier failure is no destination either
-      // (Astra r3 high 1).
-      limitedUntil: (name: string) => limitedUntil(name, model),
+      // (Astra r3 high 1), for a turn held off the reserve: one in Fable is
+      // judged on the numbers, as before 0.2.48.
+      ...(heldModel(model) ? { limitedUntil: (name: string) => limitedUntil(name, model) } : {}),
       maximumWaitMs:
         current.maximumWaitHours > 0
           ? current.maximumWaitHours * 3_600_000
@@ -6559,11 +6566,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // Judged on its failure, the event is a limit or a refusal (handleFailure
     // ignores the rest); left in error, it may be hours old: no mark.
     if (!stuck && failedOn !== null)
-      limitedAt.set(failedOn, {
-        at: now,
-        until: reportedFreeAt(event) ?? Number.POSITIVE_INFINITY,
-        model: limitScope(input.accounts.find((a) => a.name === failedOn), model, now),
-      });
+      markLimited(
+        failedOn,
+        limitScope(input.accounts.find((a) => a.name === failedOn), model, now)?.toLowerCase() ?? "",
+        reportedFreeAt(event) ?? now + LIMIT_NO_RESET_MS,
+      );
     // No Fable on any account, and an account with Opus: the thread is told
     // to switch (D3), whatever the decision's reason, naming where the
     // dispatch would run its Opus turn (Sol B2-002: the same placement).

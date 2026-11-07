@@ -2708,14 +2708,6 @@ describe("decideSwitch with an account marked by an earlier failure (Astra r3 hi
     });
   });
 
-  it("marked with no reset reported: never waited for", () => {
-    const f = failure();
-    f.rateLimits!.windows[0]!.resetsAtMs = null;
-    expect(
-      decideSwitch(input({ failure: f, maximumWaitMs: null, limitedUntil: marked(Number.POSITIVE_INFINITY) })),
-    ).toEqual({ kind: "decline", reason: "no-account-usable" });
-  });
-
   it("a thread left in error is judged on the measurements: the mark plays no part", () => {
     expect(decideSwitch(input({ stuck: true, limitedUntil: marked(NOW + 3 * HOUR) }))).toEqual({
       kind: "switch",

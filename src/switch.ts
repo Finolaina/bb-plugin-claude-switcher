@@ -79,12 +79,11 @@ export interface SwitchInput {
    */
   noTeamTakes?: (model: string, ruledOut: string | null) => boolean;
   /**
-   * Until when the provider said `name` is out, from an earlier failure
-   * whose mark stands (server's limitedAt): Infinity with no reset
-   * reported; null when unmarked. A marked account is no destination of
-   * this switch, and it is waited for no sooner than then, as the account
-   * the turn just failed on (Astra r3 high 1). Unused for a thread left in
-   * error: the measurements judge.
+   * Until when `name` is out, from an earlier failure whose mark stands
+   * (server's limitedAt); null when unmarked. A marked account is no
+   * destination of this switch, and it is waited for no sooner than then
+   * (Astra r3 high 1). Unused for a thread left in error: the measurements
+   * judge.
    */
   limitedUntil?: (name: string) => number | null;
   /**
@@ -360,8 +359,7 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
           : Math.max(at, failedFreeAt);
     } else {
       const until = marked(account.name);
-      if (until !== null)
-        at = at === null || !Number.isFinite(until) ? null : Math.max(at, until);
+      if (until !== null) at = at === null ? null : Math.max(at, until);
     }
     if (at === null) continue;
     // Never a wait for an account the rule would not choose as the retry
