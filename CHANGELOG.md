@@ -4,6 +4,75 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.48] - 2026-11-07
+
+### Cambiado
+
+Encargo de Aitor del 2026-11-07: «la cuenta de viaulab, se sigue disparando el
+tema la cuenta semanal y fable se queda sin gastar» y «tampoco quiero que hilos
+se queden parados, si una cuenta se queda sin cuota tiene que saltar a otra, el
+trabajo prima ... se trata de tenerlo todo optimizado con lo que tenemos». Plan
+y medidas: reparto-fable, PLAN §0, §A y §B (almacenamiento del hilo).
+
+- **Hueco de Opus por cuenta** (`opusRoom`, B1): en una Max o Ultra,
+  `(100 − semanal) − reserveShare × (100 − Fable)`. Positivo: semanal general
+  que otro modelo puede gastar sin quitarle nada a Fable. Negativo: la cuenta
+  llegará al 100 % de la semanal con Fable sin gastar. Ejemplos medidos el
+  2026-11-07 con 0,5: semanal 86 y Fable 53 da −9,5; 100 y 65, −17,5; 10 y 12,
+  46. Nulo en una Team, en una lectura incompleta y sin ventana de Fable.
+- **Fable va a la cuenta con más hueco** (B2): en tramos de 10 puntos, antes
+  del cuarto de sesión y de la fecha de corte, y a una Team la última. Vale
+  para proyectos nuevos, rescates, cambios tras un fallo y el elegido de la
+  cabecera. Con las tres Ultra del plan (−9,5, 46 y 45,5), un proyecto nuevo
+  va a la de 46 o la de 45,5 según la fecha de corte; antes iba a la que
+  renovaba antes aunque tuviera −9,5. Opus entre las Ultra que ya puede usar
+  (0.2.47 y B5) también va a la de más hueco.
+- **Un turno de Fable se mueve por hueco** (B3, `why: "fable-room"`): con su
+  cuenta en hueco negativo y otra Max/Ultra con al menos `roomMoveGap` (20)
+  puntos más y plaza, el proyecto se mueve antes del turno. Con −9,5 y otra a
+  10,5 se mueve; a 10,4 no. Con otro hilo del proyecto trabajando, solo por
+  debajo de −10 y no dentro de `stuckMoveMinutes` desde su último movimiento.
+  Nunca a una Team, nunca por un tic de Calor, nunca con el proyecto elegido a
+  mano.
+- **Fable con plazas llenas y un hermano trabajando también se mueve** (B4):
+  como Opus desde la 0.2.43, a la primera consulta, a una Max/Ultra con plaza
+  antes que a una Team. Antes esperaba en la cola (92 min de hilo medidos con
+  5-6 cuentas libres).
+- **[SUPUESTO] Opus y Sonnet sin ninguna Team capaz van a la Ultra con más
+  hueco** (B5): si ninguna Team, leída o conocida por su login, tiene cuota y
+  plaza para el turno, este va a la Max/Ultra con más hueco siempre que sea
+  de al menos `opusOverflowRoom` (15), detrás de cualquier Team. Si ninguna
+  llega, espera como en la 0.2.44; y si un turno lleva retenido más de
+  `maximumWaitHours`, va a la Max/Ultra de más hueco sea cual sea. Cómo
+  encajan las tres frases de Aitor (decisión de la sesión que delegó, no de
+  Aitor): «los Opus tienen que salir por Team sí o sí» (2026-11-06) es el
+  orden, Team siempre antes; «el trabajo prima» (2026-11-07) es no esperar
+  mientras haya semanal que Fable no va a usar; «Esperar siempre»
+  (2026-11-03) queda para las Ultra sin hueco y hasta el tope de espera.
+  `opusOverflowRoom` a 100 lo apaga entero, también la salida por el tope.
+  Una Ultra sin leer nunca recibe así un turno.
+- **`health --json`**: cada cuenta lleva `huecoOpus` (el hueco con un
+  decimal) y `fablePerdida`: los puntos de la ventana de Fable que quedarían
+  sin gastar si la cuenta sigue así, `−huecoOpus / reserveShare` con hueco
+  negativo y 0 si no. Nulos en una Team o en una cuenta sin leer entera.
+  Ejemplo: semanal 86 y Fable 53 dan −9,5 y 19. Los campos de antes no
+  cambian. En el texto: «hueco Opus −9.5 (Fable perdida 19)».
+- **Historial** (B6): cada muestra guarda también el % de la ventana de Fable
+  (`preferred_weekly`), para medir la Fable perdida en cada renovación.
+- **Ajustes nuevos**: `reserveShare` (0,5), `roomMoveGap` (20) y
+  `opusOverflowRoom` (15). Los tres valores son cuenta nuestra (una regresión
+  de las lecturas de la semana, ±40 %), no medidas hechas para esto; se
+  afinarán con datos reales.
+
+Límites conocidos: los subagentes de Opus dentro de un hilo de Fable siguen
+sin verse (corren en la cuenta del hilo); un Opus llevado a una Ultra por B5
+queda anotado como excursión, y el siguiente turno de Fable puede volver a la
+Team de la que salió; liberar una espera de Opus (`bestAccount` al soltarla)
+no mira B5, y la espera se coloca cuando vence; la plaza de destino de B3 es
+una plaza libre, no una por delante de la cola; los relojes de B3 y del tope
+de espera de B5 viven en memoria y una recarga los pone a cero; tras un fallo
+en una Team, la marca «ninguna Team capaz» se juzga con la última lectura.
+
 ## [0.2.47] - 2026-11-06
 
 ### Changed

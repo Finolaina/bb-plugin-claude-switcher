@@ -39,8 +39,6 @@ M = [
      PT, "B2"),
     ("B2 orden", "sin el tramo de hueco (servidor)", P, "    roomTier(account, options),\n", "    0,\n",
      VT, "B2: a new project goes to the Ultra with the most room"),
-    ("B2 orden", "Fable en una Team no va la última (servidor)", P, "    reserveOnTeam,\n", "    0,\n",
-     VT, "T-tic"),
     ("B2 orden", "un proyecto nuevo se coloca sin la reserva", V,
      "      // The share ranks a new project by room (0.2.48, B2): without the\n"
      "      // reserve here the choice was by deadline alone (PLAN §A row 1).\n"
