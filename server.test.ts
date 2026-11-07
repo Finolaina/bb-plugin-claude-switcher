@@ -22127,6 +22127,65 @@ describe("reparto por hueco 2026-11-07", () => {
       // The project moved to main after the wait was queued (another Opus
       // turn of it placed there by B5): the wait is released where the
       // project is now, main being an account the retry may run on.
+      // Astra r8 medium 2, the same for the wait moved up: the Opus retry
+      // waits on work (Team, 100 % of its session) and spare (Team, 20 %)
+      // can run it. A sibling's Opus dispatch starts the move to spare, its
+      // variable write held; the pass over the waits, reading work still,
+      // does not write over it. Once the move lands, the next pass releases
+      // the wait on spare, where the project is: one move in the history.
+      // Before: spare twice.
+      it("is not moved while another move of its project is written; released after, where the project is (Astra r8 medium 2, the wait)", async () => {
+        let gate: Promise<void> | null = null;
+        let reached = false;
+        let open = () => {};
+        const h = await host(
+          {
+            main: () => Response.json(payload(5, 100, 100)),
+            spare: () => Response.json(payload(20, 10, 0)),
+            work: () => Response.json(payload(100, 10, 0)),
+          },
+          {
+            listed: [],
+            settings: { preferredModel: "Fable", opusOverflowRoom: 15, seatsTeam: 5 },
+            presetEnv: { "proj-1": on("work") },
+            queued: [retryRow()],
+            threads: { "thread-1": { status: "error" } },
+            threadEvents: {
+              "thread-1": [
+                { id: "evt_creq_r1", scope: { kind: "thread" }, threadId: "thread-1", seq: 1, createdAt: NOW - HOUR, type: "client/turn/requested", data: { requestId: "creq_r1", execution: { model: OPUS } } },
+              ],
+            },
+            beforeSet: async () => {
+              const held = gate;
+              gate = null;
+              if (held === null) return;
+              reached = true;
+              await held;
+            },
+          },
+        );
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "spare", "work");
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        gate = new Promise<void>((resolve) => {
+          open = resolve;
+        });
+        const opus = dispatch(h, "o2", "proj-1", OPUS);
+        await vi.waitFor(() => expect(reached).toBe(true));
+        await onePass(h);
+        expect(h.retries).toEqual([]);
+        open();
+        expect(await opus).toEqual({ action: "proceed" });
+        await active(h, "o2", "proj-1");
+        await onePass(h);
+        expect(h.retries).toEqual([
+          expect.objectContaining({ threadId: "thread-1", turnRequestId: "creq_r1", reason: "Retrying on account spare, where the project is now" }),
+        ]);
+        expect(h.envSet.filter((e) => e.projectId === "proj-1").map((e) => e.note)).toEqual([ownNote("spare")]);
+        const history = ((await h.harness.behavior.callRpc("accounts_list", null)) as State).history;
+        expect(history.filter((r) => r.projectId === "proj-1").map((r) => [r.from, r.to])).toEqual([["work", "spare"]]);
+      });
+
       it("is released on main once the project is there, no project listed", async () => {
         const h = await waitingHost([]);
         dispose = () => h.harness.dispose();

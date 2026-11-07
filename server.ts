@@ -7260,6 +7260,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
       return;
     }
+    // Nor over another automatic move of the project under way (a
+    // dispatch's, its variable still being written): this read predates it.
+    // The next pass over the waits looks again (Astra r8 medium 2, the same
+    // guard as the failure's judgment).
+    if (moving(projectId)) {
+      bb.log.info(
+        `thread ${threadId}: its wait stays on ${fromName}: another move of the project is under way; looked at again at the next pass`,
+      );
+      return;
+    }
     // Moved by something else while the sessions were shared: the wait
     // stays as it is, and fires on its own.
     if (
