@@ -11563,7 +11563,7 @@ describe("an Opus turn never retried, released or placed on a Max account that k
       expect(h.envDeleted).toHaveLength(1);
     }
 
-    it("the Opus write (work → spare) lands after the Fable turn took the project home (work → main)", async () => {
+    it("the Opus write (work → spare) under way: the Fable turn's move home (work → main) waits for it, then for the Opus turn to start (Astra r3 medium 4)", async () => {
       let workSession = 17;
       let armed = false;
       const gate = envGate();
@@ -11583,17 +11583,31 @@ describe("an Opus turn never retried, released or placed on a Max account that k
       armed = true;
       const opus = dispatch(h, "thread-2", OPUS_ID);
       await gate.reached;
-      // Taken home, but the Opus write still under way: where its turn
-      // starts is not known, so its seat waits (Astra SEATS-R3-002).
+      // The Opus write under way holds the Fable turn's move home: it waits
+      // and is placed again once the write lands (every move of placeTurn
+      // holds the project since Astra r3 medium 4; before, it took the
+      // project home in between and waited for its seat, SEATS-R3-002).
       expect(await dispatch(h, "thread-3", FABLE_ID)).toMatchObject({
         action: "wait",
-        reason: "Claude Switcher: the project's account could not be read for its seat; trying again",
+        reason: "Waiting: this project is being moved to another account",
       });
-      expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-1"]);
+      expect(h.envDeleted).toEqual([]);
       gate.release();
       expect(await opus).toEqual({ action: "proceed" });
+      expect(notes(h)).toEqual([ownNote("work"), ownNote("spare")]);
       workSession = 17;
-      await staysOnSpare(h);
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "thread-3", FABLE_ID)).toMatchObject({
+        action: "wait",
+        reason: "Waiting to move to main: thread thread-2 of this project is about to start on spare",
+      });
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "thread-2", projectId: "proj-1" }),
+      });
+      expect(await dispatch(h, "thread-3", FABLE_ID)).toEqual({ action: "proceed" });
+      // Home, one write after the other: no crossing left to note.
+      expect(notes(h)).toEqual([ownNote("work"), ownNote("spare")]);
+      expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-1"]);
     });
 
     it("the Opus read of the project's account answered before the Fable turn took the project home, used after", async () => {
@@ -20826,7 +20840,7 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
       const writes = [...h.envSet, ...h.envDeleted].filter((e) => e.projectId === "proj-1");
       expect(writes).toHaveLength(1);
       expect(b.action).toBe("proceed");
-      expect(await c!).toMatchObject({ action: "wait", reason: "Waiting: this project is being moved to another account for a seat" });
+      expect(await c!).toMatchObject({ action: "wait", reason: "Waiting: this project is being moved to another account" });
       await vi.waitFor(() => expect(h.harness.recheckCount).toBeGreaterThan(before));
     });
 
@@ -20862,7 +20876,7 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
       const writes = [...h.envSet, ...h.envDeleted].filter((e) => e.projectId === "proj-1");
       expect(writes).toHaveLength(1);
       expect(await where(h)).toBe("team");
-      expect(await c!).toMatchObject({ action: "wait", reason: "Waiting: this project is being moved to another account for a seat" });
+      expect(await c!).toMatchObject({ action: "wait", reason: "Waiting: this project is being moved to another account" });
     });
 
     // Codex ASIENTOS-R2-003 / R3-001. A read a write crosses is refused and
@@ -21401,6 +21415,40 @@ describe("reparto por hueco 2026-11-07", () => {
       await active(h, "f");
       expect(await dispatch(h, "o", "proj-1", OPUS)).toEqual({ action: "proceed" });
       expect(h.envSet.filter((e) => e.projectId === "proj-1").map((e) => e.note)).toEqual([ownNote("work"), ownNote("team")]);
+    });
+
+    // Astra r3 medium 4: the other order. An Opus turn's move to a Team seat
+    // (current-reserved) is being written when a Fable sibling would move
+    // the project for room: the sibling waits and asks again once the move
+    // lands, rather than write the other Ultra in between.
+    it("a move of an Opus turn holds a Fable sibling's move for room while it is written (Astra r3 medium 4)", async () => {
+      let fable: Promise<{ action: string; reason?: string }> | null = null;
+      const h = await host(
+        {
+          main: () => Response.json(payload(5, 100, 100)),
+          spare: () => Response.json(payload(5, 90, 53)), // room -13.5
+          work: () => Response.json(payload(5, 10, 12)), // room 46
+          team: () => Response.json(payload(0, 2, 0)),
+        },
+        {
+          dirs: () => ["spare", "work", "team"],
+          settings: { preferredModel: "Fable", seatsMax: 4, seatsTeam: 2, stuckMoveMinutes: 10 },
+          presetEnv: { "proj-1": on("spare") },
+          beforeSet: async () => {
+            if (fable === null) {
+              fable = dispatch(h, "f", "proj-1", FABLE_ID);
+              await fable;
+            }
+          },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "team");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "o", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(fable).not.toBeNull();
+      expect((await fable!).action).toBe("wait");
+      expect(h.envSet.filter((e) => e.projectId === "proj-1").map((e) => e.note)).toEqual([ownNote("team")]);
     });
 
     it("an Opus turn is not this rule's", async () => {

@@ -130,6 +130,11 @@ Revisión (Astra r3: 1 high y 3 medium, `docs/reparto-por-hueco-2026-11-07/astra
   otro plugin retiene el mensaje y bb vuelve a preguntar 1 ms después, el
   turno sigue saliendo hacia la Ultra en vez de empezar otra hora de espera.
   Cuando un turno suyo ha corrido, el siguiente cuenta desde cero (medium 3).
+- Todo movimiento automático antes o después de un turno ata el proyecto
+  mientras se escribe, no solo los de plaza y hueco: si un Opus está
+  escribiendo su traslado a una Team, un hermano de Fable que lo movería por
+  hueco espera y vuelve a preguntar, en vez de escribir otra Ultra en medio.
+  El texto de esa espera ya no dice «for a seat» (medium 4).
 
 ## [0.2.47] - 2026-11-06
 

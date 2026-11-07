@@ -5423,11 +5423,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       };
       return { account: fromName, byDefault: !from.owned, writes };
     }
-    // A move of any kind while a move of the project for a seat is written
-    // and recorded (a sibling that decided on the same read, or Team first
-    // sending it back): a second move in a row. Held, and placed again on a
-    // fresh read (Codex/Astra ASIENTOS-R3-001/R3-002/R4-001/R5-001). Other
-    // moves that cross keep their rule: the last one written stands.
+    // A move of any kind while another automatic move of the project is
+    // written and recorded (a sibling that decided on the same read, or Team
+    // first sending it back): a second move in a row. Held, and placed again
+    // on a fresh read (Codex/Astra ASIENTOS-R3-001/R3-002/R4-001/R5-001;
+    // every move of placeTurn since Astra r3 medium 4).
     // ponytail: moves made outside placeTurn (moveAhead, a refresh) do not
     // look at it (Astra ASIENTOS-R6-001; needs switchAheadPercent on); the
     // way up is to check it where every automatic move is written.
@@ -5435,7 +5435,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       heldForMove.add(projectId);
       turn.held = {
         sendAt: now + SEAT_RECHECK_MS,
-        reason: "Waiting: this project is being moved to another account for a seat",
+        reason: "Waiting: this project is being moved to another account",
       };
       return { account: fromName, byDefault: !from.owned, writes };
     }
@@ -5454,7 +5454,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       decision.why === "current-full" || decision.why === "fable-room"
         ? seatKey(decision.account)
         : null;
-    const seatMove = claim !== null && decision.account !== fromName;
+    // Every automatic move here holds the project's others while it is
+    // written, whatever its reason: an Opus turn's move to a Team seat crossed
+    // a Fable sibling's move for room (Astra r3 medium 4).
+    const seatMove = decision.account !== fromName;
     if (seatMove) seatMoving.add(projectId);
     const to = accountOrDefault(decision.account);
     try {
