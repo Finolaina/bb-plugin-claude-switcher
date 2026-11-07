@@ -152,6 +152,11 @@ Revisión (Astra r4: 1 high y 3 medium, `docs/reparto-por-hueco-2026-11-07/astra
   una con su vencimiento: un fallo de Fable por su ventana ya no pisa la
   marca de cuenta que dejó antes un Opus, y el reintento de Opus no vuelve a
   esa Team (medium 3).
+- El atado de un movimiento antes de un turno dura hasta que termina su
+  despacho, cuando el hilo ya está «dicho que arranque» y lo protege
+  `siblingAdmitted`. Antes se soltaba al escribir la variable, mientras aún
+  se guardaba el historial, y un hermano de Opus podía mover el proyecto a
+  una Team en esa ventana (medium 2).
 
 ## [0.2.47] - 2026-11-06
 

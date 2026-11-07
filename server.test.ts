@@ -21483,6 +21483,42 @@ describe("reparto por hueco 2026-11-07", () => {
       expect(await where(h, "proj-2")).not.toBe("work");
     });
 
+    // Astra r4 medium 2: the hold lasts till the moving thread is told to
+    // start. While a move for room is stored in the history (after its
+    // write), an Opus sibling asks: it does not move the project to the
+    // Team seat in between; it waits, and is placed again.
+    it("a move for room holds the project while its history is stored, till its thread is told to start (Astra r4 medium 2)", async () => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(5, 100, 100)),
+          spare: () => Response.json(payload(5, 90, 53)), // room -13.5
+          work: () => Response.json(payload(5, 10, 12)), // room 46
+          team: () => Response.json(payload(0, 2, 0)),
+        },
+        {
+          dirs: () => ["spare", "work", "team"],
+          settings: { preferredModel: "Fable", seatsMax: 4, seatsTeam: 2, stuckMoveMinutes: 10 },
+          presetEnv: { "proj-1": on("spare") },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "team");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      let opus: Promise<{ action: string; reason?: string }> | null = null;
+      const set = h.bb.storage.kv.set.bind(h.bb.storage.kv);
+      h.bb.storage.kv.set = async (key: string, value: unknown) => {
+        if (key === "last-switch" && opus === null) {
+          opus = dispatch(h, "o", "proj-1", OPUS);
+          await opus;
+        }
+        return set(key, value as never);
+      };
+      expect(await dispatch(h, "f", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      expect(opus).not.toBeNull();
+      expect((await opus!).action).toBe("wait");
+      expect(h.envSet.filter((e) => e.projectId === "proj-1").map((e) => e.note)).toEqual([ownNote("work")]);
+    });
+
     it("an Opus turn is not this rule's", async () => {
       const h = await start(() => 86);
       teamLogin(h, "work");

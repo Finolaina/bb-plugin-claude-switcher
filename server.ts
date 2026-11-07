@@ -1225,6 +1225,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   const seatMoving = new Set<string>();
   const heldForMove = new Set<string>();
+  /**
+   * The project each dispatch's move holds, till that dispatch ends: the
+   * move's history is stored after its write, and until its thread is told
+   * to start no siblingAdmitted protects it (Astra r4 medium 2).
+   */
+  const heldMoves = new Map<string, string>();
+  function releaseMove(projectId: string): void {
+    seatMoving.delete(projectId);
+    wakeHeldForMove(projectId);
+  }
   function wakeHeldForMove(projectId: string): void {
     if (seatMoving.has(projectId) || movesOf(projectId).inFlight > 0) return;
     if (!heldForMove.delete(projectId)) return;
@@ -5466,6 +5476,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const seatMove = decision.account !== fromName;
     if (seatMove) seatMoving.add(projectId);
     const to = accountOrDefault(decision.account);
+    // Before a turn the hold lasts till the dispatch ends (see heldMoves):
+    // its thread is told to start by then, and siblingAdmitted takes over.
+    let handedOver = false;
     try {
       if (claim !== null) {
         seatProjects.set(thread.id, projectId);
@@ -5488,41 +5501,42 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         crowdedMoves.set(projectId, { at: now, to: decision.account });
       } else noteMove(projectId, fromName, decision.account, model, before);
       if (decision.why === "fable-room") roomMoves.set(projectId, now);
-    } finally {
-      if (seatMove) {
-        seatMoving.delete(projectId);
-        wakeHeldForMove(projectId);
+      const reason =
+        busy !== null && decision.why === "current-full"
+          ? busyReason(busy, fromName, decision.account, roomThere, fullHere, model, input.pinned === true)
+          : decision.why === "fable-room"
+          ? roomReason(fromName, decision.account, model)
+          : decision.why === "back-from-excursion"
+          ? `Moved back to account ${decision.account} before the turn: ${fromName} was an excursion for ${excursion?.model ?? "another model"}`
+          : decision.why === "current-reserved" &&
+              when === "before" &&
+              measuredAccounts(model).some((a) => a.name === fromName && a.unknown !== true) &&
+              !reservedFor(fromName, model)
+            ? // Kept for Fable only by «Team primero», not out of its margin.
+              `Movido a ${decision.account} antes del turno: ${fromName} guarda la semanal de ${current.preferredModel} y ${decision.account} es una Team con plaza (Team primero)`
+          : decision.why === "current-full"
+            ? `Moved to account ${decision.account} before the turn: ${fromName} seats full (${fullHere.running + fullHere.reserved + (fullHere.external?.length ?? 0)}/${fullHere.capacity}), ${decision.account} had ${Number.isFinite(roomThere) ? roomThere : "unlimited"} free`
+            : `Moved to account ${decision.account} ${when === "after" ? `after a turn in ${model}` : "before the turn"}: ${fromName} ${whyOut(fromName, model)}`;
+      bb.log.info(`thread ${thread.id}: ${reason}`);
+      await recordMove(
+        {
+          at: now,
+          threadId: thread.id,
+          projectId,
+          from: fromName,
+          to: decision.account,
+          reason,
+        },
+        // Its turn has not started: it runs on the new account.
+        thread.id,
+      );
+      if (seatMove && when === "before" && !turn.abandoned) {
+        heldMoves.set(thread.id, projectId);
+        handedOver = true;
       }
+    } finally {
+      if (seatMove && !handedOver) releaseMove(projectId);
     }
-    const reason =
-      busy !== null && decision.why === "current-full"
-        ? busyReason(busy, fromName, decision.account, roomThere, fullHere, model, input.pinned === true)
-        : decision.why === "fable-room"
-        ? roomReason(fromName, decision.account, model)
-        : decision.why === "back-from-excursion"
-        ? `Moved back to account ${decision.account} before the turn: ${fromName} was an excursion for ${excursion?.model ?? "another model"}`
-        : decision.why === "current-reserved" &&
-            when === "before" &&
-            measuredAccounts(model).some((a) => a.name === fromName && a.unknown !== true) &&
-            !reservedFor(fromName, model)
-          ? // Kept for Fable only by «Team primero», not out of its margin.
-            `Movido a ${decision.account} antes del turno: ${fromName} guarda la semanal de ${current.preferredModel} y ${decision.account} es una Team con plaza (Team primero)`
-        : decision.why === "current-full"
-          ? `Moved to account ${decision.account} before the turn: ${fromName} seats full (${fullHere.running + fullHere.reserved + (fullHere.external?.length ?? 0)}/${fullHere.capacity}), ${decision.account} had ${Number.isFinite(roomThere) ? roomThere : "unlimited"} free`
-          : `Moved to account ${decision.account} ${when === "after" ? `after a turn in ${model}` : "before the turn"}: ${fromName} ${whyOut(fromName, model)}`;
-    bb.log.info(`thread ${thread.id}: ${reason}`);
-    await recordMove(
-      {
-        at: now,
-        threadId: thread.id,
-        projectId,
-        from: fromName,
-        to: decision.account,
-        reason,
-      },
-      // Its turn has not started: it runs on the new account.
-      thread.id,
-    );
     return {
       account: decision.account,
       byDefault: to === null,
@@ -5842,7 +5856,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
 
   bb.experimental_hooks.on("message.dispatch", async (ctx) => {
-    const decision = await dispatchDecision(ctx);
+    let decision: Awaited<ReturnType<typeof dispatchDecision>>;
+    try {
+      decision = await dispatchDecision(ctx);
+    } finally {
+      // The move this dispatch made stops holding its project (see heldMoves).
+      const held = heldMoves.get(ctx.thread.id);
+      if (held !== undefined) {
+        heldMoves.delete(ctx.thread.id);
+        releaseMove(held);
+      }
+    }
     if (decision.action === "wait") {
       const now = deps.now();
       if (!waitSince.has(ctx.thread.id)) waitSince.set(ctx.thread.id, now);
