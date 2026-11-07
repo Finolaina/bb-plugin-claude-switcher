@@ -21678,6 +21678,22 @@ describe("reparto por hueco 2026-11-07", () => {
       expect((await dispatch(h, "b", "proj-1", OPUS)).action).toBe("wait");
     });
 
+    // Astra r4 medium 4: let out past the hour, its message is cancelled by
+    // hand before it starts; a new message of the thread has waited 0 s and
+    // does not inherit the way out: it waits.
+    it("let out past maximumWaitHours, then cancelled by hand: the next message waits from zero (Astra r4 medium 4)", async () => {
+      const { h, at } = await start(() => payload(5, 85, 90), { maximumWaitHours: 1 });
+      expect((await dispatch(h, "b", "proj-1", OPUS)).action).toBe("wait");
+      at(60 * MINUTE);
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "b", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      await h.harness.behavior.emitThreadEvent("message.cancelled", {
+        entry: { id: "msg-b", threadId: "b", payload: { kind: "message" }, createdAt: NOW } as never,
+      });
+      at(60 * MINUTE + 1);
+      expect((await dispatch(h, "b", "proj-1", OPUS)).action).toBe("wait");
+    });
+
     it("held past maximumWaitHours with opusOverflowRoom 100 or maximumWaitHours 0: it keeps waiting", async () => {
       for (const settings of [{ maximumWaitHours: 1, opusOverflowRoom: 100 }, { maximumWaitHours: 0 }]) {
         const { h, at } = await start(() => payload(5, 85, 90), settings);

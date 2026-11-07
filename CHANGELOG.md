@@ -157,6 +157,9 @@ Revisión (Astra r4: 1 high y 3 medium, `docs/reparto-por-hueco-2026-11-07/astra
   `siblingAdmitted`. Antes se soltaba al escribir la variable, mientras aún
   se guardaba el historial, y un hermano de Opus podía mover el proyecto a
   una Team en esa ventana (medium 2).
+- Un mensaje dejado salir por `maximumWaitHours` y cancelado a mano antes de
+  arrancar ya no deja la salida al siguiente mensaje del hilo, que espera
+  desde cero (medium 4).
 
 ## [0.2.47] - 2026-11-06
 

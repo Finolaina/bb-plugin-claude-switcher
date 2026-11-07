@@ -6403,7 +6403,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   async function forgetCancelledWait(threadId: string): Promise<void> {
     const asked = waitAsked.get(threadId);
-    if (asked === undefined) return;
+    // A message let out by maximumWaitHours and cancelled before it started
+    // leaves no way out to the next one (Astra r4 medium 4).
+    if (asked === undefined && !overdueTold.has(threadId)) return;
     const rows = await within(
       bb.sdk.threads.queuedMessages.list({ threadId }),
       DISPATCH_LIMIT_MS,
@@ -6412,6 +6414,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (typeof rows !== "object" || rows.value.length > 0) return;
     if (waitAsked.get(threadId) !== asked) return;
     forgetWait(threadId);
+    overdueTold.delete(threadId);
   }
 
   /**
