@@ -11787,19 +11787,19 @@ describe("a Fable thread no account can run is told to switch to Opus (D3)", () 
     await h.harness.behavior.emitThreadEvent("turn.failed", f);
     const first = `Waiting for Fable on spare. ${told}`;
     // bb sends the timed retry; it fails on spare, whose report now resets
-    // last: the wait moves the project on to main.
+    // last: the wait moves the project on to work. Not back to main: its
+    // own report (+9 h) still stands, no read made since (Astra r3 high 1).
     h.queued.length = 0;
     const g = failure({ requestId: "creq_1b", attemptNumber: 2 });
     g.rateLimits!.windows[0]!.resetsAtMs = NOW + 9 * HOUR;
     await h.harness.behavior.emitThreadEvent("turn.failed", g);
-    // An Opus turn from main (its session out) would go to spare, the
-    // first by name of the two seats its numbers run.
+    // An Opus turn from work would stay on work, a seat its numbers run.
     expect(h.retries.map((r) => r.reason)).toEqual([
       first,
-      `Waiting for Fable on main${toOpus("spare")}`,
+      `Waiting for Fable on work${toOpus("work")}`,
     ]);
     expect(await history(h)).toEqual([
-      ["thread-1", "proj-1", "spare", "main", "Waiting for Fable on main"],
+      ["thread-1", "proj-1", "spare", "work", "Waiting for Fable on work"],
       ["thread-1", "proj-1", "main", "spare", first],
     ]);
   });
@@ -21715,6 +21715,44 @@ describe("reparto por hueco 2026-11-07", () => {
         await active(h, "thread-1");
         expect(h.envSet.filter((e) => e.projectId === "proj-1")).toEqual([]);
         expect(await where(h)).toBe("main");
+      });
+
+      // Astra r3 high 1: two Team seats, both read at 20 % of session with
+      // seats free, both answering 429 for two hours; main at 10/12 (room
+      // 46). The retry never goes to a Team seat already marked: work, then
+      // spare, then main, where the turn runs. Before, work → spare → work →
+      // spare → work and attempts-exhausted.
+      it("two Team seats marked: the chain ends on main, where the turn runs (Astra r3 high 1)", async () => {
+        const h = await host(
+          {
+            main: () => Response.json(payload(5, 10, 12)),
+            spare: () => Response.json(payload(20, 10, 0)),
+            work: () => Response.json(payload(20, 10, 0)),
+          },
+          {
+            settings: { preferredModel: "Fable", seatsTeam: 2, seatsMax: 4, opusOverflowRoom: 15 },
+            presetEnv: { "proj-1": on("work") },
+            threadEvents: {
+              "thread-1": [
+                { id: "evt_creq_1", scope: { kind: "thread" }, threadId: "thread-1", seq: 1, createdAt: NOW - 60_000, type: "client/turn/requested", data: { requestId: "creq_1", execution: { model: OPUS } } },
+              ],
+            },
+          },
+        );
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "work", "spare");
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        await h.harness.behavior.emitThreadEvent("turn.failed", failure({ attemptNumber: 1 }));
+        expect(h.retries.at(-1)).toMatchObject({ reason: "Switched to account spare (Opus)" });
+        expect(await dispatch(h, "thread-1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+        expect(await where(h)).toBe("spare");
+        await active(h, "thread-1");
+        await h.harness.behavior.emitThreadEvent("turn.failed", failure({ attemptNumber: 2 }));
+        expect(h.retries.at(-1)).toMatchObject({ reason: "Switched to account main (Opus)" });
+        expect(await dispatch(h, "thread-1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+        await active(h, "thread-1");
+        expect(await where(h)).toBe("main");
+        expect(h.retries).toHaveLength(2);
       });
 
       // Out until the 429's own reset (NOW + 2 h), reads kept fresh by

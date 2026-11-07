@@ -79,6 +79,15 @@ export interface SwitchInput {
    */
   noTeamTakes?: (model: string, ruledOut: string | null) => boolean;
   /**
+   * Until when the provider said `name` is out, from an earlier failure
+   * whose mark stands (server's limitedAt): Infinity with no reset
+   * reported; null when unmarked. A marked account is no destination of
+   * this switch, and it is waited for no sooner than then, as the account
+   * the turn just failed on (Astra r3 high 1). Unused for a thread left in
+   * error: the measurements judge.
+   */
+  limitedUntil?: (name: string) => number | null;
+  /**
    * The project was put on the current account by hand: a thread left in
    * error is retried there whenever the account runs the model, whatever it
    * spends of the reserve (Aitor 2026-11-05; code-reviewer r1 M1).
@@ -305,8 +314,13 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
       };
     }
   }
+  const marked = (name: string): number | null =>
+    stuck ? null : (input.limitedUntil?.(name) ?? null);
   const others = accounts.filter(
-    (a) => a.name !== input.currentAccount && a.name !== failedOn,
+    (a) =>
+      a.name !== input.currentAccount &&
+      a.name !== failedOn &&
+      marked(a.name) === null,
   );
   // The only move that may land on an account without a seat: this one
   // cannot work, so the thread waits for a seat elsewhere.
@@ -344,6 +358,10 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
         at === null || failedFreeAt === null
           ? null
           : Math.max(at, failedFreeAt);
+    } else {
+      const until = marked(account.name);
+      if (until !== null)
+        at = at === null || !Number.isFinite(until) ? null : Math.max(at, until);
     }
     if (at === null) continue;
     // Never a wait for an account the rule would not choose as the retry

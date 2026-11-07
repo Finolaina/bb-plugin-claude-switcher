@@ -113,6 +113,15 @@ Revisión (Codex r2: 1 high y 1 medium, `docs/reparto-por-hueco-2026-11-07/codex
   −13,5 frente a 46, el siguiente turno de Fable se queda donde está. Sin
   hermanos trabajando, el 0 no lo frena (medium 2).
 
+Revisión (Astra r3: 1 high y 3 medium, `docs/reparto-por-hueco-2026-11-07/astra-r3.txt`):
+
+- Una cuenta marcada por un fallo anterior tampoco es destino del reintento
+  de otro fallo, y no se la espera antes de lo que dijo su 429. Con dos Team
+  que leen 20 % de sesión pero devuelven 429 dos horas, el reintento va de
+  work a spare y de spare a la Ultra con hueco 46, donde corre el turno.
+  Antes iba de work a spare y de spare a work hasta agotar los intentos
+  (high 1).
+
 ## [0.2.47] - 2026-11-06
 
 ### Changed

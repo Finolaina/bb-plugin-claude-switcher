@@ -1592,10 +1592,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   const limitedAt = new Map<string, { at: number; until: number }>();
   /** `name`'s reported limit still stands (see limitedAt). */
   function limited(name: string): boolean {
+    return limitedUntil(name) !== null;
+  }
+  /** Until when `name`'s reported limit stands (see limitedAt); null: it does not. */
+  function limitedUntil(name: string): number | null {
     const mark = limitedAt.get(name);
-    if (mark === undefined) return false;
+    if (mark === undefined) return null;
     const read = collector.get(name)?.observedAt;
-    return deps.now() < mark.until && !(read != null && read > mark.at);
+    return deps.now() < mark.until && !(read != null && read > mark.at)
+      ? mark.until
+      : null;
   }
   function refusing(name: string): boolean {
     const at = refusedAt.get(name);
@@ -6493,6 +6499,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       preferredModel: model,
       ...reserveOf(),
       noTeamTakes: (m: string, ruledOut: string | null) => noTeamTakes(m, undefined, ruledOut),
+      // A Team seat marked by an earlier failure is no destination either
+      // (Astra r3 high 1).
+      limitedUntil,
       maximumWaitMs:
         current.maximumWaitHours > 0
           ? current.maximumWaitHours * 3_600_000

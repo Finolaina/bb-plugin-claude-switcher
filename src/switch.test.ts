@@ -2685,3 +2685,42 @@ describe("Opus overflows to the Ultra with room (0.2.48, B5)", () => {
     expect(asked.every((a) => a === null)).toBe(true);
   });
 });
+
+// Astra r3 high 1 (2026-11-07): an account whose earlier failure still stands
+// (server's limitedAt) is no destination of a switch, and is waited for no
+// sooner than the provider said, as the account the turn just failed on.
+describe("decideSwitch with an account marked by an earlier failure (Astra r3 high 1)", () => {
+  const marked = (until: number) => (name: string) => (name === "work" ? until : null);
+
+  it("marked till +3 h: no switch to it; the wait is on main, free at +2 h", () => {
+    expect(decideSwitch(input({ limitedUntil: marked(NOW + 3 * HOUR) }))).toMatchObject({
+      kind: "wait",
+      account: "main",
+      sendAt: NOW + 2 * HOUR + BUFFER,
+    });
+  });
+
+  it("marked till +1 h: the wait is on it, at +1 h, not at once", () => {
+    expect(decideSwitch(input({ limitedUntil: marked(NOW + HOUR) }))).toMatchObject({
+      kind: "wait",
+      account: "work",
+      sendAt: NOW + HOUR + BUFFER,
+    });
+  });
+
+  it("marked with no reset reported: never waited for", () => {
+    const f = failure();
+    f.rateLimits!.windows[0]!.resetsAtMs = null;
+    expect(
+      decideSwitch(input({ failure: f, maximumWaitMs: null, limitedUntil: marked(Number.POSITIVE_INFINITY) })),
+    ).toEqual({ kind: "decline", reason: "no-account-usable" });
+  });
+
+  it("a thread left in error is judged on the measurements: the mark plays no part", () => {
+    expect(decideSwitch(input({ stuck: true, limitedUntil: marked(NOW + 3 * HOUR) }))).toEqual({
+      kind: "switch",
+      account: "work",
+      model: null,
+    });
+  });
+});
