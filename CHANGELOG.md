@@ -24,9 +24,17 @@ project uses [Semantic Versioning](https://semver.org/).
   su ritmo. Una Team cuya lectura no trae semanal se ve como antes, y las
   Ultra y Max no cambian.
 - **El panel de uso de bb también recibe la semanal de una Team** cuando su
-  lectura la trae con su reinicio (mismo patrón, en `src/usage-source.ts`:
-  la escondía por la misma regla del 2026-11-02). Una lectura incompleta,
-  sin la marca de ausente ni reinicio, sigue sin semanal (Codex BARS-001).
+  lectura la midió, con reinicio o sin él (mismo patrón, en
+  `src/usage-source.ts`: la escondía por la misma regla del 2026-11-02; es el
+  panel del «Agotada» de la captura de Aitor). Una respuesta incompleta, que
+  deja la semanal desconocida (`missing`: un 100 % que nadie midió), sigue
+  sin semanal: es lo que protegía Codex BARS-001. Codex Sol r1 (medium,
+  `docs/semanal-team-2026-11-07/codex-r1.txt`): la primera versión pedía
+  además el reinicio, y una semanal medida al 100 % sin reinicio se
+  escondía; bb veía 0 % y 85 % y no el límite que frena la cuenta. El test
+  de BARS-001 usaba justo una medición válida sin reinicio; ahora usa la
+  respuesta incompleta que BARS-001 quería evitar. El panel propio no tenía
+  ese corte (lo cubre ahora un test).
 - **El cambio anticipado no mueve un proyecto mientras se escribe otro
   movimiento suyo** (el mismo freno que el rescate y la espera adelantada
   desde la 0.2.48). En la 0.2.48 quedó como límite porque se creía apagado

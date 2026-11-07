@@ -121,7 +121,12 @@ describe("provider-usage source mapping", () => {
     ).toEqual(["session", "weekly:Fable"]);
   });
 
-  it("gives no weekly window to a known Team seat whose reading lacks the absent mark (Codex BARS-001)", () => {
+  // What BARS-001 guards: an incomplete answer (a seven_day bucket and no
+  // weekly_all) leaves the weekly unknown, as parseUsage marks it (100 %,
+  // no reset, `missing`): bb would show a known Team seat at 100 % of a
+  // week nobody measured. A weekly measured without a reset is not that
+  // (Codex Sol r1 medium, 2026-11-07).
+  it("gives no weekly window to a known Team seat whose weekly is unknown, an incomplete answer (Codex BARS-001)", () => {
     const measurement = toMeasurement(
       { ...ACCOUNT, name: "team2", kind: "team" },
       {
@@ -129,9 +134,10 @@ describe("provider-usage source mapping", () => {
         problem: null,
         login: "yes",
         usage: {
-          blocked: false,
+          blocked: true,
+          unknown: true,
           session: { usedPercent: 40, resetsAt: NOW + 3_600_000 },
-          weekly: { usedPercent: 100, resetsAt: null },
+          weekly: { usedPercent: 100, resetsAt: null, missing: true },
           models: {},
         },
       },
@@ -157,6 +163,32 @@ describe("provider-usage source mapping", () => {
           blocked: false,
           session: { usedPercent: 0, resetsAt: null },
           weekly: { usedPercent: 100, resetsAt: NOW + 40 * 3_600_000 },
+          models: { Fable: { usedPercent: 85, resetsAt: NOW + 40 * 3_600_000 } },
+        },
+      },
+    );
+    expect(
+      measurement.usage.status === "ok"
+        ? measurement.usage.windows.map((w) => w.id)
+        : [],
+    ).toEqual(["session", "weekly", "weekly:Fable"]);
+  });
+
+  // Codex Sol r1 medium (2026-11-07): the same team4 with its weekly read at
+  // 100 % and no reset in the answer (the reset is optional). Measured, not
+  // unknown: bb gets it, or it would show 0 % and 85 % and hide the limit
+  // that stops the seat.
+  it("gives bb's panel a Team seat's weekly window measured without a reset (Codex Sol r1 medium)", () => {
+    const measurement = toMeasurement(
+      { ...ACCOUNT, name: "team4", kind: "team" },
+      {
+        observedAt: NOW,
+        problem: null,
+        login: "yes",
+        usage: {
+          blocked: false,
+          session: { usedPercent: 0, resetsAt: null },
+          weekly: { usedPercent: 100, resetsAt: null },
           models: { Fable: { usedPercent: 85, resetsAt: NOW + 40 * 3_600_000 } },
         },
       },

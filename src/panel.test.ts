@@ -420,6 +420,11 @@ describe("accountRow", () => {
     expect(threadLine(row)).toBe("Team · ha gastado el 100 % de la semana · vuelve lun 17:00");
     expect(cardLine(row)).toBe("Team · vuelve lun 17:00");
     expect(row.help).toContain("Ha gastado el 100 % de la semana · se reinicia el lunes 2, 17:00");
+    // Measured without a reset (the reset is optional in the answer): still
+    // its week, out, with no «vuelve» to give (Codex Sol r1 medium, its sibling).
+    const noReset = accountRow({ ...team4, usage: { ...team4.usage, weekly: win(100, null) } }, seats(0, 5), ES);
+    expect(noReset).toMatchObject({ state: "out", when: "", bar: { kind: "week", figure: "100 %" } });
+    expect(menuLine(noReset)).toBe("Semana 100 %");
     // The cut: at 99 % its week does not run it out; its 5 hours and threads speak.
     const edge = accountRow({ ...team4, usage: { ...team4.usage, weekly: win(99, at("2026-11-02T17:00:00+01:00")) } }, seats(0, 5), ES);
     expect(edge).toMatchObject({ state: "free", when: "sin empezar", line: "0 de 5 hilos", bar: { kind: "five" } });
