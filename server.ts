@@ -1619,10 +1619,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * medium 2). Until then such an account is no Team seat that takes a turn
    * held off the reserve (noTeamTakes), no destination of a retry
    * (decideSwitch), of a placement before a turn nor of a wait moved up
-   * (moveUpWait; Astra r5 medium 1): its read lags the 429, so no read ends
-   * a mark (Astra r4 high 1). Elsewhere (the rescue of a stranded project)
-   * its numbers decide, and a turn may fail there once, as before. In
-   * memory: a reload forgets them.
+   * (moveUpWait; Astra r5 medium 1), and it is out for such a turn where the
+   * dispatch, the placement and the rescue ask whether it can run (teamOut,
+   * blockedOff, stranded; Astra r6 to r8): its read lags the 429, so no read
+   * ends a mark (Astra r4 high 1). Elsewhere (otherThatRuns, the judge of a
+   * thread left in error) its numbers decide. In memory: a reload forgets
+   * them.
    */
   const limitedAt = new Map<string, Map<string, number>>();
   /** Until when `name`'s marks stand for a turn in `model` (see limitedAt); null: none does. */
@@ -4636,6 +4638,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   function stranded(name: string, now: number, model: string): string | null {
     if (loggedOut(name)) return "not logged in";
+    // A mark standing for the model: out whatever its read says, as in the
+    // placement (Astra r8 medium 1).
+    const marked = limitedUntil(name, model);
+    if (marked !== null)
+      return `answered ${model === "" ? "a turn" : model} with a usage limit until ${new Date(marked).toISOString().slice(0, 16).replace("T", " ")}`;
     const known = measuredAccounts(model).find((a) => a.name === name);
     if (known === undefined || known.unknown === true) return null;
     const settled = settle(known, now);
@@ -4753,6 +4760,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       ...reserveOf(),
       // The pick by hand first, as before a turn (Codex r3 medium 2).
       excursionFrom: wayHome(projectId, model, measuredAccounts(model), now),
+      // Nor to an account whose mark stands for the model (Astra r8 medium 1).
+      limitedUntil: (name: string) => limitedUntil(name, model),
       freeSeats,
       now,
       currentLoggedOut: loggedOut(fromName),
@@ -5183,7 +5192,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const usage = measuredAccounts(model).find((a) => a.name === name);
     if (usage === undefined || usage.unknown === true) return false;
     const settled = settle(usage, deps.now());
-    if (isUsable(settled) && canRunModel(settled, model)) return false;
+    // A mark standing for the model: out whatever its read says, as in the
+    // placement (Astra r8 medium 1).
+    if (limitedUntil(name, model) === null && isUsable(settled) && canRunModel(settled, model))
+      return false;
     return otherThatRuns(name, model) !== null;
   }
   /**
@@ -5230,7 +5242,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (usage === undefined || usage.unknown === true || usage.team !== true)
       return false;
     const settled = settle(usage, deps.now());
-    return !(isUsable(settled) && canRunModel(settled, model));
+    // A mark standing for the model: out whatever its read says, as in the
+    // placement (Astra r8 medium 1).
+    return limitedUntil(name, model) !== null || !(isUsable(settled) && canRunModel(settled, model));
   }
   /**
    * No Team seat, measured or known by its login, can take a turn in

@@ -179,7 +179,7 @@ Revisión (Astra r5: 0 high y 3 medium, `docs/reparto-por-hueco-2026-11-07/astra
   de otro turno, y `reserveWait` no espera una cuenta marcada antes de que
   acabe su marca. En la colocación la marca cuenta para todos los modelos;
   en el juicio del fallo sigue siendo solo de Opus y Sonnet (medium 1).
-  Límite: el rescate de un proyecto varado no mira las marcas.
+  El rescate de un proyecto varado las mira desde la Astra r8.
 - El atado de un movimiento antes de un turno se apunta antes de esperar
   nada, y lo suelta el final del despacho aunque este se haya rendido. Con el
   guardado del historial colgado, el despacho daba `proceed` a los 3 s y el
@@ -226,6 +226,20 @@ Revisión (Astra r7: 0 high y 1 medium, `docs/reparto-por-hueco-2026-11-07/astra
   la espera adelantada y del juicio ya miraban la marca o no deciden destino;
   la de un hilo que se quedó en error la ignora a propósito, como desde la
   Codex r2.
+
+Revisión (Astra r8: 0 high y 2 medium, `docs/reparto-por-hueco-2026-11-07/astra-r8.txt`):
+
+- Donde el despacho y el rescate preguntan si una cuenta puede correr el
+  turno (`teamOut`, `blockedOff`, `stranded`), la marca vigente la deja
+  fuera aunque su lectura diga que tiene cuota, como ya hacía la colocación.
+  Con la Team leyendo 20/10, 5 plazas y un 429 hasta +120 min, y la Ultra
+  libre en 85/90 (hueco 10, por debajo de `opusOverflowRoom` 15), un Opus de
+  otro proyecto que estaba en la Team recibía `proceed` allí, al principio y
+  a los 60 min; ahora espera y, al cumplir `maximumWaitHours` (1 h), sale a
+  la Ultra. Sin marca sigue corriendo en la Team. Un turno de Fable leído
+  aparte (su colocación tardó demasiado) tampoco arranca en una Ultra
+  marcada si otra puede correrlo, y el rescate de cada refresco saca de la
+  cuenta marcada los proyectos que están en ella (medium 1).
 
 ## [0.2.47] - 2026-11-06
 
