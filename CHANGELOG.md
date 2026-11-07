@@ -240,6 +240,18 @@ Revisión (Astra r8: 0 high y 2 medium, `docs/reparto-por-hueco-2026-11-07/astra
   aparte (su colocación tardó demasiado) tampoco arranca en una Ultra
   marcada si otra puede correrlo, y el rescate de cada refresco saca de la
   cuenta marcada los proyectos que están en ella (medium 1).
+- Un fallo mientras otro movimiento automático del mismo proyecto se está
+  escribiendo ya no escribe encima. Un Opus en la Ultra A (90/53) fallaba
+  mientras un hermano de Fable escribía su movimiento por hueco a la Ultra B
+  (10/12): el juicio escribía la Team, aterrizaba la escritura vieja a B y el
+  reintento volvía a la Team (Team → B → Team). Ahora el juicio reintenta el
+  turno en el acto sin mover nada, y el despacho de ese reintento espera a
+  que el movimiento quede registrado y coloca el proyecto entonces: B y luego
+  la Team, sin vuelta atrás (medium 2). El test BM-INSPECT-002 esperaba que
+  el juicio escribiera encima de una vuelta a casa sin registrar; ahora
+  espera el reintento y que su despacho lleve el Opus a la Team. Límite: la espera adelantada, el
+  rescate, el cambio anticipado y el reparto entre Ultra siguen sin mirar el
+  atado.
 
 ## [0.2.47] - 2026-11-06
 

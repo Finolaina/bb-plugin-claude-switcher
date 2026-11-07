@@ -6702,6 +6702,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // A rescue runs between reads: switched off meanwhile, it stops before
     // moving and before retrying (Codex r6, IR6-006).
     if (stuck && !current.autoSwitch) return;
+    // Another automatic move of the project under way (a dispatch's, its
+    // write or its history still pending): no second write over it. The
+    // turn is retried at once; its dispatch waits for that move to be
+    // recorded and places it then (Astra r8 medium 2).
+    if (decision.account !== fromName && moving(projectId)) {
+      bb.log.info(
+        `thread ${event.threadId}: ${how}not moved to ${decision.account}: another move of the project is under way; retried, and placed once it is recorded`,
+      );
+      await retryTurn(event, "Retrying: the project is being moved to another account", undefined, stuck);
+      return;
+    }
     if (decision.account !== fromName) {
       if (
         !(await applyAccount(projectId, accountOrDefault(decision.account), from, {

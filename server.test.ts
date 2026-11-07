@@ -11128,9 +11128,18 @@ describe("an Opus turn never retried, released or placed on a Max account that k
       expect(h.retries.map((r) => r.reason)).not.toContain(
         "Retrying on account work",
       );
+      // Judged while thread-2's move home is still being recorded: since
+      // Astra r8 medium 2 it does not write over that move (it used to
+      // switch to work at once); its retry is placed once the move is
+      // recorded, and the Opus turn goes to work then.
       expect(h.retries.map((r) => r.reason)).toContain(
-        "Switched to account work (Opus)",
+        "Retrying: the project is being moved to another account",
       );
+      await h.harness.behavior.emitThreadEvent("thread.active", {
+        thread: thread({ id: "thread-2", projectId: "proj-1" }),
+      });
+      expect(await dispatch(h, "thread-3", OPUS_ID)).toEqual({ action: "proceed" });
+      expect(notes(h).at(-1)).toBe(ownNote("work"));
     });
 
     it("a pick by hand that confirms the seat while the Opus move's answer is pending wins: no excursion is noted after it (BM-INSPECT-004)", async () => {
@@ -21617,6 +21626,65 @@ describe("reparto por hueco 2026-11-07", () => {
     // an Opus sibling asking meanwhile waits, and once the write lands it
     // goes to the Team seat. Before: Team, then the old write's work on top,
     // then Team again.
+    // Astra r8 medium 2: an Opus turn of proj-1 runs on spare (90/53, room
+    // -13.5); work reads 10/12 (room 46) and the Team seat has 5 free. A
+    // Fable sibling starts its move for room to work, its variable write
+    // held; meanwhile the Opus turn fails. Its judgment does not write over
+    // the move under way: it retries the turn at once, and the retry, sent
+    // once the move landed, moves the project once more, to the Team seat.
+    // Before: team, work (the old write), team.
+    it("a failure while a move of its project is written does not move it: its retry decides after (Astra r8 medium 2)", async () => {
+      let gate: Promise<void> | null = null;
+      let reached = false;
+      let open = () => {};
+      const h = await host(
+        {
+          main: () => Response.json(payload(5, 100, 100)),
+          spare: () => Response.json(payload(5, 90, 53)), // room -13.5
+          work: () => Response.json(payload(5, 10, 12)), // room 46
+          team: () => Response.json(payload(0, 2, 0)),
+        },
+        {
+          dirs: () => ["spare", "work", "team"],
+          settings: { preferredModel: "Fable", seatsMax: 4, seatsTeam: 5, stuckMoveMinutes: 10 },
+          presetEnv: { "proj-1": on("spare") },
+          threadEvents: {
+            "thread-1": [
+              { id: "evt_creq_1", scope: { kind: "thread" }, threadId: "thread-1", seq: 1, createdAt: NOW - 60_000, type: "client/turn/requested", data: { requestId: "creq_1", execution: { model: OPUS } } },
+            ],
+          },
+          beforeSet: async () => {
+            const held = gate;
+            gate = null;
+            if (held === null) return;
+            reached = true;
+            await held;
+          },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "team");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      gate = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      const fable = dispatch(h, "f", "proj-1", FABLE_ID);
+      await vi.waitFor(() => expect(reached).toBe(true));
+      await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+      expect(h.retries).toEqual([expect.objectContaining({ threadId: "thread-1", reason: "Retrying: the project is being moved to another account" })]);
+      expect(h.retries[0]!.sendAt).toBeUndefined();
+      open();
+      expect(await fable).toEqual({ action: "proceed" });
+      await active(h, "f", "proj-1");
+      expect(await dispatch(h, "thread-1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+      expect(h.envSet.filter((e) => e.projectId === "proj-1").map((e) => e.note)).toEqual([ownNote("work"), ownNote("team")]);
+      const history = ((await h.harness.behavior.callRpc("accounts_list", null)) as State).history;
+      expect(history.filter((r) => r.projectId === "proj-1").map((r) => [r.from, r.to])).toEqual([
+        ["work", "team"],
+        ["spare", "work"],
+      ]);
+    });
+
     it("a move whose variable write outlasts its dispatch holds the project till the write ends (Astra r6 medium 2)", async () => {
       let gate: Promise<void> | null = null;
       let open = () => {};
