@@ -2656,11 +2656,11 @@ describe("Opus overflows to the Ultra with room (0.2.48, B5)", () => {
   it("noTeamTakes is asked with the account that just failed ruled out", () => {
     const asked: (string | null | undefined)[] = [];
     const liveTeam = account("work", { team: true, session: { usedPercent: 20, resetsAt: NOW + HOUR } });
-    const judged = (stuck: boolean) =>
+    const judged = (stuck: boolean, team = liveTeam) =>
       decideSwitch(
         input({
           currentAccount: "work",
-          accounts: [liveTeam, roomy],
+          accounts: [team, roomy],
           preferredModel: "Opus",
           reserveModel: "Fable",
           reserveShare: 0.5,
@@ -2677,6 +2677,11 @@ describe("Opus overflows to the Ultra with room (0.2.48, B5)", () => {
     expect(asked).toContain("work");
     asked.length = 0;
     expect(judged(true)).toEqual({ kind: "retry", account: "work", model: "Opus" });
+    // Left in error with work measured out: the Ultra is weighed, and no
+    // account is ruled out of «no Team takes it».
+    asked.length = 0;
+    judged(true, outTeam);
+    expect(asked.length).toBeGreaterThan(0);
     expect(asked.every((a) => a === null)).toBe(true);
   });
 });
