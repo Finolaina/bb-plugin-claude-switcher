@@ -21594,6 +21594,23 @@ describe("reparto por hueco 2026-11-07", () => {
           expect(h.envDeleted.filter((e) => e.projectId === "proj-1")).toHaveLength(1);
         });
 
+      // The project moved to main after the wait was queued (another Opus
+      // turn of it placed there by B5): the wait is released where the
+      // project is now, main being an account the retry may run on.
+      it("is released on main once the project is there, no project listed", async () => {
+        const h = await waitingHost([]);
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "spare", "work");
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        expect((await dispatch(h, "o2", "proj-1", OPUS)).action).toBe("proceed");
+        expect(h.envDeleted.filter((e) => e.projectId === "proj-1")).toHaveLength(1);
+        await onePass(h);
+        expect(h.retries).toEqual([
+          expect.objectContaining({ threadId: "thread-1", turnRequestId: "creq_r1", reason: "Retrying on account main, where the project is now" }),
+        ]);
+        expect(h.queued).toEqual([]);
+      });
+
       it("with opusOverflowRoom 100 it keeps waiting, as in 0.2.44", async () => {
         const h = await waitingHost([], { opusOverflowRoom: 100 });
         dispose = () => h.harness.dispose();
@@ -21678,7 +21695,12 @@ describe("reparto por hueco 2026-11-07", () => {
       );
       dispose = () => h.harness.dispose();
       teamLogin(h, "spare", "work");
+      // main's login says Ultra, so health weighs its room.
+      h.files[`${HOME}/.claude.json`] = JSON.stringify({ oauthAccount: { accountUuid: "uuid-main", emailAddress: "main@example.com", planDisplayName: "Ultra" } });
       await h.harness.behavior.callRpc("accounts_refresh", null);
+      const mainIn = async () =>
+        JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout).cuentas.find((c: { nombre: string }) => c.nombre === "main");
+      expect(await mainIn()).toMatchObject({ huecoOpus: 46 });
       expect((await dispatch(h, "o2", "proj-2", OPUS)).action).toBe("proceed");
       await active(h, "o2", "proj-2");
       expect((await dispatch(h, "o3", "proj-3", OPUS)).action).toBe("proceed");
@@ -21688,8 +21710,7 @@ describe("reparto por hueco 2026-11-07", () => {
       await h.harness.behavior.callRpc("accounts_refresh", null);
       expect((await dispatch(h, "b", "proj-1", OPUS)).action).toBe("wait");
       expect(await where(h)).toBe("spare");
-      const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
-      expect(report.cuentas.find((c: { nombre: string }) => c.nombre === "main")).toMatchObject({ huecoOpus: null, fablePerdida: null });
+      expect(await mainIn()).toMatchObject({ huecoOpus: null, fablePerdida: null });
     });
 
     // The cut of a fresh read: two refreshes (refreshMinutes 5: 10 min) after
