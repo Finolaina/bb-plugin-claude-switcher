@@ -22042,6 +22042,61 @@ describe("reparto por hueco 2026-11-07", () => {
           expect(await where(h, "proj-2")).toBe(to);
         });
 
+      // Two marks of work standing for an Opus turn, its own (read with Opus
+      // at 100 %, till +3 h) and the whole account's (till +1 h): a third
+      // Opus turn failing on spare, with main kept for Fable, waits for work
+      // till the later of the two (Astra r4 medium 3).
+      it("an Opus turn waits for a marked Team seat till the latest of its marks (Astra r4 medium 3)", async () => {
+        let clock = NOW;
+        let opusFull = 100;
+        const at = (ms: number) => new Date(NOW + ms).toISOString();
+        const workRead = () => ({
+          limits: [
+            { kind: "session", percent: 20, resets_at: at(2 * HOUR) },
+            { kind: "weekly_all", percent: 10, resets_at: at(3 * 24 * HOUR) },
+            { kind: "weekly_scoped", percent: opusFull, resets_at: at(4 * HOUR), scope: { model: { display_name: "Opus" } } },
+          ],
+          five_hour: { locked_reason: null },
+          seven_day: { locked_reason: null },
+        });
+        const opusLog = (threadId: string, requestId: string) => [
+          { id: `evt_${requestId}`, scope: { kind: "thread" }, threadId, seq: 1, createdAt: NOW - 60_000, type: "client/turn/requested", data: { requestId, execution: { model: OPUS } } },
+        ];
+        const h = await host(
+          {
+            main: () => Response.json(payload(5, 86, 53)), // room -9.5
+            work: () => Response.json(workRead()),
+            spare: () => Response.json(payload(20, 10, 0)),
+          },
+          {
+            clock: () => clock,
+            settings: { preferredModel: "Fable", seatsTeam: 2, seatsMax: 4, opusOverflowRoom: 15, maximumWaitHours: 0 },
+            presetEnv: { "proj-1": on("work"), "proj-2": on("work"), "proj-3": on("spare") },
+            threads: { "thread-2": { projectId: "proj-2" }, "thread-3": { projectId: "proj-3" } },
+            threadEvents: { "thread-1": opusLog("thread-1", "creq_1"), "thread-2": opusLog("thread-2", "creq_2"), "thread-3": opusLog("thread-3", "creq_3") },
+          },
+        );
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "work", "spare");
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        const reported = (threadId: string, requestId: string, until: number) => {
+          const f = failure({ threadId, requestId });
+          f.rateLimits!.windows[0]!.resetsAtMs = until;
+          return f;
+        };
+        await h.harness.behavior.emitThreadEvent("turn.failed", reported("thread-1", "creq_1", NOW + 3 * HOUR));
+        opusFull = 0;
+        clock += 1000;
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        await h.harness.behavior.emitThreadEvent("turn.failed", reported("thread-2", "creq_2", NOW + HOUR));
+        clock += 1000;
+        await h.harness.behavior.emitThreadEvent("turn.failed", reported("thread-3", "creq_3", NOW + 5 * HOUR));
+        expect(h.retries.find((r) => r.threadId === "thread-3")).toMatchObject({
+          reason: "Waiting for Opus on work",
+          sendAt: NOW + 3 * HOUR + 15_000,
+        });
+      });
+
       // The usage endpoint lags the 429: a read of the same numbers made
       // after the failure does not end the mark (Astra r4 high 1).
       it("a read 1 s after the failure, the same numbers: another Opus turn stays on main (Astra r4 high 1)", async () => {

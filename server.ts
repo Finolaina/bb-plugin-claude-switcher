@@ -1617,10 +1617,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         until = Math.max(until ?? end, end);
     return until;
   }
-  /** Marks `name` for `scope` till `until`; a later mark of the same scope never shortens it (see limitedAt). */
+  /** Marks `name` for `scope` till `until`, the latest report of that scope (see limitedAt). */
   function markLimited(name: string, scope: string, until: number): void {
     const marks = limitedAt.get(name) ?? new Map<string, number>();
-    marks.set(scope, Math.max(marks.get(scope) ?? until, until));
+    marks.set(scope, until);
     limitedAt.set(name, marks);
   }
   /**
