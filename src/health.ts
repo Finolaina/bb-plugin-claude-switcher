@@ -7,7 +7,7 @@
 import type { PlanInfo } from "./accounts.js";
 import { DAY_ZONE, zoneOffsetMs, type Pace } from "./pace.js";
 import type { Atasco, EsperaTeam } from "./atascos.js";
-import type { AccountUsage, UsageWindow } from "./policy.js";
+import { opusRoom, type AccountUsage, type UsageWindow } from "./policy.js";
 
 export const HEALTH_VERSION = 1;
 
@@ -83,6 +83,20 @@ export interface HealthReport {
     } | null;
     usable: boolean;
     problema: string | null;
+    /**
+     * Only with a reserve given (0.2.48). A Max or Ultra account's room for
+     * another model in points of its weekly: (100 − weekly) − share ·
+     * (100 − preferred) (see opusRoom in src/policy.ts), one decimal; null
+     * for a Team seat or an account not read whole.
+     */
+    huecoOpus?: number | null;
+    /**
+     * Only with a reserve given (0.2.48). The points of the preferred
+     * model's own window left unspent when the weekly reaches 100 % if the
+     * account goes on as now: −huecoOpus / share when huecoOpus is below 0,
+     * else 0; one decimal; null where huecoOpus is.
+     */
+    fablePerdida?: number | null;
   }>;
 }
 
@@ -140,6 +154,8 @@ export function healthReport(input: {
   /** See HealthReport.esperandoTeam. */
   esperandoTeam: EsperaTeam[] | null;
   accounts: HealthAccount[];
+  /** The preferred model and the weekly it spends per point of its own window (reserveShare): adds huecoOpus and fablePerdida. */
+  reserve?: { model: string; share: number };
 }): HealthReport {
   return {
     version: HEALTH_VERSION,
@@ -192,8 +208,25 @@ export function healthReport(input: {
               },
         usable: a.usable,
         problema: problemText(a),
+        ...(input.reserve === undefined ? {} : roomOf(a, input.reserve)),
       };
     }),
+  };
+}
+
+/** huecoOpus and fablePerdida of an account (see HealthReport). */
+function roomOf(
+  a: HealthAccount,
+  reserve: { model: string; share: number },
+): { huecoOpus: number | null; fablePerdida: number | null } {
+  const room =
+    a.usage === null || (a.plan.plan !== "max" && a.plan.plan !== "ultra")
+      ? null
+      : opusRoom(a.usage, reserve.model, reserve.share);
+  if (room === null) return { huecoOpus: null, fablePerdida: null };
+  return {
+    huecoOpus: round1(room),
+    fablePerdida: room < 0 && reserve.share > 0 ? round1(-room / reserve.share) : 0,
   };
 }
 
@@ -212,6 +245,9 @@ export function healthText(report: HealthReport): string {
       ...(c.plazas === null
         ? []
         : [`plazas ${c.plazas.usadas}/${c.plazas.total ?? "sin límite"}`]),
+      ...(c.huecoOpus === undefined || c.huecoOpus === null
+        ? []
+        : [`hueco Opus ${c.huecoOpus} (Fable perdida ${c.fablePerdida})`]),
       c.usable ? "usable" : `no usable: ${c.problema ?? "sin motivo"}`,
     ];
     return `${c.nombre.padEnd(width)}  ${parts.join(" · ")}`;

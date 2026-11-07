@@ -321,3 +321,66 @@ describe("healthText", () => {
     );
   });
 });
+
+// Aitor 2026-11-07: «la cuenta de viaulab, se sigue disparando el tema la
+// cuenta semanal y fable se queda sin gastar». Per Max or Ultra account: its
+// room for Opus and the Fable it would leave unspent (reparto-fable §B6).
+describe("health: huecoOpus and fablePerdida (0.2.48)", () => {
+  const ultra = (name: string, weekly: number, fable: number): HealthAccount =>
+    account({
+      name,
+      usage: {
+        name,
+        blocked: false,
+        session: { usedPercent: 0, resetsAt: null, absent: true },
+        weekly: { usedPercent: weekly, resetsAt: NOW + 48 * 3_600_000 },
+        models: { Fable: { usedPercent: fable, resetsAt: NOW + 48 * 3_600_000 } },
+      },
+    });
+  const report = (accounts: HealthAccount[], reserve?: { model: string; share: number }) =>
+    healthReport({
+      measured: NOW,
+      dayStartHour: 9,
+      holdsBackground: false,
+      atascos: [],
+      esperandoTeam: [],
+      accounts,
+      ...(reserve === undefined ? {} : { reserve }),
+    });
+  const FABLE = { model: "Fable", share: 0.5 };
+
+  it("the plan's accounts: viaulab -9.5 (19 of Fable lost), aitor -17.5 (35), siloeads 46 (0)", () => {
+    const [viaulab, aitor, siloeads] = report([ultra("viaulab", 86, 53), ultra("aitor", 100, 65), ultra("siloeads", 10, 12)], FABLE).cuentas;
+    expect(viaulab).toMatchObject({ huecoOpus: -9.5, fablePerdida: 19 });
+    expect(aitor).toMatchObject({ huecoOpus: -17.5, fablePerdida: 35 });
+    expect(siloeads).toMatchObject({ huecoOpus: 46, fablePerdida: 0 });
+  });
+
+  it("rounded to one decimal; a share of 0 loses nothing", () => {
+    const [x] = report([ultra("x", 86.04, 53)], FABLE).cuentas;
+    expect(x).toMatchObject({ huecoOpus: -9.5, fablePerdida: 19.1 });
+    expect(report([ultra("x", 86, 53)], { model: "Fable", share: 0 }).cuentas[0]).toMatchObject({ huecoOpus: 14, fablePerdida: 0 });
+  });
+
+  it("null for a Team seat, an account not read whole or not read", () => {
+    const team = account({
+      name: "team1",
+      usage: usage("team"),
+      plan: planOf({ kind: "unknown" }, usage("team")),
+    });
+    const unread = account({ name: "unread", usage: null });
+    const partial = { ...ultra("partial", 10, 12), usage: { ...ultra("partial", 10, 12).usage!, unknown: true as const, blocked: true } };
+    for (const c of report([team, unread, partial], FABLE).cuentas)
+      expect(c).toMatchObject({ huecoOpus: null, fablePerdida: null });
+  });
+
+  it("without a reserve given, no field is added (the schema of version 1 as it was)", () => {
+    const [x] = report([ultra("x", 86, 53)]).cuentas;
+    expect(x).not.toHaveProperty("huecoOpus");
+    expect(x).not.toHaveProperty("fablePerdida");
+  });
+
+  it("the text says it per Max or Ultra account", () => {
+    expect(healthText(report([ultra("viaulab", 86, 53)], FABLE))).toContain("hueco Opus -9.5 (Fable perdida 19)");
+  });
+});

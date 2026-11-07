@@ -7409,6 +7409,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return healthReport({
       atascos: await atascos(),
       esperandoTeam: await esperandoTeam(),
+      // huecoOpus and fablePerdida per Max or Ultra account (0.2.48).
+      ...(current.preferredModel === ""
+        ? {}
+        : { reserve: { model: current.preferredModel, share: current.reserveShare } }),
       measured: observed.length === 0 ? now : Math.max(...observed),
       dayStartHour: dayHour(),
       holdsBackground: current.paceHoldsBackground === true,

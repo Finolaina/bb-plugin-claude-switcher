@@ -17484,6 +17484,36 @@ describe("the brake on background work, off by default (paceHoldsBackground; Ait
 });
 
 describe("bb claude-switcher health (SPEC 2026-10-30 §4)", () => {
+  // Aitor 2026-11-07: «fable se queda sin gastar» (0.2.48).
+  it("gives each Max or Ultra account its huecoOpus and fablePerdida, a Team seat null", async () => {
+    const h = await host(
+      {
+        main: () => Response.json(ultraFixture("ultra-sin-5h")),
+        spare: () => Response.json(ultraFixture("team")),
+        // An Ultra without the 5-hour window, as ultra-sin-5h.
+        work: () =>
+          Response.json({
+            limits: [
+              { kind: "weekly_all", percent: 86, resets_at: new Date(NOW + 3 * 24 * HOUR).toISOString() },
+              { kind: "weekly_scoped", percent: 53, resets_at: new Date(NOW + 3 * 24 * HOUR).toISOString(), scope: { model: { display_name: "Fable" } } },
+            ],
+            five_hour: null,
+            seven_day: { locked_reason: null },
+          }),
+      },
+      { settings: { preferredModel: "Fable" } },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    const byName = Object.fromEntries(report.cuentas.map((c: { nombre: string }) => [c.nombre, c]));
+    // main: weekly 98, Fable 100 → room 2, nothing lost.
+    expect(byName.main).toMatchObject({ huecoOpus: 2, fablePerdida: 0 });
+    expect(byName.spare).toMatchObject({ huecoOpus: null, fablePerdida: null });
+    // work: weekly 86, Fable 53 → room -9.5, 19 of Fable lost.
+    expect(byName.work).toMatchObject({ huecoOpus: -9.5, fablePerdida: 19 });
+  });
+
   it("is not usable where the policy would not choose it: out at its last good read, its reset passed while the queries fail (Codex ULTRA-R06)", async () => {
     let clock = NOW;
     let down = false;
