@@ -96,6 +96,17 @@ Revisión (Codex r1: 1 high y 4 medium, `docs/reparto-por-hueco-2026-11-07/codex
   dos horas. Un hilo que se quedó en error se sigue juzgando con las
   lecturas (medium 5).
 
+Revisión (Codex r2: 1 high y 1 medium, `docs/reparto-por-hueco-2026-11-07/codex-r2.txt`):
+
+- El descarte de la Team que acaba de fallar ya no termina con el juicio:
+  esa Team no cuenta como capaz hasta el reinicio que dice el propio 429
+  (sin reinicio, hasta que llegue una lectura nueva), o hasta que una lectura
+  hecha después del fallo diga otra cosa. Antes, el despacho del reintento
+  devolvía el proyecto a la Team, que seguía leyendo 20 % de sesión: cuatro
+  idas y vueltas y el quinto fallo en `attempts-exhausted`, con la Ultra con
+  hueco 46 libre. La prueba recorre ahora la cadena entera: fallo, reintento,
+  despacho y turno en la Ultra (high 1).
+
 ## [0.2.47] - 2026-11-06
 
 ### Changed

@@ -21628,13 +21628,14 @@ describe("reparto por hueco 2026-11-07", () => {
     // just refused the turn does not veto main: the turn moves there at once,
     // no retry two hours away.
     describe("the Team that just failed the turn does not veto the overflow (Codex r1 medium 5)", () => {
-      const failingHost = (settings: Record<string, unknown> = {}) =>
+      const failingHost = (settings: Record<string, unknown> = {}, clock?: () => number) =>
         host(
           {
             main: () => Response.json(payload(5, 10, 12)),
             work: () => Response.json(payload(20, 10, 0)),
           },
           {
+            ...(clock === undefined ? {} : { clock }),
             dirs: () => ["work"],
             settings: { preferredModel: "Fable", seatsTeam: 2, seatsMax: 4, opusOverflowRoom: 15, ...settings },
             presetEnv: { "proj-1": on("work") },
@@ -21676,6 +21677,71 @@ describe("reparto por hueco 2026-11-07", () => {
         expect(h.retries).toEqual([expect.objectContaining({ reason: "Waiting for Opus on work" })]);
         expect(h.retries[0]!.sendAt! >= NOW + 2 * HOUR).toBe(true);
         expect(h.envDeleted).toEqual([]);
+      });
+
+      // Codex r2 high 1: the whole chain. The retry's dispatch does not take
+      // the project back to work, whose read still says 20 %: the turn runs
+      // on main. Before, it went back to work four times and the fifth
+      // failure was attempts-exhausted.
+      it("the retry's dispatch keeps main and the turn runs there (Codex r2 high 1)", async () => {
+        const h = await failingHost();
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "work");
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+        expect(h.retries).toEqual([expect.objectContaining({ reason: "Switched to account main (Opus)" })]);
+        expect(await dispatch(h, "thread-1", "proj-1", OPUS)).toEqual({ action: "proceed" });
+        await active(h, "thread-1");
+        expect(h.envSet.filter((e) => e.projectId === "proj-1")).toEqual([]);
+        expect(await where(h)).toBe("main");
+      });
+
+      // Out until the 429's own reset (NOW + 2 h), reads kept fresh by
+      // refreshMinutes 600 and none made since: another project's Opus turn
+      // on main stays there 1 ms before it, and goes to work at it.
+      for (const [at, to] of [[2 * HOUR - 1, "main"], [2 * HOUR, "work"]] as const)
+        it(`work is out until the 429's reset: ${at} ms after it, another Opus turn goes to ${to} (Codex r2 high 1)`, async () => {
+          let clock = NOW;
+          const h = await failingHost({ refreshMinutes: 600 }, () => clock);
+          dispose = () => h.harness.dispose();
+          teamLogin(h, "work");
+          await h.harness.behavior.callRpc("accounts_refresh", null);
+          await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+          clock = NOW + at;
+          expect(await dispatch(h, "o2", "proj-2", OPUS)).toEqual({ action: "proceed" });
+          expect(await where(h, "proj-2")).toBe(to);
+        });
+
+      // A read made after the failure is the account's word again: one at
+      // the failure's own instant does not end it, one 1 ms later does.
+      for (const [after, to] of [[0, "main"], [1, "work"]] as const)
+        it(`a read ${after} ms after the failure: another Opus turn goes to ${to} (Codex r2 high 1)`, async () => {
+          let clock = NOW;
+          const h = await failingHost({ refreshMinutes: 600 }, () => clock);
+          dispose = () => h.harness.dispose();
+          teamLogin(h, "work");
+          await h.harness.behavior.callRpc("accounts_refresh", null);
+          await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+          clock = NOW + after;
+          await h.harness.behavior.callRpc("accounts_refresh", null);
+          expect(await dispatch(h, "o2", "proj-2", OPUS)).toEqual({ action: "proceed" });
+          expect(await where(h, "proj-2")).toBe(to);
+        });
+
+      it("a 429 with no reset reported keeps work out until a read says otherwise (Codex r2 high 1)", async () => {
+        let clock = NOW;
+        const h = await failingHost({ refreshMinutes: 600 }, () => clock);
+        dispose = () => h.harness.dispose();
+        teamLogin(h, "work");
+        await h.harness.behavior.callRpc("accounts_refresh", null);
+        const base = failure();
+        await h.harness.behavior.emitThreadEvent(
+          "turn.failed",
+          failure({ rateLimits: { ...base.rateLimits!, windows: base.rateLimits!.windows.map((w) => ({ ...w, resetsAtMs: null })) } }),
+        );
+        clock = NOW + 5 * HOUR;
+        expect(await dispatch(h, "o2", "proj-2", OPUS)).toEqual({ action: "proceed" });
+        expect(await where(h, "proj-2")).toBe("main");
       });
     });
 

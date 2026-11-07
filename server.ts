@@ -93,6 +93,7 @@ import {
   decideAhead,
   decidePlacement,
   decideSwitch,
+  reportedFreeAt,
   FALLBACK_MODEL,
   isRefusal,
   MAX_ATTEMPTS,
@@ -1578,6 +1579,24 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   } | null = null;
   /** When each account last refused a turn (in memory: a reload forgets it). */
   const refusedAt = new Map<string, number>();
+  /**
+   * The accounts a turn just failed on with a usage limit, and until when
+   * the provider says so (Infinity: no reset reported). Until then, or until
+   * a read made after the failure says otherwise, such a Team seat is none
+   * that takes a turn held off the reserve (noTeamTakes): a read from before
+   * the failure may still show room the provider refused, and the retry's
+   * placement would take the project back there (Codex r2 high 1). Only
+   * there: elsewhere its numbers decide, and a turn may fail there once,
+   * as before. In memory: a reload forgets it.
+   */
+  const limitedAt = new Map<string, { at: number; until: number }>();
+  /** `name`'s reported limit still stands (see limitedAt). */
+  function limited(name: string): boolean {
+    const mark = limitedAt.get(name);
+    if (mark === undefined) return false;
+    const read = collector.get(name)?.observedAt;
+    return deps.now() < mark.until && !(read != null && read > mark.at);
+  }
   function refusing(name: string): boolean {
     const at = refusedAt.get(name);
     return at !== undefined && deps.now() - at < REFUSAL_MS;
@@ -5159,7 +5178,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       ...unreadTeamSeats({ accounts: measured, unreadTeams: unreadTeams(model), currentAccount: "", now }),
     ];
     return !teams.some((a) => {
-      if (a.name === ruledOut) return false;
+      if (a.name === ruledOut || limited(a.name)) return false;
       if (!isUsable(a) || !canRunModel(a, model)) return false;
       const key = seatKey(a.name);
       if (threadId !== undefined && seats.seatOf(threadId)?.account === key) return true;
@@ -6484,6 +6503,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       ...paceFilter(background),
     };
     const decision = decideSwitch(input);
+    // The provider's word on the account the turn failed on stands past
+    // this judgment: the retry's own placement reads it (see limitedAt).
+    if (!stuck && !refusal && failedOn !== null && declineReason(event) === null)
+      limitedAt.set(failedOn, { at: now, until: reportedFreeAt(event) ?? Number.POSITIVE_INFINITY });
     // No Fable on any account, and an account with Opus: the thread is told
     // to switch (D3), whatever the decision's reason, naming where the
     // dispatch would run its Opus turn (Sol B2-002: the same placement).
