@@ -3908,6 +3908,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       isNew,
       accounts: measured,
       preferredModel: current.preferredModel,
+      // The share ranks a new project by room (0.2.48, B2): without the
+      // reserve here the choice was by deadline alone (PLAN §A row 1).
+      ...reserveOf(),
       excursionFrom: wayHome(projectId, current.preferredModel, measured, now),
       freeSeats,
       // Background work behind the accounts saved for the user (SPEC

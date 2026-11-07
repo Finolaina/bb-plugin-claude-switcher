@@ -1005,6 +1005,12 @@ describe("Opus with no Team able to take it: the Ultra with the most room (0.2.4
     expect(chooseAccount([ultra("a", 10, 12), team], opus({ ...free, noTeamTakes: () => false }))?.account).toBe("team");
     // Even with the server's flag stale, the Team ranks first.
     expect(chooseAccount([ultra("a", 10, 12), team], opus(free))?.account).toBe("team");
+    // Also a Team seat that reports an Opus window (it spends a weekly too: Codex R047-002).
+    const opusTeam = account("team", {
+      team: true,
+      models: { Fable: { usedPercent: 4, resetsAt: NOW + 48 * HOUR }, Opus: { usedPercent: 5, resetsAt: NOW + 48 * HOUR } },
+    });
+    expect(chooseAccount([ultra("a", 10, 12), opusTeam], opus(free))?.account).toBe("team");
   });
 
   it("cut: room 14.9 waits, 15.0 enters", () => {

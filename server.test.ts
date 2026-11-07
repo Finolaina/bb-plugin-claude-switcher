@@ -21241,6 +21241,16 @@ describe("reparto por hueco 2026-11-07", () => {
       );
     });
 
+    it("B2: a new project goes to the Ultra with the most room, not the first by name", async () => {
+      const h = await start(() => 86);
+      await h.harness.behavior.emitThreadEvent("thread.created", {
+        thread: thread({ id: "thr-new", projectId: "proj-3" }),
+      });
+      expect(h.envSet.filter((e) => e.projectId === "proj-3")).toEqual([
+        expect.objectContaining({ projectId: "proj-3", note: ownNote("spare") }),
+      ]);
+    });
+
     it("roomMoveGap 0 turns it off", async () => {
       const h = await start(() => 86, { roomMoveGap: 0 });
       expect(await dispatch(h, "t1", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
