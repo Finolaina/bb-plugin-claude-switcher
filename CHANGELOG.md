@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.49] - 2026-11-07
+
+### Corregido
+
+- **El panel enseña la semana de una Team cuando su lectura la trae.**
+  Aitor, 2026-11-07: «no entiendo por qué pone agotada si tiene fable,
+  revísalo por favor». team4 leía 5 h al 0 % (sin empezar), Fable al 85 % y
+  la semanal general al 100 % hasta el lunes 9 a las 17:00, y un turno de
+  Fable allí contestó «You've hit your weekly limit»: la semanal general de
+  una Team existe desde la 0.2.39 y frena todo, Fable incluido. El panel
+  seguía la regla del 2026-11-02 («nunca la semana en una Team», cuando las
+  Team no la daban): con los números de team4, reproducido en un test, su
+  fila decía «Libre · sin empezar» y no enseñaba ninguna semana. Ahora una Team con semanal en la
+  lectura tiene su barra «Semana» con su reinicio, cuenta como agotada si
+  esa semana está al 100 % (vuelve cuando se reinicia), y el menú y la línea
+  del hilo dicen la semana («Semana 100 % · vuelve lun 17:00») en vez de sus
+  hilos. Sin parte del día en esa barra: el panel no frena ninguna Team por
+  su ritmo. Una Team cuya lectura no trae semanal se ve como antes, y las
+  Ultra y Max no cambian.
+
 ## [0.2.48] - 2026-11-07
 
 ### Cambiado

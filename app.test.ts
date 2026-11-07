@@ -246,7 +246,7 @@ describe("design B in Settings", () => {
     expect(text).toContain("vuelve lun 09:00");
     expect(text).toContain("Guardada para ti · Ya ha gastado lo de hoy");
     expect(text).toContain("2 de 2 hilos · 4 esperando");
-    // A Team seat: its 5 hours and its Fable, never a week.
+    // A Team seat with no weekly in its reading: its 5 hours and its Fable, no week.
     expect(text).toContain("team2Team5 h74 %Fable89 %Trabajando");
     expect(text).toContain("sin Fable hasta dom 22:00");
     // mariscal has no login: out, and the button to log it in.
