@@ -27,6 +27,18 @@ project uses [Semantic Versioning](https://semver.org/).
   lectura la trae con su reinicio (mismo patrón, en `src/usage-source.ts`:
   la escondía por la misma regla del 2026-11-02). Una lectura incompleta,
   sin la marca de ausente ni reinicio, sigue sin semanal (Codex BARS-001).
+- **El cambio anticipado no mueve un proyecto mientras se escribe otro
+  movimiento suyo** (el mismo freno que el rescate y la espera adelantada
+  desde la 0.2.48). En la 0.2.48 quedó como límite porque se creía apagado
+  (`switchAheadPercent` y `switchAheadOtherPercent` valen 0 por defecto),
+  pero en producción `switchAheadOtherPercent` vale 95: está encendido para
+  los hilos de Opus. Con el proyecto en una Ultra al 96 % de su semana, un
+  despacho de Fable escribía su movimiento por hueco a otra Ultra y,
+  mientras, el final de un turno de Opus escribía la Team: dos movimientos,
+  y aterrizaba el primero encima. Ahora el final del turno no escribe, y el
+  final del siguiente turno lo vuelve a mirar. Límite: el reparto entre
+  Ultra (`rebalance`, a mano y sin tocar proyectos con hilos trabajando)
+  sigue sin mirar el atado.
 
 ## [0.2.48] - 2026-11-07
 

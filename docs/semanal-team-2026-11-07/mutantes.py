@@ -16,6 +16,7 @@ SALIDA = os.path.join(REPO, "docs/semanal-team-2026-11-07/mutantes.salida.txt")
 
 PA, PAT = "src/panel.ts", "src/panel.test.ts"
 US, UST = "src/usage-source.ts", "src/usage-source.test.ts"
+V, VT = "server.ts", "server.test.ts"
 TEAM4 = "team4, 2026-11-07"
 # (camino, mutante, fichero, viejo, nuevo, ficheros de test, filtro)
 M = [
@@ -42,6 +43,10 @@ M = [
     ("panel de bb", "la semanal incompleta de una Team se enseña", US,
      '((info.plan === "team" && weekly.resetsAt === null) || weekly.absent === true',
      '(weekly.absent === true', UST, "BARS-001"),
+    ("atado", "el cambio anticipado escribe encima de un movimiento en curso", V,
+     "    if (moving(projectId)) {\n      bb.log.info(\n        `thread ${thread.id}: not moved ahead",
+     "    if (false) {\n      bb.log.info(\n        `thread ${thread.id}: not moved ahead",
+     VT, "the move ahead does not move a project while another move of it is written"),
 ]
 
 
