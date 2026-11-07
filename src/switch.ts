@@ -830,10 +830,10 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
       ? { kind: "keep", why: "current-reserved" }
       : { kind: "move", account: elsewhere.account, why: "current-reserved" };
   }
+  // Marked, the current account is not among `accounts` (see markedOut).
   const runs =
     !loggedOut &&
     current !== undefined &&
-    !currentMarked &&
     isUsable(current) &&
     canRunModel(current, input.preferredModel);
   if (runs && (pinHolds || !spendsReservedWeekly(current, options))) {
