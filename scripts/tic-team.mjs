@@ -167,8 +167,9 @@ export async function cerrar(ruta, ahora, reintento = false) {
   try {
     edad = ahora - (await stat(ruta)).mtimeMs;
   } catch (error) {
-    // Se acaba de soltar: lo intenta una vez más.
-    if (error.code === "ENOENT" && !reintento) return cerrar(ruta, ahora, true);
+    // Se acaba de soltar: lo intenta una vez más; si vuelve a pasar, otra
+    // pasada lo está cogiendo y esta no entra (antes lanzaba ENOENT).
+    if (error.code === "ENOENT") return reintento ? false : cerrar(ruta, ahora, true);
     throw error;
   }
   if (edad < CERROJO_MS || reintento) return false;

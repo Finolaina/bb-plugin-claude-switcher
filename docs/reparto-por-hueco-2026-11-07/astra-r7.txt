@@ -1,0 +1,13 @@
+Astra r7 sobre la 0.2.48 (rama feat/reparto-por-hueco, HEAD b8e832d), veredicto copiado de su salida (/tmp/reparto-rev/r7.txt, 2026-11-07).
+
+Encontré **1 medium; ningún high**.
+
+1. **medium — Una Team sin leer ignora su marca de 429 al colocar otro turno.** [src/switch.ts:809](src/switch.ts:809)  
+   La salida temprana devuelve `keep` para una Team sin medición antes de comprobar `limitedUntil` en la línea 834.
+
+   **Reproducción:** Team con **2 plazas**, endpoint de uso respondiendo **503** y un Opus que devuelve **429 hasta +120 minutos**. Una Ultra tiene sesión **5 %**, semanal **10 %**, Fable **12 %**, hueco **46** y **4 plazas libres**; B5 está en **15**. El fallo mueve correctamente su proyecto a la Ultra, pero otro proyecto situado en esa misma Team obtiene **`proceed` sin moverse**: arranca sobre el bloqueo conocido en vez de aprovechar la Ultra.
+
+   Reproducido con el harness. Como control, al proporcionar una lectura **20/10** de la Team, conservando exactamente la misma marca, el siguiente proyecto sí sale a la Ultra. El test de r6 utiliza siempre una Team medida y no cubre esta salida temprana.
+
+`tsc --noEmit` pasa. Vitest no pudo ejecutar las suites por la creación de temporales; la reproducción dirigida utilizó SQLite en memoria.
+

@@ -1,0 +1,16 @@
+Astra r5 sobre la 0.2.48 (rama feat/reparto-por-hueco, HEAD 823e1c0), veredicto copiado de su salida (/tmp/reparto-rev/r5.txt, 2026-11-07).
+
+Encontré **3 medium; ningún high**. Reproducidos con el harness del repositorio y SQLite en memoria.
+
+1. **medium — La recolocación del reintento vuelve a elegir una Team marcada.** [src/switch.ts:875](src/switch.ts:875)  
+   `noTeamTakes` excluye la Team fallida, pero `decidePlacement` sigue incluyéndola entre los destinos. Escenario: Team con lectura **20 % de sesión, 10 % semanal**, pero 429 hasta **+120 min**. El fallo lleva Opus a Ultra A **10/12**, hueco **46**. Antes del despacho se ocupa su única plaza; Ultra B **20/20**, hueco **40**, sigue libre **0/1**. El despacho devuelve `proceed` y mueve otra vez a la **Team fallida**, en vez de utilizar B. La protección de `decideSwitch` se pierde al recolocar ese mismo reintento.
+
+2. **medium — Un 429 sin reinicio acorta una marca con reinicio conocido.** [server.ts:1623](server.ts:1623)  
+   `marks.set(scope, until)` sustituye el vencimiento anterior incluso por uno menor. Escenario: Team con lectura **20/10**, dos plazas; un Opus falla y marca toda la cuenta durante **120 min**. **Un segundo después**, otro Opus falla allí sin fecha de reinicio: sobrescribe la marca con **30 min**. A los **31 min**, el primer hilo abandona su Ultra libre **10/12**, hueco **46**, y obtiene `proceed` en la Team, aunque al bloqueo confirmado le quedan **89 min**. Separar cuenta y modelo no protege frente a dos marcas del mismo ámbito.
+
+3. **medium — Un historial pendiente deja `seatMoving` sin vencimiento después del despacho.** [server.ts:5521](server.ts:5521)  
+   El registro en `heldMoves` ocurre **después** de esperar `recordMove`. Si el guardado de `last-switch` queda pendiente, el timeout del despacho marca `abandoned`, pero su `finally` no encuentra nada que liberar. Escenario: Fable mueve desde **90/53**, hueco **−13,5**, a **10/12**, hueco **46**; la variable ya está escrita. Tras **3 s** obtiene `proceed` y emite `thread.active`. Un hermano Opus sigue recibiendo «this project is being moved» a los **1, 11 y 60 min**, con una Team con **2 plazas libres**. Mientras ese guardado no termine, ni el arranque ni los relojes existentes liberan el bloqueo. Los tests de r4 dejan terminar el guardado y no cubren esta salida.
+
+`tsc --noEmit` pasa. Vitest no pudo ejecutar las suites porque necesita crear un directorio temporal y el entorno es de solo lectura.
+
+VEREDICTO: 0 high, 3 medium, 0 low

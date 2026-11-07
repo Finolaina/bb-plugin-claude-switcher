@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   canRunModel,
   chooseAccount,
+  opusRoom,
   spendsNoWeekly,
   spendsReservedWeekly,
   type AccountUsage,
@@ -860,5 +861,206 @@ describe("Opus solo por Team (2026-11-06)", () => {
     expect(spendsReservedWeekly(ultra(50, 50), as("Haiku", 50))).toBe(false);
     expect(spendsReservedWeekly(ultra(51, 10), as("Haiku", 50))).toBe(true);
     expect(spendsReservedWeekly(ultra(0, 100), as("Haiku", 50))).toBe(false);
+  });
+});
+
+// Aitor 2026-11-07: «la cuenta de viaulab, se sigue disparando el tema la
+// cuenta semanal y fable se queda sin gastar». The general weekly an Ultra
+// has left beyond what its own Fable still needs (PLAN §B1, reparto-fable).
+describe("opusRoom: the general weekly left beyond what Fable needs (0.2.48)", () => {
+  const ultra = (weekly: number, fable: number, more: Partial<AccountUsage> = {}) =>
+    account("ultra", {
+      weekly: { usedPercent: weekly, resetsAt: NOW + 48 * HOUR },
+      models: { Fable: { usedPercent: fable, resetsAt: NOW + 48 * HOUR } },
+      ...more,
+    });
+
+  it("(100 - weekly) - share * (100 - Fable): the plan's three measured accounts", () => {
+    expect(opusRoom(ultra(86, 53), "Fable", 0.5)).toBeCloseTo(-9.5, 10);
+    expect(opusRoom(ultra(100, 65), "Fable", 0.5)).toBeCloseTo(-17.5, 10);
+    expect(opusRoom(ultra(10, 12), "Fable", 0.5)).toBeCloseTo(46, 10);
+  });
+
+  it("the share weighs Fable's room", () => {
+    expect(opusRoom(ultra(10, 12), "Fable", 0)).toBeCloseTo(90, 10);
+    expect(opusRoom(ultra(10, 12), "Fable", 1)).toBeCloseTo(2, 10);
+  });
+
+  it("the reserved model is matched case-insensitively", () => {
+    expect(opusRoom(ultra(86, 53), "fable", 0.5)).toBeCloseTo(-9.5, 10);
+  });
+
+  it("null for a Team seat, an incomplete read, no weekly, no window of the reserved model or no reserved model", () => {
+    expect(opusRoom(ultra(10, 12, { team: true }), "Fable", 0.5)).toBeNull();
+    expect(opusRoom(ultra(10, 12, { unknown: true, blocked: true }), "Fable", 0.5)).toBeNull();
+    expect(opusRoom(ultra(10, 12, { weekly: { usedPercent: 0, resetsAt: null, absent: true } }), "Fable", 0.5)).toBeNull();
+    expect(opusRoom(ultra(10, 12, { models: {} }), "Fable", 0.5)).toBeNull();
+    expect(opusRoom(ultra(10, 12), "", 0.5)).toBeNull();
+  });
+
+  it("null for a read that is not fresh (Codex r1 medium 4)", () => {
+    expect(opusRoom(ultra(10, 12, { stale: true }), "Fable", 0.5)).toBeNull();
+  });
+});
+
+// PLAN §B2 (reparto-fable, 2026-11-07): Fable goes where the general weekly
+// has the most room beyond what Fable still needs, in tiers of 10 points;
+// within a tier the session quarter and the deadline decide as before. A
+// Team seat comes last for Fable: the weekly it spends there is Opus's.
+describe("the reserved model ranks by opusRoom (0.2.48, B2)", () => {
+  // `resets` hours from now for both windows: the deadline.
+  const ultra = (name: string, weekly: number, fable: number, resets = 48) =>
+    account(name, {
+      weekly: { usedPercent: weekly, resetsAt: NOW + resets * HOUR },
+      models: { Fable: { usedPercent: fable, resetsAt: NOW + resets * HOUR } },
+    });
+  const fable = (more: Partial<ChoiceOptions> = {}): ChoiceOptions => ({
+    preferredModel: "Fable",
+    reserveModel: "Fable",
+    reserveShare: 0.5,
+    ...more,
+  });
+
+  it("the plan's case: viaulab -9.5, siloeads 46, mariscal 45.5 → siloeads (same tier as mariscal, earlier deadline)", () => {
+    const accounts = [
+      ultra("viaulab", 86, 53, 10),
+      ultra("mariscal", 9, 9, 72),
+      ultra("siloeads", 10, 12, 60),
+    ];
+    expect(chooseAccount(accounts, fable())?.account).toBe("siloeads");
+    // Before 0.2.48 (no share): the earliest deadline, viaulab.
+    expect(chooseAccount(accounts, fable({ reserveShare: undefined }))?.account).toBe("viaulab");
+  });
+
+  it("cut: room 9.9 and 10.0 are different tiers, 10.0 wins over an earlier deadline", () => {
+    // (100 - 89.1) - 0.5 * 2 = 9.9; (100 - 89) - 0.5 * 2 = 10.
+    expect(chooseAccount([ultra("a", 89.1, 98, 10), ultra("b", 89, 98, 60)], fable())?.account).toBe("b");
+  });
+
+  it("cut: room 10 and 19 are the same tier, the deadline decides", () => {
+    expect(chooseAccount([ultra("a", 89, 98, 10), ultra("b", 80, 98, 60)], fable())?.account).toBe("a");
+    expect(chooseAccount([ultra("a", 89, 98, 60), ultra("b", 80, 98, 10)], fable())?.account).toBe("b");
+  });
+
+  it("a Team seat goes last for Fable, also with a sooner deadline and an Ultra with negative room", () => {
+    const team = account("team", {
+      team: true,
+      models: { Fable: { usedPercent: 10, resetsAt: NOW + 2 * HOUR } },
+    });
+    expect(chooseAccount([team, ultra("viaulab", 86, 53)], fable())?.account).toBe("viaulab");
+    // The Team still takes Fable with no Ultra able to.
+    expect(chooseAccount([team, ultra("viaulab", 100, 53)], fable())?.account).toBe("team");
+  });
+
+  it("the session quarter still comes after the tier", () => {
+    const busy = account("busy", {
+      session: { usedPercent: 80, resetsAt: NOW + 2 * HOUR },
+      weekly: { usedPercent: 10, resetsAt: NOW + 48 * HOUR },
+      models: { Fable: { usedPercent: 12, resetsAt: NOW + 48 * HOUR } },
+    });
+    expect(chooseAccount([busy, ultra("idle", 60, 60)], fable())?.account).toBe("busy");
+  });
+
+  it("an account with no room known (no Fable window) ranks as room 0-9.9", () => {
+    const blank = account("blank", { weekly: { usedPercent: 50, resetsAt: NOW + 10 * HOUR }, models: {} });
+    // room 8: same tier, blank's deadline is sooner; room 10: the next tier.
+    expect(chooseAccount([blank, ultra("z", 91, 98, 60)], fable())?.account).toBe("blank");
+    expect(chooseAccount([blank, ultra("z", 89, 98, 60)], fable())?.account).toBe("z");
+  });
+
+  it("Opus among the Ultras out of Fable (0.2.47): the most room first", () => {
+    const spent = (name: string, weekly: number, resets: number) => ultra(name, weekly, 100, resets);
+    const opus: ChoiceOptions = { preferredModel: "Opus", reserveModel: "Fable", reserveShare: 0.5 };
+    expect(chooseAccount([spent("a", 80, 10), spent("b", 20, 10)], opus)?.account).toBe("b");
+    // Haiku keeps its order: the deadline.
+    expect(chooseAccount([spent("a", 80, 10), spent("b", 20, 60)], { ...opus, preferredModel: "Haiku" })?.account).toBe("a");
+  });
+});
+
+// PLAN §B5 [SUPUESTO] (2026-11-07). Aitor: «los Opus tienen que salir por
+// Team sí o sí» (11-06) is the order, Team always first; «tampoco quiero que
+// hilos se queden parados … el trabajo prima» (11-07): with no Team able to
+// take it, Opus does not wait while an Ultra has general weekly Fable will
+// not need; «Esperar siempre» (11-03) stays for the Ultras without such room.
+describe("Opus with no Team able to take it: the Ultra with the most room (0.2.48, B5)", () => {
+  const ultra = (name: string, weekly: number, fable: number, more: Partial<AccountUsage> = {}) =>
+    account(name, {
+      weekly: { usedPercent: weekly, resetsAt: NOW + 48 * HOUR },
+      models: { Fable: { usedPercent: fable, resetsAt: NOW + 72 * HOUR } },
+      ...more,
+    });
+  const team = account("team", { team: true, models: { Fable: { usedPercent: 4, resetsAt: NOW + 48 * HOUR } } });
+  const opus = (more: Partial<ChoiceOptions> = {}): ChoiceOptions => ({
+    preferredModel: "Opus",
+    reserveModel: "Fable",
+    reserveShare: 0.5,
+    opusOverflowRoom: 15,
+    noTeamTakes: () => true,
+    freeSeats: (n) => (n === "team" ? 0 : 6),
+    ...more,
+  });
+
+  it("every Team full: Ultra A at room 46 goes, not B at -9.5", () => {
+    expect(chooseAccount([ultra("b", 86, 53), ultra("a", 10, 12), team], opus())?.account).toBe("a");
+  });
+
+  it("a Team seat with one seat goes first (no overflow while a Team takes it)", () => {
+    const free = { freeSeats: (n: string) => (n === "team" ? 1 : 6) };
+    expect(chooseAccount([ultra("a", 10, 12), team], opus({ ...free, noTeamTakes: () => false }))?.account).toBe("team");
+    // Even with the server's flag stale, the Team ranks first.
+    expect(chooseAccount([ultra("a", 10, 12), team], opus(free))?.account).toBe("team");
+    // Also a Team seat that reports an Opus window (it spends a weekly too: Codex R047-002).
+    const opusTeam = account("team", {
+      team: true,
+      models: { Fable: { usedPercent: 4, resetsAt: NOW + 48 * HOUR }, Opus: { usedPercent: 5, resetsAt: NOW + 48 * HOUR } },
+    });
+    expect(chooseAccount([ultra("a", 10, 12), opusTeam], opus(free))?.account).toBe("team");
+  });
+
+  it("cut: room 14.9 waits, 15.0 enters", () => {
+    // (100 - 80.1) - 0.5 * 10 = 14.9; (100 - 80) - 0.5 * 10 = 15.
+    expect(chooseAccount([ultra("a", 80.1, 90), team], opus())).toBeNull();
+    expect(chooseAccount([ultra("a", 80, 90), team], opus())?.account).toBe("a");
+    expect(spendsReservedWeekly(ultra("a", 80.1, 90), opus())).toBe(true);
+    expect(spendsReservedWeekly(ultra("a", 80, 90), opus())).toBe(false);
+  });
+
+  it("an Ultra not read whole never takes it", () => {
+    expect(chooseAccount([ultra("a", 10, 12, { unknown: true }), team], opus())).toBeNull();
+    expect(spendsReservedWeekly(ultra("a", 10, 12, { unknown: true }), opus())).toBe(true);
+  });
+
+  it("opusOverflowRoom 100 turns it off; unset, no share or no flag too", () => {
+    expect(chooseAccount([ultra("a", 10, 12), team], opus({ opusOverflowRoom: 100 }))).toBeNull();
+    expect(chooseAccount([ultra("a", 0, 99), team], opus({ opusOverflowRoom: 100 }))).toBeNull();
+    // Room 100: weekly 0, Fable 100 whose window resets a day before the weekly (not 0.2.47's case).
+    const hundred = account("a", {
+      weekly: { usedPercent: 0, resetsAt: NOW + 72 * HOUR },
+      models: { Fable: { usedPercent: 100, resetsAt: NOW + 48 * HOUR } },
+    });
+    expect(chooseAccount([hundred, team], opus({ opusOverflowRoom: 100 }))).toBeNull();
+    expect(chooseAccount([hundred, team], opus({ opusOverflowRoom: 99.9 }))?.account).toBe("a");
+    expect(chooseAccount([ultra("a", 10, 12), team], opus({ opusOverflowRoom: undefined }))).toBeNull();
+    expect(chooseAccount([ultra("a", 10, 12), team], opus({ reserveShare: undefined }))).toBeNull();
+    expect(chooseAccount([ultra("a", 10, 12), team], opus({ noTeamTakes: () => false }))).toBeNull();
+    expect(chooseAccount([ultra("a", 10, 12), team], opus({ noTeamTakes: undefined }))).toBeNull();
+  });
+
+  it("the flag is asked for the turn's model", () => {
+    const asked: string[] = [];
+    chooseAccount([ultra("a", 10, 12), team], opus({ noTeamTakes: (m) => (asked.push(m), true) }));
+    expect(asked.length).toBeGreaterThan(0);
+    expect(new Set(asked)).toEqual(new Set(["Opus"]));
+  });
+
+  it("Sonnet too; Haiku and Fable keep their rules", () => {
+    expect(chooseAccount([ultra("a", 10, 12), team], opus({ preferredModel: "Sonnet" }))?.account).toBe("a");
+    // Room 20 ≥ 15, weekly 60 over Haiku's margin of 50: still Fable's for Haiku.
+    expect(spendsReservedWeekly(ultra("a", 60, 60), opus({ preferredModel: "Haiku", reserveSpareUpTo: 50 }))).toBe(true);
+    expect(spendsReservedWeekly(ultra("a", 10, 12), opus({ preferredModel: "Fable" }))).toBe(false);
+  });
+
+  it("a Team seat is never one: it spends nothing of Fable's anyway", () => {
+    expect(spendsReservedWeekly(team, opus())).toBe(false);
   });
 });

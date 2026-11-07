@@ -4,6 +4,275 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.48] - 2026-11-07
+
+### Cambiado
+
+Encargo de Aitor del 2026-11-07: «la cuenta de viaulab, se sigue disparando el
+tema la cuenta semanal y fable se queda sin gastar» y «tampoco quiero que hilos
+se queden parados, si una cuenta se queda sin cuota tiene que saltar a otra, el
+trabajo prima ... se trata de tenerlo todo optimizado con lo que tenemos». Plan
+y medidas: reparto-fable, PLAN §0, §A y §B (almacenamiento del hilo).
+
+- **Hueco de Opus por cuenta** (`opusRoom`, B1): en una Max o Ultra,
+  `(100 − semanal) − reserveShare × (100 − Fable)`. Positivo: semanal general
+  que otro modelo puede gastar sin quitarle nada a Fable. Negativo: la cuenta
+  llegará al 100 % de la semanal con Fable sin gastar. Ejemplos medidos el
+  2026-11-07 con 0,5: semanal 86 y Fable 53 da −9,5; 100 y 65, −17,5; 10 y 12,
+  46. Nulo en una Team, en una lectura incompleta y sin ventana de Fable.
+- **Fable va a la cuenta con más hueco** (B2): en tramos de 10 puntos, antes
+  del cuarto de sesión y de la fecha de corte, y a una Team la última. Vale
+  para proyectos nuevos, rescates, cambios tras un fallo y el elegido de la
+  cabecera. Con las tres Ultra del plan (−9,5, 46 y 45,5), un proyecto nuevo
+  va a la de 46 o la de 45,5 según la fecha de corte; antes iba a la que
+  renovaba antes aunque tuviera −9,5. Opus entre las Ultra que ya puede usar
+  (0.2.47 y B5) también va a la de más hueco.
+- **Un turno de Fable se mueve por hueco** (B3, `why: "fable-room"`): con su
+  cuenta en hueco negativo y otra Max/Ultra con al menos `roomMoveGap` (20)
+  puntos más y plaza, el proyecto se mueve antes del turno. Con −9,5 y otra a
+  10,5 se mueve; a 10,4 no. Con otro hilo del proyecto trabajando, solo por
+  debajo de −10 y no dentro de `stuckMoveMinutes` desde su último movimiento.
+  Nunca a una Team, nunca por un tic de Calor, nunca con el proyecto elegido a
+  mano.
+- **Fable con plazas llenas y un hermano trabajando también se mueve** (B4):
+  como Opus desde la 0.2.43, a la primera consulta, a una Max/Ultra con plaza
+  antes que a una Team. Antes esperaba en la cola (92 min de hilo medidos con
+  5-6 cuentas libres).
+- **[SUPUESTO] Opus y Sonnet sin ninguna Team capaz van a la Ultra con más
+  hueco** (B5): si ninguna Team, leída o conocida por su login, tiene cuota y
+  plaza para el turno, este va a la Max/Ultra con más hueco siempre que sea
+  de al menos `opusOverflowRoom` (15), detrás de cualquier Team. Si ninguna
+  llega, espera como en la 0.2.44; y si un turno lleva retenido más de
+  `maximumWaitHours`, va a la Max/Ultra de más hueco sea cual sea. Cómo
+  encajan las tres frases de Aitor (decisión de la sesión que delegó, no de
+  Aitor): «los Opus tienen que salir por Team sí o sí» (2026-11-06) es el
+  orden, Team siempre antes; «el trabajo prima» (2026-11-07) es no esperar
+  mientras haya semanal que Fable no va a usar; «Esperar siempre»
+  (2026-11-03) queda para las Ultra sin hueco y hasta el tope de espera.
+  `opusOverflowRoom` a 100 lo apaga entero, también la salida por el tope.
+  Una Ultra sin leer nunca recibe así un turno.
+- **`health --json`**: cada cuenta lleva `huecoOpus` (el hueco con un
+  decimal) y `fablePerdida`: los puntos de la ventana de Fable que quedarían
+  sin gastar si la cuenta sigue así, `−huecoOpus / reserveShare` con hueco
+  negativo y 0 si no. Nulos en una Team o en una cuenta sin leer entera.
+  Ejemplo: semanal 86 y Fable 53 dan −9,5 y 19. Los campos de antes no
+  cambian. En el texto: «hueco Opus −9.5 (Fable perdida 19)».
+- **Historial** (B6): cada muestra guarda también el % de la ventana de Fable
+  (`preferred_weekly`), para medir la Fable perdida en cada renovación.
+- **Ajustes nuevos**: `reserveShare` (0,5), `roomMoveGap` (20) y
+  `opusOverflowRoom` (15). Los tres valores son cuenta nuestra (una regresión
+  de las lecturas de la semana, ±40 %), no medidas hechas para esto; se
+  afinarán con datos reales.
+
+Límites conocidos: los subagentes de Opus dentro de un hilo de Fable siguen
+sin verse (corren en la cuenta del hilo); un Opus llevado a una Ultra por B5
+queda anotado como excursión, y el siguiente turno de Fable puede volver a la
+Team de la que salió; la plaza de destino de B3 es
+una plaza libre, no una por delante de la cola; los relojes de B3 y del tope
+de espera de B5 viven en memoria y una recarga los pone a cero.
+
+Revisión (Codex r1: 1 high y 4 medium, `docs/reparto-por-hueco-2026-11-07/codex-r1.txt`):
+
+- Un reintento de Opus programado (a 120 min, con todas las Team al 100 % de
+  sesión) se suelta en la Ultra con hueco en el siguiente refresco: la espera
+  adelantada (`moveUpWait`) elige con las mismas opciones que cualquier
+  movimiento, B5 incluido (high 1).
+- Un solo descanso entre movimientos de un proyecto con hilos trabajando,
+  lo haga la regla que lo haga: tras moverse por hueco, `crowded` tampoco lo
+  mueve dentro de `stuckMoveMinutes` (medium 3).
+- Un movimiento por hueco reserva su plaza en el destino y ata el proyecto
+  mientras se escribe, como uno por plaza: un hermano de Opus que decide con
+  la misma lectura espera y vuelve a preguntar, en vez de escribir otro
+  destino a la vez (medium 2).
+- Una lectura que no está fresca (de más de dos refrescos, es decir, con las
+  consultas fallando desde entonces) no da hueco: ni para B5, ni para los tramos de Fable, ni en
+  `health` (`huecoOpus` nulo). Antes, con el endpoint de uso caído 31 min
+  tras una lectura buena, la Ultra seguía dando hueco 46 y Opus iba a ella;
+  ahora espera una Team (medium 4).
+- La Team que acaba de rechazar un turno de Opus no cuenta como Team capaz,
+  aunque su lectura diga que sí: con la única Team devolviendo un 429
+  bloqueado dos horas y su lectura en 20 % de sesión con plaza libre, el
+  turno pasa a la Ultra con hueco 46 en el acto, en vez de reintentarse a las
+  dos horas. Un hilo que se quedó en error se sigue juzgando con las
+  lecturas (medium 5).
+
+Revisión (Codex r2: 1 high y 1 medium, `docs/reparto-por-hueco-2026-11-07/codex-r2.txt`):
+
+- El descarte de la Team que acaba de fallar ya no termina con el juicio:
+  esa Team no cuenta como capaz hasta el reinicio que dice el propio 429
+  (desde Astra r4, ninguna lectura la levanta: ver abajo). Antes, el despacho del reintento
+  devolvía el proyecto a la Team, que seguía leyendo 20 % de sesión: cuatro
+  idas y vueltas y el quinto fallo en `attempts-exhausted`, con la Ultra con
+  hueco 46 libre. La prueba recorre ahora la cadena entera: fallo, reintento,
+  despacho y turno en la Ultra (high 1). La marca vive en memoria (una
+  recarga la olvida) y solo cuenta para «ninguna Team capaz»: otro proyecto
+  que ya está en esa Team puede fallar allí una vez, como antes.
+- Con `stuckMoveMinutes` a 0, B3 tampoco mueve un proyecto con hilos
+  trabajando, como ya no lo movía `crowded`: con un hermano activo y hueco
+  −13,5 frente a 46, el siguiente turno de Fable se queda donde está. Sin
+  hermanos trabajando, el 0 no lo frena (medium 2).
+
+Revisión (Astra r3: 1 high y 3 medium, `docs/reparto-por-hueco-2026-11-07/astra-r3.txt`):
+
+- Una cuenta marcada por un fallo anterior tampoco es destino del reintento
+  de otro fallo, y no se la espera antes de lo que dijo su 429. Con dos Team
+  que leen 20 % de sesión pero devuelven 429 dos horas, el reintento va de
+  work a spare y de spare a la Ultra con hueco 46, donde corre el turno.
+  Antes iba de work a spare y de spare a work hasta agotar los intentos
+  (high 1). Vale para los turnos que guardan la reserva (Opus, Sonnet); uno
+  de Fable se juzga con los números, como antes de la 0.2.48.
+- La marca es del modelo que falló cuando la lectura de la cuenta lo explica
+  por la ventana propia de ese modelo (Fable al 100 % con sesión y semanal
+  general por debajo): un Opus de otro proyecto sigue yendo a esa Team, Team
+  primero. Si la sesión o la semanal general también están llenas, o la
+  lectura no explica el 429, la marca es de toda la cuenta (medium 2).
+- La salida por `maximumWaitHours` se mantiene hasta que el turno arranca: si
+  otro plugin retiene el mensaje y bb vuelve a preguntar 1 ms después, el
+  turno sigue saliendo hacia la Ultra en vez de empezar otra hora de espera.
+  Cuando un turno suyo ha corrido, el siguiente cuenta desde cero (medium 3).
+- Todo movimiento automático antes o después de un turno ata el proyecto
+  mientras se escribe, no solo los de plaza y hueco: si un Opus está
+  escribiendo su traslado a una Team, un hermano de Fable que lo movería por
+  hueco espera y vuelve a preguntar, en vez de escribir otra Ultra en medio.
+  El texto de esa espera ya no dice «for a seat» (medium 4).
+
+Revisión (Astra r4: 1 high y 3 medium, `docs/reparto-por-hueco-2026-11-07/astra-r4.txt`):
+
+- La marca de una cuenta que acaba de dar un 429 ya no la levanta ninguna
+  lectura: el endpoint de uso va por detrás del 429, y cada fallo vuelve a
+  leer las cuentas antes de juzgar, así que una lectura con los mismos
+  números quitaba la marca. Con dos Team en 429 dos horas y el reloj
+  avanzando 1 s entre fallos, el reintento volvía a ir de work a spare y de
+  spare a work hasta agotar los intentos. Ahora la marca dura hasta el
+  reinicio que dice el 429 y, sin reinicio, 30 min (`LIMIT_NO_RESET_MS`,
+  [SUPUESTO]: no había un retraso de bb ni nuestro que encajara). Fuera el
+  código de «una lectura posterior la desmiente» y el de la marca sin fin
+  (high 1).
+- Cada cuenta guarda una marca de la cuenta entera y una por modelo, cada
+  una con su vencimiento: un fallo de Fable por su ventana ya no pisa la
+  marca de cuenta que dejó antes un Opus, y el reintento de Opus no vuelve a
+  esa Team (medium 3).
+- El atado de un movimiento antes de un turno dura hasta que termina su
+  despacho, cuando el hilo ya está «dicho que arranque» y lo protege
+  `siblingAdmitted`. Antes se soltaba al escribir la variable, mientras aún
+  se guardaba el historial, y un hermano de Opus podía mover el proyecto a
+  una Team en esa ventana (medium 2). Probado en las dos ventanas que hay:
+  mientras se guarda el historial y, tras él, mientras el despacho mira el
+  login de la cuenta por defecto (llavero ilegible); en el camino normal no
+  queda nada esperado entre el historial y el «dicho que arranque».
+- Un mensaje dejado salir por `maximumWaitHours` y cancelado a mano antes de
+  arrancar ya no deja la salida al siguiente mensaje del hilo, que espera
+  desde cero (medium 4).
+
+Revisión (Astra r5: 0 high y 3 medium, `docs/reparto-por-hueco-2026-11-07/astra-r5.txt`):
+
+- Dentro del mismo ámbito gana el vencimiento más tardío: un 429 sin
+  reinicio (30 min) un segundo después de otro con reinicio a +120 min ya no
+  acorta la marca, y a los 31 min ningún Opus vuelve a esa Team. Corte
+  probado a 120 min − 1 ms y a 120 min (medium 2).
+- La colocación antes de un turno tampoco elige una cuenta con marca
+  vigente para el modelo, leída o Team conocida por su login: el reintento
+  que el fallo llevó a la Ultra A (10/12, hueco 46), con su única plaza
+  ocupada antes del despacho, va a la Ultra B (20/20, hueco 40) libre, en vez
+  de volver a la Team que acaba de fallar. La espera adelantada
+  (`moveUpWait`) tampoco suelta un reintento en una Team marcada por el 429
+  de otro turno, y `reserveWait` no espera una cuenta marcada antes de que
+  acabe su marca. En la colocación la marca cuenta para todos los modelos;
+  en el juicio del fallo sigue siendo solo de Opus y Sonnet (medium 1).
+  El rescate de un proyecto varado las mira desde la Astra r8.
+- El atado de un movimiento antes de un turno se apunta antes de esperar
+  nada, y lo suelta el final del despacho aunque este se haya rendido. Con el
+  guardado del historial colgado, el despacho daba `proceed` a los 3 s y el
+  atado se quedaba sin dueño: un hermano de Opus oía «this project is being
+  moved» a los 1, 11 y 60 min con una Team con 2 plazas libres; ahora va a
+  esa Team. Ningún atado dura más de `SEAT_TTL_MS` (90 s, el tiempo que ata
+  `siblingAdmitted`), tampoco el de un movimiento después de un turno, que
+  no tiene despacho que lo suelte. Corte probado a 90 s − 1 ms y a 90 s
+  (medium 3).
+
+Revisión (Astra r6: 1 high y 1 medium, `docs/reparto-por-hueco-2026-11-07/astra-r6.txt`):
+
+- La cuenta en la que está el proyecto tampoco cuenta como buena por su
+  lectura si tiene una marca vigente para el modelo. En la espera adelantada
+  (`moveUpWait`): con la Team leyendo 20/10 y un 429 hasta +120 min, y la
+  Ultra sin leer al fallar, el reintento esperaba en la Team hasta +120 min
+  15 s aunque al minuto la Ultra leyera 10/12 con hueco 46; ahora se suelta
+  allí en el siguiente refresco (high 1). En la colocación antes de un turno
+  (el mismo patrón en un camino vecino): un Opus de otro proyecto que está
+  en esa Team va a la Ultra con hueco en vez de quedarse a fallar, y el
+  historial dice que esa cuenta tiene un 429 sin reiniciar; sin otra cuenta
+  capaz, se queda como bloqueada. El consejo «pasa este hilo a Opus» de un
+  Fable que falla en una cuenta marcada entera apunta ahora a la cuenta
+  donde correría Opus, no a la marcada.
+- El atado de un movimiento se suelta cuando terminan a la vez el despacho y
+  la escritura de la variable, o a los `SEAT_TTL_MS`, lo que llegue antes.
+  Con la escritura de Ultra A (90/53) a Ultra B (10/12) retenida más de 3 s,
+  el despacho se rendía y soltaba el atado: un hermano de Opus escribía la
+  Team y la escritura vieja la pisaba con B (Team → B → Team). Ahora ese
+  hermano espera y, cuando aterriza la escritura, va a la Team. Cada atado
+  tiene dueño: la escritura vieja que aterriza pasados los 90 s no suelta el
+  de un movimiento posterior (medium 2).
+
+Revisión (Astra r7: 0 high y 1 medium, `docs/reparto-por-hueco-2026-11-07/astra-r7.txt`):
+
+- Una Team sin leer (endpoint de uso en 503, login de Team) con un 429
+  vigente tampoco se queda el turno de otro proyecto que está en ella: la
+  salida temprana de la colocación para una cuenta sin lecturas mira antes la
+  marca, y ese Opus va a la Ultra con hueco 46 (medium 1).
+- La otra salida temprana con el mismo fallo, en el juicio: un turno cuyo
+  arranque no se conoce (enviado sin pasar por el despacho) que falla en un
+  proyecto sobre la Team marcada ya no se reintenta allí por su lectura
+  (20/10); va a la Ultra. Las demás salidas tempranas de la colocación, de
+  la espera adelantada y del juicio ya miraban la marca o no deciden destino;
+  la de un hilo que se quedó en error la ignora a propósito, como desde la
+  Codex r2.
+
+Revisión (Astra r8: 0 high y 2 medium, `docs/reparto-por-hueco-2026-11-07/astra-r8.txt`):
+
+- Donde el despacho y el rescate preguntan si una cuenta puede correr el
+  turno (`teamOut`, `blockedOff`, `stranded`), la marca vigente la deja
+  fuera aunque su lectura diga que tiene cuota, como ya hacía la colocación.
+  Con la Team leyendo 20/10, 5 plazas y un 429 hasta +120 min, y la Ultra
+  libre en 85/90 (hueco 10, por debajo de `opusOverflowRoom` 15), un Opus de
+  otro proyecto que estaba en la Team recibía `proceed` allí, al principio y
+  a los 60 min; ahora espera y, al cumplir `maximumWaitHours` (1 h), sale a
+  la Ultra. Sin marca sigue corriendo en la Team. Un turno de Fable leído
+  aparte (su colocación tardó demasiado) tampoco arranca en una Ultra
+  marcada si otra puede correrlo, y el rescate de cada refresco saca de la
+  cuenta marcada los proyectos que están en ella (medium 1).
+- Un fallo mientras otro movimiento automático del mismo proyecto se está
+  escribiendo ya no escribe encima. Un Opus en la Ultra A (90/53) fallaba
+  mientras un hermano de Fable escribía su movimiento por hueco a la Ultra B
+  (10/12): el juicio escribía la Team, aterrizaba la escritura vieja a B y el
+  reintento volvía a la Team (Team → B → Team). Ahora el juicio reintenta el
+  turno en el acto sin mover nada, y el despacho de ese reintento espera a
+  que el movimiento quede registrado y coloca el proyecto entonces: B y luego
+  la Team, sin vuelta atrás (medium 2). El test BM-INSPECT-002 esperaba que
+  el juicio escribiera encima de una vuelta a casa sin registrar; ahora
+  espera el reintento y que su despacho lleve el Opus a la Team.
+- El mismo freno en los otros dos caminos que escriben sin pasar por la
+  colocación (medium 2, caminos hermanos). El rescate de cada refresco no
+  saca de su cuenta un proyecto mientras se escribe otro movimiento suyo: lo
+  vuelve a mirar el refresco siguiente (antes, con la variable del despacho
+  aún sin escribir, los dos escribían la misma cuenta y quedaban dos
+  movimientos). La espera adelantada de un reintento tampoco mueve el
+  proyecto entonces: la pasada siguiente suelta la espera en la cuenta a la
+  que llegó (antes, dos movimientos a la misma Team). Límite: el cambio
+  anticipado (`switchAheadPercent` y `switchAheadOtherPercent`, a 0 por
+  defecto) y el reparto entre Ultra (`rebalance`, a mano y sin tocar
+  proyectos con hilos trabajando) siguen sin mirar el atado.
+
+Revisión (Astra r9: 0 high y 1 medium, `docs/reparto-por-hueco-2026-11-07/astra-r9.txt`):
+
+- La colocación al crearse un hilo (`placeProject`, desde `thread.created`)
+  tampoco escribe mientras se escribe otro movimiento automático del
+  proyecto. Con el proyecto en una Ultra A (5/10, Fable 100), una Ultra B
+  (5/10/12, hueco 46) y una Team (0/2), un despacho de Opus escribía A →
+  Team; un hilo nuevo creado entretanto colocaba el proyecto en B, juzgado
+  por Fable, y luego aterrizaba la Team: dos movimientos desde A. Ahora el
+  hilo nuevo no lo coloca: el proyecto ya se está moviendo, y el despacho
+  de ese hilo pasa por la colocación antes del turno, que espera al atado.
+
 ## [0.2.47] - 2026-11-06
 
 ### Changed

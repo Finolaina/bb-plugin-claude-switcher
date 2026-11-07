@@ -9,6 +9,8 @@ import type { PluginTurnFailedEvent } from "@get-bb/plugin-sdk";
 import {
   canRunModel,
   chooseAccount,
+  choosingReserve,
+  opusRoom,
   afterTeams,
   holdsForReserve,
   isUsable,
@@ -66,6 +68,24 @@ export interface SwitchInput {
   reserveModel?: string;
   /** See ChoiceOptions.reserveSpareUpTo. */
   reserveSpareUpTo?: number;
+  /** See ChoiceOptions.reserveShare. */
+  reserveShare?: number;
+  /** See ChoiceOptions.opusOverflowRoom. */
+  opusOverflowRoom?: number;
+  /**
+   * See ChoiceOptions.noTeamTakes. `ruledOut`: the account the turn just
+   * failed on, never a Team that takes it (Codex r1 medium 5); null for a
+   * thread left in error or a failure on an account unknown.
+   */
+  noTeamTakes?: (model: string, ruledOut: string | null) => boolean;
+  /**
+   * Until when `name` is out, from an earlier failure whose mark stands
+   * (server's limitedAt); null when unmarked. A marked account is no
+   * destination of this switch, and it is waited for no sooner than then
+   * (Astra r3 high 1). Unused for a thread left in error: the measurements
+   * judge.
+   */
+  limitedUntil?: (name: string) => number | null;
   /**
    * The project was put on the current account by hand: a thread left in
    * error is retried there whenever the account runs the model, whatever it
@@ -225,10 +245,28 @@ function chooseSeated(
   return chooseAccount(accounts, { ...options, freeSeats });
 }
 
+/**
+ * When the provider says the account a turn failed on is free again: the
+ * latest reset of the windows it flagged. A refusal reports no reset: the
+ * account that refused is never waited for. Under a warning report no window
+ * is blocked: the one that warned is the one the provider enforced, not the
+ * one that resets last. Null: no reset reported.
+ */
+export function reportedFreeAt(failure: PluginTurnFailedEvent): number | null {
+  const windows = failure.rateLimits?.windows ?? [];
+  const blocked = windows.filter((w) => w.status === "blocked");
+  const warned = windows.filter((w) => w.status === "warning");
+  const flagged =
+    blocked.length > 0 ? blocked : warned.length > 0 ? warned : windows;
+  const reported = flagged
+    .map((w) => w.resetsAtMs)
+    .filter((ms): ms is number => ms !== null);
+  return reported.length === 0 ? null : Math.max(...reported);
+}
+
 export function decideSwitch(input: SwitchInput): SwitchDecision {
   const declined = declineReason(input.failure, input.stuck === true);
   if (declined !== null) return { kind: "decline", reason: declined };
-  const rateLimits = input.failure.rateLimits;
 
   const accounts = input.accounts.map((a) => settle(a, input.now));
   const stuck = input.stuck === true;
@@ -236,10 +274,20 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
     input.failedAccount === undefined
       ? input.currentAccount
       : input.failedAccount;
+  // The Team that just refused the turn takes no part in «no Team takes
+  // it», as it is no destination below (Codex r1 medium 5).
+  const ruledOut = stuck ? null : failedOn;
+  const teamTakes = input.noTeamTakes;
   const options = {
     preferredModel: input.preferredModel,
     reserveModel: input.reserveModel,
     reserveSpareUpTo: input.reserveSpareUpTo,
+    reserveShare: input.reserveShare,
+    opusOverflowRoom: input.opusOverflowRoom,
+    noTeamTakes:
+      teamTakes === undefined
+        ? undefined
+        : (model: string) => teamTakes(model, ruledOut),
     savedForUser: input.savedForUser,
   };
   // A failure just reported rules its account out. Left in error, the thread
@@ -247,8 +295,11 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
   // log reports the account it failed on, not the one it sits on now. The
   // same when the account it ran on is unknown: the current account first,
   // on its measurements (code-reviewer r15).
+  const marked = (name: string): number | null =>
+    stuck ? null : (input.limitedUntil?.(name) ?? null);
   if (stuck || failedOn === null) {
-    const own = accounts.filter((a) => a.name === input.currentAccount);
+    // Not one a mark keeps out (Astra r7): its read lags the 429.
+    const own = accounts.filter((a) => a.name === input.currentAccount && marked(a.name) === null);
     // A pick by hand holds for the reserved model and Haiku, never for a
     // model held off the reserve (Aitor 2026-11-06, «sí o sí»).
     const here = chooseAccount(
@@ -266,7 +317,10 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
     }
   }
   const others = accounts.filter(
-    (a) => a.name !== input.currentAccount && a.name !== failedOn,
+    (a) =>
+      a.name !== input.currentAccount &&
+      a.name !== failedOn &&
+      marked(a.name) === null,
   );
   // The only move that may land on an account without a seat: this one
   // cannot work, so the thread waits for a seat elsewhere.
@@ -287,18 +341,7 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
 
   // The provider's own report wins over our (possibly stale) measurement of
   // the account that just failed: it is blocked at least until its reset.
-  // A refusal reports no reset: the account that refused is never waited for.
-  // Under a warning report no window is blocked: the one that warned is the
-  // one the provider enforced, not the one that resets last.
-  const windows = rateLimits?.windows ?? [];
-  const blocked = windows.filter((w) => w.status === "blocked");
-  const warned = windows.filter((w) => w.status === "warning");
-  const flagged =
-    blocked.length > 0 ? blocked : warned.length > 0 ? warned : windows;
-  const reported = flagged
-    .map((w) => w.resetsAtMs)
-    .filter((ms): ms is number => ms !== null);
-  const failedFreeAt = reported.length === 0 ? null : Math.max(...reported);
+  const failedFreeAt = reportedFreeAt(input.failure);
 
   // Ties: the current account (no move needed), then the name. Never the
   // order the accounts were measured in.
@@ -315,6 +358,9 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
         at === null || failedFreeAt === null
           ? null
           : Math.max(at, failedFreeAt);
+    } else {
+      const until = marked(account.name);
+      if (until !== null) at = at === null ? null : Math.max(at, until);
     }
     if (at === null) continue;
     // Never a wait for an account the rule would not choose as the retry
@@ -507,7 +553,13 @@ export type PlacementDecision =
         /** A turn in the reserved model: back to the account the project left for another model. */
         | "back-from-excursion"
         /** The turn would wait for a seat where the project is: another account has one free. */
-        | "current-full";
+        | "current-full"
+        /**
+         * A turn in the reserved model on an account whose general weekly
+         * runs out before the reserved model does: another has more room
+         * (see roomMove).
+         */
+        | "fable-room";
     };
 
 export interface PlacementInput {
@@ -530,6 +582,20 @@ export interface PlacementInput {
   reserveModel?: string;
   /** See ChoiceOptions.reserveSpareUpTo. */
   reserveSpareUpTo?: number;
+  /** See ChoiceOptions.reserveShare. */
+  reserveShare?: number;
+  /** See ChoiceOptions.opusOverflowRoom. */
+  opusOverflowRoom?: number;
+  /** See ChoiceOptions.noTeamTakes. */
+  noTeamTakes?: (model: string) => boolean;
+  /**
+   * As SwitchInput.limitedUntil: a marked account is no destination, and is
+   * waited for no sooner than its mark ends (reserveWait). The retry a switch
+   * sent away is placed again before it starts, and went back to the Team
+   * seat that had just failed (Astra r5 medium 1). The current account
+   * marked runs nothing either, read or not (Astra r6, r7).
+   */
+  limitedUntil?: (name: string) => number | null;
   /**
    * The account the project left for a turn in another model (its excursion),
    * for a turn in the reserved model to go back to; null when the caller
@@ -601,6 +667,58 @@ export interface PlacementInput {
    * holds until the account is out for real). Seats still move it.
    */
   pinned?: boolean;
+  /**
+   * Points of opusRoom another account must have over the current one for a
+   * turn in the reserved model to move there (see roomMove). Unset = never
+   * moved for room.
+   */
+  roomMoveGap?: number;
+  /** Another thread of the project has a turn under way or holds a seat. */
+  projectSeated?: boolean;
+  /** The project moved for a seat or for room within stuckMoveMinutes. */
+  movedRecently?: boolean;
+}
+
+/**
+ * With a sibling at work, a move for room only below this room: the move
+ * takes its next turns along (our own count, reparto-fable PLAN §B3).
+ */
+export const ROOM_MOVE_WITH_SIBLINGS = -10;
+
+/**
+ * Where a turn in the reserved model goes for room (Aitor 2026-11-07, «fable
+ * se queda sin gastar»): its account is a Max or Ultra with opusRoom below
+ * 0, so its general weekly will reach 100 % with the reserved model unspent,
+ * and another Max or Ultra, read whole, able to run it and with a free seat,
+ * has at least `roomMoveGap` points more; the best of those by rank. With a
+ * sibling at work only below ROOM_MOVE_WITH_SIBLINGS and not within
+ * stuckMoveMinutes of the project's last move. Never to a Team seat: the
+ * weekly the reserved model spends there is Opus's. Null: stay.
+ */
+function roomMove(
+  current: AccountUsage,
+  accounts: AccountUsage[],
+  input: PlacementInput,
+  options: ChoiceOptions,
+): string | null {
+  const gap = input.roomMoveGap;
+  const share = options.reserveShare;
+  if (gap === undefined || share === undefined || !choosingReserve(options))
+    return null;
+  const reserve = options.reserveModel!;
+  const here = opusRoom(current, reserve, share);
+  if (here === null || here >= 0) return null;
+  if (
+    input.projectSeated === true &&
+    (here >= ROOM_MOVE_WITH_SIBLINGS || input.movedRecently === true)
+  )
+    return null;
+  const ahead = accounts.filter((a) => {
+    if (a.name === input.currentAccount) return false;
+    const room = opusRoom(a, reserve, share);
+    return room !== null && room >= here + gap;
+  });
+  return chooseSeated(ahead, options, input.freeSeats)?.account ?? null;
 }
 
 /** The account a project would best run on now, for the thread header. */
@@ -615,11 +733,13 @@ export function bestAccount(
   savedForUser?: (account: string) => boolean,
   /** See ChoiceOptions.reserveSpareUpTo. */
   reserveSpareUpTo?: number,
+  /** See ChoiceOptions.reserveShare. */
+  reserveShare?: number,
 ): string | null {
   return (
     chooseSeated(
       accounts.map((a) => settle(a, now)),
-      { preferredModel, reserveModel, savedForUser, reserveSpareUpTo },
+      { preferredModel, reserveModel, savedForUser, reserveSpareUpTo, reserveShare },
       freeSeats,
     )?.account ?? null
   );
@@ -641,11 +761,16 @@ export function bestAccount(
  * as soon as it can run it.
  */
 export function decidePlacement(input: PlacementInput): PlacementDecision {
-  const accounts = input.accounts.map((a) => settle(a, input.now));
+  const accounts = input.accounts
+    .filter((a) => !markedOut(input, a.name))
+    .map((a) => settle(a, input.now));
   const options = {
     preferredModel: input.preferredModel,
     reserveModel: input.reserveModel,
     reserveSpareUpTo: input.reserveSpareUpTo,
+    reserveShare: input.reserveShare,
+    opusOverflowRoom: input.opusOverflowRoom,
+    noTeamTakes: input.noTeamTakes,
     savedForUser: input.savedForUser,
   };
   if (input.isNew) {
@@ -682,7 +807,10 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   // model held off the reserve goes to a Team seat or waits, pick or not
   // (Aitor 2026-11-06: «los Opus tienen que salir por Team sí o sí»).
   const pinHolds = input.pinned === true && !holdsForReserve(options);
-  if (!loggedOut && (current === undefined || current.unknown === true)) {
+  // A current account marked by a 429 does not run the turn whatever its
+  // read says, or with nothing read (Astra r6, r7): the read lags the 429.
+  const currentMarked = markedOut(input, input.currentAccount);
+  if (!loggedOut && !currentMarked && (current === undefined || current.unknown === true)) {
     if (
       pinHolds ||
       input.unreadKeepsReserve?.(input.currentAccount) !== true ||
@@ -702,12 +830,18 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
       ? { kind: "keep", why: "current-reserved" }
       : { kind: "move", account: elsewhere.account, why: "current-reserved" };
   }
+  // Marked, the current account is not among `accounts` (see markedOut).
   const runs =
     !loggedOut &&
     current !== undefined &&
     isUsable(current) &&
     canRunModel(current, input.preferredModel);
   if (runs && (pinHolds || !spendsReservedWeekly(current, options))) {
+    // A pick by hand holds the reserved model where it is.
+    const forRoom =
+      input.pinned === true ? null : roomMove(current, accounts, input, options);
+    if (forRoom !== null)
+      return { kind: "move", account: forRoom, why: "fable-room" };
     if (
       !pinHolds &&
       input.justMovedHere !== true &&
@@ -749,11 +883,17 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     // one; a Max out of the reserved model only after (Codex R047-R2-002 and
     // R047-R2-003), and not for seats for all only: the server then asks
     // for one seat, which a Team seat may have.
+    // The reserved model with a share set (0.2.48): a Max or Ultra seat
+    // first, a Team seat only with none, and not for seats for all: the
+    // server then asks for one seat, which a Max or Ultra may have (B4).
     const choice = holdsForReserve(options)
       ? (pick(roomy.filter((a) => !afterTeams(a, options))) ??
-        pick(unreadTeamSeats(input)) ??
+        pick(destinationTeamSeats(input)) ??
         (input.seatsWantedOnly === true && wanted > 1 ? null : pick(roomy)))
-      : pick(roomy);
+      : choosingReserve(options) && options.reserveShare !== undefined
+        ? (pick(roomy.filter((a) => a.team !== true)) ??
+          (input.seatsWantedOnly === true && wanted > 1 ? null : pick(roomy)))
+        : pick(roomy);
     return choice === null
       ? { kind: "keep" }
       : { kind: "move", account: choice.account, why: "current-full" };
@@ -820,7 +960,7 @@ function chooseTeamsFirst(
       options,
       input.freeSeats,
     ) ??
-    chooseSeated(unreadTeamSeats(input), options, input.freeSeats) ??
+    chooseSeated(destinationTeamSeats(input), options, input.freeSeats) ??
     chooseSeated(measured, options, input.freeSeats)
   );
 }
@@ -830,6 +970,19 @@ function chooseTeamsFirst(
  * the reserve needs. What an incomplete answer did say still counts (Astra
  * FINAL-002, FINAL-R8-002); only a window it left out reads as free.
  */
+/** The unread Team seats a placement may move to: none marked (see PlacementInput.limitedUntil). */
+function destinationTeamSeats(input: PlacementInput): AccountUsage[] {
+  return unreadTeamSeats(input).filter((a) => !markedOut(input, a.name));
+}
+
+/**
+ * A mark keeps `name` out (see PlacementInput.limitedUntil). The current
+ * account too: marked, it runs nothing either (Astra r6, r7).
+ */
+function markedOut(input: Pick<PlacementInput, "limitedUntil">, name: string): boolean {
+  return (input.limitedUntil?.(name) ?? null) !== null;
+}
+
 export function unreadTeamSeats(
   input: Pick<PlacementInput, "accounts" | "unreadTeams" | "currentAccount" | "now">,
 ): AccountUsage[] {
@@ -863,6 +1016,9 @@ export function reserveWait(
     preferredModel: input.preferredModel,
     reserveModel: input.reserveModel,
     reserveSpareUpTo: input.reserveSpareUpTo,
+    reserveShare: input.reserveShare,
+    opusOverflowRoom: input.opusOverflowRoom,
+    noTeamTakes: input.noTeamTakes,
   };
   // At the same time, a Team seat before a Max out of the reserved model
   // (Codex R047-R2-004).
@@ -875,8 +1031,10 @@ export function reserveWait(
   ]) {
     if (raw.name === input.currentAccount) continue;
     const account = settle(raw, input.now);
-    const at = freeAt(account, input.preferredModel);
-    if (at === null) continue;
+    const free = freeAt(account, input.preferredModel);
+    if (free === null) continue;
+    // A marked account frees no sooner than its mark ends.
+    const at = Math.max(free, input.limitedUntil?.(raw.name) ?? free);
     // As in decideSwitch: judged as the account will be when the turn is
     // sent, a Max account whose reserved window resets keeps it again.
     const sendBy = Math.max(at, input.now) + RESET_BUFFER_MS + RESET_JITTER_MS;
@@ -912,6 +1070,9 @@ export function placedOn(input: PlacementInput): string | null {
         preferredModel: input.preferredModel,
         reserveModel: input.reserveModel,
         reserveSpareUpTo: input.reserveSpareUpTo,
+        reserveShare: input.reserveShare,
+        opusOverflowRoom: input.opusOverflowRoom,
+        noTeamTakes: input.noTeamTakes,
       },
     )?.account ?? null
   );
@@ -931,6 +1092,12 @@ export interface AheadInput {
   reserveModel?: string;
   /** See ChoiceOptions.reserveSpareUpTo. */
   reserveSpareUpTo?: number;
+  /** See ChoiceOptions.reserveShare. */
+  reserveShare?: number;
+  /** See ChoiceOptions.opusOverflowRoom. */
+  opusOverflowRoom?: number;
+  /** See ChoiceOptions.noTeamTakes. */
+  noTeamTakes?: (model: string) => boolean;
   /** Share of a window (session, weekly or the preferred model's) at which the project moves ahead of the limit. */
   threshold: number;
   /** Seats free on an account: ahead of the limit, only an account with one is a target. */
@@ -981,6 +1148,9 @@ export function decideAhead(input: AheadInput): AheadDecision {
     preferredModel: input.preferredModel,
     reserveModel: input.reserveModel,
     reserveSpareUpTo: input.reserveSpareUpTo,
+    reserveShare: input.reserveShare,
+    opusOverflowRoom: input.opusOverflowRoom,
+    noTeamTakes: input.noTeamTakes,
     freeSeats: input.freeSeats,
     savedForUser: input.savedForUser,
   });

@@ -1,0 +1,21 @@
+**Encontré 2 medium; ningún high. No daría la rama por lista para instalar todavía.** Ambos casos están reproducidos con el harness del repositorio y SQLite en memoria.
+
+1. **medium — La Team marcada todavía admite Opus cuando ninguna alternativa supera B5.** [server.ts:5227](/home/aitor/Desarrollo/_wt/switcher-reparto-hueco/server.ts:5227), [server.ts:6153](/home/aitor/Desarrollo/_wt/switcher-reparto-hueco/server.ts:6153).
+
+   Team con lectura **20 % de sesión, 10 % semanal**, cinco plazas y una marca de **429 hasta +120 minutos**. Ultra libre en **85/90**, hueco **10**; `opusOverflowRoom=15`, `maximumWaitHours=1`.
+
+   R7 descarta correctamente la Team en `decidePlacement`, que devuelve `current-blocked`. Pero después `teamOut` y `blockedOff` solo consultan las mediciones: el despacho devuelve **`proceed` en la Team bloqueada**. Tampoco registra espera para activar la salida de B5 al cumplirse la hora.
+
+   Reproduje `proceed` en esa Team al inicio y a los **60 minutos**, sin movimiento. Como control, cambiando únicamente su lectura de sesión a **100 %**, devuelve `wait` y a los 60 minutos sale correctamente hacia la Ultra. Los tests de r7 utilizan una Ultra con hueco **46** y no cubren esta salida sin destino inmediato.
+
+2. **medium — Un fallo de un hermano atraviesa el bloqueo de B3 y produce tres movimientos.** [server.ts:5508](/home/aitor/Desarrollo/_wt/switcher-reparto-hueco/server.ts:5508), [server.ts:6693](/home/aitor/Desarrollo/_wt/switcher-reparto-hueco/server.ts:6693).
+
+   Un Opus está ejecutándose en Ultra A. A pasa a **90/53**, hueco **−13,5**; Ultra B está en **10/12**, hueco **46**, y una Team recupera cuota con **cinco plazas libres**.
+
+   Un hermano Fable inicia B3 hacia B. Mientras esa escritura está pendiente, falla el Opus: `judge` llama a `applyAccount` sin consultar `seatMoving` y escribe la Team. Después aterriza la escritura antigua hacia B; al despachar el reintento de Opus vuelve a escribirse la Team.
+
+   Reproduje **Team → Ultra B → Team**, sin agotar los 90 segundos y con `switchAheadPercent` apagado. Los tests de exclusión entre despachos no cubren `turn.failed`; este caso tampoco depende del cambio anticipado mencionado como límite conocido.
+
+`tsc --noEmit` pasa. Vitest no pudo ejecutar las suites porque el entorno de solo lectura impide crear sus temporales.
+
+VEREDICTO: 0 high, 2 medium, 0 low

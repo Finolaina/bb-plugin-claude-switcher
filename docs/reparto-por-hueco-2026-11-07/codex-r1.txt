@@ -1,0 +1,20 @@
+Codex r1 sobre la 0.2.48 (rama feat/reparto-por-hueco, HEAD f5cda21), veredicto copiado de su salida (/tmp/reparto-rev/r1.txt, 2026-11-07).
+
+Encontré **1 high y 4 medium**. Reproduje los escenarios con el harness del repo y SQLite en memoria; no ejecuté la suite completa por el entorno de solo lectura.
+
+1. **high — Los reintentos programados no aprovechan B5.** [server.ts:7046](/home/aitor/Desarrollo/_wt/switcher-reparto-hueco/server.ts:7046)  
+   `moveUpWait` llama a `bestAccount` sin `opusOverflowRoom` ni `noTeamTakes`; la comprobación de la cuenta actual, en la línea 7018, tampoco incorpora B5. Escenario: Opus tiene un reintento dentro de **120 minutos**, las Team están al **100 % de sesión** y una Ultra tiene semanal **10 %**, Fable **12 %**, hueco **46** y cuatro plazas libres. Tras dos refrescos, el reintento sigue esperando los 120 minutos. El rescate incluso mueve el proyecto a la Ultra, pero no libera el mensaje. Está documentado como techo, aunque incumple directamente «el trabajo prima».
+
+2. **medium — B3 permite dos movimientos simultáneos del mismo proyecto.** [server.ts:5378](/home/aitor/Desarrollo/_wt/switcher-reparto-hueco/server.ts:5378)  
+   Solo `current-full` reserva destino y activa `seatMoving`; `fable-room` queda fuera. Escenario: origen semanal **90 %**, Fable **53 %**, hueco **−13,5**; Ultra destino **10/12**, hueco **46**; Team libre. Reteniendo la escritura del movimiento de Fable, un hermano Opus escribe primero la Team; después aterriza la escritura pendiente hacia la Ultra. Reproducción: **dos escrituras a destinos distintos** y Opus termina en `wait`, pese a tener Team libre. La protección existente evita admitirlo durante la escritura, pero no evita el movimiento doble.
+
+3. **medium — Un movimiento por hueco no activa el descanso de los movimientos por plazas.** [server.ts:5403](/home/aitor/Desarrollo/_wt/switcher-reparto-hueco/server.ts:5403)  
+   B3 guarda `roomMoves`, pero `crowded` solo consulta `crowdedMoves` en la línea 1268. Con `stuckMoveMinutes=10` y capacidad **1**, un hermano trabaja en el origen con hueco **−13,5**; otro mueve el proyecto por B3 a una Ultra con hueco **46** y arranca allí. Un tercer hilo mueve inmediatamente el proyecto a otra Ultra con hueco **35**. Reproduje ambos movimientos **sin avanzar el reloj**: el descanso entre movimientos depende de qué regla ejecute el segundo.
+
+4. **medium — B5 considera medido el hueco de una cuenta cuyas lecturas llevan fallando.** [src/policy.ts:298](/home/aitor/Desarrollo/_wt/switcher-reparto-hueco/src/policy.ts:298)  
+   `opusRoom` comprueba `unknown`, pero `collector.usable` conserva las lecturas antiguas libres sin esa marca. Tras medir una Ultra en **10/12**, fallar todas las consultas con **503 durante 31 minutos**, con `refreshMinutes=5`, Opus recibe `proceed` hacia ella usando todavía hueco **46**. Su cuota real puede haber cambiado en otra máquina. El test D8 de [server.test.ts:21463](/home/aitor/Desarrollo/_wt/switcher-reparto-hueco/server.test.ts:21463) devuelve `limits: []`; no prueba esta caída del endpoint con caché previa.
+
+5. **medium — La Team que acaba de rechazar el turno puede vetar el desagüe.** [server.ts:5152](/home/aitor/Desarrollo/_wt/switcher-reparto-hueco/server.ts:5152)  
+   `noTeamTakes` no recibe la cuenta descartada por el fallo. Escenario: la única Team devuelve un **429 bloqueado hasta dentro de dos horas**, pero la lectura de uso aún informa sesión **20 %**, semanal **10 %** y plaza libre. Hay una Ultra en **10/12**, hueco **46**. Reproduje un reintento programado para **dos horas después**, sin movimiento: `decideSwitch` excluye correctamente la Team fallida como destino inmediato, mientras `noTeamTakes` la sigue contando como capaz y prohíbe la Ultra.
+
+VEREDICTO: 1 high, 4 medium, 0 low

@@ -2438,3 +2438,346 @@ describe("Opus solo por Team: placement of a project pinned to an Ultra (2026-11
     expect(place("Fable", 1)).toEqual({ kind: "keep" });
   });
 });
+
+// PLAN §B3 (reparto-fable, 2026-11-07; Aitor: «fable se queda sin gastar»):
+// a Fable turn on a Max/Ultra whose general weekly will run out before its
+// Fable does moves to one with at least roomMoveGap more room and a seat.
+describe("decidePlacement moves a Fable turn by room (0.2.48, B3)", () => {
+  const ultra = (name: string, weekly: number, fable: number, more: Partial<AccountUsage> = {}) =>
+    account(name, {
+      weekly: { usedPercent: weekly, resetsAt: NOW + 48 * HOUR },
+      models: { Fable: { usedPercent: fable, resetsAt: NOW + 48 * HOUR } },
+      ...more,
+    });
+  const viaulab = ultra("viaulab", 86, 53); // room -9.5
+  const siloeads = ultra("siloeads", 10, 12); // room 46
+  const turn = (overrides: Partial<PlacementInput> = {}): PlacementInput => ({
+    currentAccount: "viaulab",
+    isNew: false,
+    accounts: [viaulab, siloeads],
+    preferredModel: "Fable",
+    reserveModel: "Fable",
+    reserveShare: 0.5,
+    roomMoveGap: 20,
+    freeSeats: () => 4,
+    now: NOW,
+    ...overrides,
+  });
+  const move = (account: string) => ({ kind: "move", account, why: "fable-room" });
+
+  it("current -9.5 and another at 46 with a seat: moves", () => {
+    expect(decidePlacement(turn())).toEqual(move("siloeads"));
+  });
+
+  it("cut of the gap: another at -9.5 + 20 = 10.5 moves, at 10.4 and at 9 it stays", () => {
+    expect(decidePlacement(turn({ accounts: [viaulab, ultra("b", 89, 99)] }))).toEqual(move("b"));
+    expect(decidePlacement(turn({ accounts: [viaulab, ultra("b", 89.1, 99)] }))).toEqual({ kind: "keep" });
+    expect(decidePlacement(turn({ accounts: [viaulab, ultra("b", 90.5, 99)] }))).toEqual({ kind: "keep" });
+  });
+
+  it("cut of the current room: -0.5 moves, 0 and +1 stay", () => {
+    expect(decidePlacement(turn({ accounts: [ultra("viaulab", 50.5, 0), siloeads] }))).toEqual(move("siloeads"));
+    expect(decidePlacement(turn({ accounts: [ultra("viaulab", 50, 0), siloeads] }))).toEqual({ kind: "keep" });
+    expect(decidePlacement(turn({ accounts: [ultra("viaulab", 49, 0), siloeads] }))).toEqual({ kind: "keep" });
+  });
+
+  it("with a sibling at work, only below -10: -9 and -10 stay, -10.5 moves", () => {
+    const at = (weekly: number) => turn({ projectSeated: true, accounts: [ultra("viaulab", weekly, 0), siloeads] });
+    expect(decidePlacement(at(59))).toEqual({ kind: "keep" });
+    expect(decidePlacement(at(60))).toEqual({ kind: "keep" });
+    expect(decidePlacement(at(60.5))).toEqual(move("siloeads"));
+  });
+
+  it("with a sibling at work, not within stuckMoveMinutes of the project's last move", () => {
+    expect(
+      decidePlacement(turn({ projectSeated: true, movedRecently: true, accounts: [ultra("viaulab", 70, 0), siloeads] })),
+    ).toEqual({ kind: "keep" });
+    // Alone, a recent move does not hold it: nothing else moves with it.
+    expect(decidePlacement(turn({ movedRecently: true }))).toEqual(move("siloeads"));
+  });
+
+  it("the account with the most room among those far enough ahead, with a seat", () => {
+    const mariscal = ultra("mariscal", 30, 30); // room 35
+    expect(decidePlacement(turn({ accounts: [viaulab, mariscal, siloeads] }))).toEqual(move("siloeads"));
+    expect(
+      decidePlacement(turn({ accounts: [viaulab, mariscal, siloeads], freeSeats: (n) => (n === "siloeads" ? 0 : 4) })),
+    ).toEqual(move("mariscal"));
+    expect(decidePlacement(turn({ freeSeats: (n) => (n === "siloeads" ? 0 : 4) }))).toEqual({ kind: "keep" });
+  });
+
+  it("never to a Team seat, an unread account or one that cannot run Fable", () => {
+    const team = account("team", { team: true, models: { Fable: { usedPercent: 0, resetsAt: NOW + 48 * HOUR } } });
+    expect(decidePlacement(turn({ accounts: [viaulab, team] }))).toEqual({ kind: "keep" });
+    expect(
+      decidePlacement(turn({ accounts: [viaulab, ultra("siloeads", 10, 12, { unknown: true, blocked: true })] })),
+    ).toEqual({ kind: "keep" });
+    expect(decidePlacement(turn({ accounts: [viaulab, ultra("siloeads", 10, 100)] }))).toEqual({ kind: "keep" });
+  });
+
+  it("a pick by hand, an Opus turn, no gap or no share: no move by room", () => {
+    expect(decidePlacement(turn({ pinned: true }))).toEqual({ kind: "keep" });
+    expect(decidePlacement(turn({ roomMoveGap: undefined }))).toEqual({ kind: "keep" });
+    expect(decidePlacement(turn({ reserveShare: undefined }))).toEqual({ kind: "keep" });
+    expect(decidePlacement(turn({ preferredModel: "Opus" }))).not.toEqual(move("siloeads"));
+  });
+
+  it("D8: with the reads down (the current account unknown) it does not move", () => {
+    expect(
+      decidePlacement(turn({ accounts: [ultra("viaulab", 86, 53, { unknown: true, blocked: true }), siloeads] })),
+    ).toEqual({ kind: "keep" });
+  });
+});
+
+// PLAN §B4 / §A row 2 (2026-11-07): Fable with its seats full goes to a Max
+// or Ultra seat first, a Team seat only with none.
+describe("decidePlacement with the seats full, for Fable with a share (0.2.48, B4)", () => {
+  const ultra = account("ultra", {
+    weekly: { usedPercent: 10, resetsAt: NOW + 48 * HOUR },
+    models: { Fable: { usedPercent: 12, resetsAt: NOW + 48 * HOUR } },
+  });
+  const team = account("team", {
+    team: true,
+    session: { usedPercent: 0, resetsAt: NOW + 2 * HOUR },
+    models: { Fable: { usedPercent: 0, resetsAt: NOW + 4 * HOUR } },
+  });
+  const here = account("here", {
+    weekly: { usedPercent: 40, resetsAt: NOW + 48 * HOUR },
+    models: { Fable: { usedPercent: 53, resetsAt: NOW + 48 * HOUR } },
+  });
+  const full = (free: Record<string, number>, overrides: Partial<PlacementInput> = {}): PlacementInput => ({
+    currentAccount: "here",
+    isNew: false,
+    accounts: [here, ultra, team],
+    preferredModel: "Fable",
+    reserveModel: "Fable",
+    reserveShare: 0.5,
+    seatsFull: true,
+    freeSeats: (n) => free[n] ?? 0,
+    now: NOW,
+    ...overrides,
+  });
+
+  it("an Ultra seat before a Team seat, also one with seats for all", () => {
+    expect(decidePlacement(full({ ultra: 1, team: 2 }))).toEqual({ kind: "move", account: "ultra", why: "current-full" });
+    expect(decidePlacement(full({ ultra: 1, team: 2 }, { seatsWanted: 2 }))).toEqual({ kind: "move", account: "ultra", why: "current-full" });
+  });
+
+  it("seats for all only: none on an Ultra, so none (the server then asks for one seat)", () => {
+    expect(decidePlacement(full({ ultra: 1, team: 2 }, { seatsWanted: 2, seatsWantedOnly: true }))).toEqual({ kind: "keep" });
+  });
+
+  it("no Ultra seat: the Team seat", () => {
+    expect(decidePlacement(full({ ultra: 0, team: 1 }))).toEqual({ kind: "move", account: "team", why: "current-full" });
+  });
+
+  it("without a share: the order before 0.2.48 (the Team seat by deadline)", () => {
+    expect(decidePlacement(full({ ultra: 1, team: 2 }, { reserveShare: undefined }))).toEqual({ kind: "move", account: "team", why: "current-full" });
+  });
+});
+
+// PLAN §B5 [SUPUESTO] (2026-11-07): Opus with no Team able to take it goes to
+// the Ultra with the most room ≥ opusOverflowRoom, behind every Team seat,
+// measured or known by its login.
+describe("Opus overflows to the Ultra with room (0.2.48, B5)", () => {
+  const ultra = (name: string, weekly: number, fable: number) =>
+    account(name, {
+      weekly: { usedPercent: weekly, resetsAt: NOW + 48 * HOUR },
+      models: { Fable: { usedPercent: fable, resetsAt: NOW + 72 * HOUR } },
+    });
+  const outTeam = account("work", { team: true, session: { usedPercent: 100, resetsAt: NOW + HOUR } });
+  const fullTeam = account("spare", { team: true });
+  const roomy = ultra("roomy", 10, 12); // room 46
+  const tight = ultra("tight", 86, 53); // room -9.5
+  const base = (overrides: Partial<PlacementInput> = {}): PlacementInput => ({
+    currentAccount: "work",
+    isNew: false,
+    accounts: [outTeam, fullTeam, tight, roomy],
+    preferredModel: "Opus",
+    reserveModel: "Fable",
+    reserveShare: 0.5,
+    opusOverflowRoom: 15,
+    noTeamTakes: () => true,
+    freeSeats: (n) => (n === "spare" ? 0 : 4),
+    now: NOW,
+    ...overrides,
+  });
+
+  it("from a Team out of its session, every other Team full: to the Ultra with room 46", () => {
+    expect(decidePlacement(base())).toEqual({ kind: "move", account: "roomy", why: "current-blocked" });
+  });
+
+  it("an unread Team seat goes first", () => {
+    expect(decidePlacement(base({ unreadTeams: ["fresh"] }))).toEqual({ kind: "move", account: "fresh", why: "current-blocked" });
+  });
+
+  it("from a full Team seat (seats full), to the Ultra with room; none with room: it waits", () => {
+    const full = base({ currentAccount: "spare", accounts: [fullTeam, tight, roomy], seatsFull: true });
+    expect(decidePlacement(full)).toEqual({ kind: "move", account: "roomy", why: "current-full" });
+    expect(decidePlacement({ ...full, accounts: [fullTeam, tight] })).toEqual({ kind: "keep" });
+  });
+
+  it("opusOverflowRoom 100: kept where it is, as in 0.2.44", () => {
+    expect(decidePlacement(base({ opusOverflowRoom: 100 }))).toEqual({ kind: "keep", why: "current-blocked" });
+  });
+
+  it("a project on such an Ultra stays while no Team takes the turn, and goes to a Team seat once one does", () => {
+    expect(decidePlacement(base({ currentAccount: "roomy" }))).toEqual({ kind: "keep" });
+    const teamFree = base({ currentAccount: "roomy", noTeamTakes: () => false, freeSeats: () => 4 });
+    expect(decidePlacement(teamFree)).toEqual({ kind: "move", account: "spare", why: "current-reserved" });
+  });
+
+  it("reserveWait: the Ultra with room, free now, before a Team out for an hour; a Team free now still first", () => {
+    const held = base({ currentAccount: "tight", accounts: [outTeam, tight, roomy] });
+    expect(reserveWait(held)).toEqual({ account: "roomy", at: 0 });
+    expect(reserveWait({ ...held, opusOverflowRoom: 100 })).toEqual({ account: "work", at: NOW + HOUR });
+    expect(reserveWait({ ...held, accounts: [outTeam, fullTeam, tight, roomy] })).toEqual({ account: "spare", at: 0 });
+  });
+
+  // Astra r5 medium 1: a mark from an earlier 429 (server's limitedAt) keeps
+  // an account out of the placement's destinations, read or known by its
+  // login, as out of a switch's; the current account is still judged on its
+  // numbers; reserveWait waits for a marked one no sooner than its mark.
+  describe("with an account marked by an earlier failure (Astra r5 medium 1)", () => {
+    const marked = (name: string, until: number) => (n: string) => (n === name ? until : null);
+
+    it("an unread Team seat marked is no destination: to the Ultra with room", () => {
+      expect(decidePlacement(base({ unreadTeams: ["fresh"], limitedUntil: marked("fresh", NOW + HOUR) }))).toEqual({
+        kind: "move",
+        account: "roomy",
+        why: "current-blocked",
+      });
+    });
+
+    it("the Ultra with room marked is no destination: kept where it is", () => {
+      expect(decidePlacement(base({ limitedUntil: marked("roomy", NOW + HOUR) }))).toEqual({ kind: "keep", why: "current-blocked" });
+    });
+
+    // Astra r6: its read lags the 429 that marked it, so it is not one the
+    // turn runs on: with another able (an Ultra with room 40), there; with
+    // none, kept as blocked. Its login says Ultra: judged as unread instead,
+    // it would be kept as one that spends the reserve ("current-reserved").
+    it("a project on a marked Ultra moves to another able; with none, kept as blocked (Astra r6)", () => {
+      const placed = base({ currentAccount: "roomy", limitedUntil: marked("roomy", NOW + HOUR), unreadKeepsReserve: (n) => n === "roomy" });
+      expect(decidePlacement(placed)).toEqual({ kind: "keep", why: "current-blocked" });
+      const other = ultra("other", 20, 20); // room 40
+      expect(decidePlacement({ ...placed, accounts: [outTeam, fullTeam, tight, roomy, other] })).toEqual({
+        kind: "move",
+        account: "other",
+        why: "current-blocked",
+      });
+    });
+
+    // Astra r7: the same on an unread Team seat (its login says Team): the
+    // early keep for an account with nothing measured looks at the mark
+    // first.
+    it("a project on an unread Team seat a 429 marked moves to the Ultra with room (Astra r7)", () => {
+      expect(decidePlacement(base({ currentAccount: "fresh", limitedUntil: marked("fresh", NOW + HOUR) }))).toEqual({
+        kind: "move",
+        account: "roomy",
+        why: "current-blocked",
+      });
+    });
+
+    it("reserveWait: the Ultra marked till +3 h waits behind the Team out for an hour; marked till +30 min, it frees then", () => {
+      const held = base({ currentAccount: "tight", accounts: [outTeam, tight, roomy] });
+      expect(reserveWait({ ...held, limitedUntil: marked("roomy", NOW + 3 * HOUR) })).toEqual({ account: "work", at: NOW + HOUR });
+      expect(reserveWait({ ...held, limitedUntil: marked("roomy", NOW + HOUR / 2) })).toEqual({ account: "roomy", at: NOW + HOUR / 2 });
+    });
+  });
+
+  it("after a failure on a Team seat, the switch goes to the Ultra with room", () => {
+    expect(
+      decideSwitch(
+        input({
+          currentAccount: "work",
+          accounts: [outTeam, fullTeam, tight, roomy],
+          preferredModel: "Opus",
+          reserveModel: "Fable",
+          reserveShare: 0.5,
+          opusOverflowRoom: 15,
+          noTeamTakes: () => true,
+          freeSeats: (n) => (n === "spare" ? 0 : 4),
+        }),
+      ),
+    ).toEqual({ kind: "switch", account: "roomy", model: "Opus" });
+  });
+
+  // Codex r1 medium 5: the Team that just refused the turn is no Team that
+  // takes it, though its read says it would; left in error, nothing is
+  // ruled out (the measurements judge).
+  it("noTeamTakes is asked with the account that just failed ruled out", () => {
+    const asked: (string | null | undefined)[] = [];
+    const liveTeam = account("work", { team: true, session: { usedPercent: 20, resetsAt: NOW + HOUR } });
+    const judged = (stuck: boolean, team = liveTeam) =>
+      decideSwitch(
+        input({
+          currentAccount: "work",
+          accounts: [team, roomy],
+          preferredModel: "Opus",
+          reserveModel: "Fable",
+          reserveShare: 0.5,
+          opusOverflowRoom: 15,
+          stuck,
+          noTeamTakes: (_model, ruledOut) => {
+            asked.push(ruledOut);
+            return ruledOut === "work";
+          },
+          freeSeats: () => 4,
+        }),
+      );
+    expect(judged(false)).toEqual({ kind: "switch", account: "roomy", model: "Opus" });
+    expect(asked).toContain("work");
+    asked.length = 0;
+    expect(judged(true)).toEqual({ kind: "retry", account: "work", model: "Opus" });
+    // Left in error with work measured out: the Ultra is weighed, and no
+    // account is ruled out of «no Team takes it».
+    asked.length = 0;
+    judged(true, outTeam);
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked.every((a) => a === null)).toBe(true);
+  });
+});
+
+// Astra r3 high 1 (2026-11-07): an account whose earlier failure still stands
+// (server's limitedAt) is no destination of a switch, and is waited for no
+// sooner than the provider said, as the account the turn just failed on.
+describe("decideSwitch with an account marked by an earlier failure (Astra r3 high 1)", () => {
+  const marked = (until: number) => (name: string) => (name === "work" ? until : null);
+
+  it("marked till +3 h: no switch to it; the wait is on main, free at +2 h", () => {
+    expect(decideSwitch(input({ limitedUntil: marked(NOW + 3 * HOUR) }))).toMatchObject({
+      kind: "wait",
+      account: "main",
+      sendAt: NOW + 2 * HOUR + BUFFER,
+    });
+  });
+
+  it("marked till +1 h: the wait is on it, at +1 h, not at once", () => {
+    expect(decideSwitch(input({ limitedUntil: marked(NOW + HOUR) }))).toMatchObject({
+      kind: "wait",
+      account: "work",
+      sendAt: NOW + HOUR + BUFFER,
+    });
+  });
+
+  // Astra r7 (an early exit of decideSwitch): a failure whose account is
+  // unknown is judged on the current account's numbers first; a mark there
+  // keeps the retry off it.
+  it("a failure whose account is unknown does not retry on the current account its mark keeps out", () => {
+    const here = input({ failedAccount: null, accounts: [account("main"), account("work")] });
+    expect(decideSwitch(here)).toEqual({ kind: "retry", account: "main", model: null });
+    expect(decideSwitch({ ...here, limitedUntil: (n) => (n === "main" ? NOW + 2 * HOUR : null) })).toEqual({
+      kind: "switch",
+      account: "work",
+      model: null,
+    });
+  });
+
+  it("a thread left in error is judged on the measurements: the mark plays no part", () => {
+    expect(decideSwitch(input({ stuck: true, limitedUntil: marked(NOW + 3 * HOUR) }))).toEqual({
+      kind: "switch",
+      account: "work",
+      model: null,
+    });
+  });
+});

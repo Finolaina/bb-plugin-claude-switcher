@@ -40,6 +40,13 @@ export interface AccountUsage {
    * (measuredAccounts).
    */
   team?: true;
+  /**
+   * The account's read is older than two refreshes (its queries have been
+   * failing since): its numbers still let it run as before, but give no
+   * room (opusRoom), for its quota may have moved elsewhere since (Codex r1
+   * medium 4). Set where the reads are known (measuredAccounts).
+   */
+  stale?: true;
 }
 
 export interface ChoiceOptions {
@@ -74,6 +81,29 @@ export interface ChoiceOptions {
    * siempre»).
    */
   reserveSpareUpTo?: number;
+  /**
+   * The general weekly the reserved model spends per point of its own window
+   * (see opusRoom). Set, the reserved model ranks by opusRoom in tiers of 10
+   * points, a Team seat last, and a model held off the reserve ranks the
+   * accounts it may use behind the Team seats by it too (Aitor 2026-11-07,
+   * «fable se queda sin gastar»). Unset = the order before 0.2.48.
+   */
+  reserveShare?: number;
+  /**
+   * A model held off the reserve (Opus, Sonnet) with no Team seat able to
+   * take it (`noTeamTakes`) may run on a Max or Ultra account whose opusRoom
+   * is at least this, after every Team seat (reparto-fable PLAN §B5,
+   * [SUPUESTO]: Aitor 2026-11-07, «tampoco quiero que hilos se queden parados
+   * … el trabajo prima», with «sí o sí» of 2026-11-06 as the order). Unset,
+   * 100 or more = never (the rule of 0.2.44), and so without a share.
+   */
+  opusOverflowRoom?: number;
+  /**
+   * No Team seat, measured or known by its login, can take a turn in
+   * `model` now: its quota and a free seat (set by the server). Unset = a
+   * Team seat may: no Max or Ultra takes the turn for its room.
+   */
+  noTeamTakes?: (model: string) => boolean;
 }
 
 export interface Choice {
@@ -172,6 +202,7 @@ export function spendsReservedWeekly(
   // left of it and whatever its margin, also when it reports no weekly
   // (Codex r1 high 3): with no Team seat the turn waits.
   if (reserveSpentTillWeekly(account, options.reserveModel!)) return false;
+  if (overflowsByRoom(account, options)) return false;
   if (holdsForReserve(options)) return true;
   if (account.weekly.absent === true) return false;
   return (
@@ -211,7 +242,8 @@ export function reserveSpentTillWeekly(
 
 /**
  * A Max or Ultra account that takes a model held off the reserve only because
- * the reserved model is spent there until its weekly resets: it comes after
+ * the reserved model is spent there until its weekly resets, or because no
+ * Team seat can and it has room (overflowsByRoom, 0.2.48): it comes after
  * every Team seat, whatever their session or windows (Codex R047-002), for a
  * Team seat runs both models and a project with threads in each stays put.
  */
@@ -222,8 +254,62 @@ export function afterTeams(
   return (
     holdsForReserve(options) &&
     account.team !== true &&
-    reserveSpentTillWeekly(account, options.reserveModel!)
+    (reserveSpentTillWeekly(account, options.reserveModel!) ||
+      overflowsByRoom(account, options))
   );
+}
+
+/**
+ * A Max or Ultra account that takes a model held off the reserve because no
+ * Team seat can and its opusRoom is at least `opusOverflowRoom` (see
+ * ChoiceOptions.opusOverflowRoom): what that turn spends is weekly the
+ * reserved model will not need. Never one not read whole (opusRoom null).
+ */
+export function overflowsByRoom(
+  account: AccountUsage,
+  options: ChoiceOptions,
+): boolean {
+  const threshold = options.opusOverflowRoom;
+  const share = options.reserveShare;
+  if (threshold === undefined || !(threshold < 100) || share === undefined)
+    return false;
+  if (!holdsForReserve(options) || account.team === true) return false;
+  const room = opusRoom(account, options.reserveModel!, share);
+  return (
+    room !== null &&
+    room >= threshold &&
+    options.noTeamTakes?.(options.preferredModel) === true
+  );
+}
+
+/**
+ * The general weekly a Max or Ultra account has left beyond what its own
+ * window of the reserved model still needs: `(100 − weekly) − share ·
+ * (100 − reserved)`, in points of the weekly (Aitor 2026-11-07, «se sigue
+ * disparando el tema la cuenta semanal y fable se queda sin gastar»).
+ * Positive: weekly another model may spend without taking any from the
+ * reserved model. Negative: the account reaches 100 % of its weekly with
+ * that much left to spend of the reserved model times `share`, lost at the
+ * reset. `share` is the weekly the reserved model spends per point of its
+ * own window (measured 0.45-0.6 per account, ±40 %, reparto-fable PLAN §0).
+ * Null for a Team seat, an incomplete read, a read not fresh (`stale`), no
+ * weekly reported, or no window of the reserved model: nothing to weigh.
+ */
+export function opusRoom(
+  account: AccountUsage,
+  reserve: string,
+  share: number,
+): number | null {
+  if (
+    account.team === true ||
+    account.unknown === true ||
+    account.stale === true ||
+    account.weekly.absent === true
+  )
+    return null;
+  const own = modelWindow(account, reserve);
+  if (own === undefined) return null;
+  return 100 - account.weekly.usedPercent - share * (100 - own.usedPercent);
 }
 
 /**
@@ -263,10 +349,37 @@ function sessionQuarter(account: AccountUsage): number {
   return Math.floor(account.session.usedPercent / 25);
 }
 
+/** Whether `options` choose for the reserved model itself. */
+export function choosingReserve(options: ChoiceOptions): boolean {
+  const reserve = options.reserveModel ?? "";
+  return (
+    reserve !== "" &&
+    reserve.toLowerCase() === options.preferredModel.toLowerCase()
+  );
+}
+
+/** Width of an opusRoom tier, in points of the weekly (reparto-fable PLAN §B2). */
+export const ROOM_TIER = 10;
+
+/**
+ * The account's opusRoom tier, lowest first: −floor(room / ROOM_TIER), so a
+ * room of 46 comes before one of 9.9 and a negative one after both; within
+ * a tier the quarter and the deadline decide. 0 (as a room of 0-9.9) when
+ * nothing ranks by room: no share, a model it does not apply to, or no room
+ * known for the account.
+ */
+function roomTier(account: AccountUsage, options: ChoiceOptions): number {
+  const share = options.reserveShare;
+  if (share === undefined) return 0;
+  if (!choosingReserve(options) && !holdsForReserve(options)) return 0;
+  const room = opusRoom(account, options.reserveModel!, share);
+  return room === null ? 0 : -Math.floor(room / ROOM_TIER);
+}
+
 function rank(
   account: AccountUsage,
   options: ChoiceOptions,
-): [number, number, number, number, number, number, number] {
+): [number, number, number, number, number, number, number, number, number] {
   const saved = options.savedForUser?.(account.name) === true ? 1 : 0;
   const keepsReserve =
     reserving(options) && canRunModel(account, options.reserveModel!) ? 1 : 0;
@@ -282,11 +395,21 @@ function rank(
       : 0;
   // After every Team seat comes first, also before the day's pace (Codex
   // R047-R2-001): it only ever sets a held model apart.
+  // The reserved model on a Team seat spends the weekly Opus runs on: last
+  // (reparto-fable PLAN §A row 2), and only with a share set.
+  const reserveOnTeam =
+    options.reserveShare !== undefined &&
+    choosingReserve(options) &&
+    account.team === true
+      ? 1
+      : 0;
   return [
     afterTeams(account, options) ? 1 : 0,
     saved,
     keepsReserve,
     spendsWeekly,
+    reserveOnTeam,
+    roomTier(account, options),
     sessionQuarter(account),
     deadline(account, options.preferredModel),
     account.session.usedPercent,
@@ -296,7 +419,9 @@ function rank(
 /**
  * For background work, the accounts saved for the user last (see
  * savedForUser). Then accounts out of the reserved model first (when reserving), then those
- * that spend no weekly window for the model (Team seats), then the lowest
+ * that spend no weekly window for the model (Team seats), then (with a
+ * share set, see ChoiceOptions.reserveShare) a Team seat last for the
+ * reserved model and the opusRoom tier, then the lowest
  * session quarter, then the closest deadline for the model, then lowest
  * session use, then name: never the order measured. Within a quarter what
  * runs out first is spent first; the quarter keeps new sessions from piling
@@ -309,12 +434,14 @@ function sortedByRank(
   options: ChoiceOptions,
 ): AccountUsage[] {
   return [...accounts].sort((a, b) => {
-    const [xa, va, ka, wa, ta, da, sa] = rank(a, options);
-    const [xb, vb, kb, wb, tb, db, sb] = rank(b, options);
+    const [xa, va, ka, wa, ea, ra, ta, da, sa] = rank(a, options);
+    const [xb, vb, kb, wb, eb, rb, tb, db, sb] = rank(b, options);
     if (xa !== xb) return xa - xb;
     if (va !== vb) return va - vb;
     if (ka !== kb) return ka - kb;
     if (wa !== wb) return wa - wb;
+    if (ea !== eb) return ea - eb;
+    if (ra !== rb) return ra - rb;
     if (ta !== tb) return ta - tb;
     if (da !== db) return da - db;
     if (sa !== sb) return sa - sb;

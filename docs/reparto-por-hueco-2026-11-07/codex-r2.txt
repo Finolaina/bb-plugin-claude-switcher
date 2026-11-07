@@ -1,0 +1,14 @@
+Codex r2 sobre la 0.2.48 (rama feat/reparto-por-hueco, HEAD fe3707e), veredicto copiado de su salida (/tmp/reparto-rev/r2.txt, 2026-11-07).
+
+Encontré **1 high y 1 medium**. Los otros cuatro arreglos de r1 pasan las reproducciones dirigidas.
+
+1. **high — La Team fallida vuelve a capturar el reintento y agota los intentos.** [server.ts:5190](server.ts:5190)  
+   El descarte de `ruledOut` solo dura durante `judge`; `reserveFor` lo pierde al despachar el reintento. Escenario reproducido: única Team con lectura de sesión **20 %**, semanal **10 %**, pero devuelve **429 hasta dentro de 120 minutos**. Ultra con semanal **10 %**, Fable **12 %**, hueco **46** y cuatro plazas libres. El juicio mueve a la Ultra y programa el reintento inmediato; su despacho vuelve a elegir la Team fallida. Repetí la cadena: **cuatro idas y vueltas**, ningún turno en la Ultra y quinto fallo ignorado por `attempts-exhausted`. El hilo queda en error con capacidad libre.  
+   El [test del arreglo](server.test.ts:21657) solo comprueba que se programa el reintento; el mock no ejecuta su despacho.
+
+2. **medium — B3 mueve proyectos ocupados con `stuckMoveMinutes=0`.** [server.ts:5290](server.ts:5290)  
+   B3 se habilita por `roomMoveGap` sin respetar el cero que promete mantener quietos los proyectos con hilos trabajando. Reproducción: `stuckMoveMinutes=0`, `roomMoveGap=20`, hermano activo ocupando **1/4 plazas**; origen con semanal **90 %**, Fable **53 %**, hueco **−13,5**; destino **10/12**, hueco **46**. El siguiente turno de Fable mueve el proyecto aunque el origen todavía puede ejecutarlo y tiene tres plazas libres. El test que apaga `stuckMoveMinutes` solo ejercita B4, con hueco positivo; no detecta esta vía.
+
+Reproducciones con el harness y SQLite en memoria; `tsc --noEmit` pasa. Vitest no pudo crear sus temporales en el entorno de solo lectura.
+
+VEREDICTO: 1 high, 1 medium, 0 low

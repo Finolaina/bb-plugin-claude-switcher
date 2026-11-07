@@ -93,6 +93,7 @@ import {
   decideAhead,
   decidePlacement,
   decideSwitch,
+  reportedFreeAt,
   FALLBACK_MODEL,
   isRefusal,
   MAX_ATTEMPTS,
@@ -117,9 +118,11 @@ import {
   holdsForReserve,
   isUsable,
   modelWindow,
+  opusRoom,
   reserveToSpare,
   reserving,
   spendsReservedWeekly,
+  type AccountUsage,
 } from "./src/policy.js";
 import {
   usageFetchMethod,
@@ -151,6 +154,12 @@ export const PROJECTS_FRESH_MS = 30_000;
  * its usage still measures fine.
  */
 export const REFUSAL_MS = 6 * 60 * 60_000;
+/**
+ * How long a usage limit with no reset reported keeps its account marked
+ * (see limitedAt). [SUPUESTO] 30 min: no default of bb's or ours fits, and
+ * the next turn there may fail once more after it (Astra r4 high 1).
+ */
+export const LIMIT_NO_RESET_MS = 30 * 60_000;
 /** A measurement older than this is taken again before moving a project ahead of the limit. */
 export const AHEAD_FRESH_MS = 60_000;
 /** bb fails a dispatch whose checkpoint takes 10 s: the placement before a turn is left behind well before. */
@@ -652,6 +661,36 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         "A Haiku turn runs on a Max or Ultra account that can still run the preferred model only while that account's weekly and preferred-model windows are both at or under this share. Opus and Sonnet never run on a Max or Ultra account while Fable is preferred, whatever this says: they run on a Team seat or wait for one. 0 = never.",
       default: 50,
     },
+    // Aitor 2026-11-07 («la cuenta de viaulab, se sigue disparando el tema
+    // la cuenta semanal y fable se queda sin gastar»). 0.5 is our own count
+    // (a regression of the week's reads, ±40 %: reparto-fable PLAN §0), not
+    // a measure made for it; real reads will set it.
+    reserveShare: {
+      type: "number",
+      label: "Weekly the preferred model spends per point of its own window",
+      description:
+        "How many points of a Max or Ultra account's general weekly one point of the preferred model's own window spends (about 0.5 for Fable, our own count from a week of reads, ±40 %). With it, the room another model has on an account is (100 − weekly) − this × (100 − preferred): the preferred model goes to the account with the most such room, in steps of 10 points, and to a Team seat last; below 0, the account reaches 100 % of its weekly with the preferred model left unspent.",
+      default: 0.5,
+    },
+    // PLAN §B3 (reparto-fable, 2026-11-07); 20 is our own count, not a measure.
+    roomMoveGap: {
+      type: "number",
+      label: "Move a preferred-model turn for room, gap (points)",
+      description:
+        "Before a turn in the preferred model on a Max or Ultra account whose room for another model (see above) is below 0, the project moves to a Max or Ultra account with a free seat and at least this many points more room. With another thread of the project at work, only below −10 and not within the minutes below of its last move. Needs the automatic choice. 0 or less = never.",
+      default: 20,
+    },
+    // PLAN §B5 (reparto-fable, 2026-11-07) [SUPUESTO]: Aitor 2026-11-07,
+    // «tampoco quiero que hilos se queden parados … el trabajo prima», with
+    // «los Opus tienen que salir por Team sí o sí» (2026-11-06) as the order.
+    // 15 is our own count, not a measure.
+    opusOverflowRoom: {
+      type: "number",
+      label: "Opus and Sonnet on a Max or Ultra with no Team seat able, from room (points)",
+      description:
+        "With no Team seat able to take an Opus or Sonnet turn (quota and a free seat), the turn runs on the Max or Ultra account with the most room for another model (see above) if that room is at least this, after every Team seat; with none, it waits for a Team seat as before, and a turn held that way longer than the maximum automatic wait takes the Ultra with the most room whatever it is. 100 = never (Opus and Sonnet only by Team, as before).",
+      default: 15,
+    },
     stuckMoveMinutes: {
       type: "number",
       label: "A project moved for a seat with threads at work stays (minutes)",
@@ -825,6 +864,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   const reserveOf = () => ({
     reserveModel: current.preferredModel,
     reserveSpareUpTo: current.otherModelUpTo,
+    reserveShare: current.reserveShare,
+    opusOverflowRoom: current.opusOverflowRoom,
+    noTeamTakes: (model: string) => noTeamTakes(model),
   });
   settings.onChange((next) => {
     const moved =
@@ -1168,15 +1210,48 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
   /** When each project last moved for a crowded seat (see crowded): not again within stuckMoveMinutes. */
   const crowdedMoves = new Map<string, { at: number; to: string }>();
+  /** When each project last moved for room (see roomMove in src/switch.ts). */
+  const roomMoves = new Map<string, number>();
+  /** The project moved for a seat or for room within stuckMoveMinutes. */
+  function movedRecently(projectId: string, now: number): boolean {
+    const limit = current.stuckMoveMinutes * 60_000;
+    const last = Math.max(crowdedMoves.get(projectId)?.at ?? -Infinity, roomMoves.get(projectId) ?? -Infinity);
+    return now - last <= limit;
+  }
   /**
-   * Projects with a move for a seat under way, from its decision until it
-   * is recorded (crowdedMoves), and projects with a turn held meanwhile:
-   * asked again as the move ends, landed or not (Astra ASIENTOS-R4-001/002).
+   * Projects with a move under way, from its decision until it is recorded
+   * (crowdedMoves), with when it was decided, and projects with a turn held
+   * meanwhile: asked again as the move ends, landed or not (Astra
+   * ASIENTOS-R4-001/002). No hold outlives SEAT_TTL_MS, the time
+   * siblingAdmitted ties a project for from the first time: a write that
+   * never answers held the project for ever (Astra r5 medium 3).
    */
-  const seatMoving = new Set<string>();
+  const seatMoving = new Map<string, { since: number }>();
   const heldForMove = new Set<string>();
+  function moving(projectId: string): boolean {
+    const hold = seatMoving.get(projectId);
+    return hold !== undefined && deps.now() - hold.since < SEAT_TTL_MS;
+  }
+  /**
+   * The move each dispatch holds its project for, till that dispatch ends,
+   * given up or not, and the move's variable write has ended: the move's
+   * history is stored after its write, and until its thread is told to
+   * start no siblingAdmitted protects it (Astra r4 medium 2). Set before
+   * anything is awaited (Astra r5 medium 3). A write still under way when
+   * the dispatch gives up would land on top of a sibling's move (Astra r6
+   * medium 2).
+   */
+  const heldMoves = new Map<
+    string,
+    { projectId: string; hold: { since: number }; written: Promise<unknown> }
+  >();
+  /** Ends `hold`, unless another move holds the project since. */
+  function releaseMove(projectId: string, hold: { since: number }): void {
+    if (seatMoving.get(projectId) === hold) seatMoving.delete(projectId);
+    wakeHeldForMove(projectId);
+  }
   function wakeHeldForMove(projectId: string): void {
-    if (seatMoving.has(projectId) || movesOf(projectId).inFlight > 0) return;
+    if (moving(projectId) || movesOf(projectId).inFlight > 0) return;
     if (!heldForMove.delete(projectId)) return;
     void bb.experimental_hooks
       .recheck("message.dispatch")
@@ -1194,10 +1269,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * 2026-11-05 13:15, «que cuando termine una … salga otra»: 0.2.41 waited
    * stuckMoveMinutes first): to an account with seats for all when the
    * project asks for more than the account has ("crowded", first ask
-   * only), else to a seat for the thread ("stuck"). For a model other than
-   * the reserved one only: where the reserved model's turns run is not this
-   * rule's. Null: neither, or stuckMoveMinutes is 0, or the project moved so
-   * within it.
+   * only), else to a seat for the thread ("stuck"). Also for the reserved
+   * model since 0.2.48 (Aitor 2026-11-07, «tampoco quiero que hilos se queden
+   * parados … el trabajo prima»): its targets rank by room, a Team seat
+   * last (see ChoiceOptions.reserveShare). Null: neither, or
+   * stuckMoveMinutes is 0, or the project moved so within it.
    */
   function crowded(
     thread: ThreadResponse,
@@ -1216,15 +1292,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     | null {
     const limit = current.stuckMoveMinutes * 60_000;
     if (!(limit > 0) || !current.autoSwitch) return null;
-    if (!reserving({ preferredModel: model, ...reserveOf() })) return null;
     const key = seatKey(name);
     if (seats.seatOf(thread.id)?.account === key) return null;
     const queue = seats.queue(key);
     const ahead = queue.findIndex((q) => q.threadId === thread.id);
     if (seats.free(key) > (ahead === -1 ? queue.length : ahead)) return null;
     if (!projectSeated(thread.projectId, thread.id)) return null;
-    const last = crowdedMoves.get(thread.projectId)?.at;
-    if (last !== undefined && now - last <= limit) return null;
+    // One rest between moves, whichever rule made the last one: a seat or
+    // room (Codex r1 medium 3).
+    if (movedRecently(thread.projectId, now)) return null;
     const wanted = projectWants(thread, key);
     const capacity = seats.snapshot([key])[key]!.capacity;
     const since = seats.waitingSince(thread.id);
@@ -1535,6 +1611,58 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   } | null = null;
   /** When each account last refused a turn (in memory: a reload forgets it). */
   const refusedAt = new Map<string, number>();
+  /**
+   * The usage limits turns just failed on, per account and scope, each
+   * until the reset its 429 reported (none reported: LIMIT_NO_RESET_MS).
+   * Scope "": the whole account's; a model's name, lower case: that model's
+   * alone, its own window explaining the limit (see limitScope; Astra r3
+   * medium 2). Until then such an account is no Team seat that takes a turn
+   * held off the reserve (noTeamTakes), no destination of a retry
+   * (decideSwitch), of a placement before a turn nor of a wait moved up
+   * (moveUpWait; Astra r5 medium 1), and it is out for such a turn where the
+   * dispatch, the placement and the rescue ask whether it can run (teamOut,
+   * blockedOff, stranded; Astra r6 to r8): its read lags the 429, so no read
+   * ends a mark (Astra r4 high 1). Elsewhere (otherThatRuns, the judge of a
+   * thread left in error) its numbers decide. In memory: a reload forgets
+   * them.
+   */
+  const limitedAt = new Map<string, Map<string, number>>();
+  /** Until when `name`'s marks stand for a turn in `model` (see limitedAt); null: none does. */
+  function limitedUntil(name: string, model: string): number | null {
+    const now = deps.now();
+    let until: number | null = null;
+    for (const [scope, end] of limitedAt.get(name) ?? [])
+      if ((scope === "" || scope === model.toLowerCase()) && now < end)
+        until = Math.max(until ?? end, end);
+    return until;
+  }
+  /**
+   * Marks `name` for `scope` till `until`; a later 429 of the same scope
+   * never shortens it: one with no reset reported does not cut a reset
+   * known (see limitedAt; Astra r5 medium 2).
+   */
+  function markLimited(name: string, scope: string, until: number): void {
+    const marks = limitedAt.get(name) ?? new Map<string, number>();
+    marks.set(scope, Math.max(marks.get(scope) ?? until, until));
+    limitedAt.set(name, marks);
+  }
+  /**
+   * Whose a usage limit on `account` is, by its read as the turn in `model`
+   * failed: that model's when its own window is full while the session and
+   * the general weekly are not (a Fable window at 100 % takes no Team seat
+   * from Opus); otherwise, or unread, the whole account's (null).
+   */
+  function limitScope(account: AccountUsage | undefined, model: string, now: number): string | null {
+    if (account === undefined || account.unknown === true || model === "") return null;
+    const a = settle(account, now);
+    const own = modelWindow(a, model);
+    return own !== undefined &&
+      own.usedPercent >= 100 &&
+      a.session.usedPercent < 100 &&
+      a.weekly.usedPercent < 100
+      ? model
+      : null;
+  }
   function refusing(name: string): boolean {
     const at = refusedAt.get(name);
     return at !== undefined && deps.now() - at < REFUSAL_MS;
@@ -1543,6 +1671,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function whyOut(name: string, model: string): string {
     if (loggedOut(name)) return "is not logged in";
     if (refusing(name)) return "refused a turn";
+    if (limitedUntil(name, model) !== null)
+      return `answered ${model === "" ? "a turn" : model} with a usage limit that has not reset yet`;
     if (reservedFor(name, model) && canRunHere(name, model))
       return `would spend ${current.preferredModel}'s weekly`;
     const known = measuredAccounts(model).find((a) => a.name === name);
@@ -1835,7 +1965,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       let imported = false;
       try {
         for (const [name, [at, running, reserved, session, weekly, sessionResets, weeklyResets]] of fromKv)
-          addSample(historial, { at, account: name, running, reserved, external: null, waiting: null, capacity: null, session, weekly, sessionResets, weeklyResets });
+          addSample(historial, { at, account: name, running, reserved, external: null, waiting: null, capacity: null, session, weekly, sessionResets, weeklyResets, preferredWeekly: null });
         imported = true;
       } catch (error) {
         bb.log.warn(
@@ -2091,6 +2221,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         weekly: weekly.absent === true ? null : weekly.usedPercent,
         sessionResets: session.resetsAt,
         weeklyResets: weekly.absent === true ? null : weekly.resetsAt,
+        preferredWeekly: modelWindow({ name, ...m.usage }, current.preferredModel)?.usedPercent ?? null,
       }),
     );
   }
@@ -2816,13 +2947,20 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function maxReadAgeMs(): number {
     return 2 * Math.max(1, current.refreshMinutes) * 60_000;
   }
+  /** The account's read is older than two refreshes, or there is none (see AccountUsage.stale). */
+  function readStale(name: string): boolean {
+    const m = collector.get(name);
+    return m?.observedAt == null || deps.now() - m.observedAt > maxReadAgeMs();
+  }
 
   /** Measurements recent enough to decide on (see maxReadAgeMs). */
   function measuredAccounts(model = current.preferredModel) {
     // A refusing account is out, whatever its numbers say; so is one whose
     // answer, incomplete, still says it is full.
-    return collector.usable(maxReadAgeMs(), model).map((measured) => {
-      const login = accounts.find((account) => account.name === measured.name);
+    return collector.usable(maxReadAgeMs(), model).map((raw) => {
+      const login = accounts.find((account) => account.name === raw.name);
+      // Not fresh: no room is read from it (Codex r1 medium 4).
+      const measured = readStale(raw.name) ? { ...raw, stale: true as const } : raw;
       const a =
         login !== undefined && planOf(login, measured).plan === "team"
           ? { ...measured, team: true as const }
@@ -2896,6 +3034,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         measuredAccounts(),
         current.preferredModel,
         deps.now(),
+        current.preferredModel,
+        undefined,
+        undefined,
+        undefined,
+        current.reserveShare,
       ),
       history,
       forecasts: forecasts(),
@@ -3860,6 +4003,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       isNew,
       accounts: measured,
       preferredModel: current.preferredModel,
+      // The share ranks a new project by room (0.2.48, B2): without the
+      // reserve here the choice was by deadline alone (PLAN §A row 1).
+      ...reserveOf(),
       excursionFrom: wayHome(projectId, current.preferredModel, measured, now),
       freeSeats,
       // Background work behind the accounts saved for the user (SPEC
@@ -3888,6 +4034,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (siblingAdmitted(projectId) !== null) {
       bb.log.info(
         `thread ${thread.id}: not placed (another thread is about to start on ${fromName})`,
+      );
+      return;
+    }
+    // Nor while another automatic move of the project is written (a
+    // dispatch's, before its thread is told to start): the project is being
+    // placed, and this thread's dispatch goes through placeTurn, which waits
+    // for that move (Astra r9 medium).
+    if (moving(projectId)) {
+      bb.log.info(
+        `thread ${thread.id}: not placed (another move of the project is under way)`,
       );
       return;
     }
@@ -4492,6 +4648,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   function stranded(name: string, now: number, model: string): string | null {
     if (loggedOut(name)) return "not logged in";
+    // A mark standing for the model: out whatever its read says, as in the
+    // placement (Astra r8 medium 1).
+    const marked = limitedUntil(name, model);
+    if (marked !== null)
+      return `answered ${model === "" ? "a turn" : model} with a usage limit until ${new Date(marked).toISOString().slice(0, 16).replace("T", " ")}`;
     const known = measuredAccounts(model).find((a) => a.name === name);
     if (known === undefined || known.unknown === true) return null;
     const settled = settle(known, now);
@@ -4609,6 +4770,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       ...reserveOf(),
       // The pick by hand first, as before a turn (Codex r3 medium 2).
       excursionFrom: wayHome(projectId, model, measuredAccounts(model), now),
+      // Nor to an account whose mark stands for the model (Astra r8 medium 1).
+      limitedUntil: (name: string) => limitedUntil(name, model),
       freeSeats,
       now,
       currentLoggedOut: loggedOut(fromName),
@@ -4616,6 +4779,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (decision.kind === "keep") {
       bb.log.debug(
         `project ${projectName}: left on ${fromName} (${why}): no other account with a free seat can run ${model === "" ? "a turn" : model}`,
+      );
+      return;
+    }
+    // Nor over another automatic move of the project under way (a
+    // dispatch's, its variable still being written): this read predates it.
+    // The next refresh looks again (Astra r8 medium 2, the same guard as the
+    // failure's judgment).
+    if (moving(projectId)) {
+      bb.log.info(
+        `project ${projectName}: left on ${fromName}: another move of the project is under way; looked at again at the next refresh`,
       );
       return;
     }
@@ -4707,6 +4880,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     adviceOver(thread.id);
     forgetWait(thread.id);
     toldToStart.delete(thread.id);
+    overdueTold.delete(thread.id);
     // A hidden thread's turn too: it runs on the project's account, and
     // keeps the project there (Codex PLAZAS-R2-003).
     if (thread.providerId === CLAUDE_CODE_PROVIDER) {
@@ -4820,6 +4994,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     adviceOver(thread.id);
     forgetWait(thread.id);
     toldToStart.delete(thread.id);
+    overdueTold.delete(thread.id);
     stuckSaid.delete(thread.id);
     // Forgotten in storage too, or the stored list only grows (Codex r8,
     // IR8-004).
@@ -4932,7 +5107,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       isNew: false,
       accounts: measured,
       preferredModel: model,
-      ...reserveOf(),
+      ...reserveFor(threadId, now),
+      // An account whose mark stands for the model is no destination (Astra
+      // r5 medium 1). For every model, unlike decideSwitch, where a Fable
+      // turn is judged on its numbers (see the judge).
+      limitedUntil: (name: string) => limitedUntil(name, model),
       excursionFrom: wayHome(projectId, model, measured, now),
       freeSeats:
         own === null
@@ -5033,7 +5212,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const usage = measuredAccounts(model).find((a) => a.name === name);
     if (usage === undefined || usage.unknown === true) return false;
     const settled = settle(usage, deps.now());
-    if (isUsable(settled) && canRunModel(settled, model)) return false;
+    // A mark standing for the model: out whatever its read says, as in the
+    // placement (Astra r8 medium 1).
+    if (limitedUntil(name, model) === null && isUsable(settled) && canRunModel(settled, model))
+      return false;
     return otherThatRuns(name, model) !== null;
   }
   /**
@@ -5080,14 +5262,78 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (usage === undefined || usage.unknown === true || usage.team !== true)
       return false;
     const settled = settle(usage, deps.now());
-    return !(isUsable(settled) && canRunModel(settled, model));
+    // A mark standing for the model: out whatever its read says, as in the
+    // placement (Astra r8 medium 1).
+    return limitedUntil(name, model) !== null || !(isUsable(settled) && canRunModel(settled, model));
+  }
+  /**
+   * No Team seat, measured or known by its login, can take a turn in
+   * `model` now (see ChoiceOptions.noTeamTakes): unlocked, its session and
+   * windows under 100 %, and a seat free for the turn: one it holds, or one
+   * beyond the threads queued ahead of it (all of them, for no thread).
+   * `ruledOut`: the account a turn just failed on, never one that takes it
+   * whatever its read says (Codex r1 medium 5; see SwitchInput.noTeamTakes).
+   */
+  function noTeamTakes(model: string, threadId?: string, ruledOut?: string | null): boolean {
+    const now = deps.now();
+    const measured = measuredAccounts(model);
+    const teams = [
+      ...measured
+        .filter((a) => a.team === true && a.unknown !== true)
+        .map((a) => settle(a, now)),
+      ...unreadTeamSeats({ accounts: measured, unreadTeams: unreadTeams(model), currentAccount: "", now }),
+    ];
+    return !teams.some((a) => {
+      if (a.name === ruledOut || limitedUntil(a.name, model) !== null) return false;
+      if (!isUsable(a) || !canRunModel(a, model)) return false;
+      const key = seatKey(a.name);
+      if (threadId !== undefined && seats.seatOf(threadId)?.account === key) return true;
+      const queue = seats.queue(key);
+      const ahead = threadId === undefined ? -1 : queue.findIndex((q) => q.threadId === threadId);
+      return seats.free(key) > (ahead === -1 ? queue.length : ahead);
+    });
+  }
+  /**
+   * The choice options for a turn of `threadId` (see reserveOf): a Team seat
+   * it holds or is first in line for counts as one that takes it, and once
+   * its message has been held longer than maximumWaitHours any Max or Ultra
+   * with room known takes it behind the Team seats ([SUPUESTO], reparto-fable
+   * PLAN §B5: «esa espera respeta maximumWaitHours»). Off with
+   * opusOverflowRoom at 100 or more, or maximumWaitHours 0.
+   */
+  function reserveFor(threadId: string | undefined, now: number) {
+    const base = reserveOf();
+    if (threadId === undefined) return base;
+    return {
+      ...base,
+      noTeamTakes: (model: string) => noTeamTakes(model, threadId),
+      ...(overdue(threadId, now) ? { opusOverflowRoom: -Infinity } : {}),
+    };
+  }
+  /**
+   * Threads let out by maximumWaitHours (see reserveFor) and told to start,
+   * until a turn of theirs runs: asked again before it starts (another
+   * plugin held the message), the way out still stands, and the hour is not
+   * counted anew (Astra r3 medium 3).
+   */
+  const overdueTold = new Set<string>();
+  /** The thread's message has been held past maximumWaitHours, or it was let out for that and has not started (see reserveFor). */
+  function overdue(threadId: string, now: number): boolean {
+    const since = waitSince.get(threadId);
+    return (
+      current.opusOverflowRoom < 100 &&
+      current.maximumWaitHours > 0 &&
+      (overdueTold.has(threadId) ||
+        (since !== undefined &&
+          now - since >= current.maximumWaitHours * 3_600_000))
+    );
   }
   /** A turn in `model` goes to a Team seat only (see holdsForReserve). */
   function heldModel(model: string): boolean {
     return holdsForReserve({ preferredModel: model, ...reserveOf() });
   }
-  function heldOff(name: string, model: string, projectId?: string): boolean {
-    const options = { preferredModel: model, ...reserveOf() };
+  function heldOff(name: string, model: string, projectId?: string, threadId?: string): boolean {
+    const options = { preferredModel: model, ...reserveFor(threadId, deps.now()) };
     // A pick by hand no longer lets such a turn spend the reserve (Aitor
     // 2026-11-06, «sí o sí»): `projectId` is kept for the callers.
     if (!holdsForReserve(options)) return false;
@@ -5177,6 +5423,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         : {}),
       pinned: pins.get(projectId) === fromName,
       projectSeats: projectWants(thread, seatKey(fromName)),
+      // Only before a real turn: a tick never moves (see placeTurn's refusal).
+      ...(when === "before" && current.autoSwitch && current.roomMoveGap > 0
+        ? {
+            roomMoveGap: current.roomMoveGap,
+            projectSeated: projectSeated(projectId, thread.id),
+            // stuckMoveMinutes 0 keeps a project with threads at work where
+            // it is, as it keeps crowded off (Codex r2 medium 2).
+            movedRecently: !(current.stuckMoveMinutes > 0) || movedRecently(projectId, now),
+          }
+        : {}),
       // On the account the project moved to only (code-reviewer r3).
       justMovedHere:
         crowdedMoves.get(projectId)?.to === fromName &&
@@ -5244,19 +5500,22 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       };
       return { account: fromName, byDefault: !from.owned, writes };
     }
-    // A move of any kind while a move of the project for a seat is written
-    // and recorded (a sibling that decided on the same read, or Team first
-    // sending it back): a second move in a row. Held, and placed again on a
-    // fresh read (Codex/Astra ASIENTOS-R3-001/R3-002/R4-001/R5-001). Other
-    // moves that cross keep their rule: the last one written stands.
-    // ponytail: moves made outside placeTurn (moveAhead, a refresh) do not
-    // look at it (Astra ASIENTOS-R6-001; needs switchAheadPercent on); the
-    // way up is to check it where every automatic move is written.
-    if (decision.account !== fromName && seatMoving.has(projectId)) {
+    // A move of any kind while another automatic move of the project is
+    // written and recorded (a sibling that decided on the same read, or Team
+    // first sending it back): a second move in a row. Held, and placed again
+    // on a fresh read (Codex/Astra ASIENTOS-R3-001/R3-002/R4-001/R5-001;
+    // every move of placeTurn since Astra r3 medium 4).
+    // The failure's judgment, the refresh's rescue and moveUpWait look at it
+    // too (Astra r8 medium 2), and so does placeProject (Astra r9 medium).
+    // ponytail: moveAhead and rebalance do not look at it (Astra
+    // ASIENTOS-R6-001; moveAhead needs switchAheadPercent on, rebalance is
+    // by hand and skips projects with threads working); the way up is to
+    // check it where every automatic move is written.
+    if (decision.account !== fromName && moving(projectId)) {
       heldForMove.add(projectId);
       turn.held = {
         sendAt: now + SEAT_RECHECK_MS,
-        reason: "Waiting: this project is being moved to another account for a seat",
+        reason: "Waiting: this project is being moved to another account",
       };
       return { account: fromName, byDefault: !from.owned, writes };
     }
@@ -5268,10 +5527,24 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // PLAZAS-R3-001). A move that fails leaves it as the message asks for
     // a seat where the project is (a seat elsewhere is given up); one
     // whose turn never starts is freed as any reservation is (SEAT_TTL_MS).
+    // A move for room claims its seat and holds the project's other moves
+    // the same way (Codex r1 medium 2): a sibling deciding on the same read
+    // would write another destination meanwhile.
     const claim =
-      decision.why === "current-full" ? seatKey(decision.account) : null;
-    const seatMove = claim !== null && decision.account !== fromName;
-    if (seatMove) seatMoving.add(projectId);
+      decision.why === "current-full" || decision.why === "fable-room"
+        ? seatKey(decision.account)
+        : null;
+    // Every automatic move here holds the project's others while it is
+    // written, whatever its reason: an Opus turn's move to a Team seat crossed
+    // a Fable sibling's move for room (Astra r3 medium 4).
+    const seatMove = decision.account !== fromName;
+    // Before a turn the hold lasts till the dispatch ends (see heldMoves):
+    // its thread is told to start by then, and siblingAdmitted takes over.
+    const handedOver = seatMove && when === "before";
+    const hold = { since: now };
+    if (seatMove) seatMoving.set(projectId, hold);
+    const held = { projectId, hold, written: Promise.resolve() as Promise<unknown> };
+    if (handedOver) heldMoves.set(thread.id, held);
     const to = accountOrDefault(decision.account);
     try {
       if (claim !== null) {
@@ -5279,11 +5552,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         reserveSeat(thread.id, claim, now);
       }
       // The sessions are not waited for: see applyAccount (Fable, 2026-10-29).
-      await applyAccount(projectId, to, from, {
+      held.written = applyAccount(projectId, to, from, {
         share: false,
         forThread: thread.id,
         keepPin: otherModel(model),
       });
+      await held.written;
       await markHandled(projectId);
       // A move for a crowded seat is a new home, not an excursion: a turn in
       // the preferred model going back would take the project to the full
@@ -5294,39 +5568,39 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         if (excursions.get(projectId)?.from === fromName) excursions.delete(projectId);
         crowdedMoves.set(projectId, { at: now, to: decision.account });
       } else noteMove(projectId, fromName, decision.account, model, before);
+      if (decision.why === "fable-room") roomMoves.set(projectId, now);
+      const reason =
+        busy !== null && decision.why === "current-full"
+          ? busyReason(busy, fromName, decision.account, roomThere, fullHere, model, input.pinned === true)
+          : decision.why === "fable-room"
+          ? roomReason(fromName, decision.account, model)
+          : decision.why === "back-from-excursion"
+          ? `Moved back to account ${decision.account} before the turn: ${fromName} was an excursion for ${excursion?.model ?? "another model"}`
+          : decision.why === "current-reserved" &&
+              when === "before" &&
+              measuredAccounts(model).some((a) => a.name === fromName && a.unknown !== true) &&
+              !reservedFor(fromName, model)
+            ? // Kept for Fable only by «Team primero», not out of its margin.
+              `Movido a ${decision.account} antes del turno: ${fromName} guarda la semanal de ${current.preferredModel} y ${decision.account} es una Team con plaza (Team primero)`
+          : decision.why === "current-full"
+            ? `Moved to account ${decision.account} before the turn: ${fromName} seats full (${fullHere.running + fullHere.reserved + (fullHere.external?.length ?? 0)}/${fullHere.capacity}), ${decision.account} had ${Number.isFinite(roomThere) ? roomThere : "unlimited"} free`
+            : `Moved to account ${decision.account} ${when === "after" ? `after a turn in ${model}` : "before the turn"}: ${fromName} ${whyOut(fromName, model)}`;
+      bb.log.info(`thread ${thread.id}: ${reason}`);
+      await recordMove(
+        {
+          at: now,
+          threadId: thread.id,
+          projectId,
+          from: fromName,
+          to: decision.account,
+          reason,
+        },
+        // Its turn has not started: it runs on the new account.
+        thread.id,
+      );
     } finally {
-      if (seatMove) {
-        seatMoving.delete(projectId);
-        wakeHeldForMove(projectId);
-      }
+      if (seatMove && !handedOver) releaseMove(projectId, hold);
     }
-    const reason =
-      busy !== null && decision.why === "current-full"
-        ? busyReason(busy, fromName, decision.account, roomThere, fullHere, model, input.pinned === true)
-        : decision.why === "back-from-excursion"
-        ? `Moved back to account ${decision.account} before the turn: ${fromName} was an excursion for ${excursion?.model ?? "another model"}`
-        : decision.why === "current-reserved" &&
-            when === "before" &&
-            measuredAccounts(model).some((a) => a.name === fromName && a.unknown !== true) &&
-            !reservedFor(fromName, model)
-          ? // Kept for Fable only by «Team primero», not out of its margin.
-            `Movido a ${decision.account} antes del turno: ${fromName} guarda la semanal de ${current.preferredModel} y ${decision.account} es una Team con plaza (Team primero)`
-        : decision.why === "current-full"
-          ? `Moved to account ${decision.account} before the turn: ${fromName} seats full (${fullHere.running + fullHere.reserved + (fullHere.external?.length ?? 0)}/${fullHere.capacity}), ${decision.account} had ${Number.isFinite(roomThere) ? roomThere : "unlimited"} free`
-          : `Moved to account ${decision.account} ${when === "after" ? `after a turn in ${model}` : "before the turn"}: ${fromName} ${whyOut(fromName, model)}`;
-    bb.log.info(`thread ${thread.id}: ${reason}`);
-    await recordMove(
-      {
-        at: now,
-        threadId: thread.id,
-        projectId,
-        from: fromName,
-        to: decision.account,
-        reason,
-      },
-      // Its turn has not started: it runs on the new account.
-      thread.id,
-    );
     return {
       account: decision.account,
       byDefault: to === null,
@@ -5336,6 +5610,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     };
   }
 
+  /** What the history says of a move for room (see roomMove), in plain Spanish. */
+  function roomReason(from: string, to: string, model: string): string {
+    const now = deps.now();
+    const measured = measuredAccounts(model);
+    const room = (name: string) => {
+      const a = measured.find((m) => m.name === name);
+      const r = a === undefined ? null : opusRoom(settle(a, now), current.preferredModel, current.reserveShare);
+      return r === null ? "?" : String(Math.round(r * 10) / 10).replace(".", ",");
+    };
+    return `Movido a ${to} antes del turno: ${from} se queda sin semanal antes de gastar su ${current.preferredModel} (hueco ${room(from)}) y ${to} tiene hueco ${room(to)} (hueco = semanal libre − ${String(current.reserveShare).replace(".", ",")} × ${current.preferredModel} libre)`;
+  }
   /** What the history says of a move for a crowded seat (see crowded), in plain Spanish for whoever reads it. */
   function busyReason(
     busy: NonNullable<ReturnType<typeof crowded>>,
@@ -5360,7 +5645,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         ? null
         : (() => {
             const settled = settle(there, deps.now());
-            return settled.team !== true &&
+            // The margin is a reason for another model only (B4, 0.2.48).
+            return reserving(options) &&
+              settled.team !== true &&
               canRunModel(settled, current.preferredModel) &&
               reserveToSpare(settled, options)
               ? settled
@@ -5633,13 +5920,27 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
 
   bb.experimental_hooks.on("message.dispatch", async (ctx) => {
-    const decision = await dispatchDecision(ctx);
+    let decision: Awaited<ReturnType<typeof dispatchDecision>>;
+    try {
+      decision = await dispatchDecision(ctx);
+    } finally {
+      // The move this dispatch made stops holding its project once its
+      // write has ended too (see heldMoves).
+      const held = heldMoves.get(ctx.thread.id);
+      if (held !== undefined) {
+        heldMoves.delete(ctx.thread.id);
+        const release = () => releaseMove(held.projectId, held.hold);
+        void held.written.then(release, release);
+      }
+    }
     if (decision.action === "wait") {
       const now = deps.now();
       if (!waitSince.has(ctx.thread.id)) waitSince.set(ctx.thread.id, now);
       waitAsked.set(ctx.thread.id, now);
       toldToStart.delete(ctx.thread.id);
     } else if (ctx.attempt === "start-turn") {
+      if (decision.action === "proceed" && overdue(ctx.thread.id, deps.now()))
+        overdueTold.add(ctx.thread.id);
       forgetWait(ctx.thread.id);
       if (decision.action !== "proceed") toldToStart.delete(ctx.thread.id);
     }
@@ -5872,7 +6173,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         model !== null &&
         at !== null &&
         at.account !== null &&
-        heldOff(at.account, model, thread.projectId)
+        heldOff(at.account, model, thread.projectId, thread.id)
       ) {
         const reason = `Waiting to place ${model} again: the project is on ${at.account}, which keeps its weekly for ${current.preferredModel}`;
         bb.log.info(`thread ${thread.id}: its message waits (${reason})`);
@@ -6168,7 +6469,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   async function forgetCancelledWait(threadId: string): Promise<void> {
     const asked = waitAsked.get(threadId);
-    if (asked === undefined) return;
+    // A message let out by maximumWaitHours and cancelled before it started
+    // leaves no way out to the next one (Astra r4 medium 4).
+    if (asked === undefined && !overdueTold.has(threadId)) return;
     const rows = await within(
       bb.sdk.threads.queuedMessages.list({ threadId }),
       DISPATCH_LIMIT_MS,
@@ -6177,6 +6480,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (typeof rows !== "object" || rows.value.length > 0) return;
     if (waitAsked.get(threadId) !== asked) return;
     forgetWait(threadId);
+    overdueTold.delete(threadId);
   }
 
   /**
@@ -6333,6 +6637,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       accounts: measuredAccounts(model),
       preferredModel: model,
       ...reserveOf(),
+      noTeamTakes: (m: string, ruledOut: string | null) => noTeamTakes(m, undefined, ruledOut),
+      // A Team seat marked by an earlier failure is no destination either
+      // (Astra r3 high 1), for a turn held off the reserve: one in Fable is
+      // judged on the numbers, as before 0.2.48.
+      ...(heldModel(model) ? { limitedUntil: (name: string) => limitedUntil(name, model) } : {}),
       maximumWaitMs:
         current.maximumWaitHours > 0
           ? current.maximumWaitHours * 3_600_000
@@ -6345,6 +6654,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       ...paceFilter(background),
     };
     const decision = decideSwitch(input);
+    // The provider's word on the account the turn failed on stands past
+    // this judgment: the retry's own placement reads it (see limitedAt).
+    // Judged on its failure, the event is a limit or a refusal (handleFailure
+    // ignores the rest); left in error, it may be hours old: no mark.
+    if (!stuck && failedOn !== null)
+      markLimited(
+        failedOn,
+        limitScope(input.accounts.find((a) => a.name === failedOn), model, now)?.toLowerCase() ?? "",
+        reportedFreeAt(event) ?? now + LIMIT_NO_RESET_MS,
+      );
     // No Fable on any account, and an account with Opus: the thread is told
     // to switch (D3), whatever the decision's reason, naming where the
     // dispatch would run its Opus turn (Sol B2-002: the same placement).
@@ -6406,6 +6725,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // A rescue runs between reads: switched off meanwhile, it stops before
     // moving and before retrying (Codex r6, IR6-006).
     if (stuck && !current.autoSwitch) return;
+    // Another automatic move of the project under way (a dispatch's, its
+    // write or its history still pending): no second write over it. The
+    // turn is retried at once; its dispatch waits for that move to be
+    // recorded and places it then (Astra r8 medium 2).
+    if (decision.account !== fromName && moving(projectId)) {
+      bb.log.info(
+        `thread ${event.threadId}: ${how}not moved to ${decision.account}: another move of the project is under way; retried, and placed once it is recorded`,
+      );
+      await retryTurn(event, "Retrying: the project is being moved to another account", undefined, stuck);
+      return;
+    }
     if (decision.account !== fromName) {
       if (
         !(await applyAccount(projectId, accountOrDefault(decision.account), from, {
@@ -6880,6 +7210,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (
       !noLogin &&
       !refusing(fromName) &&
+      // Its read lags the 429 it marked: no account to keep the wait on by
+      // that read (Astra r6 high 1).
+      limitedUntil(fromName, model) === null &&
       (((here === undefined || here.unknown === true) &&
         // Unread, and it may spend the reserve: a Team seat that can take
         // the turn is looked for below (Codex r3 medium 3).
@@ -6893,7 +7226,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         (pins.get(projectId) === fromName &&
         !holdsForReserve({ preferredModel: model, ...reserveOf() })
           ? bestAccount([here], model, now)
-          : bestAccount([here], model, now, current.preferredModel, undefined, undefined, current.otherModelUpTo)) === fromName))
+          : // With every choice option, B5 included: an Opus retry on an
+            // Ultra with room and no Team able runs there (Codex r1 high 1).
+            chooseAccount([settle(here, now)], {
+              preferredModel: model,
+              ...reserveFor(threadId, now),
+            })?.account) === fromName))
     ) {
       // It waited on the account the project was on before.
       const changed = accountChangedAt.get(projectId);
@@ -6913,20 +7251,35 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         );
       return;
     }
-    const to = bestAccount(
-      measured.filter((a) => a.name !== fromName),
-      model,
-      now,
-      current.preferredModel,
-      freeSeats,
-      paceFilter(isBackground(thread)).savedForUser,
-      current.otherModelUpTo,
-    );
+    // The choice of any move, B5 included (Codex r1 high 1); never an
+    // account whose mark stands for the model (Astra r5 medium 1).
+    const to =
+      chooseAccount(
+        measured
+          .filter((a) => a.name !== fromName && limitedUntil(a.name, model) === null)
+          .map((a) => settle(a, now)),
+        {
+          preferredModel: model,
+          ...reserveFor(threadId, now),
+          freeSeats,
+          savedForUser: paceFilter(isBackground(thread)).savedForUser,
+        },
+      )?.account ?? null;
     if (to === null) {
       // Nothing to release it on; the wait fires on its own at sendAt and
       // is placed then (code-reviewer r2, CR2-05).
       bb.log.debug(
         `thread ${threadId}: its wait stays on ${fromName}: no other account can run ${model}${reservedFor(fromName, model, now) ? " and this one keeps " + current.preferredModel : ""}`,
+      );
+      return;
+    }
+    // Nor over another automatic move of the project under way (a
+    // dispatch's, its variable still being written): this read predates it.
+    // The next pass over the waits looks again (Astra r8 medium 2, the same
+    // guard as the failure's judgment).
+    if (moving(projectId)) {
+      bb.log.info(
+        `thread ${threadId}: its wait stays on ${fromName}: another move of the project is under way; looked at again at the next pass`,
       );
       return;
     }
@@ -7289,6 +7642,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return healthReport({
       atascos: await atascos(),
       esperandoTeam: await esperandoTeam(),
+      // huecoOpus and fablePerdida per Max or Ultra account (0.2.48).
+      ...(current.preferredModel === ""
+        ? {}
+        : { reserve: { model: current.preferredModel, share: current.reserveShare } }),
       measured: observed.length === 0 ? now : Math.max(...observed),
       dayStartHour: dayHour(),
       holdsBackground: current.paceHoldsBackground === true,
@@ -7297,7 +7654,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         const usage =
           m?.usage === null || m?.usage === undefined
             ? null
-            : settle({ ...m.usage, name: account.name }, now);
+            : settle(
+                {
+                  ...m.usage,
+                  name: account.name,
+                  // huecoOpus only from a fresh read (Codex r1 medium 4).
+                  ...(readStale(account.name) ? { stale: true as const } : {}),
+                },
+                now,
+              );
         const unconfirmed =
           usage !== null && !trusted.has(account.name) && m?.observedAt != null;
         // The same per model: a window out at the last good read, its reset
