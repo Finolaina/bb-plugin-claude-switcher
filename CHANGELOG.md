@@ -156,7 +156,10 @@ Revisión (Astra r4: 1 high y 3 medium, `docs/reparto-por-hueco-2026-11-07/astra
   despacho, cuando el hilo ya está «dicho que arranque» y lo protege
   `siblingAdmitted`. Antes se soltaba al escribir la variable, mientras aún
   se guardaba el historial, y un hermano de Opus podía mover el proyecto a
-  una Team en esa ventana (medium 2).
+  una Team en esa ventana (medium 2). Probado en las dos ventanas que hay:
+  mientras se guarda el historial y, tras él, mientras el despacho mira el
+  login de la cuenta por defecto (llavero ilegible); en el camino normal no
+  queda nada esperado entre el historial y el «dicho que arranque».
 - Un mensaje dejado salir por `maximumWaitHours` y cancelado a mano antes de
   arrancar ya no deja la salida al siguiente mensaje del hilo, que espera
   desde cero (medium 4).
