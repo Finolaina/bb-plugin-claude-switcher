@@ -1,0 +1,213 @@
+import { execFile } from "node:child_process";
+import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { describe, expect, it } from "vitest";
+import { RETIC_MS, VIEJO_MS, elegir } from "./tic-team.mjs";
+
+const NOW = Date.parse("2026-11-07T12:41:00+01:00");
+const MEDIDO = "2026-11-07T12:36:00+01:00";
+const team = (nombre: string, over: Record<string, unknown> = {}) => ({
+  nombre,
+  plan: "team",
+  cincoHoras: true,
+  usable: true,
+  sesion: { pct: 0, pctExacto: 0, vuelve: null },
+  semana: { pct: 40, pctExacto: 40, vuelve: "2026-11-12T12:00:00+01:00" },
+  ...over,
+});
+const carpetas = (...nombres: string[]) =>
+  Object.fromEntries(nombres.map((n) => [n, `/cuentas/${n}`]));
+const elige = (cuentas: unknown[], estado = {}, ahora = NOW, medido = MEDIDO) =>
+  elegir({
+    health: { medido, cuentas },
+    carpetas: carpetas("team1", "team2", "team3", "ultra1"),
+    estado,
+    ahora,
+  }).tics.map((t: { cuenta: string }) => t.cuenta);
+
+describe("elegir", () => {
+  it("las 12:36 del 2026-11-07 reconstruidas: tic a las Team sin ventana, no a las que la tienen abierta", () => {
+    expect(
+      elige([
+        team("team1"),
+        team("team2", {
+          sesion: { pct: 0, pctExacto: 0, vuelve: "2026-11-07T17:10:00+01:00" },
+        }),
+        team("team3"),
+      ]),
+    ).toEqual(["team1", "team3"]);
+  });
+
+  it("una ventana que ya se renovó aunque la lectura no lo sepa recibe tic; un minuto antes, no", () => {
+    const vuelve = (iso: string) =>
+      team("team1", { sesion: { pct: 100, pctExacto: 100, vuelve: iso } });
+    expect(elige([vuelve("2026-11-07T12:41:00+01:00")])).toEqual(["team1"]);
+    expect(elige([vuelve("2026-11-07T12:42:00+01:00")])).toEqual([]);
+  });
+
+  it("solo Team: una Max con ventana de 5 h y una Ultra, sin ventana abierta, no reciben tic", () => {
+    expect(elige([team("ultra1", { plan: "max" })])).toEqual([]);
+    expect(
+      elige([team("ultra1", { plan: "ultra", cincoHoras: false })]),
+    ).toEqual([]);
+  });
+
+  it("una Team con la semanal agotada no recibe tic; al 99,9 % sí", () => {
+    const semana = (p: number) =>
+      team("team1", { semana: { pct: p, pctExacto: p, vuelve: null } });
+    expect(elige([semana(100)])).toEqual([]);
+    expect(elige([semana(99.9)])).toEqual(["team1"]);
+  });
+
+  it("una Team que no se puede usar (sin login, error) no recibe tic", () => {
+    expect(
+      elige([team("team1", { usable: false, problema: "sin login" })]),
+    ).toEqual([]);
+  });
+
+  it("no repite el tic hasta que pasan RETIC_MS desde el anterior", () => {
+    expect(
+      elige([team("team1")], { ultimo: { team1: NOW - RETIC_MS + 1 } }),
+    ).toEqual([]);
+    expect(
+      elige([team("team1")], { ultimo: { team1: NOW - RETIC_MS } }),
+    ).toEqual(["team1"]);
+  });
+
+  it("una Team sin carpeta conocida no recibe tic y sale como saltada", () => {
+    const r = elegir({
+      health: { medido: MEDIDO, cuentas: [team("team9")] },
+      carpetas: {},
+      estado: {},
+      ahora: NOW,
+    });
+    expect(r.tics).toEqual([]);
+    expect(r.saltadas).toEqual([{ cuenta: "team9", motivo: "sin carpeta" }]);
+  });
+
+  it("una lectura de uso vieja no decide nada: falla", () => {
+    const viejo = new Date(NOW - VIEJO_MS - 1).toISOString();
+    expect(() => elige([team("team1")], {}, NOW, viejo)).toThrow(/vieja/);
+    expect(
+      elige([team("team1")], {}, NOW, new Date(NOW - VIEJO_MS).toISOString()),
+    ).toEqual(["team1"]);
+  });
+
+  it("una salud sin la forma esperada falla en vez de decir «nada que hacer»", () => {
+    expect(() =>
+      elegir({
+        health: { medido: MEDIDO },
+        carpetas: {},
+        estado: {},
+        ahora: NOW,
+      }),
+    ).toThrow(/forma/);
+  });
+});
+
+const SCRIPT = fileURLToPath(new URL("./tic-team.mjs", import.meta.url));
+
+describe("tic-team.mjs ejecutado", () => {
+  /** `claude`: cuerpo de un claude de mentira; deja cada llamada en llamadas.txt de su carpeta. */
+  async function preparar(claude: string) {
+    const dir = await mkdtemp(join(tmpdir(), "tic-team-"));
+    const health = JSON.stringify({
+      medido: new Date().toISOString(),
+      cuentas: [
+        team("team1"),
+        team("team2", {
+          sesion: {
+            pct: 3,
+            pctExacto: 3,
+            vuelve: new Date(Date.now() + 3_600_000).toISOString(),
+          },
+        }),
+      ],
+    });
+    const list = JSON.stringify({
+      accounts: [
+        { name: "team1", configDir: "/cuentas/team1" },
+        { name: "team2", configDir: "/cuentas/team2" },
+      ],
+    });
+    await writeFile(join(dir, "health.json"), health);
+    await writeFile(join(dir, "list.json"), list);
+    const bb = join(dir, "bb-falso");
+    await writeFile(
+      bb,
+      `#!/bin/sh\ncase "$2" in health) cat "${dir}/health.json";; list) cat "${dir}/list.json";; *) exit 9;; esac\n`,
+    );
+    const cl = join(dir, "claude-falso");
+    await writeFile(
+      cl,
+      `#!/bin/sh\necho "$CLAUDE_CONFIG_DIR|\${CLAUDECODE:-sin}|$*" >> "${dir}/llamadas.txt"\n${claude}\n`,
+    );
+    await chmod(bb, 0o755);
+    await chmod(cl, 0o755);
+    const correr = async () => {
+      try {
+        const r = await promisify(execFile)(process.execPath, [SCRIPT], {
+          cwd: dir,
+          env: { ...process.env, BB_CLI: bb, TIC_CLAUDE: cl, CLAUDECODE: "1" },
+        });
+        return { code: 0, stdout: r.stdout };
+      } catch (e) {
+        const err = e as { code: number; stdout: string };
+        return { code: err.code, stdout: err.stdout };
+      }
+    };
+    const llamadas = async () =>
+      (await readFile(join(dir, "llamadas.txt"), "utf8")).trim().split("\n");
+    const log = () => readFile(join(dir, "tic-team.log"), "utf8");
+    return { correr, llamadas, log };
+  }
+
+  it("da el tic solo a la Team sin ventana y no lo repite en la pasada siguiente", async () => {
+    const { correr, llamadas, log } = await preparar(
+      `echo '{"is_error":false,"result":"ok"}'`,
+    );
+    const primera = await correr();
+    expect(primera.code).toBe(0);
+    expect(primera.stdout).toMatch(/1 tic/);
+    expect(await log()).toMatch(/team1 ok/);
+    expect(await log()).not.toMatch(/team2/);
+    const segunda = await correr();
+    expect(segunda.code).toBe(0);
+    expect(segunda.stdout).toMatch(/0 tics/);
+    expect(await llamadas()).toHaveLength(1);
+  });
+
+  it("pasa a claude la carpeta de la cuenta, el modelo barato, sin herramientas y sin la sesión de quien lo lanza", async () => {
+    const { correr, llamadas } = await preparar(
+      `echo '{"is_error":false,"result":"ok"}'`,
+    );
+    expect((await correr()).code).toBe(0);
+    const [carpeta, claudecode, args] = (await llamadas())[0].split("|");
+    expect(carpeta).toBe("/cuentas/team1");
+    expect(claudecode).toBe("sin");
+    expect(args).toMatch(/^-p /);
+    expect(args).toMatch(/--model haiku/);
+    expect(args).toMatch(/--tools/);
+    expect(args).toMatch(/--no-session-persistence/);
+  });
+
+  it("un tic que falla sale con código 1 y se reintenta en la pasada siguiente", async () => {
+    const { correr, llamadas, log } = await preparar(
+      `echo '{"is_error":true,"result":"Not logged in"}'; exit 1`,
+    );
+    expect((await correr()).code).toBe(1);
+    expect(await log()).toMatch(/team1 FALLO/);
+    expect((await correr()).code).toBe(1);
+    expect(await llamadas()).toHaveLength(2);
+  });
+
+  it("si claude acaba con código 0 pero dice is_error, cuenta como fallo", async () => {
+    const { correr } = await preparar(
+      `echo '{"is_error":true,"result":"limit"}'`,
+    );
+    expect((await correr()).code).toBe(1);
+  });
+});
