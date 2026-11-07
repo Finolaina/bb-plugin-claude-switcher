@@ -20948,7 +20948,10 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
       expect(moves(h)).toEqual([]);
     });
 
-    it("a Fable turn that would wait is not this rule's: no move", async () => {
+    // Until 0.2.47 a Fable turn here waited («not this rule's»); since
+    // 0.2.48 (B4, Aitor 2026-11-07: «el trabajo prima») it moves too, to the
+    // Ultra main with a free seat (a Team seat last for Fable).
+    it("a Fable turn that would wait moves too, to the Ultra with a free seat (0.2.48, B4)", async () => {
       const { h } = await start({ settings: { seatsMax: 1 } });
       const fable = (await h.harness.registrations.hooks["message.dispatch"]!(
         makeMessageDispatchHookContext({
@@ -20957,8 +20960,8 @@ describe("noche 2026-11-05: atascos con hermanos en marcha", () => {
           attempt: "start-turn",
         }),
       )) as { action: string };
-      expect(fable.action).toBe("wait");
-      expect(moves(h)).toEqual([]);
+      expect(fable.action).toBe("proceed");
+      expect(await where(h)).toBe("main");
     });
 
     it("keeps the way home of Fable when the full account was itself an excursion (code-reviewer r1 H2)", async () => {
@@ -21239,6 +21242,60 @@ describe("reparto por hueco 2026-11-07", () => {
       await h.harness.behavior.callRpc("accounts_refresh", null);
       expect((await dispatch(h, "t1", "proj-1", OPUS)).action).toBe("proceed");
       expect(await where(h)).toBe("work");
+    });
+  });
+
+  describe("B4: a Fable turn that would wait for a seat with a sibling at work moves", () => {
+    /** proj-1 on main (Ultra, 1 seat, room 36.5) with Fable thread a at work; spare an Ultra (room 46), work a Team. */
+    const start = async (settings: Record<string, unknown> = {}) => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(5, 40, 53)),
+          spare: () => Response.json(payload(5, 10, 12)),
+          work: () => Response.json(payload(0, 2, 0)),
+        },
+        { settings: { preferredModel: "Fable", seatsMax: 1, seatsTeam: 2, stuckMoveMinutes: 10, ...settings } },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "a", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      await active(h, "a");
+      return h;
+    };
+
+    it("moves at its first ask to the Ultra with a free seat, not the Team seat, and says why", async () => {
+      const h = await start();
+      expect(await dispatch(h, "b", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("spare");
+      expect((await history(h))[0]).toBe(
+        "Movido a spare antes del turno: el hilo iba a esperar plaza en main (1/1 ocupadas), con otro hilo de su proyecto trabajando; spare tenía 1 libre",
+      );
+    });
+
+    it("with no Ultra free, to the Team seat: the work comes first", async () => {
+      const h = await host(
+        {
+          main: () => Response.json(payload(5, 40, 53)),
+          spare: () => Response.json(payload(5, 100, 12)),
+          work: () => Response.json(payload(0, 2, 0)),
+        },
+        { settings: { preferredModel: "Fable", seatsMax: 1, seatsTeam: 2, stuckMoveMinutes: 10 } },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "a", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      await active(h, "a");
+      expect(await dispatch(h, "b", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("work");
+    });
+
+    it("stuckMoveMinutes 0: it waits where it is", async () => {
+      const h = await start({ stuckMoveMinutes: 0 });
+      expect((await dispatch(h, "b", "proj-1", FABLE_ID)).action).toBe("wait");
+      expect(await where(h)).toBe("main");
+      expect(h.envSet).toEqual([]);
     });
   });
 });

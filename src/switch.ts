@@ -822,11 +822,17 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     // one; a Max out of the reserved model only after (Codex R047-R2-002 and
     // R047-R2-003), and not for seats for all only: the server then asks
     // for one seat, which a Team seat may have.
+    // The reserved model with a share set (0.2.48): a Max or Ultra seat
+    // first, a Team seat only with none, and not for seats for all: the
+    // server then asks for one seat, which a Max or Ultra may have (B4).
     const choice = holdsForReserve(options)
       ? (pick(roomy.filter((a) => !afterTeams(a, options))) ??
         pick(unreadTeamSeats(input)) ??
         (input.seatsWantedOnly === true && wanted > 1 ? null : pick(roomy)))
-      : pick(roomy);
+      : choosingReserve(options) && options.reserveShare !== undefined
+        ? (pick(roomy.filter((a) => a.team !== true)) ??
+          (input.seatsWantedOnly === true && wanted > 1 ? null : pick(roomy)))
+        : pick(roomy);
     return choice === null
       ? { kind: "keep" }
       : { kind: "move", account: choice.account, why: "current-full" };

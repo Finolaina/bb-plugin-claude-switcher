@@ -1223,10 +1223,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * 2026-11-05 13:15, «que cuando termine una … salga otra»: 0.2.41 waited
    * stuckMoveMinutes first): to an account with seats for all when the
    * project asks for more than the account has ("crowded", first ask
-   * only), else to a seat for the thread ("stuck"). For a model other than
-   * the reserved one only: where the reserved model's turns run is not this
-   * rule's. Null: neither, or stuckMoveMinutes is 0, or the project moved so
-   * within it.
+   * only), else to a seat for the thread ("stuck"). Also for the reserved
+   * model since 0.2.48 (Aitor 2026-11-07, «tampoco quiero que hilos se queden
+   * parados … el trabajo prima»): its targets rank by room, a Team seat
+   * last (see ChoiceOptions.reserveShare). Null: neither, or
+   * stuckMoveMinutes is 0, or the project moved so within it.
    */
   function crowded(
     thread: ThreadResponse,
@@ -1245,7 +1246,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     | null {
     const limit = current.stuckMoveMinutes * 60_000;
     if (!(limit > 0) || !current.autoSwitch) return null;
-    if (!reserving({ preferredModel: model, ...reserveOf() })) return null;
     const key = seatKey(name);
     if (seats.seatOf(thread.id)?.account === key) return null;
     const queue = seats.queue(key);
@@ -5417,7 +5417,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         ? null
         : (() => {
             const settled = settle(there, deps.now());
-            return settled.team !== true &&
+            // The margin is a reason for another model only (B4, 0.2.48).
+            return reserving(options) &&
+              settled.team !== true &&
               canRunModel(settled, current.preferredModel) &&
               reserveToSpare(settled, options)
               ? settled

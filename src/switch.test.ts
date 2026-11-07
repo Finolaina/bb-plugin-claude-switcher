@@ -2527,3 +2527,50 @@ describe("decidePlacement moves a Fable turn by room (0.2.48, B3)", () => {
     ).toEqual({ kind: "keep" });
   });
 });
+
+// PLAN §B4 / §A row 2 (2026-11-07): Fable with its seats full goes to a Max
+// or Ultra seat first, a Team seat only with none.
+describe("decidePlacement with the seats full, for Fable with a share (0.2.48, B4)", () => {
+  const ultra = account("ultra", {
+    weekly: { usedPercent: 10, resetsAt: NOW + 48 * HOUR },
+    models: { Fable: { usedPercent: 12, resetsAt: NOW + 48 * HOUR } },
+  });
+  const team = account("team", {
+    team: true,
+    session: { usedPercent: 0, resetsAt: NOW + 2 * HOUR },
+    models: { Fable: { usedPercent: 0, resetsAt: NOW + 4 * HOUR } },
+  });
+  const here = account("here", {
+    weekly: { usedPercent: 40, resetsAt: NOW + 48 * HOUR },
+    models: { Fable: { usedPercent: 53, resetsAt: NOW + 48 * HOUR } },
+  });
+  const full = (free: Record<string, number>, overrides: Partial<PlacementInput> = {}): PlacementInput => ({
+    currentAccount: "here",
+    isNew: false,
+    accounts: [here, ultra, team],
+    preferredModel: "Fable",
+    reserveModel: "Fable",
+    reserveShare: 0.5,
+    seatsFull: true,
+    freeSeats: (n) => free[n] ?? 0,
+    now: NOW,
+    ...overrides,
+  });
+
+  it("an Ultra seat before a Team seat, also one with seats for all", () => {
+    expect(decidePlacement(full({ ultra: 1, team: 2 }))).toEqual({ kind: "move", account: "ultra", why: "current-full" });
+    expect(decidePlacement(full({ ultra: 1, team: 2 }, { seatsWanted: 2 }))).toEqual({ kind: "move", account: "ultra", why: "current-full" });
+  });
+
+  it("seats for all only: none on an Ultra, so none (the server then asks for one seat)", () => {
+    expect(decidePlacement(full({ ultra: 1, team: 2 }, { seatsWanted: 2, seatsWantedOnly: true }))).toEqual({ kind: "keep" });
+  });
+
+  it("no Ultra seat: the Team seat", () => {
+    expect(decidePlacement(full({ ultra: 0, team: 1 }))).toEqual({ kind: "move", account: "team", why: "current-full" });
+  });
+
+  it("without a share: the order before 0.2.48 (the Team seat by deadline)", () => {
+    expect(decidePlacement(full({ ultra: 1, team: 2 }, { reserveShare: undefined }))).toEqual({ kind: "move", account: "team", why: "current-full" });
+  });
+});
