@@ -146,7 +146,7 @@ const SCRIPT = fileURLToPath(new URL("./tic-team.mjs", import.meta.url));
 
 describe("cerrar", () => {
   it("tres pasadas que miran a la vez un cerrojo muerto: alguna se lo queda, nunca ninguna (que se lo queden dos es el techo escrito en cerrar)", async () => {
-    for (let vuelta = 0; vuelta < 20; vuelta++) {
+    for (let vuelta = 0; vuelta < 100; vuelta++) {
       const dir = await mkdtemp(join(tmpdir(), "tic-team-cerrojo-"));
       const ruta = join(dir, "tic-team.lock");
       await writeFile(ruta, "");
