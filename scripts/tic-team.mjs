@@ -27,14 +27,18 @@ import { promisify } from "node:util";
 export const RETIC_MS = 30 * 60_000;
 /** Una lectura de uso más vieja no sirve para saber si hay ventana abierta. */
 export const VIEJO_MS = 30 * 60_000;
-/** Un cerrojo más viejo es de una pasada muerta: 5 tics de 2 min caben de sobra. */
+/** Una pasada no empieza tics nuevos pasado este rato: los que queden, en la siguiente. */
+export const PASADA_MS = Number(process.env.TIC_PASADA_MS ?? 10 * 60_000);
+/** Un cerrojo más viejo es de una pasada muerta: PASADA_MS más un último tic de CLAUDE_MS caben. */
 export const CERROJO_MS = 15 * 60_000;
 const BB_MS = 60_000;
 const CLAUDE_MS = 120_000;
 /**
  * Fuera del entorno de claude: lo que lo haría hijo de otra sesión y toda
  * credencial que gane al login guardado en la carpeta de la cuenta (con ellas
- * el tic iría a otra cuenta y diría «ok»; Codex r1).
+ * el tic iría a otra cuenta y diría «ok»; Codex r1). Además, toda variable
+ * ANTHROPIC_*: claves, URL y los alias de modelo (`ANTHROPIC_DEFAULT_HAIKU_MODEL`
+ * cambia lo que es «haiku» aunque se pase `--model haiku`; Codex r2).
  */
 const FUERA = [
   "CLAUDECODE",
@@ -43,10 +47,7 @@ const FUERA = [
   "CLAUDE_CODE_CHILD_SESSION",
   "CLAUDE_CODE_SESSION_ID",
   "CLAUDE_CONFIG_DIR",
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_AUTH_TOKEN",
   "CLAUDE_CODE_OAUTH_TOKEN",
-  "ANTHROPIC_BASE_URL",
   "CLAUDE_CODE_USE_BEDROCK",
   "CLAUDE_CODE_USE_VERTEX",
   "CLAUDE_CODE_USE_FOUNDRY",
@@ -126,7 +127,7 @@ async function bb(args) {
 /** Un «ok» con Haiku en la cuenta: sin herramientas, sin MCP, sin ajustes de usuario ni sesión guardada. */
 async function tic({ carpeta }, vacia) {
   const env = { ...process.env };
-  for (const v of FUERA) delete env[v];
+  for (const v of Object.keys(env)) if (FUERA.includes(v) || v.startsWith("ANTHROPIC_")) delete env[v];
   if (carpeta !== null) env.CLAUDE_CONFIG_DIR = carpeta;
   let stdout;
   try {
@@ -155,22 +156,37 @@ async function leerEstado(ruta) {
 }
 
 /** Una sola pasada a la vez: dos solapadas darían dos tics a la misma cuenta (Codex r1). */
-async function cerrar(ruta, ahora) {
+export async function cerrar(ruta, ahora, reintento = false) {
   try {
     await (await open(ruta, "wx")).close();
     return true;
   } catch (error) {
     if (error.code !== "EEXIST") throw error;
   }
-  if (ahora - (await stat(ruta)).mtimeMs < CERROJO_MS) return false;
+  let edad;
+  try {
+    edad = ahora - (await stat(ruta)).mtimeMs;
+  } catch (error) {
+    // Se acaba de soltar: lo intenta una vez más.
+    if (error.code === "ENOENT" && !reintento) return cerrar(ruta, ahora, true);
+    throw error;
+  }
+  if (edad < CERROJO_MS || reintento) return false;
+  // ponytail: dos pasadas que vean a la vez el mismo cerrojo muerto pueden
+  // quedárselo las dos (el borrado de una puede llevarse el nuevo de la otra;
+  // Codex r2). Solo pasa si una pasada murió a medias y otra lanzada a mano
+  // coincide con la programada; su coste es un tic de más (0,0006 $). Mejora:
+  // un token en el cerrojo que su dueño compruebe antes de cada tic.
   console.error("cerrojo de una pasada muerta: se quita");
   await rm(ruta, { force: true });
-  return cerrar(ruta, ahora);
+  return cerrar(ruta, ahora, true);
 }
 
 export async function main({ dir = process.cwd(), ahora = Date.now() } = {}) {
-  const health = JSON.parse(await bb(["claude-switcher", "health", "--json"]));
+  // La lista antes que la salud: así la hora de la lectura de cada cuenta nunca
+  // es más nueva que la ventana que enseña la salud (Codex r2).
   const list = JSON.parse(await bb(["claude-switcher", "list", "--json"]));
+  const health = JSON.parse(await bb(["claude-switcher", "health", "--json"]));
   if (!Array.isArray(list.accounts)) throw new Error("la lista no tiene la forma esperada");
   const lista = Object.fromEntries(
     list.accounts.map((a) => [a.name, { configDir: a.configDir, observedAt: a.observedAt }]),
@@ -191,7 +207,12 @@ export async function main({ dir = process.cwd(), ahora = Date.now() } = {}) {
     const ultimo = { ...estado.ultimo };
     let fallos = 0;
     let buenos = 0;
-    for (const t of tics) {
+    const inicio = Date.now();
+    for (const [i, t] of tics.entries()) {
+      if (i > 0 && Date.now() - inicio >= PASADA_MS) {
+        console.error(`pasada de más de ${PASADA_MS / 60_000} min: el resto, en la siguiente`);
+        break;
+      }
       let linea;
       try {
         await tic(t, vacia);

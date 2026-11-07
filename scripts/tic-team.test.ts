@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
-import { CERROJO_MS, RETIC_MS, VIEJO_MS, elegir } from "./tic-team.mjs";
+import { CERROJO_MS, RETIC_MS, VIEJO_MS, cerrar, elegir } from "./tic-team.mjs";
 
 const NOW = Date.parse("2026-11-07T12:41:00+01:00");
 const MEDIDO = "2026-11-07T12:36:00+01:00";
@@ -144,6 +144,21 @@ describe("elegir", () => {
 
 const SCRIPT = fileURLToPath(new URL("./tic-team.mjs", import.meta.url));
 
+describe("cerrar", () => {
+  it("tres pasadas que miran a la vez un cerrojo muerto: solo una se lo queda (el caso de Codex r2, con un borrado a destiempo, queda como techo)", async () => {
+    for (let vuelta = 0; vuelta < 20; vuelta++) {
+      const dir = await mkdtemp(join(tmpdir(), "tic-team-cerrojo-"));
+      const ruta = join(dir, "tic-team.lock");
+      await writeFile(ruta, "");
+      const muerto = (Date.now() - CERROJO_MS - 60_000) / 1000;
+      await utimes(ruta, muerto, muerto);
+      const ahora = Date.now();
+      const dueños = await Promise.all([cerrar(ruta, ahora), cerrar(ruta, ahora), cerrar(ruta, ahora)]);
+      expect(dueños.filter(Boolean)).toHaveLength(1);
+    }
+  });
+});
+
 describe("tic-team.mjs ejecutado", () => {
   /**
    * `claude`: cuerpo de un claude de mentira. Cada llamada deja en llamadas.txt
@@ -152,6 +167,7 @@ describe("tic-team.mjs ejecutado", () => {
   async function preparar(
     claude: string,
     configDir: string | null = "/cuentas/team1",
+    { conTeam3 = false } = {},
   ) {
     const dir = await mkdtemp(join(tmpdir(), "tic-team-"));
     const ahora = Date.now();
@@ -159,6 +175,7 @@ describe("tic-team.mjs ejecutado", () => {
       medido: new Date(ahora).toISOString(),
       cuentas: [
         team("team1"),
+        ...(conTeam3 ? [team("team3")] : []),
         team("team2", {
           sesion: {
             pct: 3,
@@ -172,6 +189,7 @@ describe("tic-team.mjs ejecutado", () => {
       accounts: [
         { name: "team1", configDir, observedAt: ahora },
         { name: "team2", configDir: "/cuentas/team2", observedAt: ahora },
+        { name: "team3", configDir: "/cuentas/team3", observedAt: ahora },
       ],
     });
     await writeFile(join(dir, "health.json"), health);
@@ -179,20 +197,20 @@ describe("tic-team.mjs ejecutado", () => {
     const bb = join(dir, "bb-falso");
     await writeFile(
       bb,
-      `#!/bin/sh\ncase "$2" in health) cat "${dir}/health.json";; list) cat "${dir}/list.json";; *) exit 9;; esac\n`,
+      `#!/bin/sh\necho "$2" >> "${dir}/bb-orden.txt"\ncase "$2" in health) cat "${dir}/health.json";; list) cat "${dir}/list.json";; *) exit 9;; esac\n`,
     );
     const cl = join(dir, "claude-falso");
     await writeFile(
       cl,
       [
         "#!/bin/sh",
-        `{ echo "---"; echo "\${CLAUDE_CONFIG_DIR-sin}"; echo "\${CLAUDECODE-sin}\${CLAUDE_CODE_OAUTH_TOKEN-sin}\${ANTHROPIC_AUTH_TOKEN-sin}\${ANTHROPIC_API_KEY-sin}"; pwd; printf '[%s]\\n' "$@"; } >> "${dir}/llamadas.txt"`,
+        `{ echo "---"; echo "\${CLAUDE_CONFIG_DIR-sin}"; echo "\${CLAUDECODE-sin}\${CLAUDE_CODE_OAUTH_TOKEN-sin}\${ANTHROPIC_AUTH_TOKEN-sin}\${ANTHROPIC_API_KEY-sin}\${ANTHROPIC_DEFAULT_HAIKU_MODEL-sin}"; pwd; printf '[%s]\\n' "$@"; } >> "${dir}/llamadas.txt"`,
         claude,
       ].join("\n"),
     );
     await chmod(bb, 0o755);
     await chmod(cl, 0o755);
-    const correr = async () => {
+    const correr = async (extra: Record<string, string> = {}) => {
       try {
         const r = await promisify(execFile)(process.execPath, [SCRIPT], {
           cwd: dir,
@@ -205,6 +223,8 @@ describe("tic-team.mjs ejecutado", () => {
             CLAUDE_CODE_OAUTH_TOKEN: "otra",
             ANTHROPIC_AUTH_TOKEN: "otra",
             ANTHROPIC_API_KEY: "otra",
+            ANTHROPIC_DEFAULT_HAIKU_MODEL: "otro-modelo",
+            ...extra,
           },
         });
         return { code: 0, stdout: r.stdout };
@@ -256,7 +276,7 @@ describe("tic-team.mjs ejecutado", () => {
     expect((await correr()).code).toBe(0);
     const [l] = await llamadas();
     expect(l.carpeta).toBe("/cuentas/team1");
-    expect(l.credenciales).toBe("sinsinsinsin");
+    expect(l.credenciales).toBe("sinsinsinsinsin");
     expect(l.cwd).toBe(join(tmpdir(), "tic-team-vacia"));
     expect(l.cwd.startsWith(dir)).toBe(false);
     expect(l.args).toEqual([
@@ -319,5 +339,33 @@ describe("tic-team.mjs ejecutado", () => {
     // La segunda no da tic (ya guardado) y no tiene nada que registrar.
     expect((await correr()).stdout).toMatch(/0 tics, 0 fallos/);
     expect(await llamadas()).toHaveLength(1);
+  });
+  it("pide la lista de cuentas antes que la salud", async () => {
+    const { dir, correr } = await preparar(OK);
+    expect((await correr()).code).toBe(0);
+    expect((await readFile(join(dir, "bb-orden.txt"), "utf8")).trim().split("\n")).toEqual([
+      "list",
+      "health",
+    ]);
+  });
+
+  it("dos pasadas a la vez con un cerrojo muerto dan un solo tic por cuenta", async () => {
+    const { dir, correr, llamadas } = await preparar(`sleep 0.3; ${OK}`);
+    const cerrojo = join(dir, "tic-team.lock");
+    await writeFile(cerrojo, "");
+    const muerto = (Date.now() - CERROJO_MS - 60_000) / 1000;
+    await utimes(cerrojo, muerto, muerto);
+    await Promise.all([correr(), correr(), correr()]);
+    expect(await llamadas()).toHaveLength(1);
+  });
+
+  it("una pasada larga no empieza tics nuevos pasado su tope, pero siempre da el primero", async () => {
+    const { correr, llamadas } = await preparar(`sleep 0.2; ${OK}`, "/cuentas/team1", { conTeam3: true });
+    const r = await correr({ TIC_PASADA_MS: "0" });
+    expect(r.code).toBe(0);
+    expect(await llamadas()).toHaveLength(1);
+    const sinTope = await preparar(OK, "/cuentas/team1", { conTeam3: true });
+    expect((await sinTope.correr()).code).toBe(0);
+    expect(await sinTope.llamadas()).toHaveLength(2);
   });
 });
