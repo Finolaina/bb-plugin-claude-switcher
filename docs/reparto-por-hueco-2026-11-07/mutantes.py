@@ -264,6 +264,13 @@ M = [
     ("r4 medium 3", "de dos marcas vale la que vence antes", V,
      "        until = Math.max(until ?? end, end);\n", "        until = Math.min(until ?? end, end);\n",
      VT, "till the latest of its marks"),
+    # Astra r5 (docs/reparto-por-hueco-2026-11-07/astra-r5.txt)
+    ("r5 medium 2", "un 429 sin reinicio acorta la marca del mismo ámbito", V,
+     "    marks.set(scope, Math.max(marks.get(scope) ?? until, until));\n", "    marks.set(scope, until);\n",
+     VT, "then one with no reset"),
+    ("r5 medium 2", "dentro del ámbito gana el vencimiento más temprano", V,
+     "    marks.set(scope, Math.max(marks.get(scope) ?? until, until));\n", "    marks.set(scope, Math.min(marks.get(scope) ?? until, until));\n",
+     VT, "then one with no reset"),
     ("r4 medium 2", "el atado se suelta al escribir, antes del historial", V,
      "      bb.log.info(`thread ${thread.id}: ${reason}`);\n      await recordMove(\n",
      "      bb.log.info(`thread ${thread.id}: ${reason}`);\n      seatMoving.delete(projectId);\n      await recordMove(\n",

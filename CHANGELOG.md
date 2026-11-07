@@ -164,6 +164,13 @@ Revisión (Astra r4: 1 high y 3 medium, `docs/reparto-por-hueco-2026-11-07/astra
   arrancar ya no deja la salida al siguiente mensaje del hilo, que espera
   desde cero (medium 4).
 
+Revisión (Astra r5: 0 high y 3 medium, `docs/reparto-por-hueco-2026-11-07/astra-r5.txt`):
+
+- Dentro del mismo ámbito gana el vencimiento más tardío: un 429 sin
+  reinicio (30 min) un segundo después de otro con reinicio a +120 min ya no
+  acorta la marca, y a los 31 min ningún Opus vuelve a esa Team. Corte
+  probado a 120 min − 1 ms y a 120 min (medium 2).
+
 ## [0.2.47] - 2026-11-06
 
 ### Changed

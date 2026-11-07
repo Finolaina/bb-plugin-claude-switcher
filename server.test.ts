@@ -22252,6 +22252,45 @@ describe("reparto por hueco 2026-11-07", () => {
           expect(await dispatch(h, "o2", "proj-2", OPUS)).toEqual({ action: "proceed" });
           expect(await where(h, "proj-2")).toBe(to);
         });
+
+      // Astra r5 medium 2: a 429 on work till +120 min, and 1 s later another
+      // one there with no reset (+30 min). The later end stands: at 31 min
+      // and 1 ms before +120 min another Opus turn stays on main; at +120
+      // min it goes to work.
+      for (const [after, to] of [[31 * MINUTE, "main"], [2 * HOUR - 1, "main"], [2 * HOUR, "work"]] as const)
+        it(`a 429 till +120 min, then one with no reset: ${after} ms after, another Opus turn goes to ${to} (Astra r5 medium 2)`, async () => {
+          let clock = NOW;
+          const opusLog = (threadId: string, requestId: string) => [
+            { id: `evt_${requestId}`, scope: { kind: "thread" }, threadId, seq: 1, createdAt: NOW - 60_000, type: "client/turn/requested", data: { requestId, execution: { model: OPUS } } },
+          ];
+          const h = await host(
+            {
+              main: () => Response.json(payload(5, 10, 12)),
+              work: () => Response.json(payload(20, 10, 0)),
+            },
+            {
+              clock: () => clock,
+              dirs: () => ["work"],
+              settings: { preferredModel: "Fable", seatsTeam: 2, seatsMax: 4, opusOverflowRoom: 15, refreshMinutes: 600 },
+              presetEnv: { "proj-1": on("work"), "proj-3": on("work") },
+              threads: { "thread-3": { projectId: "proj-3" } },
+              threadEvents: { "thread-1": opusLog("thread-1", "creq_1"), "thread-3": opusLog("thread-3", "creq_3") },
+            },
+          );
+          dispose = () => h.harness.dispose();
+          teamLogin(h, "work");
+          await h.harness.behavior.callRpc("accounts_refresh", null);
+          await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+          clock = NOW + 1000;
+          const base = failure({ threadId: "thread-3", requestId: "creq_3" });
+          await h.harness.behavior.emitThreadEvent(
+            "turn.failed",
+            { ...base, rateLimits: { ...base.rateLimits!, windows: base.rateLimits!.windows.map((w) => ({ ...w, resetsAtMs: null })) } },
+          );
+          clock = NOW + after;
+          expect(await dispatch(h, "o2", "proj-2", OPUS)).toEqual({ action: "proceed" });
+          expect(await where(h, "proj-2")).toBe(to);
+        });
     });
 
     // Codex r1 medium 4: main read at 10/12 (room 46), then every query

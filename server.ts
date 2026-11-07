@@ -1617,10 +1617,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         until = Math.max(until ?? end, end);
     return until;
   }
-  /** Marks `name` for `scope` till `until`, the latest report of that scope (see limitedAt). */
+  /**
+   * Marks `name` for `scope` till `until`; a later 429 of the same scope
+   * never shortens it: one with no reset reported does not cut a reset
+   * known (see limitedAt; Astra r5 medium 2).
+   */
   function markLimited(name: string, scope: string, until: number): void {
     const marks = limitedAt.get(name) ?? new Map<string, number>();
-    marks.set(scope, until);
+    marks.set(scope, Math.max(marks.get(scope) ?? until, until));
     limitedAt.set(name, marks);
   }
   /**
