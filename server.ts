@@ -4037,6 +4037,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
       return;
     }
+    // Nor while another automatic move of the project is written (a
+    // dispatch's, before its thread is told to start): the project is being
+    // placed, and this thread's dispatch goes through placeTurn, which waits
+    // for that move (Astra r9 medium).
+    if (moving(projectId)) {
+      bb.log.info(
+        `thread ${thread.id}: not placed (another move of the project is under way)`,
+      );
+      return;
+    }
     if (
       !(await applyAccount(projectId, accountOrDefault(decision.account), latest))
     ) {
@@ -5496,7 +5506,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // on a fresh read (Codex/Astra ASIENTOS-R3-001/R3-002/R4-001/R5-001;
     // every move of placeTurn since Astra r3 medium 4).
     // The failure's judgment, the refresh's rescue and moveUpWait look at it
-    // too (Astra r8 medium 2).
+    // too (Astra r8 medium 2), and so does placeProject (Astra r9 medium).
     // ponytail: moveAhead and rebalance do not look at it (Astra
     // ASIENTOS-R6-001; moveAhead needs switchAheadPercent on, rebalance is
     // by hand and skips projects with threads working); the way up is to

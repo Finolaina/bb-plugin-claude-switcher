@@ -262,6 +262,17 @@ Revisión (Astra r8: 0 high y 2 medium, `docs/reparto-por-hueco-2026-11-07/astra
   defecto) y el reparto entre Ultra (`rebalance`, a mano y sin tocar
   proyectos con hilos trabajando) siguen sin mirar el atado.
 
+Revisión (Astra r9: 0 high y 1 medium, `docs/reparto-por-hueco-2026-11-07/astra-r9.txt`):
+
+- La colocación al crearse un hilo (`placeProject`, desde `thread.created`)
+  tampoco escribe mientras se escribe otro movimiento automático del
+  proyecto. Con el proyecto en una Ultra A (5/10, Fable 100), una Ultra B
+  (5/10/12, hueco 46) y una Team (0/2), un despacho de Opus escribía A →
+  Team; un hilo nuevo creado entretanto colocaba el proyecto en B, juzgado
+  por Fable, y luego aterrizaba la Team: dos movimientos desde A. Ahora el
+  hilo nuevo no lo coloca: el proyecto ya se está moviendo, y el despacho
+  de ese hilo pasa por la colocación antes del turno, que espera al atado.
+
 ## [0.2.47] - 2026-11-06
 
 ### Changed

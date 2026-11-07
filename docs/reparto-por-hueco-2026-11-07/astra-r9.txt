@@ -1,0 +1,18 @@
+88,829
+Los dos medium de r8 están cerrados en sus escenarios: M1 espera en la Team marcada y sale a la Ultra al cumplir 60 minutos; M2 retiene el reintento durante B3 y permite despacharlo después. Reproducido con el harness y SQLite en memoria.
+
+Queda **1 medium** dentro del punto (3):
+
+- **medium — `placeProject` escribe sin consultar el atado**, en [server.ts:4041](/home/aitor/Desarrollo/_wt/switcher-reparto-hueco/server.ts:4041), desde `thread.created`.
+
+  Proyecto en Ultra A: sesión **5 %**, semanal **10 %**, Fable **100 %**. Ultra B: **5/10/12 %**, hueco **46**, cuatro plazas libres. Team: sesión **0 %**, semanal **2 %**, cinco plazas libres.
+
+  Un despacho de Opus inicia A → Team y mantiene pendiente su escritura, con `seatMoving` vigente. Antes de terminar, llega `thread.created` para otro hilo del proyecto: `placeProject`, juzgando por Fable, escribe B sin mirar el atado. Después aterriza la escritura pendiente hacia Team.
+
+  **Reproducido: B → Team**, antes de los 90 segundos, con dos movimientos registrados desde A. `siblingAdmitted` no lo impide porque el despacho de Opus aún no ha recibido `proceed`. Este camino queda fuera de los techos aceptados de `moveAhead` y `rebalance`.
+
+No encontré bloqueos perpetuos introducidos por los arreglos: comprobé el reintento antes y después de liberar el movimiento, la liberación de `moveUpWait` en la siguiente pasada y el rescate posterior a una escritura fallida.
+
+`tsc --noEmit` pasa. Vitest no pudo ejecutar la suite por la creación de temporales en el entorno de solo lectura; las reproducciones anteriores corrieron en memoria.
+
+VEREDICTO: 0 high, 1 medium, 0 low

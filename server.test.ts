@@ -21733,6 +21733,55 @@ describe("reparto por hueco 2026-11-07", () => {
       expect(history.filter((r) => r.projectId === "proj-1").map((r) => [r.from, r.to])).toEqual([["spare", "work"]]);
     });
 
+    // Astra r9 medium: the same for thread.created's placement. proj-1 sits
+    // on spare (Ultra, 5/10, Fable 100); work reads 5/10/12 (room 46, 4
+    // seats) and the Team seat 0/2 (5 seats). An Opus dispatch starts its
+    // move to the Team seat, its variable write held; meanwhile another
+    // thread of the project is created. Its placement, judged for Fable,
+    // does not write work over the move under way: one write, one move.
+    // Before: work, then the Team write landing on top.
+    it("a thread created while a move of its project is written does not place the project (Astra r9 medium)", async () => {
+      let gate: Promise<void> | null = null;
+      let reached = false;
+      let open = () => {};
+      const h = await host(
+        {
+          main: () => Response.json(payload(5, 100, 100)),
+          spare: () => Response.json(payload(5, 10, 100)),
+          work: () => Response.json(payload(5, 10, 12)), // room 46
+          team: () => Response.json(payload(0, 2, 0)),
+        },
+        {
+          dirs: () => ["spare", "work", "team"],
+          settings: { preferredModel: "Fable", seatsMax: 4, seatsTeam: 5 },
+          presetEnv: { "proj-1": on("spare") },
+          beforeSet: async () => {
+            const held = gate;
+            gate = null;
+            if (held === null) return;
+            reached = true;
+            await held;
+          },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "team");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      gate = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      const opus = dispatch(h, "o", "proj-1", OPUS);
+      await vi.waitFor(() => expect(reached).toBe(true));
+      await h.harness.behavior.emitThreadEvent("thread.created", {
+        thread: thread({ id: "thr-new", projectId: "proj-1" }),
+      });
+      open();
+      expect(await opus).toEqual({ action: "proceed" });
+      expect(h.envSet.filter((e) => e.projectId === "proj-1").map((e) => e.note)).toEqual([ownNote("team")]);
+      const history = ((await h.harness.behavior.callRpc("accounts_list", null)) as State).history;
+      expect(history.filter((r) => r.projectId === "proj-1").map((r) => [r.from, r.to])).toEqual([["spare", "team"]]);
+    });
+
     it("a move whose variable write outlasts its dispatch holds the project till the write ends (Astra r6 medium 2)", async () => {
       let gate: Promise<void> | null = null;
       let open = () => {};
