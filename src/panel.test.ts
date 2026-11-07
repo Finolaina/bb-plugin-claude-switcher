@@ -425,6 +425,27 @@ describe("accountRow", () => {
     const noReset = accountRow({ ...team4, usage: { ...team4.usage, weekly: win(100, null) } }, seats(0, 5), ES);
     expect(noReset).toMatchObject({ state: "out", when: "", bar: { kind: "week", figure: "100 %" } });
     expect(menuLine(noReset)).toBe("Semana 100 %");
+    // Astra r2 low: no weekly_all and the 5 hours locked («abuse»): the
+    // parser leaves the week unknown (100 %, `missing`) but the reading whole
+    // (a lock is proof). Out by the lock, with no week drawn: nobody measured
+    // it. The same for an Ultra.
+    const lockedSeat = {
+      ...team4,
+      usage: { ...team4.usage, blocked: true, session: win(40, at("2026-10-31T00:00:00+01:00")), weekly: { usedPercent: 100, resetsAt: null, missing: true as const } },
+    };
+    const locked = accountRow(lockedSeat, seats(0, 5), ES);
+    expect(locked).toMatchObject({ state: "out", line: "bloqueada por el proveedor · 0 de 5 hilos", bar: { kind: "five", figure: "40 %" } });
+    expect(locked.bars.map((b) => b.kind)).toEqual(["five", "model"]);
+    expect(locked.help).not.toMatch(/semana/);
+    expect(menuLine(locked)).toBe("bloqueada por el proveedor · 0 de 5 hilos");
+    const lockedUltra = ultra("u", 40, "2026-11-02T09:00:00+01:00", null);
+    const lockedU = accountRow(
+      { ...lockedUltra, usage: { ...lockedUltra.usage, blocked: true, weekly: { usedPercent: 100, resetsAt: null, missing: true as const } } },
+      undefined,
+      ES,
+    );
+    expect(lockedU).toMatchObject({ state: "out", line: "bloqueada por el proveedor" });
+    expect(lockedU.bars.map((b) => b.kind)).toEqual(["five", "model"]);
     // The cut: at 99 % its week does not run it out; its 5 hours and threads speak.
     const edge = accountRow({ ...team4, usage: { ...team4.usage, weekly: win(99, at("2026-11-02T17:00:00+01:00")) } }, seats(0, 5), ES);
     expect(edge).toMatchObject({ state: "free", when: "sin empezar", line: "0 de 5 hilos", bar: { kind: "five" } });

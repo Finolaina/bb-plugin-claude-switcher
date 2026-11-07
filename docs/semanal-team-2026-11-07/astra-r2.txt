@@ -1,0 +1,10 @@
+VEREDICTO: 0 high, 0 medium, 1 low
+tokens used
+94,543
+**R1 cerrado:** bb recibe la semanal medida con o sin reinicio y sigue ocultando `missing`.
+
+- **low — El panel propio dibuja una semanal desconocida como medida.** [src/panel.ts:511](/home/aitor/Desarrollo/_wt/switcher-semanal-team/src/panel.ts:511). Escenario reproducido: Team con **5 h al 40 %, Fable al 85 %, sin `weekly_all` y con `five_hour.locked_reason: "abuse"`**. El parser devuelve semanal `100 %, missing: true`, pero sin `unknown` porque existe un bloqueo explícito. El panel muestra una barra roja «Semana 100 %» y afirma «Ha gastado el 100 % de la semana». Ese porcentaje no se midió. La cuenta correctamente sigue agotada por el bloqueo; el defecto es la explicación visual. Hay que excluir `missing` también de la barra y de `weekOut`. El test de respuesta incompleta no cubre esta combinación con bloqueo.
+
+Pasaron **288 tests**, **22 escenarios adicionales** y el typecheck. No encontré otros hallazgos en el diff completo. `moveAhead` quedó revisado estáticamente: su test no pudo ejecutarse porque el host necesita crear temporales y el entorno es de solo lectura.
+
+VEREDICTO: 0 high, 0 medium, 1 low

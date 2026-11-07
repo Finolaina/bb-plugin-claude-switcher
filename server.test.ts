@@ -5919,6 +5919,22 @@ function teamPayload(session: number, fable: number): Payload {
   };
 }
 
+// Astra r2 low (2026-11-07): an answer with no weekly_all but a lock is
+// whole, its weekly unknown (`missing`). The views get that mark, so the
+// panel draws no week nobody measured.
+it("hands the views a weekly unknown under a lock with its missing mark (Astra r2 low)", async () => {
+  const locked = teamPayload(40, 85);
+  const h = await host({
+    main: () => Response.json(payload(5, 10, 12)),
+    work: () => Response.json({ ...locked, five_hour: { locked_reason: "abuse" }, seven_day: { locked_reason: null } }),
+  });
+  dispose = () => h.harness.dispose();
+  const state = (await h.harness.behavior.callRpc("accounts_refresh", null)) as State;
+  const work = state.accounts.find((a) => a.name === "work")!;
+  expect(work.usage).toMatchObject({ blocked: true, weekly: { usedPercent: 100, resetsAt: null, missing: true } });
+  expect(work.usage?.unknown).toBeUndefined();
+});
+
 describe("moving a project ahead of the limit for a thread in another model", () => {
   // The project's account (main) is a Team seat whose session is nearly
   // full; work is a Team seat with room; spare is a Max account that still

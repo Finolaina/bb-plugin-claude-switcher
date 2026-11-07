@@ -379,6 +379,11 @@ const windowSchema = z.object({
   resetsAt: z.number().nullable(),
   /** The provider reported no such window: a Team seat's general weekly. */
   absent: z.literal(true).optional(),
+  /**
+   * The answer lacked it (incomplete, or whole only for a lock): 100 % that
+   * nobody measured. The panel draws no such week (Astra r2 low).
+   */
+  missing: z.literal(true).optional(),
 });
 const accountStateSchema = z.object({
   name: z.string(),

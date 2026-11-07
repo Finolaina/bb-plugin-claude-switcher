@@ -161,7 +161,7 @@ export function whenLong(
   return `${lang === "es" ? "el" : "on"} ${name} ${target.day}, ${target.time}`;
 }
 
-type Window = { usedPercent: number; resetsAt: number | null; absent?: true };
+type Window = { usedPercent: number; resetsAt: number | null; absent?: true; missing?: true };
 
 /** An account as the plugin's state carries it (State["accounts"][number]). */
 export interface PanelAccount {
@@ -389,7 +389,10 @@ export function accountRow(
   // reading has one, stops it too (Aitor, 2026-11-07, team4: see the bars);
   // one its reading lacks is absent, at 0 %, and stops nothing.
   const main = !whole ? null : team ? usage.session : usage.weekly;
-  const weekOut = whole && team && usedOf(usage.weekly, now) >= 100;
+  // Never by a week nobody measured: an answer with no weekly_all but a
+  // lock is whole, its week `missing` at 100 % (Astra r2 low).
+  const weekOut =
+    whole && team && usage.weekly.missing !== true && usedOf(usage.weekly, now) >= 100;
   const limits = !whole
     ? []
     : [
@@ -508,7 +511,8 @@ export function accountRow(
         // 2026-11-02 («never on a Team seat») held while Team seats reported
         // no week. No day's budget on it: the panel holds no Team seat back
         // by its pace (weekUsed is 100 there).
-        ...(usage.weekly.absent === true
+        // Nor a week nobody measured (`missing`, see weekOut), on any plan.
+        ...(usage.weekly.absent === true || usage.weekly.missing === true
           ? []
           : [
               barOf(

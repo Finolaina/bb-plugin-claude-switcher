@@ -22,7 +22,15 @@ project uses [Semantic Versioning](https://semver.org/).
   del hilo dicen la semana («Semana 100 % · vuelve lun 17:00») en vez de sus
   hilos. Sin parte del día en esa barra: el panel no frena ninguna Team por
   su ritmo. Una Team cuya lectura no trae semanal se ve como antes, y las
-  Ultra y Max no cambian.
+  Ultra y Max no cambian. Astra r2 (low,
+  `docs/semanal-team-2026-11-07/astra-r2.txt`): una respuesta sin
+  `weekly_all` pero con un bloqueo explícito (`locked_reason`) se da por
+  completa y deja la semanal desconocida (`missing`, al 100 %); el panel
+  pintaba «Semana 100 %» sin que nadie la midiera. Ahora no dibuja esa
+  semana en ningún plan ni da una Team por agotada por ella: sigue agotada
+  por el bloqueo, que es lo que dice. Para eso el estado que reciben las
+  vistas lleva ya la marca `missing` de cada ventana: su esquema la quitaba,
+  y el panel nunca la habría visto (lo prueba un test del servidor).
 - **El panel de uso de bb también recibe la semanal de una Team** cuando su
   lectura la midió, con reinicio o sin él (mismo patrón, en
   `src/usage-source.ts`: la escondía por la misma regla del 2026-11-02; es el
