@@ -78,6 +78,9 @@ Revisión (Codex r1: 1 high y 4 medium, `docs/reparto-por-hueco-2026-11-07/codex
   sesión) se suelta en la Ultra con hueco en el siguiente refresco: la espera
   adelantada (`moveUpWait`) elige con las mismas opciones que cualquier
   movimiento, B5 incluido (high 1).
+- Un solo descanso entre movimientos de un proyecto con hilos trabajando,
+  lo haga la regla que lo haga: tras moverse por hueco, `crowded` tampoco lo
+  mueve dentro de `stuckMoveMinutes` (medium 3).
 
 ## [0.2.47] - 2026-11-06
 

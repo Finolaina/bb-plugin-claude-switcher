@@ -1265,8 +1265,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const ahead = queue.findIndex((q) => q.threadId === thread.id);
     if (seats.free(key) > (ahead === -1 ? queue.length : ahead)) return null;
     if (!projectSeated(thread.projectId, thread.id)) return null;
-    const last = crowdedMoves.get(thread.projectId)?.at;
-    if (last !== undefined && now - last <= limit) return null;
+    // One rest between moves, whichever rule made the last one: a seat or
+    // room (Codex r1 medium 3).
+    if (movedRecently(thread.projectId, now)) return null;
     const wanted = projectWants(thread, key);
     const capacity = seats.snapshot([key])[key]!.capacity;
     const since = seats.waitingSince(thread.id);

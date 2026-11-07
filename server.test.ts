@@ -21313,6 +21313,38 @@ describe("reparto por hueco 2026-11-07", () => {
       expect(await where(h)).toBe("work");
     });
 
+    // Codex r1 medium 3: one rest between moves, whichever rule made the
+    // last one. Capacity 1, a at work on main (room -13.5), b moves the
+    // project for room to spare (46) and starts; c would wait for spare's seat
+    // with siblings at work: it waits, rather than move it again to work (35).
+    it("a move for room starts the same rest as a move for a seat (Codex r1 medium 3)", async () => {
+      let clock = NOW;
+      let mainWeekly = 40; // room 36.5 while a starts
+      const h = await host(
+        {
+          main: () => Response.json(payload(5, mainWeekly, 53)),
+          spare: () => Response.json(payload(5, 10, 12)),
+          work: () => Response.json(payload(5, 30, 30)),
+        },
+        { clock: () => clock, settings: { preferredModel: "Fable", seatsMax: 1, stuckMoveMinutes: 10 } },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "a", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      await active(h, "a");
+      mainWeekly = 90;
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "b", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      await active(h, "b");
+      expect(await where(h)).toBe("spare");
+      expect((await dispatch(h, "c", "proj-1", FABLE_ID)).action).toBe("wait");
+      expect(await where(h)).toBe("spare");
+      clock = NOW + 10 * 60_000 + 1;
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect(await dispatch(h, "c", "proj-1", FABLE_ID)).toEqual({ action: "proceed" });
+      expect(await where(h)).toBe("work");
+    });
+
     it("an Opus turn is not this rule's", async () => {
       const h = await start(() => 86);
       teamLogin(h, "work");
