@@ -23,6 +23,10 @@ project uses [Semantic Versioning](https://semver.org/).
   hilos. Sin parte del día en esa barra: el panel no frena ninguna Team por
   su ritmo. Una Team cuya lectura no trae semanal se ve como antes, y las
   Ultra y Max no cambian.
+- **El panel de uso de bb también recibe la semanal de una Team** cuando su
+  lectura la trae con su reinicio (mismo patrón, en `src/usage-source.ts`:
+  la escondía por la misma regla del 2026-11-02). Una lectura incompleta,
+  sin la marca de ausente ni reinicio, sigue sin semanal (Codex BARS-001).
 
 ## [0.2.48] - 2026-11-07
 

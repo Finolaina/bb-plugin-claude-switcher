@@ -81,9 +81,13 @@ export function toMeasurement(
       ...(session.absent === true
         ? []
         : [window("five-hour", "session", "Current session", session, null)]),
-      // None for a Team seat: it has no general weekly (Aitor, 2026-11-02),
-      // also when the reading lacks the absent mark (Codex BARS-001).
-      ...(info.plan === "team" || weekly.absent === true
+      // On a Team seat only with a reset in its reading: one without its
+      // weekly is absent, and an incomplete one (no absent mark, no reset)
+      // shows none (Codex BARS-001). Until 2026-11-07 none at all, «it has no
+      // general weekly» (Aitor, 2026-11-02); it has since 0.2.39, and team4's
+      // at 100 % stopped Fable at 85 % (Aitor, 2026-11-07: «no entiendo por
+      // qué pone agotada si tiene fable»).
+      ...((info.plan === "team" && weekly.resetsAt === null) || weekly.absent === true
         ? []
         : [window("weekly", "weekly", "Weekly limit", weekly, null)]),
       ...Object.entries(models).map(([model, w]) =>

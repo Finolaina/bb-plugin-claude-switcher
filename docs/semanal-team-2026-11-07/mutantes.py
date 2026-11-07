@@ -15,6 +15,7 @@ REPO = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=Tru
 SALIDA = os.path.join(REPO, "docs/semanal-team-2026-11-07/mutantes.salida.txt")
 
 PA, PAT = "src/panel.ts", "src/panel.test.ts"
+US, UST = "src/usage-source.ts", "src/usage-source.test.ts"
 TEAM4 = "team4, 2026-11-07"
 # (camino, mutante, fichero, viejo, nuevo, ficheros de test, filtro)
 M = [
@@ -35,6 +36,12 @@ M = [
     ("panel", "parte del día en la semana de una Team", PA,
      "  const weekUsed = whole && !team ? usedOf(usage.weekly, now) : 100;",
      "  const weekUsed = whole ? usedOf(usage.weekly, now) : 100;", PAT, TEAM4),
+    ("panel de bb", "ninguna semanal en una Team", US,
+     '((info.plan === "team" && weekly.resetsAt === null) || weekly.absent === true',
+     '(info.plan === "team" || weekly.absent === true', UST, TEAM4),
+    ("panel de bb", "la semanal incompleta de una Team se enseña", US,
+     '((info.plan === "team" && weekly.resetsAt === null) || weekly.absent === true',
+     '(weekly.absent === true', UST, "BARS-001"),
 ]
 
 

@@ -143,6 +143,31 @@ describe("provider-usage source mapping", () => {
     ).toEqual(["session"]);
   });
 
+  // Aitor, 2026-11-07: «no entiendo por qué pone agotada si tiene fable»:
+  // team4 read its general weekly at 100 % till Monday 17:00 (a Team seat
+  // reports one since 0.2.39). bb's panel gets that window too.
+  it("gives bb's panel a Team seat's weekly window when its reading has one with its reset (team4, 2026-11-07)", () => {
+    const measurement = toMeasurement(
+      { ...ACCOUNT, name: "team4", kind: "team" },
+      {
+        observedAt: NOW,
+        problem: null,
+        login: "yes",
+        usage: {
+          blocked: false,
+          session: { usedPercent: 0, resetsAt: null },
+          weekly: { usedPercent: 100, resetsAt: NOW + 40 * 3_600_000 },
+          models: { Fable: { usedPercent: 85, resetsAt: NOW + 40 * 3_600_000 } },
+        },
+      },
+    );
+    expect(
+      measurement.usage.status === "ok"
+        ? measurement.usage.windows.map((w) => w.id)
+        : [],
+    ).toEqual(["session", "weekly", "weekly:Fable"]);
+  });
+
   it("reports no login, a failed collection and a never-observed account as usage states", () => {
     const base = {
       accountEmail: "work@example.com",
