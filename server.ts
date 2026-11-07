@@ -5495,9 +5495,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // first sending it back): a second move in a row. Held, and placed again
     // on a fresh read (Codex/Astra ASIENTOS-R3-001/R3-002/R4-001/R5-001;
     // every move of placeTurn since Astra r3 medium 4).
-    // ponytail: moves made outside placeTurn (moveAhead, a refresh) do not
-    // look at it (Astra ASIENTOS-R6-001; needs switchAheadPercent on); the
-    // way up is to check it where every automatic move is written.
+    // The failure's judgment, the refresh's rescue and moveUpWait look at it
+    // too (Astra r8 medium 2).
+    // ponytail: moveAhead and rebalance do not look at it (Astra
+    // ASIENTOS-R6-001; moveAhead needs switchAheadPercent on, rebalance is
+    // by hand and skips projects with threads working); the way up is to
+    // check it where every automatic move is written.
     if (decision.account !== fromName && moving(projectId)) {
       heldForMove.add(projectId);
       turn.held = {

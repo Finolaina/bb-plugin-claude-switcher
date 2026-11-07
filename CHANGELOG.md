@@ -249,9 +249,18 @@ Revisión (Astra r8: 0 high y 2 medium, `docs/reparto-por-hueco-2026-11-07/astra
   que el movimiento quede registrado y coloca el proyecto entonces: B y luego
   la Team, sin vuelta atrás (medium 2). El test BM-INSPECT-002 esperaba que
   el juicio escribiera encima de una vuelta a casa sin registrar; ahora
-  espera el reintento y que su despacho lleve el Opus a la Team. Límite: la espera adelantada, el
-  rescate, el cambio anticipado y el reparto entre Ultra siguen sin mirar el
-  atado.
+  espera el reintento y que su despacho lleve el Opus a la Team.
+- El mismo freno en los otros dos caminos que escriben sin pasar por la
+  colocación (medium 2, caminos hermanos). El rescate de cada refresco no
+  saca de su cuenta un proyecto mientras se escribe otro movimiento suyo: lo
+  vuelve a mirar el refresco siguiente (antes, con la variable del despacho
+  aún sin escribir, los dos escribían la misma cuenta y quedaban dos
+  movimientos). La espera adelantada de un reintento tampoco mueve el
+  proyecto entonces: la pasada siguiente suelta la espera en la cuenta a la
+  que llegó (antes, dos movimientos a la misma Team). Límite: el cambio
+  anticipado (`switchAheadPercent` y `switchAheadOtherPercent`, a 0 por
+  defecto) y el reparto entre Ultra (`rebalance`, a mano y sin tocar
+  proyectos con hilos trabajando) siguen sin mirar el atado.
 
 ## [0.2.47] - 2026-11-06
 
