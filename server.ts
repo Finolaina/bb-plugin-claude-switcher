@@ -2860,13 +2860,25 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function maxReadAgeMs(): number {
     return 2 * Math.max(1, current.refreshMinutes) * 60_000;
   }
+  /** The account's latest query failed, or its read is older than two refreshes (see AccountUsage.stale). */
+  function readStale(name: string): boolean {
+    const m = collector.get(name);
+    return (
+      m === undefined ||
+      m.problem !== null ||
+      m.observedAt === null ||
+      deps.now() - m.observedAt > maxReadAgeMs()
+    );
+  }
 
   /** Measurements recent enough to decide on (see maxReadAgeMs). */
   function measuredAccounts(model = current.preferredModel) {
     // A refusing account is out, whatever its numbers say; so is one whose
     // answer, incomplete, still says it is full.
-    return collector.usable(maxReadAgeMs(), model).map((measured) => {
-      const login = accounts.find((account) => account.name === measured.name);
+    return collector.usable(maxReadAgeMs(), model).map((raw) => {
+      const login = accounts.find((account) => account.name === raw.name);
+      // Not fresh: no room is read from it (Codex r1 medium 4).
+      const measured = readStale(raw.name) ? { ...raw, stale: true as const } : raw;
       const a =
         login !== undefined && planOf(login, measured).plan === "team"
           ? { ...measured, team: true as const }
@@ -7436,7 +7448,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         const usage =
           m?.usage === null || m?.usage === undefined
             ? null
-            : settle({ ...m.usage, name: account.name }, now);
+            : settle(
+                {
+                  ...m.usage,
+                  name: account.name,
+                  // huecoOpus only from a fresh read (Codex r1 medium 4).
+                  ...(readStale(account.name) ? { stale: true as const } : {}),
+                },
+                now,
+              );
         const unconfirmed =
           usage !== null && !trusted.has(account.name) && m?.observedAt != null;
         // The same per model: a window out at the last good read, its reset

@@ -21509,10 +21509,14 @@ describe("reparto por hueco 2026-11-07", () => {
     it("held past maximumWaitHours, it takes the Ultra with the most room whatever it is (main at room 10)", async () => {
       const { h, at } = await start(() => payload(5, 85, 90), { maximumWaitHours: 1 });
       expect((await dispatch(h, "b", "proj-1", OPUS)).action).toBe("wait");
+      // Read again each time, as the refresh does: a read older than two
+      // refreshes gives no room (Codex r1 medium 4).
       at(59 * MINUTE);
+      await h.harness.behavior.callRpc("accounts_refresh", null);
       expect((await dispatch(h, "b", "proj-1", OPUS)).action).toBe("wait");
       expect(await where(h)).toBe("spare");
       at(60 * MINUTE);
+      await h.harness.behavior.callRpc("accounts_refresh", null);
       expect(await dispatch(h, "b", "proj-1", OPUS)).toEqual({ action: "proceed" });
       expect(await where(h)).toBe("main");
     });
@@ -21522,6 +21526,7 @@ describe("reparto por hueco 2026-11-07", () => {
         const { h, at } = await start(() => payload(5, 85, 90), settings);
         expect((await dispatch(h, "b", "proj-1", OPUS)).action).toBe("wait");
         at(7 * 60 * MINUTE);
+        await h.harness.behavior.callRpc("accounts_refresh", null);
         expect((await dispatch(h, "b", "proj-1", OPUS)).action).toBe("wait");
         expect(await where(h)).toBe("spare");
         h.harness.dispose();
@@ -21598,6 +21603,36 @@ describe("reparto por hueco 2026-11-07", () => {
         expect(h.retries).toEqual([]);
         expect(h.queued.map((r) => r.id)).toEqual(["r1"]);
       });
+    });
+
+    // Codex r1 medium 4: main read at 10/12 (room 46), then every query
+    // answers 503 for 31 min (refreshMinutes 5): the old read gives no room.
+    it("D8: with the usage endpoint down 31 min after a good read, main gives no room (Codex r1 medium 4)", async () => {
+      let clock = NOW;
+      let down = false;
+      const answer = (p: Payload) => () => (down ? new Response("down", { status: 503 }) : Response.json(p));
+      const h = await host(
+        { main: answer(payload(5, 10, 12)), spare: answer(payload(0, 2, 0)), work: answer(payload(0, 2, 0)) },
+        {
+          clock: () => clock,
+          settings: { preferredModel: "Fable", seatsTeam: 1, seatsMax: 4, opusOverflowRoom: 15, refreshMinutes: 5 },
+          presetEnv: { "proj-1": on("spare"), "proj-2": on("spare"), "proj-3": on("work") },
+        },
+      );
+      dispose = () => h.harness.dispose();
+      teamLogin(h, "spare", "work");
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect((await dispatch(h, "o2", "proj-2", OPUS)).action).toBe("proceed");
+      await active(h, "o2", "proj-2");
+      expect((await dispatch(h, "o3", "proj-3", OPUS)).action).toBe("proceed");
+      await active(h, "o3", "proj-3");
+      down = true;
+      clock = NOW + 31 * 60_000;
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      expect((await dispatch(h, "b", "proj-1", OPUS)).action).toBe("wait");
+      expect(await where(h)).toBe("spare");
+      const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+      expect(report.cuentas.find((c: { nombre: string }) => c.nombre === "main")).toMatchObject({ huecoOpus: null, fablePerdida: null });
     });
 
     it("D8: with main not read whole it never takes Opus", async () => {

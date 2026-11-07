@@ -40,6 +40,13 @@ export interface AccountUsage {
    * (measuredAccounts).
    */
   team?: true;
+  /**
+   * The latest query of the account failed, or its read is older than two
+   * refreshes: its numbers still let it run as before, but give no room
+   * (opusRoom), for its quota may have moved elsewhere since (Codex r1
+   * medium 4). Set where the reads are known (measuredAccounts).
+   */
+  stale?: true;
 }
 
 export interface ChoiceOptions {
@@ -285,8 +292,8 @@ export function overflowsByRoom(
  * that much left to spend of the reserved model times `share`, lost at the
  * reset. `share` is the weekly the reserved model spends per point of its
  * own window (measured 0.45-0.6 per account, ±40 %, reparto-fable PLAN §0).
- * Null for a Team seat, an incomplete read, no weekly reported, or no window
- * of the reserved model: nothing to weigh.
+ * Null for a Team seat, an incomplete read, a read not fresh (`stale`), no
+ * weekly reported, or no window of the reserved model: nothing to weigh.
  */
 export function opusRoom(
   account: AccountUsage,
@@ -296,6 +303,7 @@ export function opusRoom(
   if (
     account.team === true ||
     account.unknown === true ||
+    account.stale === true ||
     account.weekly.absent === true
   )
     return null;

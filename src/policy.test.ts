@@ -897,6 +897,10 @@ describe("opusRoom: the general weekly left beyond what Fable needs (0.2.48)", (
     expect(opusRoom(ultra(10, 12, { models: {} }), "Fable", 0.5)).toBeNull();
     expect(opusRoom(ultra(10, 12), "", 0.5)).toBeNull();
   });
+
+  it("null for a read that is not fresh (Codex r1 medium 4)", () => {
+    expect(opusRoom(ultra(10, 12, { stale: true }), "Fable", 0.5)).toBeNull();
+  });
 });
 
 // PLAN §B2 (reparto-fable, 2026-11-07): Fable goes where the general weekly
