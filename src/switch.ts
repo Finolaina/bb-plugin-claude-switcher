@@ -589,11 +589,11 @@ export interface PlacementInput {
   /** See ChoiceOptions.noTeamTakes. */
   noTeamTakes?: (model: string) => boolean;
   /**
-   * As SwitchInput.limitedUntil: a marked account other than the current
-   * one is no destination, and is waited for no sooner than its mark ends
-   * (reserveWait). The retry a switch sent away is placed again before it
-   * starts, and went back to the Team seat that had just failed (Astra r5
-   * medium 1).
+   * As SwitchInput.limitedUntil: a marked account is no destination, and is
+   * waited for no sooner than its mark ends (reserveWait). The retry a switch
+   * sent away is placed again before it starts, and went back to the Team
+   * seat that had just failed (Astra r5 medium 1). The current account
+   * marked runs nothing either, read or not (Astra r6, r7).
    */
   limitedUntil?: (name: string) => number | null;
   /**
@@ -809,7 +809,7 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   const pinHolds = input.pinned === true && !holdsForReserve(options);
   // A current account marked by a 429 does not run the turn whatever its
   // read says, or with nothing read (Astra r6, r7): the read lags the 429.
-  const currentMarked = (input.limitedUntil?.(input.currentAccount) ?? null) !== null;
+  const currentMarked = markedOut(input, input.currentAccount);
   if (!loggedOut && !currentMarked && (current === undefined || current.unknown === true)) {
     if (
       pinHolds ||
@@ -975,12 +975,12 @@ function destinationTeamSeats(input: PlacementInput): AccountUsage[] {
   return unreadTeamSeats(input).filter((a) => !markedOut(input, a.name));
 }
 
-/** `name` is not the current account and a mark keeps it out (see PlacementInput.limitedUntil). */
-function markedOut(
-  input: Pick<PlacementInput, "currentAccount" | "limitedUntil">,
-  name: string,
-): boolean {
-  return name !== input.currentAccount && (input.limitedUntil?.(name) ?? null) !== null;
+/**
+ * A mark keeps `name` out (see PlacementInput.limitedUntil). The current
+ * account too: marked, it runs nothing either (Astra r6, r7).
+ */
+function markedOut(input: Pick<PlacementInput, "limitedUntil">, name: string): boolean {
+  return (input.limitedUntil?.(name) ?? null) !== null;
 }
 
 export function unreadTeamSeats(
