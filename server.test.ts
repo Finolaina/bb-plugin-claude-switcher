@@ -23364,6 +23364,40 @@ describe("a turn that failed for want of a session on its machine (2026-11-10)",
     expect(moved(h)).toEqual([["proj-1", ownNote("work")]]);
   });
 
+  it("judges a failure for want of a session at its fifth attempt and past it too (code-reviewer r1, high)", async () => {
+    for (const attemptNumber of [5, 6]) {
+      const h = await host(ROOM, {
+        ...MACHINES,
+        threadEvents: { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) },
+      });
+      await h.harness.behavior.emitThreadEvent("turn.failed", lost({ attemptNumber }));
+      await settled();
+      expect(moved(h), `attempt ${attemptNumber}`).toEqual([["proj-1", ownNote("work")]]);
+      const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+      expect(report.sinSesion.map((m: { cuenta: string }) => m.cuenta)).toEqual(["main"]);
+      h.harness.dispose();
+    }
+  });
+
+  it("a thread left in error past its fifth attempt is retried once where the project is, and that retry's failure moves it (code-reviewer r1, high)", async () => {
+    const log = { "thread-1": lostLog("thread-1", "creq_1", EXPIRED) };
+    const h = await host(ROOM, {
+      ...MACHINES,
+      threads: { "thread-1": { status: "error", environmentId: "env-1" } },
+      threadEvents: log,
+    });
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.retries.map((r) => r.reason)).toEqual(["Retrying on account main (Opus): it has room now"]);
+    log["thread-1"] = lostLog("thread-1", "creq_2", EXPIRED, 5);
+    await h.harness.behavior.emitThreadEvent("turn.failed", lost({ requestId: "creq_2", attemptNumber: 6 }));
+    await settled();
+    expect(moved(h)).toEqual([["proj-1", ownNote("work")]]);
+    // Left in error again: retried on work, where the project went, not on main.
+    await onePass(h);
+    expect(h.retries.map((r) => r.reason).filter((r) => /on account main/.test(r))).toHaveLength(1);
+  });
+
   it("counts the turn among the stuck threads of history, and health shows the mark of each account and machine", async () => {
     const h = await lostOnMac();
     const history = (await h.harness.behavior.runCli(["history", "--dias", "1"])).stdout;

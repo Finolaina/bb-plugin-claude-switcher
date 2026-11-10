@@ -7122,9 +7122,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // Pure guards first: another provider's limit must not query every account.
     const declined = declineReason(event);
     // bb announces a turn refused for want of a session with no errorInfo:
-    // its text in bb's log tells (sin-login 2026-11-10).
+    // its text in bb's log tells (sin-login 2026-11-10). Whatever the
+    // attempt, as a refusal (see declineReason): its retries in the same
+    // place spend them all, and the mark must be set (code-reviewer r1, high).
     const mayBeLost =
-      declined === "not-rate-limit" &&
+      (declined === "not-rate-limit" || declined === "attempts-exhausted") &&
       (event.errorInfo === null || event.errorInfo.category === "unknown");
     if (declined !== null && !mayBeLost) {
       bb.log.debug(`thread ${event.threadId}: ignored (${declined})`);
