@@ -1,4 +1,4 @@
-HEAD 27195018a9b2d7a3c5dedd1d62915d54baaed111
+HEAD db12d5832c9904fb0797a3cf5b6f435b3c0ce94a
 MUERE      D1 texto · sin la detección del texto (nunca casa) · src/switch.test.ts 'is told by its text' · Tests  1 failed | 159 skipped (160)
 MUERE      D1 texto · sin la detección del texto (servidor: el fallo se ignora) · server.test.ts 'moves the project off the account and retries the turn at once' · Tests  1 failed | 895 skipped (896)
 MUERE      D1 texto · 401 sin límite de palabra (casa 4010) · src/switch.test.ts 'is not a limit, a crash nor any other text' · Tests  1 failed | 159 skipped (160)
