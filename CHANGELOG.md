@@ -34,6 +34,11 @@ project uses [Semantic Versioning](https://semver.org/).
   marca la quita un turno bueno de la cuenta en cualquier máquina; el motivo
   de un movimiento y «ninguna Team la toma» miran solo las máquinas del
   proyecto.
+- Revisión code-reviewer r2: un «Not logged in» que llega mientras se lee
+  dónde arrancó el turno marca la cuenta de la plaza que reservó el despacho
+  (antes no marcaba nada y el rescate volvía a esa cuenta en cada refresco);
+  el texto ya no casa con «not logged into» de gh ni con un «cannot be
+  renewed» suelto.
 
 ### Añadido
 
