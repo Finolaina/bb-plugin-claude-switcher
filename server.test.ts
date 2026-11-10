@@ -23453,6 +23453,74 @@ describe("a turn that failed for want of a session on its machine (2026-11-10)",
     expect(await marks()).toEqual([]);
   });
 
+  /** Only main can run: the turns start there, marked or not. */
+  const ONLY_MAIN = {
+    main: () => Response.json(payload(1, 1)),
+    spare: () => Response.json(payload(100, 100)),
+    work: () => Response.json(payload(100, 100)),
+  };
+  const marksOf = async (h: Awaited<ReturnType<typeof host>>) =>
+    JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout).sinSesion.map(
+      (m: { cuenta: string; maquina: string }) => `${m.cuenta}@${m.maquina}`,
+    );
+  /** A turn of `id` that starts on the project's account and ends well. */
+  const goodTurn = async (h: Awaited<ReturnType<typeof host>>, id: string, projectId: string, environmentId: string) => {
+    const t = thread({ id, projectId, environmentId });
+    await h.harness.behavior.emitThreadEvent("thread.active", { thread: t });
+    await settled();
+    return () => h.harness.behavior.emitThreadEvent("thread.idle", { thread: t, lastAssistantText: null });
+  };
+
+  it("does not take the session as back for a turn that started before the failure (code-reviewer r1, low 2)", async () => {
+    let clock = NOW;
+    const h = await host(ONLY_MAIN, {
+      ...MACHINES,
+      clock: () => clock,
+      threadEvents: { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) },
+    });
+    dispose = () => h.harness.dispose();
+    expect(await before(h, "thr-2", "proj-2")).toEqual({ action: "proceed" });
+    const ends = await goodTurn(h, "thr-2", "proj-2", "env-2");
+    clock = NOW + 1;
+    await h.harness.behavior.emitThreadEvent("turn.failed", lost());
+    await settled();
+    expect(await marksOf(h)).toEqual(["main@host-mac"]);
+    // Started 1 ms before main failed there: its credentials were read before.
+    await ends();
+    expect(await marksOf(h)).toEqual(["main@host-mac"]);
+  });
+
+  it("reads the thread's machine again before marking the account on a machine unknown (code-reviewer r1, low 1)", async () => {
+    const h = await host(ROOM, {
+      ...MACHINES,
+      threadEvents: { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) },
+    });
+    dispose = () => h.harness.dispose();
+    let reads = 0;
+    h.harness.sdk.stub("environments.list", async ({ projectId }: { projectId: string }) => {
+      if (reads++ === 0) throw new Error("bb is busy");
+      return (MACHINES.environments?.[projectId] ?? []).map((e) => ({ projectId, status: "ready", ...e }));
+    });
+    await h.harness.behavior.emitThreadEvent("turn.failed", lost());
+    await settled();
+    expect(await marksOf(h)).toEqual(["main@host-mac"]);
+  });
+
+  it("takes the session on a machine unknown as back once a turn of the account ends well on any machine (code-reviewer r1, low 1)", async () => {
+    const h = await host(ONLY_MAIN, {
+      ...MACHINES,
+      threads: { "thread-1": { environmentId: null } },
+      threadEvents: { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", lost());
+    await settled();
+    expect(await marksOf(h)).toEqual(["main@"]);
+    expect(await before(h, "thr-3", "proj-3")).toEqual({ action: "proceed" });
+    await (await goodTurn(h, "thr-3", "proj-3", "env-3"))();
+    expect(await marksOf(h)).toEqual([]);
+  });
+
   it("lets a pick by hand of the account stand (it may have been logged in again), and its next failure for want of a session moves the project again", async () => {
     const log = { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) };
     const h = await lostOnMac({ threadEvents: log });

@@ -1826,17 +1826,24 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
     }
   }
-  /** `name` ran a turn well on `host`, or was picked by hand (no host: on every machine). */
-  function sessionBack(name: string, host?: string): void {
+  /**
+   * `name` ran a turn well, started `since`, on `host` (undefined: a
+   * machine not read), or was picked by hand (no turn: on every machine). A
+   * turn clears the marks set when it had already started, or later: its
+   * machine's, and the one on a machine unknown, which no other turn could
+   * (code-reviewer r1, lows 1 and 2).
+   */
+  function sessionBack(name: string, turn?: { host: string | undefined; since: number }): void {
     const marks = sessionLostAt.get(name);
     if (marks === undefined) return;
-    if (host === undefined) sessionLostAt.delete(name);
-    else {
-      if (!marks.delete(host)) return;
-      if (marks.size === 0) sessionLostAt.delete(name);
-    }
+    const gone: string[] = [];
+    for (const [host, at] of marks)
+      if (turn === undefined || ((host === "" || host === turn.host) && turn.since >= at)) gone.push(host);
+    if (gone.length === 0) return;
+    for (const host of gone) marks.delete(host);
+    if (marks.size === 0) sessionLostAt.delete(name);
     bb.log.info(
-      `account ${name}: its session is taken as back${host === undefined ? "" : ` on ${hostLabel(host)}`}`,
+      `account ${name}: its session is taken as back${turn === undefined ? "" : ` on ${gone.map(hostLabel).join(", ")}`}`,
     );
   }
   /**
@@ -5077,6 +5084,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   const startedOn = new Map<string, string | null>();
   /** The latest `thread.active` of each thread still reading its account. */
   const starting = new Map<string, number>();
+  /**
+   * When each thread's turn was announced: one that started before a
+   * session was lost read its credentials before, and its good end says
+   * nothing of the account there now (code-reviewer r1, low 2).
+   */
+  const startedTime = new Map<string, number>();
   let starts = 0;
   /**
    * The project's moves (`movesOf().epoch`) when each thread's message was
@@ -5092,6 +5105,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function forgetStart(threadId: string): void {
     startedOn.delete(threadId);
     starting.delete(threadId);
+    startedTime.delete(threadId);
     dispatchEpoch.delete(threadId);
   }
   /** Since when this plugin holds each thread's message: answered "wait", until it goes (see src/atascos.ts). */
@@ -5148,6 +5162,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     starting.set(thread.id, token);
     // Unknown until read: a failure meanwhile is nobody's (Codex IR15-002).
     startedOn.set(thread.id, null);
+    const startedAt = deps.now();
     const move = movesOf(thread.projectId);
     const busy = move.inFlight > 0;
     // Within DISPATCH_LIMIT_MS: a read that hangs leaves the turn to be
@@ -5203,18 +5218,23 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       bb.log.debug(
         `thread ${thread.id}: where its turn started is unknown (sent past the dispatch checkpoint, the project moved, or its account could not be read)`,
       );
-    if (account !== undefined) startedOn.set(thread.id, account);
+    if (account !== undefined) {
+      startedOn.set(thread.id, account);
+      startedTime.set(thread.id, startedAt);
+    }
   });
   bb.events.on("thread.idle", ({ thread }) => {
     // A turn that ended well where it started: the account has a session on
     // the thread's machine (sin-login 2026-11-10). Its machine as last read:
-    // unread, the mark stands till SESSION_LOST_MS.
+    // unread, only the mark on a machine unknown goes (code-reviewer r1,
+    // low 1), and the others stand till SESSION_LOST_MS.
     const ran = startedOn.get(thread.id);
+    const since = startedTime.get(thread.id);
     const host =
       thread.environmentId === null
         ? undefined
         : hostsRead.get(thread.projectId)?.byEnvironment.get(thread.environmentId);
-    if (typeof ran === "string" && host !== undefined) sessionBack(ran, host);
+    if (typeof ran === "string" && since !== undefined) sessionBack(ran, { host, since });
     // Its turn ended there: a later failure that no new `thread.active`
     // announces (a turn refused at the door) is the project's account's,
     // not a leftover of the account this turn ran on (code-reviewer r11).
@@ -7150,7 +7170,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         return;
       }
       failed = sessionLost(event);
-      const host = await threadHost(thread);
+      // Once more before a mark on a machine unknown, which keeps the
+      // account from every project (code-reviewer r1, low 1).
+      let host = await threadHost(thread);
+      if (host === "" && thread.environmentId !== null) host = await threadHost(thread);
       failedHost.set(event.threadId, host);
       await nameHost(host);
     }
