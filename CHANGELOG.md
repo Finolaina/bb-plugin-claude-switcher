@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.50] - 2026-11-10
+
+### Seguridad
+
+- zod 4.6.5 a 4.6.7 (runtime; aviso de Dependabot, arreglado en 4.6.6: las
+  cotas de tamano de arrays, sets y maps se comprueban antes de analizar los
+  elementos) y vite 8.3.2 a 8.3.7 (desarrollo, via vitest; 6 avisos).
+
+### Cambiado
+
+- Las pruebas de mutantes (`docs/*/mutantes.py`) se niegan a correr (codigo 3)
+  si `git status --porcelain` del repo no esta vacio, para no pisar cambios
+  sin guardar.
+
 ## [0.2.49] - 2026-11-07
 
 ### Corregido
