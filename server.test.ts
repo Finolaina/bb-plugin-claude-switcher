@@ -23496,6 +23496,25 @@ describe("a turn that failed for want of a session on its machine (2026-11-10)",
     expect((await h.harness.behavior.runCli(["history", "--dias", "1"])).stdout).toMatch(/Stuck threads: 1\n/);
   });
 
+  it("does not move a project to the account for a seat (crowded, the path of 2026-11-10 11:58)", async () => {
+    // «Movido a X antes del turno: el hilo iba a esperar plaza en Y (4/4)»:
+    // here spare is full with a sibling at work, and main, the best with a
+    // seat, has no session on the Mac.
+    const h = await lostOnMac(
+      { settings: { seatsMax: 1, stuckMoveMinutes: 10 }, presetEnv: { "proj-2": ownVar("spare") } },
+      MAIN_BEST,
+    );
+    expect((await before(h, "a", "proj-2")).action).toBe("proceed");
+    await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "a", projectId: "proj-2" }) });
+    expect(await before(h, "b", "proj-2")).toEqual({ action: "proceed" });
+    expect(moved(h)).toEqual([
+      ["proj-1", ownNote("work")],
+      ["proj-2", ownNote("work")],
+    ]);
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history[0]?.reason).toMatch(/^Movido a work antes del turno: el hilo iba a esperar plaza en spare/);
+  });
+
   it("moves the project off the account and retries the turn at once", async () => {
     const h = await host(ROOM, {
       threadEvents: { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) },
