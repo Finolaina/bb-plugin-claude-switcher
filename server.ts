@@ -5238,6 +5238,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     toldToStart.delete(thread.id);
     overdueTold.delete(thread.id);
     stuckSaid.delete(thread.id);
+    failedHost.delete(thread.id);
     // Forgotten in storage too, or the stored list only grows (Codex r8,
     // IR8-004).
     if (cancelled.delete(thread.id)) await storeCancelled(thread.id);
