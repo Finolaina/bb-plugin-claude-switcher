@@ -3362,6 +3362,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         // Any pick, the default account's too: it is the user's choice.
         pins.set(projectId, to?.name ?? current.defaultAccountName);
         storePins();
+        // Picked by hand, an account without a session is taken as logged
+        // in again, on every machine: nothing automatic holds the pick back,
+        // and a turn that fails there for want of a session marks it anew
+        // (sin-login 2026-11-10).
+        sessionBack(to?.name ?? current.defaultAccountName);
         movesOf(projectId).picks += 1;
         await markHandled(projectId);
         const fromName = from.account ?? current.defaultAccountName;

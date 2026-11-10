@@ -23255,7 +23255,7 @@ describe("a turn that failed for want of a session on its machine (2026-11-10)",
     const h = await host(usage, {
       ...MACHINES,
       ...options,
-      threadEvents: { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) },
+      threadEvents: options.threadEvents ?? { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) },
     });
     dispose = () => h.harness.dispose();
     await h.harness.behavior.emitThreadEvent("turn.failed", lost());
@@ -23417,6 +23417,26 @@ describe("a turn that failed for want of a session on its machine (2026-11-10)",
     expect(await marks()).toEqual(["main@host-mac"]);
     await turn("thr-2", "proj-2", "env-2");
     expect(await marks()).toEqual([]);
+  });
+
+  it("lets a pick by hand of the account stand (it may have been logged in again), and its next failure for want of a session moves the project again", async () => {
+    const log = { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) };
+    const h = await lostOnMac({ threadEvents: log });
+    const picked = await h.harness.behavior.runCli(["use", "Website", "default"]);
+    expect(picked.exitCode ?? 0).toBe(0);
+    expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-1"]);
+    expect(await before(h, "thread-1", "proj-1")).toEqual({ action: "proceed" });
+    // Not moved off by the placement before its turn: the pick stands.
+    expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-1"]);
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-1", projectId: "proj-1", environmentId: "env-1" }),
+    });
+    log["thread-1"] = lostLog("thread-1", "creq_7", NOT_LOGGED_IN, 10);
+    await h.harness.behavior.emitThreadEvent("turn.failed", lost({ requestId: "creq_7" }));
+    expect(moved(h)).toEqual([
+      ["proj-1", ownNote("work")],
+      ["proj-1", ownNote("work")],
+    ]);
   });
 
   it("moves the project off the account and retries the turn at once", async () => {
