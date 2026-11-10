@@ -19,10 +19,10 @@ SIN = "(sessionLostAt.size > 0 ? null : limitedUntil(name, model, projectId))"
 # (camino, mutante, fichero, viejo, nuevo, ficheros de test, filtro)
 M = [
     ("D1 texto", "sin la detección del texto (nunca casa)", "src/switch.ts",
-     "const SESSION_LOSS =\n  /not logged in|", "const SESSION_LOSS =\n  /(?!)|",
+     "const SESSION_LOSS =\n  /not logged in|", "const SESSION_LOSS =\n  /(?!)/i || /not logged in|",
      SW, "is told by its text"),
     ("D1 texto", "sin la detección del texto (servidor: el fallo se ignora)", "src/switch.ts",
-     "const SESSION_LOSS =\n  /not logged in|", "const SESSION_LOSS =\n  /(?!)|",
+     "const SESSION_LOSS =\n  /not logged in|", "const SESSION_LOSS =\n  /(?!)/i || /not logged in|",
      S, "moves the project off the account and retries the turn at once"),
     ("D1 texto", "401 sin límite de palabra (casa 4010)", "src/switch.ts",
      "|\\b401\\b|", "|401|",
@@ -62,8 +62,9 @@ M = [
      "      limitedUntil: (name: string) => sessionLostOn(name, projectId)?.until ?? null,\n", "",
      S, "placeProject"),
     ("C4 rescate", "el rescate del refresco no ve la cuenta sin sesión (stranded)", "server.ts",
-     "    // No session there on one of the project's machines (sin-login 2026-11-10).\n    const lost = sessionLostOn(name, projectId);\n    if (lost !== null) return `sin sesión en ${hostLabel(lost.host)}`;\n",
-     "",
+     "    // No session there on one of the project's machines (sin-login 2026-11-10).\n    const lost = sessionLostOn(name, projectId);\n    if (lost !== null) return `sin sesión en ${hostLabel(lost.host)}`;\n"
+     "    // A mark standing for the model: out whatever its read says, as in the\n    // placement (Astra r8 medium 1).\n    const marked = limitedUntil(name, model, projectId);",
+     "    // A mark standing for the model: out whatever its read says, as in the\n    // placement (Astra r8 medium 1).\n    const marked = (sessionLostAt.size > 0 ? null : limitedUntil(name, model, projectId));",
      S, "rescueStranded"),
     ("C4 rescate", "sin la marca en la colocación del rescate", "server.ts",
      "      // Nor to an account whose mark stands for the model (Astra r8 medium 1).\n      limitedUntil: (name: string) => limitedUntil(name, model, projectId),",

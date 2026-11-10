@@ -4882,7 +4882,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (lost !== null) return `sin sesión en ${hostLabel(lost.host)}`;
     // A mark standing for the model: out whatever its read says, as in the
     // placement (Astra r8 medium 1).
-    const marked = limitedUntil(name, model);
+    const marked = limitedUntil(name, model, projectId);
     if (marked !== null)
       return `answered ${model === "" ? "a turn" : model} with a usage limit until ${new Date(marked).toISOString().slice(0, 16).replace("T", " ")}`;
     const known = measuredAccounts(model).find((a) => a.name === name);
