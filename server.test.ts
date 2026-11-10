@@ -23364,6 +23364,20 @@ describe("a turn that failed for want of a session on its machine (2026-11-10)",
     expect(moved(h)).toEqual([["proj-1", ownNote("work")]]);
   });
 
+  it("counts the turn among the stuck threads of history, and health shows the mark of each account and machine", async () => {
+    const h = await lostOnMac();
+    const history = (await h.harness.behavior.runCli(["history", "--dias", "1"])).stdout;
+    expect(history).toMatch(/Stuck threads: 1\n/);
+    expect(history).toMatch(/STUCK: main sin sesión en the laptop: thread thread-1 \(Opus\)/);
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    expect(report.sinSesion).toEqual([
+      { cuenta: "main", maquina: "host-mac", nombreMaquina: "the laptop", hasta: "2026-09-29T18:00:00+02:00" },
+    ]);
+    expect((await h.harness.behavior.runCli(["health"])).stdout).toMatch(
+      /sin sesión: main en the laptop hasta 2026-09-29T18:00:00\+02:00/,
+    );
+  });
+
   it("moves the project off the account and retries the turn at once", async () => {
     const h = await host(ROOM, {
       threadEvents: { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) },

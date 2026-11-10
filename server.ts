@@ -1783,6 +1783,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (marks.size === 0) sessionLostAt.delete(name);
     return found;
   }
+  /** Every session lost still standing, per account and machine (see sessionLostAt), for health. */
+  function sessionMarks(): Array<{ account: string; host: string; hostName: string; until: number }> {
+    const now = deps.now();
+    return [...sessionLostAt].flatMap(([account, marks]) =>
+      [...marks]
+        .filter(([, at]) => now < at + SESSION_LOST_MS)
+        .map(([host, at]) => ({ account, host, hostName: hostLabel(host), until: at + SESSION_LOST_MS })),
+    );
+  }
   /** A machine by its name, for the texts; its id when bb did not name it. */
   function hostLabel(host: string): string {
     return host === "" ? "una máquina sin identificar" : (hostNames.get(host) ?? host);
@@ -7915,6 +7924,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return healthReport({
       atascos: await atascos(),
       esperandoTeam: await esperandoTeam(),
+      sinSesion: sessionMarks(),
       // huecoOpus and fablePerdida per Max or Ultra account (0.2.48).
       ...(current.preferredModel === ""
         ? {}

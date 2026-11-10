@@ -60,6 +60,13 @@ export interface HealthReport {
   atascos: Atasco[] | null;
   /** Opus and Sonnet turns this plugin holds for a Team seat, with the minutes (Aitor 2026-11-06); null when the queue could not be read. */
   esperandoTeam: EsperaTeam[] | null;
+  /**
+   * The accounts a turn failed on for want of a session, per machine, while
+   * their mark stands (0.2.51, Aitor 2026-11-10): no project with threads on
+   * that machine is placed there. `maquina` is bb's host id ("" when the
+   * thread's machine could not be told).
+   */
+  sinSesion: SinSesion[];
   cuentas: Array<{
     nombre: string;
     plan: "ultra" | "max" | "team" | "desconocido";
@@ -98,6 +105,14 @@ export interface HealthReport {
      */
     fablePerdida?: number | null;
   }>;
+}
+
+/** One account without a session on one machine (see HealthReport.sinSesion). */
+export interface SinSesion {
+  cuenta: string;
+  maquina: string;
+  nombreMaquina: string;
+  hasta: string;
 }
 
 /** "2026-11-01T18:00:00+01:00": ISO 8601 with the zone's offset at that time. */
@@ -153,6 +168,8 @@ export function healthReport(input: {
   atascos: Atasco[] | null;
   /** See HealthReport.esperandoTeam. */
   esperandoTeam: EsperaTeam[] | null;
+  /** See HealthReport.sinSesion; `until` in ms. */
+  sinSesion?: ReadonlyArray<{ account: string; host: string; hostName: string; until: number }>;
   accounts: HealthAccount[];
   /** The preferred model and the weekly it spends per point of its own window (reserveShare): adds huecoOpus and fablePerdida. */
   reserve?: { model: string; share: number };
@@ -164,6 +181,12 @@ export function healthReport(input: {
     freno: input.holdsBackground,
     atascos: input.atascos,
     esperandoTeam: input.esperandoTeam,
+    sinSesion: (input.sinSesion ?? []).map((m) => ({
+      cuenta: m.account,
+      maquina: m.host,
+      nombreMaquina: m.hostName,
+      hasta: isoInZone(m.until),
+    })),
     cuentas: input.accounts.map((a) => {
       const u = a.usage;
       const whole = u !== null && u.unknown !== true;
@@ -264,6 +287,7 @@ export function healthText(report: HealthReport): string {
     ...(report.esperandoTeam === null
       ? ["esperando Team: la cola no se pudo leer"]
       : report.esperandoTeam.map((e) => `esperando Team: ${e.hilo} (${e.modelo}) ${e.minutos} min`)),
+    ...report.sinSesion.map((m) => `sin sesión: ${m.cuenta} en ${m.nombreMaquina} hasta ${m.hasta}`),
     "",
   ].join("\n");
 }

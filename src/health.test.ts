@@ -77,7 +77,7 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
       medido: "2026-10-30T21:55:58+01:00",
       inicioDia: 9,
       freno: true,
-      atascos: [], esperandoTeam: [],
+      atascos: [], esperandoTeam: [], sinSesion: [],
       cuentas: [
         {
           nombre: "aitor",
