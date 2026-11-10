@@ -23251,8 +23251,8 @@ describe("a turn that failed for want of a session on its machine (2026-11-10)",
     for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
   };
   /** main lost its session on the Mac: thread-1's failure, judged. */
-  async function lostOnMac(options: HostOptions = {}) {
-    const h = await host(ROOM, {
+  async function lostOnMac(options: HostOptions = {}, usage: Record<string, () => Response> = ROOM) {
+    const h = await host(usage, {
       ...MACHINES,
       ...options,
       threadEvents: { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) },
@@ -23277,6 +23277,72 @@ describe("a turn that failed for want of a session on its machine (2026-11-10)",
     const h = await lostOnMac();
     await before(h, "thr-3", "proj-3");
     expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-1"]);
+  });
+
+  /** main measures best of all, so every choice would take it but for its mark. */
+  const MAIN_BEST = {
+    main: () => Response.json(payload(1, 1)),
+    spare: () => Response.json(payload(50, 60)),
+    work: () => Response.json(payload(40, 50)),
+  };
+  const ownVar = (account: string) => [
+    { name: ENV_VAR, note: ownNote(account), secret: true as const, value: null },
+  ];
+  /** One pass of the background refresh, to its end. */
+  async function onePass(h: Awaited<ReturnType<typeof host>>) {
+    const calls = h.usageCalls.length;
+    const run = h.harness.behavior.runService("usage-refresh");
+    await vi.waitFor(() => {
+      expect(h.usageCalls.length).toBeGreaterThanOrEqual(calls + 3);
+    });
+    run.controller.abort();
+    await run.done;
+    await settled();
+  }
+  const moved = (h: Awaited<ReturnType<typeof host>>) =>
+    h.envSet.map((e) => [e.projectId, e.note]);
+
+  it("places a new project with threads on that machine elsewhere (placeProject)", async () => {
+    const h = await lostOnMac({
+      ...{ ...MACHINES, environments: { ...MACHINES.environments, "proj-4": [{ id: "env-4", hostId: "host-mac", path: "/home/someone/fourth" }] } },
+      extraProjects: [{ id: "proj-3", name: "Third" }, { id: "proj-4", name: "Fourth" }],
+    }, MAIN_BEST);
+    await h.harness.behavior.emitThreadEvent("thread.created", {
+      thread: thread({ id: "thr-4", projectId: "proj-4" }),
+    });
+    expect(moved(h).at(-1)).toEqual(["proj-4", ownNote("work")]);
+  });
+
+  it("moves a project sitting on the account off it at the next refresh (rescueStranded), and leaves one on another machine", async () => {
+    const h = await lostOnMac({}, MAIN_BEST);
+    await onePass(h);
+    expect(moved(h)).toEqual([
+      ["proj-1", ownNote("work")],
+      ["proj-2", ownNote("work")],
+    ]);
+  });
+
+  it("does not move a project ahead of the limit to the account (moveAhead)", async () => {
+    let clock = NOW;
+    const h = await lostOnMac(
+      {
+        clock: () => clock,
+        settings: { switchAheadPercent: 55 },
+        presetEnv: { "proj-2": ownVar("spare") },
+      },
+      MAIN_BEST,
+    );
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + 5 * 60_000;
+    await before(h, "thr-2", "proj-2");
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "thr-2", projectId: "proj-2" }),
+      lastAssistantText: null,
+    });
+    expect(moved(h)).toEqual([
+      ["proj-1", ownNote("work")],
+      ["proj-2", ownNote("work")],
+    ]);
   });
 
   it("moves the project off the account and retries the turn at once", async () => {

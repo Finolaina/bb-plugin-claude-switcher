@@ -4206,6 +4206,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // Background work behind the accounts saved for the user (SPEC
       // 2026-10-30 §2).
       ...paceFilter(isBackground(thread)),
+      // Nor on an account with no session on one of its machines; a
+      // limit's mark is left to the placement before its turn, as before
+      // (sin-login 2026-11-10).
+      limitedUntil: (name: string) => sessionLostOn(name, projectId)?.until ?? null,
       now,
       currentLoggedOut: unconfirmed(fromName),
     });
@@ -5317,7 +5321,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       isNew: false,
       accounts: measured,
       preferredModel: model,
-      ...reserveFor(threadId, now),
+      ...reserveFor(threadId, now, projectId),
       // An account whose mark stands for the model is no destination (Astra
       // r5 medium 1). For every model, unlike decideSwitch, where a Fable
       // turn is judged on its numbers (see the judge).
@@ -5389,10 +5393,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * The best account other than `name` that can run `model` now, its seats
    * aside and without spending the reserve; null when none can.
    */
-  function otherThatRuns(name: string, model: string): string | null {
+  function otherThatRuns(name: string, model: string, projectId?: string): string | null {
     const now = deps.now();
     const options = { preferredModel: model, ...reserveOf() };
-    const measured = measuredAccounts(model);
+    // Nor one a session lost keeps from the project: its turn would wait in
+    // that queue for a move no placement makes (sin-login 2026-11-10).
+    const measured = measuredAccounts(model).filter(
+      (a) => projectId === undefined || sessionLostOn(a.name, projectId) === null,
+    );
     return (
       chooseAccount(
         measured.filter((a) => a.name !== name).map((a) => settle(a, now)),
@@ -5418,15 +5426,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * another account can: it waits and is placed again, rather than start
    * where it fails (a pick by hand that crossed its placement).
    */
-  function blockedOff(name: string, model: string): boolean {
+  function blockedOff(name: string, model: string, projectId?: string): boolean {
     const usage = measuredAccounts(model).find((a) => a.name === name);
     if (usage === undefined || usage.unknown === true) return false;
     const settled = settle(usage, deps.now());
     // A mark standing for the model: out whatever its read says, as in the
     // placement (Astra r8 medium 1).
-    if (limitedUntil(name, model) === null && isUsable(settled) && canRunModel(settled, model))
+    if (limitedUntil(name, model, projectId) === null && isUsable(settled) && canRunModel(settled, model))
       return false;
-    return otherThatRuns(name, model) !== null;
+    return otherThatRuns(name, model, projectId) !== null;
   }
   /**
    * With nothing measured of `name`, its login still says what it is: a Max
@@ -5466,7 +5474,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * as measured now or, unmeasured, as its login says.
    */
   /** `name` is a Team seat measured unable to run `model`, a model held off the reserve. */
-  function teamOut(name: string, model: string): boolean {
+  function teamOut(name: string, model: string, projectId?: string): boolean {
     if (!heldModel(model)) return false;
     const usage = measuredAccounts(model).find((a) => a.name === name);
     if (usage === undefined || usage.unknown === true || usage.team !== true)
@@ -5474,7 +5482,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const settled = settle(usage, deps.now());
     // A mark standing for the model: out whatever its read says, as in the
     // placement (Astra r8 medium 1).
-    return limitedUntil(name, model) !== null || !(isUsable(settled) && canRunModel(settled, model));
+    return limitedUntil(name, model, projectId) !== null || !(isUsable(settled) && canRunModel(settled, model));
   }
   /**
    * No Team seat, measured or known by its login, can take a turn in
@@ -5484,7 +5492,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * `ruledOut`: the account a turn just failed on, never one that takes it
    * whatever its read says (Codex r1 medium 5; see SwitchInput.noTeamTakes).
    */
-  function noTeamTakes(model: string, threadId?: string, ruledOut?: string | null): boolean {
+  function noTeamTakes(model: string, threadId?: string, ruledOut?: string | null, projectId?: string): boolean {
     const now = deps.now();
     const measured = measuredAccounts(model);
     const teams = [
@@ -5494,7 +5502,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       ...unreadTeamSeats({ accounts: measured, unreadTeams: unreadTeams(model), currentAccount: "", now }),
     ];
     return !teams.some((a) => {
-      if (a.name === ruledOut || limitedUntil(a.name, model) !== null) return false;
+      if (a.name === ruledOut || limitedUntil(a.name, model, projectId) !== null) return false;
       if (!isUsable(a) || !canRunModel(a, model)) return false;
       const key = seatKey(a.name);
       if (threadId !== undefined && seats.seatOf(threadId)?.account === key) return true;
@@ -5511,12 +5519,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * PLAN §B5: «esa espera respeta maximumWaitHours»). Off with
    * opusOverflowRoom at 100 or more, or maximumWaitHours 0.
    */
-  function reserveFor(threadId: string | undefined, now: number) {
+  function reserveFor(threadId: string | undefined, now: number, projectId?: string) {
     const base = reserveOf();
     if (threadId === undefined) return base;
     return {
       ...base,
-      noTeamTakes: (model: string) => noTeamTakes(model, threadId),
+      noTeamTakes: (model: string) => noTeamTakes(model, threadId, undefined, projectId),
       ...(overdue(threadId, now) ? { opusOverflowRoom: -Infinity } : {}),
     };
   }
@@ -5543,7 +5551,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return holdsForReserve({ preferredModel: model, ...reserveOf() });
   }
   function heldOff(name: string, model: string, projectId?: string, threadId?: string): boolean {
-    const options = { preferredModel: model, ...reserveFor(threadId, deps.now()) };
+    const options = { preferredModel: model, ...reserveFor(threadId, deps.now(), projectId) };
     // A pick by hand no longer lets such a turn spend the reserve (Aitor
     // 2026-11-06, «sí o sí»): `projectId` is kept for the callers.
     if (!holdsForReserve(options)) return false;
@@ -5682,7 +5690,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // to fail. With none able to run it, it starts: the failure is what
       // tells the user and applies the longest wait (revisión 2026-11-04).
       else if (decision.why === "current-blocked") {
-        const other = otherThatRuns(fromName, model);
+        const other = otherThatRuns(fromName, model, projectId);
         if (other !== null)
           turn.held = {
             sendAt: now + SEAT_RECHECK_MS,
@@ -6397,7 +6405,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         model !== null &&
         at !== null &&
         at.account !== null &&
-        teamOut(at.account, model)
+        teamOut(at.account, model, thread.projectId)
       ) {
         const reason = `Waiting for a Team seat that can run ${model}: the project is on ${at.account}, which ${whyOut(at.account, model, thread.projectId)}`;
         bb.log.info(`thread ${thread.id}: its message waits (${reason})`);
@@ -6408,7 +6416,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         model !== null &&
         at !== null &&
         at.account !== null &&
-        blockedOff(at.account, model)
+        blockedOff(at.account, model, thread.projectId)
       ) {
         const waited = blockedWaits.get(thread.id) ?? 0;
         if (waited < BLOCKED_WAITS) {
@@ -6874,11 +6882,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       accounts: sessionBlocked(measuredAccounts(model), projectId),
       preferredModel: model,
       ...reserveOf(),
-      noTeamTakes: (m: string, ruledOut: string | null) => noTeamTakes(m, undefined, ruledOut),
+      noTeamTakes: (m: string, ruledOut: string | null) => noTeamTakes(m, undefined, ruledOut, projectId),
       // A Team seat marked by an earlier failure is no destination either
       // (Astra r3 high 1), for a turn held off the reserve: one in Fable is
       // judged on the numbers, as before 0.2.48.
-      ...(heldModel(model) ? { limitedUntil: (name: string) => limitedUntil(name, model) } : {}),
+      ...(heldModel(model) ? { limitedUntil: (name: string) => limitedUntil(name, model, projectId) } : {}),
       maximumWaitMs:
         current.maximumWaitHours > 0
           ? current.maximumWaitHours * 3_600_000
@@ -7467,7 +7475,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       !refusing(fromName) &&
       // Its read lags the 429 it marked: no account to keep the wait on by
       // that read (Astra r6 high 1).
-      limitedUntil(fromName, model) === null &&
+      limitedUntil(fromName, model, projectId) === null &&
       (((here === undefined || here.unknown === true) &&
         // Unread, and it may spend the reserve: a Team seat that can take
         // the turn is looked for below (Codex r3 medium 3).
@@ -7485,7 +7493,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             // Ultra with room and no Team able runs there (Codex r1 high 1).
             chooseAccount([settle(here, now)], {
               preferredModel: model,
-              ...reserveFor(threadId, now),
+              ...reserveFor(threadId, now, projectId),
             })?.account) === fromName))
     ) {
       // It waited on the account the project was on before.
@@ -7511,11 +7519,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const to =
       chooseAccount(
         measured
-          .filter((a) => a.name !== fromName && limitedUntil(a.name, model) === null)
+          .filter((a) => a.name !== fromName && limitedUntil(a.name, model, projectId) === null)
           .map((a) => settle(a, now)),
         {
           preferredModel: model,
-          ...reserveFor(threadId, now),
+          ...reserveFor(threadId, now, projectId),
           freeSeats,
           savedForUser: paceFilter(isBackground(thread)).savedForUser,
         },
