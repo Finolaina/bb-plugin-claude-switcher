@@ -732,6 +732,8 @@ describe("a turn that failed for want of a session on its machine", () => {
       "OAUTH TOKEN HAS EXPIRED",
       "authentication_error",
       "HTTP 401",
+      "status 401",
+      "401 Unauthorized",
     ])
       expect(isSessionLoss(text), text).toBe(true);
   });
@@ -742,6 +744,8 @@ describe("a turn that failed for want of a session on its machine", () => {
       "You've reached your Fable limit. Switch to another model",
       'Provider "claude-code" exited unexpectedly with code 0',
       "context window exceeded at 4010 tokens",
+      // A 400 of the API with more than 401 messages (code-reviewer r1, low 4).
+      'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"messages.401.content: Input should be a valid list"}}',
       "",
     ])
       expect(isSessionLoss(text), text).toBe(false);
