@@ -7138,9 +7138,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // Where its turn started, read now and forgotten whatever comes of the
     // failure: a failure declined below ends the turn as well, with no
     // `thread.idle` (Codex IR13-001, code-reviewer r13).
-    const started = startedOn.get(event.threadId);
+    let started = startedOn.get(event.threadId);
     // Its judgment's generation, taken before any read (see generation).
     const judgedIn = generation(event.threadId);
+    // The seat its dispatch reserved, before it is released: where the turn
+    // runs while its start is still read (Astra SEATS-R04).
+    const seatHeld = seats.seatOf(event.threadId)?.account;
     forgetStart(event.threadId);
     turnsUnderWay.delete(event.threadId);
     releaseSeat(event.threadId, "its turn failed");
@@ -7176,6 +7179,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         return;
       }
       failed = sessionLost(event);
+      // «Not logged in» comes at once, often while thread.active still reads
+      // the project's account: the seat says where it ran, or the retry goes
+      // back there on every rescue (code-reviewer r2, low 1).
+      if (started === null && seatHeld !== undefined) started = seatName(seatHeld);
       // Once more before a mark on a machine unknown, which keeps the
       // account from every project (code-reviewer r1, low 1).
       let host = await threadHost(thread);

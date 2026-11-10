@@ -23536,6 +23536,39 @@ describe("a turn that failed for want of a session on its machine (2026-11-10)",
     expect(state.history[0]?.reason).toMatch(/main cannot run/);
   });
 
+  it("marks the account of the seat its dispatch reserved when the failure comes while its start is still being read (code-reviewer r2, low 1)", async () => {
+    // «Not logged in» comes at once: thread.active still reads the
+    // project's account, the start is unknown, and the retry went back to
+    // the same account on every rescue.
+    let pending: EnvGate | null = null;
+    const takeGate = () => {
+      const gate = pending;
+      pending = null;
+      if (gate === null) return Promise.resolve();
+      gate.captured();
+      return gate.held;
+    };
+    const h = await host(ROOM, {
+      ...MACHINES,
+      beforeEnvRead: () => takeGate(),
+      threadEvents: { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) },
+    });
+    dispose = () => h.harness.dispose();
+    expect(await before(h, "thread-1", "proj-1")).toEqual({ action: "proceed" });
+    const gate = envGate();
+    pending = gate;
+    const active = h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-1", projectId: "proj-1", environmentId: "env-1" }),
+    });
+    await gate.reached;
+    await h.harness.behavior.emitThreadEvent("turn.failed", lost());
+    await settled();
+    expect(moved(h)).toEqual([["proj-1", ownNote("work")]]);
+    expect(await marksOf(h)).toEqual(["main@host-mac"]);
+    gate.release();
+    await active;
+  });
+
   it("lets a pick by hand of the account stand (it may have been logged in again), and its next failure for want of a session moves the project again", async () => {
     const log = { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) };
     const h = await lostOnMac({ threadEvents: log });
