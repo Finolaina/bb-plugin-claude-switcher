@@ -746,6 +746,10 @@ describe("a turn that failed for want of a session on its machine", () => {
       "context window exceeded at 4010 tokens",
       // A 400 of the API with more than 401 messages (code-reviewer r1, low 4).
       'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"messages.401.content: Input should be a valid list"}}',
+      // gh, not Claude Code; and a renewal that is not the login's
+      // (code-reviewer r2, nit).
+      "You are not logged into any GitHub hosts. To log in, run: gh auth login",
+      "The certificate cannot be renewed before it expires",
       "",
     ])
       expect(isSessionLoss(text), text).toBe(false);

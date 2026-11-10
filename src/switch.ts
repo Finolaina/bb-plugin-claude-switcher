@@ -129,10 +129,12 @@ export function isRefusal(failure: PluginTurnFailedEvent): boolean {
  * machine the turn ran on (bb's log, 2026-11-10: a provider/error with no
  * errorInfo, the text in its detail): no login there, a login past its
  * time limit, or a token the API no longer takes. A 401 only as a status:
- * «messages.401.content» is a 400 of a long thread (code-reviewer r1, low 4).
+ * «messages.401.content» is a 400 of a long thread (code-reviewer r1, low 4);
+ * not «not logged into» (gh), nor «cannot be renewed» but the login's
+ * (code-reviewer r2, nit).
  */
 const SESSION_LOSS =
-  /not logged in|please run \/login|login reached its time limit|cannot be renewed|(?:api error:|http|status) 401\b|\b401 unauthorized|authentication_error|oauth token has expired/i;
+  /not logged in\b|please run \/login|login reached its time limit|(?:api error:|http|status) 401\b|\b401 unauthorized|authentication_error|oauth token has expired/i;
 
 /** The text of a failed turn says its account has no session on its machine. */
 export function isSessionLoss(text: string): boolean {
