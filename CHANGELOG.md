@@ -26,6 +26,14 @@ project uses [Semantic Versioning](https://semver.org/).
   por hueco), la de un proyecto nuevo, el rescate del refresco, el cambio
   anticipado, las esperas adelantadas y el juicio de un hilo en error. Un
   hilo que quedó en error por un login caducado se reintenta en el rescate.
+- Revisión code-reviewer r1: el fallo se juzga también en el quinto intento y
+  después (antes se ignoraba y el rescate lo reintentaba en la misma cuenta
+  en cada refresco); un 401 cuenta solo como estado de la respuesta, no el
+  «messages.401» de un 400; un turno que arrancó antes del fallo no quita la
+  marca; la máquina del hilo se relee antes de marcar una desconocida, y esa
+  marca la quita un turno bueno de la cuenta en cualquier máquina; el motivo
+  de un movimiento y «ninguna Team la toma» miran solo las máquinas del
+  proyecto.
 
 ### Añadido
 
