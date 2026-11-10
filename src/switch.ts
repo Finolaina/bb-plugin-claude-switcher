@@ -125,6 +125,46 @@ export function isRefusal(failure: PluginTurnFailedEvent): boolean {
 }
 
 /**
+ * What Claude Code says when the account has no working session on the
+ * machine the turn ran on (bb's log, 2026-11-10: a provider/error with no
+ * errorInfo, the text in its detail): no login there, a login past its
+ * time limit, or a token the API no longer takes. A 401 only as a status:
+ * «messages.401.content» is a 400 of a long thread (code-reviewer r1, low 4);
+ * not «not logged into» (gh), nor «cannot be renewed» but the login's
+ * (code-reviewer r2, nit).
+ */
+const SESSION_LOSS =
+  /not logged in\b|please run \/login|login reached its time limit|(?:api error:|http|status) 401\b|\b401 unauthorized|authentication_error|oauth token has expired/i;
+
+/** The text of a failed turn says its account has no session on its machine. */
+export function isSessionLoss(text: string): boolean {
+  return SESSION_LOSS.test(text);
+}
+
+/**
+ * What this plugin gives a failure it read as a session lost: the refusal's
+ * category, and its own code (see isSessionLost).
+ */
+export const SESSION_LOST_INFO: NonNullable<PluginTurnFailedEvent["errorInfo"]> = {
+  category: "unauthorized",
+  providerCode: "claude-switcher:session-lost",
+  httpStatusCode: null,
+};
+
+/**
+ * The failure, judged as the refusal it is: bb sends it with no errorInfo,
+ * which is no business of this plugin (see SESSION_LOST_INFO).
+ */
+export function sessionLost(failure: PluginTurnFailedEvent): PluginTurnFailedEvent {
+  return { ...failure, errorInfo: SESSION_LOST_INFO };
+}
+
+/** A refusal this plugin read from the failure's text: the account's on that machine only. */
+export function isSessionLost(failure: PluginTurnFailedEvent): boolean {
+  return failure.errorInfo?.providerCode === SESSION_LOST_INFO.providerCode;
+}
+
+/**
  * Why this failure is none of this plugin's business, or null when it is.
  * Cheap and pure: call it before measuring anything.
  */

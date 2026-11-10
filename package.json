@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-claude-switcher",
-  "version": "0.2.49",
+  "version": "0.2.51",
   "type": "module",
   "description": "See every Claude Code account's usage windows in bb, pick the account before a new thread's first message, start new projects on the best account and switch a project to another account when a turn hits a subscription limit.",
   "license": "MIT",
@@ -49,7 +49,7 @@
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.3.0",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@get-bb/plugin-sdk": "0.6.15",

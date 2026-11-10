@@ -4,6 +4,62 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.51] - 2026-11-10
+
+### Corregido
+
+- **Un turno que falla porque la cuenta no tiene sesión en su máquina mueve
+  el proyecto y se reintenta.** Aitor, 2026-11-10: «tengo un par de hilos
+  que no corren porque no ha cambiado de cuenta». bb anuncia ese fallo sin
+  `errorInfo` («Not logged in · Please run /login», «this login reached its
+  time limit and cannot be renewed», un 401 o «OAuth token has expired» en el
+  texto del error) y el plugin lo ignoraba; `history` decía «Stuck threads:
+  0». Ahora el texto del error en el registro de bb lo delata, la cuenta
+  queda marcada en esa máquina (no en las demás: en otra puede tener sesión),
+  el proyecto va a otra cuenta capaz con el criterio de siempre y el turno se
+  reintenta solo; sin otra capaz, se queda en error, dicho en el registro y
+  contado en `history`.
+- Mientras dura la marca (6 h como mucho, `SESSION_LOST_MS`, o hasta que un
+  turno acaba bien en esa cuenta y esa máquina, o un `use` a mano), ningún
+  camino automático lleva ni deja en esa cuenta a un proyecto con hilos en
+  esa máquina: la colocación antes del turno (también al mover por plaza y
+  por hueco), la de un proyecto nuevo, el rescate del refresco, el cambio
+  anticipado, las esperas adelantadas y el juicio de un hilo en error. Un
+  hilo que quedó en error por un login caducado se reintenta en el rescate.
+- Revisión code-reviewer r1: el fallo se juzga también en el quinto intento y
+  después (antes se ignoraba y el rescate lo reintentaba en la misma cuenta
+  en cada refresco); un 401 cuenta solo como estado de la respuesta, no el
+  «messages.401» de un 400; un turno que arrancó antes del fallo no quita la
+  marca; la máquina del hilo se relee antes de marcar una desconocida, y esa
+  marca la quita un turno bueno de la cuenta en cualquier máquina; el motivo
+  de un movimiento y «ninguna Team la toma» miran solo las máquinas del
+  proyecto.
+- Revisión code-reviewer r2: un «Not logged in» que llega mientras se lee
+  dónde arrancó el turno marca la cuenta de la plaza que reservó el despacho
+  (antes no marcaba nada y el rescate volvía a esa cuenta en cada refresco);
+  el texto ya no casa con «not logged into» de gh ni con un «cannot be
+  renewed» suelto.
+
+### Añadido
+
+- `health --json` enseña `sinSesion`: cada cuenta sin sesión en una máquina,
+  con la máquina y hasta cuándo dura la marca; `history` cuenta cada fallo
+  así como un hilo atascado, con el motivo «sin sesión en <máquina>».
+
+## [0.2.50] - 2026-11-10
+
+### Seguridad
+
+- zod 4.6.5 a 4.6.7 (runtime; aviso de Dependabot, arreglado en 4.6.6: las
+  cotas de tamano de arrays, sets y maps se comprueban antes de analizar los
+  elementos) y vite 8.3.2 a 8.3.7 (desarrollo, via vitest; 6 avisos).
+
+### Cambiado
+
+- Las pruebas de mutantes (`docs/*/mutantes.py`) se niegan a correr (codigo 3)
+  si `git status --porcelain` del repo no esta vacio, para no pisar cambios
+  sin guardar.
+
 ## [0.2.49] - 2026-11-07
 
 ### Corregido

@@ -25,6 +25,7 @@ import {
   RESERVE_RECHECK_MS,
   SEAT_RECHECK_MS,
   SEAT_TTL_MS,
+  SESSION_LOST_MS,
   type State,
 } from "./server.js";
 import type { AccountsIo } from "./src/accounts.js";
@@ -409,7 +410,9 @@ interface HostOptions {
   /** The filesystem the sessions of a moved project are shared on; none: not shared. */
   sessionsIo?: SessionsIo;
   /** What environments.list answers per project (its paths on every host). */
-  environments?: Record<string, { path: string | null; status?: string }[]>;
+  environments?: Record<string, { path: string | null; status?: string; id?: string; hostId?: string }[]>;
+  /** What hosts.list answers (the machines bb knows). */
+  hosts?: { id: string; name: string }[];
 }
 
 /** A machineEnvironment read held by a test: `reached` once the read waits on it, `release` to let it answer. */
@@ -679,6 +682,9 @@ async function host(
             return { ok: true };
           },
         },
+      },
+      hosts: {
+        list: async () => options.hosts ?? [],
       },
       environments: {
         list: async ({ projectId }: { projectId: string }) =>
@@ -23180,5 +23186,498 @@ describe("reparto por hueco 2026-11-07", () => {
       expect((await dispatch(h, "b", "proj-1", OPUS)).action).toBe("wait");
       expect(await where(h)).toBe("spare");
     });
+  });
+});
+
+describe("a turn that failed for want of a session on its machine (2026-11-10)", () => {
+  // Aitor, 2026-11-10 12:46: «tengo un par de hilos que no corren porque no
+  // ha cambiado de cuenta». A project moved to an account with room but no
+  // Claude Code session on the machine its thread runs on; bb logged
+  // «Not logged in · Please run /login» with no errorInfo, and nothing moved
+  // it nor retried it.
+  const ROOM = {
+    main: () => Response.json(payload(10, 10)),
+    spare: () => Response.json(payload(10, 60)),
+    work: () => Response.json(payload(5, 20)),
+  };
+  const NOT_LOGGED_IN = "Not logged in · Please run /login";
+  const EXPIRED =
+    "Failed to authenticate: this login reached its time limit and cannot be renewed. Run `claude auth login` to sign in again";
+  /** bb's log of a turn of `threadId` that failed with `detail`, no errorInfo. */
+  function lostLog(threadId: string, requestId: string, detail: string, seq = 1): LoggedEvent[] {
+    return [
+      {
+        seq,
+        type: "client/turn/requested",
+        data: { requestId, execution: { model: "claude-opus-5-5" } },
+      },
+      {
+        seq: seq + 1,
+        type: "provider/error",
+        data: { providerThreadId: "p", threadId, message: "Provider error", detail },
+      },
+    ];
+  }
+  /** The failure bb announces for it: no errorInfo, no limit report. */
+  const lost = (overrides: Partial<PluginTurnFailedEvent> = {}) =>
+    failure({ errorInfo: null, rateLimits: null, ...overrides });
+
+  /** proj-1 and proj-2 with threads on the Mac, proj-3 on the NUC only; thread-1 (proj-1) runs on the Mac. */
+  const MACHINES: HostOptions = {
+    environments: {
+      "proj-1": [{ id: "env-1", hostId: "host-mac", path: "/home/someone/site" }],
+      "proj-2": [{ id: "env-2", hostId: "host-mac", path: "/home/someone/other" }],
+      "proj-3": [{ id: "env-3", hostId: "host-nuc", path: "/home/someone/third" }],
+    },
+    hosts: [
+      { id: "host-mac", name: "the laptop" },
+      { id: "host-nuc", name: "the server" },
+    ],
+    threads: { "thread-1": { environmentId: "env-1" } },
+    extraProjects: [{ id: "proj-3", name: "Third" }],
+    projectCreatedAt: { "proj-3": NOW - 24 * HOUR },
+  };
+  /** bb asks before a turn of `threadId` in `projectId`, in Opus. */
+  const before = (h: Awaited<ReturnType<typeof host>>, threadId: string, projectId: string) =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: threadId, projectId }),
+        requestedExecution: { providerId: "claude-code", model: "claude-opus-5-5" },
+        attempt: "start-turn",
+      }),
+    );
+  /** The background reads of the projects' machines, over. */
+  const settled = async () => {
+    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+  };
+  /** main lost its session on the Mac: thread-1's failure, judged. */
+  async function lostOnMac(options: HostOptions = {}, usage: Record<string, () => Response> = ROOM) {
+    const h = await host(usage, {
+      ...MACHINES,
+      ...options,
+      threadEvents: options.threadEvents ?? { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", lost());
+    await settled();
+    return h;
+  }
+
+  it("keeps the account from the turns of another project with threads on that machine", async () => {
+    const h = await lostOnMac();
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([["proj-1", `${ACCOUNTS}/work`]]);
+    await before(h, "thr-2", "proj-2");
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-1", `${ACCOUNTS}/work`],
+      ["proj-2", `${ACCOUNTS}/work`],
+    ]);
+  });
+
+  it("leaves the account to a project with no thread on that machine: the login is the machine's", async () => {
+    const h = await lostOnMac();
+    await before(h, "thr-3", "proj-3");
+    expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-1"]);
+  });
+
+  /** main measures best of all, so every choice would take it but for its mark. */
+  const MAIN_BEST = {
+    main: () => Response.json(payload(1, 1)),
+    spare: () => Response.json(payload(50, 60)),
+    work: () => Response.json(payload(40, 50)),
+  };
+  const ownVar = (account: string) => [
+    { name: ENV_VAR, note: ownNote(account), secret: true as const, value: null },
+  ];
+  /** One pass of the background refresh, to its end. */
+  async function onePass(h: Awaited<ReturnType<typeof host>>) {
+    const calls = h.usageCalls.length;
+    const run = h.harness.behavior.runService("usage-refresh");
+    await vi.waitFor(() => {
+      expect(h.usageCalls.length).toBeGreaterThanOrEqual(calls + 3);
+    });
+    run.controller.abort();
+    await run.done;
+    await settled();
+  }
+  const moved = (h: Awaited<ReturnType<typeof host>>) =>
+    h.envSet.map((e) => [e.projectId, e.note]);
+
+  it("places a new project with threads on that machine elsewhere (placeProject)", async () => {
+    const h = await lostOnMac({
+      environments: { ...MACHINES.environments, "proj-4": [{ id: "env-4", hostId: "host-mac", path: "/home/someone/fourth" }] },
+      extraProjects: [{ id: "proj-3", name: "Third" }, { id: "proj-4", name: "Fourth" }],
+    }, MAIN_BEST);
+    await h.harness.behavior.emitThreadEvent("thread.created", {
+      thread: thread({ id: "thr-4", projectId: "proj-4" }),
+    });
+    expect(moved(h).at(-1)).toEqual(["proj-4", ownNote("work")]);
+  });
+
+  it("moves a project sitting on the account off it at the next refresh (rescueStranded), and leaves one on another machine", async () => {
+    const h = await lostOnMac({}, MAIN_BEST);
+    await onePass(h);
+    expect(moved(h)).toEqual([
+      ["proj-1", ownNote("work")],
+      ["proj-2", ownNote("work")],
+    ]);
+  });
+
+  it("does not move a project ahead of the limit to the account (moveAhead)", async () => {
+    let clock = NOW;
+    const h = await lostOnMac(
+      {
+        clock: () => clock,
+        settings: { switchAheadPercent: 55 },
+        presetEnv: { "proj-2": ownVar("spare") },
+      },
+      MAIN_BEST,
+    );
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + 5 * 60_000;
+    await before(h, "thr-2", "proj-2");
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "thr-2", projectId: "proj-2" }),
+      lastAssistantText: null,
+    });
+    expect(moved(h)).toEqual([
+      ["proj-1", ownNote("work")],
+      ["proj-2", ownNote("work")],
+    ]);
+  });
+
+  it("retries a thread left in error by a login past its time limit, and its next failure moves the project (the rescue)", async () => {
+    // 2026-11-10: a thread had sat in error since 2026-11-08 with «this login
+    // reached its time limit and cannot be renewed», and nothing retried it.
+    const log = { "thread-1": lostLog("thread-1", "creq_1", EXPIRED) };
+    const h = await host(ROOM, {
+      ...MACHINES,
+      threads: { "thread-1": { status: "error", environmentId: "env-1" } },
+      threadEvents: log,
+    });
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    // The log does not say which account refused: retried where the project is.
+    expect(h.retries.map((r) => r.reason)).toEqual(["Retrying on account main (Opus): it has room now"]);
+    expect(h.envSet).toEqual([]);
+    log["thread-1"] = lostLog("thread-1", "creq_2", EXPIRED, 5);
+    await h.harness.behavior.emitThreadEvent("turn.failed", lost({ requestId: "creq_2", attemptNumber: 2 }));
+    expect(moved(h)).toEqual([["proj-1", ownNote("work")]]);
+  });
+
+  it("judges a failure for want of a session at its fifth attempt and past it too (code-reviewer r1, high)", async () => {
+    for (const attemptNumber of [5, 6]) {
+      const h = await host(ROOM, {
+        ...MACHINES,
+        threadEvents: { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) },
+      });
+      await h.harness.behavior.emitThreadEvent("turn.failed", lost({ attemptNumber }));
+      await settled();
+      expect(moved(h), `attempt ${attemptNumber}`).toEqual([["proj-1", ownNote("work")]]);
+      const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+      expect(report.sinSesion.map((m: { cuenta: string }) => m.cuenta)).toEqual(["main"]);
+      h.harness.dispose();
+    }
+  });
+
+  it("a thread left in error past its fifth attempt is retried once where the project is, and that retry's failure moves it (code-reviewer r1, high)", async () => {
+    const log = { "thread-1": lostLog("thread-1", "creq_1", EXPIRED) };
+    const h = await host(ROOM, {
+      ...MACHINES,
+      threads: { "thread-1": { status: "error", environmentId: "env-1" } },
+      threadEvents: log,
+    });
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    expect(h.retries.map((r) => r.reason)).toEqual(["Retrying on account main (Opus): it has room now"]);
+    log["thread-1"] = lostLog("thread-1", "creq_2", EXPIRED, 5);
+    await h.harness.behavior.emitThreadEvent("turn.failed", lost({ requestId: "creq_2", attemptNumber: 6 }));
+    await settled();
+    expect(moved(h)).toEqual([["proj-1", ownNote("work")]]);
+    // Left in error again: retried on work, where the project went, not on main.
+    await onePass(h);
+    expect(h.retries.map((r) => r.reason).filter((r) => /on account main/.test(r))).toHaveLength(1);
+  });
+
+  it("counts the turn among the stuck threads of history, and health shows the mark of each account and machine", async () => {
+    const h = await lostOnMac();
+    const history = (await h.harness.behavior.runCli(["history", "--dias", "1"])).stdout;
+    expect(history).toMatch(/Stuck threads: 1\n/);
+    expect(history).toMatch(/STUCK: main sin sesión en the laptop: thread thread-1 \(Opus\)/);
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    expect(report.sinSesion).toEqual([
+      { cuenta: "main", maquina: "host-mac", nombreMaquina: "the laptop", hasta: "2026-09-29T18:00:00+02:00" },
+    ]);
+    expect((await h.harness.behavior.runCli(["health"])).stdout).toMatch(
+      /sin sesión: main en the laptop hasta 2026-09-29T18:00:00\+02:00/,
+    );
+  });
+
+  for (const [age, kept] of [
+    [SESSION_LOST_MS - 1, true],
+    [SESSION_LOST_MS, false],
+  ] as const)
+    it(`keeps the account from the project ${age} ms after the failure: ${kept ? "still marked" : "the mark is over"} (SESSION_LOST_MS, [SUPUESTO])`, async () => {
+      let clock = NOW;
+      const h = await lostOnMac({ clock: () => clock });
+      clock = NOW + age;
+      // Measured again at that time: an old read decides nothing.
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      await before(h, "thr-2", "proj-2");
+      // Moved off main (to the account then measured best), or left on it.
+      expect(h.envSet.map((e) => e.projectId)).toEqual(kept ? ["proj-1", "proj-2"] : ["proj-1"]);
+      expect(h.envDeleted).toEqual([]);
+    });
+
+  it("takes the session as back once a turn ends well on the account on that machine, not on another", async () => {
+    // Only main can run: the turns start there, marked or not.
+    const h = await lostOnMac({}, {
+      main: () => Response.json(payload(1, 1)),
+      spare: () => Response.json(payload(100, 100)),
+      work: () => Response.json(payload(100, 100)),
+    });
+    const marks = async () =>
+      JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout).sinSesion.map(
+        (m: { cuenta: string; maquina: string }) => `${m.cuenta}@${m.maquina}`,
+      );
+    expect(await marks()).toEqual(["main@host-mac"]);
+    const turn = async (id: string, projectId: string, environmentId: string) => {
+      expect(await before(h, id, projectId)).toEqual({ action: "proceed" });
+      const t = thread({ id, projectId, environmentId });
+      await h.harness.behavior.emitThreadEvent("thread.active", { thread: t });
+      await settled();
+      await h.harness.behavior.emitThreadEvent("thread.idle", { thread: t, lastAssistantText: null });
+    };
+    await turn("thr-3", "proj-3", "env-3");
+    expect(await marks()).toEqual(["main@host-mac"]);
+    await turn("thr-2", "proj-2", "env-2");
+    expect(await marks()).toEqual([]);
+  });
+
+  /** Only main can run: the turns start there, marked or not. */
+  const ONLY_MAIN = {
+    main: () => Response.json(payload(1, 1)),
+    spare: () => Response.json(payload(100, 100)),
+    work: () => Response.json(payload(100, 100)),
+  };
+  const marksOf = async (h: Awaited<ReturnType<typeof host>>) =>
+    JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout).sinSesion.map(
+      (m: { cuenta: string; maquina: string }) => `${m.cuenta}@${m.maquina}`,
+    );
+  /** A turn of `id` that starts on the project's account and ends well. */
+  const goodTurn = async (h: Awaited<ReturnType<typeof host>>, id: string, projectId: string, environmentId: string) => {
+    const t = thread({ id, projectId, environmentId });
+    await h.harness.behavior.emitThreadEvent("thread.active", { thread: t });
+    await settled();
+    return () => h.harness.behavior.emitThreadEvent("thread.idle", { thread: t, lastAssistantText: null });
+  };
+
+  it("does not take the session as back for a turn that started before the failure (code-reviewer r1, low 2)", async () => {
+    let clock = NOW;
+    const h = await host(ONLY_MAIN, {
+      ...MACHINES,
+      clock: () => clock,
+      threadEvents: { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) },
+    });
+    dispose = () => h.harness.dispose();
+    expect(await before(h, "thr-2", "proj-2")).toEqual({ action: "proceed" });
+    const ends = await goodTurn(h, "thr-2", "proj-2", "env-2");
+    clock = NOW + 1;
+    await h.harness.behavior.emitThreadEvent("turn.failed", lost());
+    await settled();
+    expect(await marksOf(h)).toEqual(["main@host-mac"]);
+    // Started 1 ms before main failed there: its credentials were read before.
+    await ends();
+    expect(await marksOf(h)).toEqual(["main@host-mac"]);
+  });
+
+  it("reads the thread's machine again before marking the account on a machine unknown (code-reviewer r1, low 1)", async () => {
+    const h = await host(ROOM, {
+      ...MACHINES,
+      threadEvents: { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) },
+    });
+    dispose = () => h.harness.dispose();
+    let reads = 0;
+    h.harness.sdk.stub("environments.list", async ({ projectId }: { projectId: string }) => {
+      if (reads++ === 0) throw new Error("bb is busy");
+      return (MACHINES.environments?.[projectId] ?? []).map((e) => ({ projectId, status: "ready", ...e }));
+    });
+    await h.harness.behavior.emitThreadEvent("turn.failed", lost());
+    await settled();
+    expect(await marksOf(h)).toEqual(["main@host-mac"]);
+  });
+
+  it("takes the session on a machine unknown as back once a turn of the account ends well on any machine (code-reviewer r1, low 1)", async () => {
+    const h = await host(ONLY_MAIN, {
+      ...MACHINES,
+      threads: { "thread-1": { environmentId: null } },
+      threadEvents: { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", lost());
+    await settled();
+    expect(await marksOf(h)).toEqual(["main@"]);
+    expect(await before(h, "thr-3", "proj-3")).toEqual({ action: "proceed" });
+    await (await goodTurn(h, "thr-3", "proj-3", "env-3"))();
+    expect(await marksOf(h)).toEqual([]);
+  });
+
+  it("says why a project on another machine moves off the account by what keeps it there, not by the mark of the other machine (code-reviewer r1, low 5)", async () => {
+    let full = false;
+    const h = await lostOnMac({}, {
+      ...ROOM,
+      main: () => Response.json(full ? payload(100, 100) : payload(10, 10)),
+    });
+    full = true;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect(await before(h, "thr-3", "proj-3")).toEqual({ action: "proceed" });
+    expect(moved(h).at(-1)).toEqual(["proj-3", ownNote("work")]);
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history[0]?.reason).not.toMatch(/usage limit|sin sesión/);
+    expect(state.history[0]?.reason).toMatch(/main cannot run/);
+  });
+
+  it("marks the account of the seat its dispatch reserved when the failure comes while its start is still being read (code-reviewer r2, low 1)", async () => {
+    // «Not logged in» comes at once: thread.active still reads the
+    // project's account, the start is unknown, and the retry went back to
+    // the same account on every rescue.
+    let pending: EnvGate | null = null;
+    const takeGate = () => {
+      const gate = pending;
+      pending = null;
+      if (gate === null) return Promise.resolve();
+      gate.captured();
+      return gate.held;
+    };
+    const h = await host(ROOM, {
+      ...MACHINES,
+      beforeEnvRead: () => takeGate(),
+      threadEvents: { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) },
+    });
+    dispose = () => h.harness.dispose();
+    expect(await before(h, "thread-1", "proj-1")).toEqual({ action: "proceed" });
+    const gate = envGate();
+    pending = gate;
+    const active = h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-1", projectId: "proj-1", environmentId: "env-1" }),
+    });
+    await gate.reached;
+    await h.harness.behavior.emitThreadEvent("turn.failed", lost());
+    await settled();
+    expect(moved(h)).toEqual([["proj-1", ownNote("work")]]);
+    expect(await marksOf(h)).toEqual(["main@host-mac"]);
+    gate.release();
+    await active;
+  });
+
+  it("lets a pick by hand of the account stand (it may have been logged in again), and its next failure for want of a session moves the project again", async () => {
+    const log = { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) };
+    const h = await lostOnMac({ threadEvents: log });
+    const picked = await h.harness.behavior.runCli(["use", "Website", "default"]);
+    expect(picked.exitCode ?? 0).toBe(0);
+    expect(h.envDeleted.map((e) => e.projectId)).toEqual(["proj-1"]);
+    expect(await before(h, "thread-1", "proj-1")).toEqual({ action: "proceed" });
+    // Not moved off by the placement before its turn: the pick stands.
+    expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-1"]);
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-1", projectId: "proj-1", environmentId: "env-1" }),
+    });
+    log["thread-1"] = lostLog("thread-1", "creq_7", NOT_LOGGED_IN, 10);
+    await h.harness.behavior.emitThreadEvent("turn.failed", lost({ requestId: "creq_7" }));
+    expect(moved(h)).toEqual([
+      ["proj-1", ownNote("work")],
+      ["proj-1", ownNote("work")],
+    ]);
+  });
+
+  it("moves a project whose thread waits on the account off it, and has bb retry the turn there at once (moveUpWait)", async () => {
+    const h = await lostOnMac({
+      threads: { "thread-1": { environmentId: "env-1" }, "thr-2": { status: "error", environmentId: "env-2" } },
+      threadEvents: {
+        "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN),
+        "thr-2": [{ seq: 1, type: "client/turn/requested", data: { requestId: "creq_r2", execution: { model: "claude-opus-5-5" } } }],
+      },
+      queued: [
+        {
+          id: "r2",
+          threadId: "thr-2",
+          payload: { kind: "retry", attempt: 2, reason: "Waiting for main", retryOfTurnRequestId: "creq_r2" },
+          sendAt: NOW + 2 * HOUR + BUFFER,
+          waitingOn: { kind: "time" },
+          createdAt: NOW - HOUR,
+          model: "claude-opus-5-5",
+        },
+      ],
+    });
+    await onePass(h);
+    expect(h.retries.filter((r) => r.threadId === "thr-2")).toEqual([
+      {
+        threadId: "thr-2",
+        turnRequestId: "creq_r2",
+        reason: "Moved to account work, which can run the waiting turn now: main sin sesión en the laptop",
+      },
+    ]);
+  });
+
+  it("does not retry a thread left in error on the account its machine has no session for (the rescue's judgment)", async () => {
+    const h = await lostOnMac({
+      threads: { "thread-1": { environmentId: "env-1" }, "thr-2": { status: "error", environmentId: "env-2" } },
+      threadEvents: {
+        "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN),
+        "thr-2": lostLog("thr-2", "creq_8", EXPIRED),
+      },
+    });
+    await onePass(h);
+    expect(h.retries.filter((r) => r.threadId === "thr-2").map((r) => r.reason)).toEqual([
+      "Switched to account work (Opus): main sin sesión en the laptop",
+    ]);
+  });
+
+  it("leaves the turn in error, said and counted, when no other account can run it", async () => {
+    const h = await lostOnMac({}, {
+      main: () => Response.json(payload(1, 1)),
+      spare: () => Response.json(payload(100, 100)),
+      work: () => Response.json(payload(100, 100)),
+    });
+    expect(h.envSet).toEqual([]);
+    expect(h.retries).toEqual([]);
+    expect(h.harness.logEntries.map((e) => e.message)).toContainEqual(
+      expect.stringMatching(/^thread thread-1: no switch \(/),
+    );
+    expect((await h.harness.behavior.runCli(["history", "--dias", "1"])).stdout).toMatch(/Stuck threads: 1\n/);
+  });
+
+  it("does not move a project to the account for a seat (crowded, the path of 2026-11-10 11:58)", async () => {
+    // «Movido a X antes del turno: el hilo iba a esperar plaza en Y (4/4)»:
+    // here spare is full with a sibling at work, and main, the best with a
+    // seat, has no session on the Mac.
+    const h = await lostOnMac(
+      { settings: { seatsMax: 1, stuckMoveMinutes: 10 }, presetEnv: { "proj-2": ownVar("spare") } },
+      MAIN_BEST,
+    );
+    expect((await before(h, "a", "proj-2")).action).toBe("proceed");
+    await h.harness.behavior.emitThreadEvent("thread.active", { thread: thread({ id: "a", projectId: "proj-2" }) });
+    expect(await before(h, "b", "proj-2")).toEqual({ action: "proceed" });
+    expect(moved(h)).toEqual([
+      ["proj-1", ownNote("work")],
+      ["proj-2", ownNote("work")],
+    ]);
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history[0]?.reason).toMatch(/^Movido a work antes del turno: el hilo iba a esperar plaza en spare/);
+  });
+
+  it("moves the project off the account and retries the turn at once", async () => {
+    const h = await host(ROOM, {
+      threadEvents: { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", lost());
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    expect(h.retries).toEqual([
+      {
+        threadId: "thread-1",
+        turnRequestId: "creq_1",
+        reason: expect.stringMatching(/^Switched to account work.*main sin sesión en/),
+      },
+    ]);
   });
 });
