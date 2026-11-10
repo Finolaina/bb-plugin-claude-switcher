@@ -23378,6 +23378,47 @@ describe("a turn that failed for want of a session on its machine (2026-11-10)",
     );
   });
 
+  for (const [age, kept] of [
+    [SESSION_LOST_MS - 1, true],
+    [SESSION_LOST_MS, false],
+  ] as const)
+    it(`keeps the account from the project ${age} ms after the failure: ${kept ? "still marked" : "the mark is over"} (SESSION_LOST_MS, [SUPUESTO])`, async () => {
+      let clock = NOW;
+      const h = await lostOnMac({ clock: () => clock });
+      clock = NOW + age;
+      // Measured again at that time: an old read decides nothing.
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      await before(h, "thr-2", "proj-2");
+      // Moved off main (to the account then measured best), or left on it.
+      expect(h.envSet.map((e) => e.projectId)).toEqual(kept ? ["proj-1", "proj-2"] : ["proj-1"]);
+      expect(h.envDeleted).toEqual([]);
+    });
+
+  it("takes the session as back once a turn ends well on the account on that machine, not on another", async () => {
+    // Only main can run: the turns start there, marked or not.
+    const h = await lostOnMac({}, {
+      main: () => Response.json(payload(1, 1)),
+      spare: () => Response.json(payload(100, 100)),
+      work: () => Response.json(payload(100, 100)),
+    });
+    const marks = async () =>
+      JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout).sinSesion.map(
+        (m: { cuenta: string; maquina: string }) => `${m.cuenta}@${m.maquina}`,
+      );
+    expect(await marks()).toEqual(["main@host-mac"]);
+    const turn = async (id: string, projectId: string, environmentId: string) => {
+      expect(await before(h, id, projectId)).toEqual({ action: "proceed" });
+      const t = thread({ id, projectId, environmentId });
+      await h.harness.behavior.emitThreadEvent("thread.active", { thread: t });
+      await settled();
+      await h.harness.behavior.emitThreadEvent("thread.idle", { thread: t, lastAssistantText: null });
+    };
+    await turn("thr-3", "proj-3", "env-3");
+    expect(await marks()).toEqual(["main@host-mac"]);
+    await turn("thr-2", "proj-2", "env-2");
+    expect(await marks()).toEqual([]);
+  });
+
   it("moves the project off the account and retries the turn at once", async () => {
     const h = await host(ROOM, {
       threadEvents: { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) },

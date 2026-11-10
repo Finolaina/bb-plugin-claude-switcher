@@ -1719,7 +1719,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     });
   }
   /** Each project's machines as its environments said, and when (see hostsOf). */
-  const hostsRead = new Map<string, { at: number; hosts: ReadonlySet<string> }>();
+  const hostsRead = new Map<
+    string,
+    { at: number; hosts: ReadonlySet<string>; byEnvironment: ReadonlyMap<string, string> }
+  >();
   const hostsReading = new Map<string, Promise<unknown>>();
   /** The machines' names, as bb lists them, for the texts (see hostLabel). */
   const hostNames = new Map<string, string>();
@@ -1746,6 +1749,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         hostsRead.set(projectId, {
           at: deps.now(),
           hosts: new Set(environments.filter((e) => e.status !== "destroyed").map((e) => e.hostId)),
+          byEnvironment: new Map(environments.map((e) => [e.id, e.hostId])),
         });
         return environments;
       } catch (error) {
@@ -5197,6 +5201,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (account !== undefined) startedOn.set(thread.id, account);
   });
   bb.events.on("thread.idle", ({ thread }) => {
+    // A turn that ended well where it started: the account has a session on
+    // the thread's machine (sin-login 2026-11-10). Its machine as last read:
+    // unread, the mark stands till SESSION_LOST_MS.
+    const ran = startedOn.get(thread.id);
+    const host =
+      thread.environmentId === null
+        ? undefined
+        : hostsRead.get(thread.projectId)?.byEnvironment.get(thread.environmentId);
+    if (typeof ran === "string" && host !== undefined) sessionBack(ran, host);
     // Its turn ended there: a later failure that no new `thread.active`
     // announces (a turn refused at the door) is the project's account's,
     // not a leftover of the account this turn ran on (code-reviewer r11).
