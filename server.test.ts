@@ -23521,6 +23521,21 @@ describe("a turn that failed for want of a session on its machine (2026-11-10)",
     expect(await marksOf(h)).toEqual([]);
   });
 
+  it("says why a project on another machine moves off the account by what keeps it there, not by the mark of the other machine (code-reviewer r1, low 5)", async () => {
+    let full = false;
+    const h = await lostOnMac({}, {
+      ...ROOM,
+      main: () => Response.json(full ? payload(100, 100) : payload(10, 10)),
+    });
+    full = true;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    expect(await before(h, "thr-3", "proj-3")).toEqual({ action: "proceed" });
+    expect(moved(h).at(-1)).toEqual(["proj-3", ownNote("work")]);
+    const state = (await h.harness.behavior.callRpc("accounts_list", null)) as State;
+    expect(state.history[0]?.reason).not.toMatch(/usage limit|sin sesión/);
+    expect(state.history[0]?.reason).toMatch(/main cannot run/);
+  });
+
   it("lets a pick by hand of the account stand (it may have been logged in again), and its next failure for want of a session moves the project again", async () => {
     const log = { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) };
     const h = await lostOnMac({ threadEvents: log });

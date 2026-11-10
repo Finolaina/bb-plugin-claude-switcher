@@ -879,13 +879,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     bb.realtime.publish(ADVICE_CHANGED, { threadId });
   }
   let current = await settings.get();
-  /** The reserved model and how much of it a turn in another model may spend (see ChoiceOptions.reserveSpareUpTo). */
-  const reserveOf = () => ({
+  /**
+   * The reserved model and how much of it a turn in another model may spend
+   * (see ChoiceOptions.reserveSpareUpTo). `projectId`: a Team without a
+   * session on another machine still takes its turns (code-reviewer r1, low 3).
+   */
+  const reserveOf = (projectId?: string) => ({
     reserveModel: current.preferredModel,
     reserveSpareUpTo: current.otherModelUpTo,
     reserveShare: current.reserveShare,
     opusOverflowRoom: current.opusOverflowRoom,
-    noTeamTakes: (model: string) => noTeamTakes(model),
+    noTeamTakes: (model: string) => noTeamTakes(model, undefined, undefined, projectId),
   });
   settings.onChange((next) => {
     const moved =
@@ -1887,7 +1891,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const lost = sessionLostOn(name, projectId);
     if (lost !== null) return `sin sesión en ${hostLabel(lost.host)}`;
     if (refusing(name)) return "refused a turn";
-    if (limitedUntil(name, model) !== null)
+    // The project's machines only: another's session lost is no limit of it
+    // (code-reviewer r1, low 5).
+    if (limitedUntil(name, model, projectId) !== null)
       return `answered ${model === "" ? "a turn" : model} with a usage limit that has not reset yet`;
     if (reservedFor(name, model) && canRunHere(name, model))
       return `would spend ${current.preferredModel}'s weekly`;
@@ -4226,7 +4232,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       preferredModel: current.preferredModel,
       // The share ranks a new project by room (0.2.48, B2): without the
       // reserve here the choice was by deadline alone (PLAN §A row 1).
-      ...reserveOf(),
+      ...reserveOf(projectId),
       excursionFrom: wayHome(projectId, current.preferredModel, measured, now),
       freeSeats,
       // Background work behind the accounts saved for the user (SPEC
@@ -4471,7 +4477,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       currentAccount: fromName,
       accounts: aheadTargets(projectId, fromName, model, now),
       preferredModel: model,
-      ...reserveOf(),
+      ...reserveOf(projectId),
       threshold,
       freeSeats,
       ...paceFilter(isBackground(thread)),
@@ -5007,7 +5013,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       isNew: false,
       accounts: aheadTargets(projectId, fromName, model, now),
       preferredModel: model,
-      ...reserveOf(),
+      ...reserveOf(projectId),
       // The pick by hand first, as before a turn (Codex r3 medium 2).
       excursionFrom: wayHome(projectId, model, measuredAccounts(model), now),
       // Nor to an account whose mark stands for the model (Astra r8 medium 1).
@@ -5444,7 +5450,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   function otherThatRuns(name: string, model: string, projectId?: string): string | null {
     const now = deps.now();
-    const options = { preferredModel: model, ...reserveOf() };
+    const options = { preferredModel: model, ...reserveOf(projectId) };
     // Nor one a session lost keeps from the project: its turn would wait in
     // that queue for a move no placement makes (sin-login 2026-11-10).
     const measured = measuredAccounts(model).filter(
@@ -5569,7 +5575,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * opusOverflowRoom at 100 or more, or maximumWaitHours 0.
    */
   function reserveFor(threadId: string | undefined, now: number, projectId?: string) {
-    const base = reserveOf();
+    const base = reserveOf(projectId);
     if (threadId === undefined) return base;
     return {
       ...base,
