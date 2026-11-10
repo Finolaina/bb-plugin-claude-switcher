@@ -96,6 +96,9 @@ import {
   reportedFreeAt,
   FALLBACK_MODEL,
   isRefusal,
+  isSessionLoss,
+  isSessionLost,
+  sessionLost,
   MAX_ATTEMPTS,
   mayAdviseOpus,
   measuredOut,
@@ -160,6 +163,16 @@ export const REFUSAL_MS = 6 * 60 * 60_000;
  * the next turn there may fail once more after it (Astra r4 high 1).
  */
 export const LIMIT_NO_RESET_MS = 30 * 60_000;
+/**
+ * How long an account whose turn failed for want of a session on a machine
+ * (see sessionLostAt) is no place for a project with threads there, unless
+ * a turn ends well on it there first or it is picked by hand. [SUPUESTO]
+ * 6 h, the refusal's (REFUSAL_MS): a login does not come back with a reset,
+ * and someone has to log in on that machine.
+ */
+export const SESSION_LOST_MS = 6 * 60 * 60_000;
+/** How long a project's machines, read from its environments, are taken as they were (see hostsOf). */
+export const HOSTS_FRESH_MS = 10 * 60_000;
 /** A measurement older than this is taken again before moving a project ahead of the limit. */
 export const AHEAD_FRESH_MS = 60_000;
 /** bb fails a dispatch whose checkpoint takes 10 s: the placement before a turn is left behind well before. */
@@ -1671,6 +1684,160 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function refusing(name: string): boolean {
     const at = refusedAt.get(name);
     return at !== undefined && deps.now() - at < REFUSAL_MS;
+  }
+  /**
+   * The accounts a turn failed on for want of a session, per machine (bb's
+   * host id; "" when the thread's machine could not be told), and when
+   * (Aitor 2026-11-10: «no han cambiado de cuentas»). A login is a
+   * machine's: the same account may run on another, so the mark keeps the
+   * account from the projects with threads on that machine only (see
+   * hostsOf). It ends after SESSION_LOST_MS, when a turn ends well on the
+   * account there (thread.idle) or when the account is picked by hand. In
+   * memory: a reload forgets them, and the next failure marks again.
+   */
+  const sessionLostAt = new Map<string, Map<string, number>>();
+  /** The machine of each thread whose latest failure was a session lost, as it was judged (see markRefused). */
+  const failedHost = new Map<string, string>();
+  /** The thread's machine, from its project's environments; "" when they do not say. */
+  async function threadHost(thread: ThreadResponse): Promise<string> {
+    const environments = await readHosts(thread.projectId);
+    return environments?.find((e) => e.id === thread.environmentId)?.hostId ?? "";
+  }
+  /** The accounts as `measured`, those a session lost keeps from the project blocked (see sessionLostOn). */
+  function sessionBlocked<A extends AccountUsage>(measured: A[], projectId: string): A[] {
+    return measured.map((a) => {
+      if (sessionLostOn(a.name, projectId) === null) return a;
+      const { unknown: _, ...known } = a;
+      return { ...known, blocked: true } as A;
+    });
+  }
+  /** Each project's machines as its environments said, and when (see hostsOf). */
+  const hostsRead = new Map<string, { at: number; hosts: ReadonlySet<string> }>();
+  const hostsReading = new Map<string, Promise<unknown>>();
+  /** The machines' names, as bb lists them, for the texts (see hostLabel). */
+  const hostNames = new Map<string, string>();
+  /**
+   * The machines the project's threads run on, as its environments say:
+   * null when not read (yet), and a mark then keeps the account from it,
+   * whatever its machine. Read in the background, never awaited where a
+   * decision is taken: a missing or old read is asked for, and the next
+   * decision has it.
+   */
+  function hostsOf(projectId: string): ReadonlySet<string> | null {
+    const read = hostsRead.get(projectId);
+    if (read === undefined || deps.now() - read.at >= HOSTS_FRESH_MS) void readHosts(projectId);
+    return read?.hosts ?? null;
+  }
+  /** Reads the project's machines (see hostsOf); the environments too, for the thread's. */
+  function readHosts(projectId: string) {
+    const under = hostsReading.get(projectId);
+    if (under !== undefined)
+      return under as Promise<Awaited<ReturnType<typeof bb.sdk.environments.list>> | null>;
+    const run = (async () => {
+      try {
+        const environments = await bb.sdk.environments.list({ projectId });
+        hostsRead.set(projectId, {
+          at: deps.now(),
+          hosts: new Set(environments.filter((e) => e.status !== "destroyed").map((e) => e.hostId)),
+        });
+        return environments;
+      } catch (error) {
+        bb.log.warn(
+          `project ${projectId}: its machines not read (an account without a session on one is kept from it, whatever its machine): ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return null;
+      } finally {
+        hostsReading.delete(projectId);
+      }
+    })();
+    hostsReading.set(projectId, run);
+    return run;
+  }
+  /**
+   * Until when a session lost keeps `name` from the project (see
+   * sessionLostAt), and on which machine; null when none does. No project
+   * given, or its machines unknown: any machine's mark does.
+   */
+  function sessionLostOn(name: string, projectId?: string): { host: string; until: number } | null {
+    const marks = sessionLostAt.get(name);
+    if (marks === undefined) return null;
+    const now = deps.now();
+    const hosts = projectId === undefined ? null : hostsOf(projectId);
+    let found: { host: string; until: number } | null = null;
+    for (const [host, at] of marks) {
+      const until = at + SESSION_LOST_MS;
+      if (now >= until) {
+        marks.delete(host);
+        continue;
+      }
+      if (host !== "" && hosts !== null && !hosts.has(host)) continue;
+      if (found === null || until > found.until) found = { host, until };
+    }
+    if (marks.size === 0) sessionLostAt.delete(name);
+    return found;
+  }
+  /** A machine by its name, for the texts; its id when bb did not name it. */
+  function hostLabel(host: string): string {
+    return host === "" ? "una máquina sin identificar" : (hostNames.get(host) ?? host);
+  }
+  /** The machines' names (see hostLabel), read once per machine not named yet. */
+  async function nameHost(host: string): Promise<void> {
+    if (host === "" || hostNames.has(host)) return;
+    try {
+      for (const h of await bb.sdk.hosts.list()) hostNames.set(h.id, h.name);
+    } catch (error) {
+      bb.log.debug(
+        `the machines' names not read: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  /** `name` ran a turn well on `host`, or was picked by hand (no host: on every machine). */
+  function sessionBack(name: string, host?: string): void {
+    const marks = sessionLostAt.get(name);
+    if (marks === undefined) return;
+    if (host === undefined) sessionLostAt.delete(name);
+    else {
+      if (!marks.delete(host)) return;
+      if (marks.size === 0) sessionLostAt.delete(name);
+    }
+    bb.log.info(
+      `account ${name}: its session is taken as back${host === undefined ? "" : ` on ${hostLabel(host)}`}`,
+    );
+  }
+  /**
+   * The text of the failed turn's error in bb's log, when it says the
+   * account has no session on its machine (see isSessionLoss); null when it
+   * says anything else, or the log does not name the turn. bb announces such
+   * a failure with no errorInfo: its text is the only word of it.
+   */
+  async function sessionLossText(threadId: string, requestId: string): Promise<string | null> {
+    try {
+      const turns = await bb.sdk.threads.events.list({
+        threadId,
+        types: ["client/turn/requested"],
+        order: "desc",
+        limit: "20",
+      });
+      const own = turns.find(
+        (r) => r.type === "client/turn/requested" && r.data.requestId === requestId,
+      );
+      if (own === undefined) return null;
+      const [failed] = await bb.sdk.threads.events.list({
+        threadId,
+        types: ["provider/error"],
+        order: "desc",
+        limit: "1",
+        afterSeq: String(own.seq),
+      });
+      if (failed?.type !== "provider/error") return null;
+      const text = `${failed.data.message} ${failed.data.detail ?? ""}`;
+      return isSessionLoss(text) ? text : null;
+    } catch (error) {
+      bb.log.warn(
+        `thread ${threadId}: its failure not read from bb's log (a session lost is not told): ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
   }
   /** Why a project moves off `name` before a turn, for the history. */
   function whyOut(name: string, model: string): string {
@@ -6287,7 +6454,30 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     name: string,
     now: number,
     event: PluginTurnFailedEvent,
+    model = "",
   ): void {
+    // A session lost is the account's on the thread's machine only.
+    if (isSessionLost(event)) {
+      const host = failedHost.get(event.threadId) ?? "";
+      const marks = sessionLostAt.get(name) ?? new Map<string, number>();
+      marks.set(host, now);
+      sessionLostAt.set(name, marks);
+      const line = `STUCK: ${name} sin sesión en ${hostLabel(host)}: thread ${event.threadId}${model === "" ? "" : ` (${model})`} failed for want of a login there; ${name} is kept from the projects with threads there for ${SESSION_LOST_MS / 3_600_000} h, or until a turn ends well on it there or it is picked by hand`;
+      bb.log.warn(line);
+      toHistorial(`thread ${event.threadId} stuck`, (db) =>
+        addStuck(db, {
+          at: now,
+          thread: event.threadId,
+          account: name,
+          model,
+          minutes: 0,
+          free: [],
+          projectBusy: false,
+          line,
+        }),
+      );
+      return;
+    }
     refusedAt.set(name, now);
     bb.log.warn(
       `account ${name} refused a turn (HTTP ${event.errorInfo?.httpStatusCode ?? "?"}): chosen for nothing for ${REFUSAL_MS / 3_600_000} h`,
@@ -6358,7 +6548,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // means the new account fails as well, and is judged below.
       recent.graced.add(event.threadId);
       if (typeof started === "string" && isRefusal(event))
-        markRefused(started, now, event);
+        markRefused(started, now, event, model);
       const told = followsAdvice(recent, model, now, event, started, projectId, background);
       const reason = `Retrying on account ${recent.to}${told === null ? "" : `. ${told}`}`;
       bb.log.info(
@@ -6403,7 +6593,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         // an account without a login, or out), or keeps the preferred
         // model's weekly for this turn's model: then it is judged below.
         // Its refusal is the old account's, wherever it runs again.
-        if (isRefusal(event)) markRefused(started, now, event);
+        if (isRefusal(event)) markRefused(started, now, event, model);
         const told =
           sendAt === undefined || recent === undefined
             ? null
@@ -6620,7 +6810,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const failedOn = ranOn === undefined ? fromName : ranOn;
     const refusal = isRefusal(event);
     if (refusal && !stuck && failedOn !== null) {
-      markRefused(failedOn, now, event);
+      markRefused(failedOn, now, event, model);
     } else if (refusal && !stuck) {
       bb.log.info(
         `thread ${event.threadId}: refused by an account unknown (where its turn started could not be read); none marked`,
@@ -6649,7 +6839,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       failure: event,
       currentAccount: fromName,
       failedAccount: failedOn,
-      accounts: measuredAccounts(model),
+      // An account a session lost keeps from the project runs nothing of it,
+      // also judged from the log (stuck), where no mark applies (sin-login
+      // 2026-11-10).
+      accounts: sessionBlocked(measuredAccounts(model), projectId),
       preferredModel: model,
       ...reserveOf(),
       noTeamTakes: (m: string, ruledOut: string | null) => noTeamTakes(m, undefined, ruledOut),
@@ -6730,7 +6923,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     const reason =
       decision.kind === "switch"
-        ? `Switched to account ${decision.account}${decision.model === null ? "" : ` (${decision.model})`}${refusal && failedOn !== null ? `: ${failedOn} refused the turn` : ""}`
+        ? `Switched to account ${decision.account}${decision.model === null ? "" : ` (${decision.model})`}${refusal && failedOn !== null ? (isSessionLost(event) && !stuck ? `: ${failedOn} sin sesión en ${hostLabel(failedHost.get(event.threadId) ?? "")}` : `: ${failedOn} refused the turn`) : ""}`
         : decision.kind === "retry"
           ? `Retrying on account ${decision.account}${decision.model === null ? "" : ` (${decision.model})`}: it has room now`
           : advice === null
@@ -6860,7 +7053,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (!current.autoSwitch) return;
     // Pure guards first: another provider's limit must not query every account.
     const declined = declineReason(event);
-    if (declined !== null) {
+    // bb announces a turn refused for want of a session with no errorInfo:
+    // its text in bb's log tells (sin-login 2026-11-10).
+    const mayBeLost =
+      declined === "not-rate-limit" &&
+      (event.errorInfo === null || event.errorInfo.category === "unknown");
+    if (declined !== null && !mayBeLost) {
       bb.log.debug(`thread ${event.threadId}: ignored (${declined})`);
       return;
     }
@@ -6868,17 +7066,28 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const skipped =
       notTheUsersThread(thread) ??
       // A limit names its provider; a refusal only has the thread's.
-      (isRefusal(event) && thread.providerId !== CLAUDE_CODE_PROVIDER
+      ((isRefusal(event) || mayBeLost) && thread.providerId !== CLAUDE_CODE_PROVIDER
         ? `refusal of provider ${thread.providerId}`
         : null);
     if (skipped !== null) {
       bb.log.debug(`thread ${event.threadId}: ignored (${skipped})`);
       return;
     }
+    let failed = event;
+    if (mayBeLost) {
+      if ((await sessionLossText(event.threadId, event.requestId)) === null) {
+        bb.log.debug(`thread ${event.threadId}: ignored (${declined})`);
+        return;
+      }
+      failed = sessionLost(event);
+      const host = await threadHost(thread);
+      failedHost.set(event.threadId, host);
+      await nameHost(host);
+    }
     try {
       await inProjectQueue(thread.projectId, () =>
         handleFailure(
-          event,
+          failed,
           thread.projectId,
           started,
           judgedIn,

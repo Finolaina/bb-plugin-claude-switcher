@@ -25,6 +25,7 @@ import {
   RESERVE_RECHECK_MS,
   SEAT_RECHECK_MS,
   SEAT_TTL_MS,
+  SESSION_LOST_MS,
   type State,
 } from "./server.js";
 import type { AccountsIo } from "./src/accounts.js";
@@ -409,7 +410,9 @@ interface HostOptions {
   /** The filesystem the sessions of a moved project are shared on; none: not shared. */
   sessionsIo?: SessionsIo;
   /** What environments.list answers per project (its paths on every host). */
-  environments?: Record<string, { path: string | null; status?: string }[]>;
+  environments?: Record<string, { path: string | null; status?: string; id?: string; hostId?: string }[]>;
+  /** What hosts.list answers (the machines bb knows). */
+  hosts?: { id: string; name: string }[];
 }
 
 /** A machineEnvironment read held by a test: `reached` once the read waits on it, `release` to let it answer. */
@@ -679,6 +682,9 @@ async function host(
             return { ok: true };
           },
         },
+      },
+      hosts: {
+        list: async () => options.hosts ?? [],
       },
       environments: {
         list: async ({ projectId }: { projectId: string }) =>
@@ -23180,5 +23186,55 @@ describe("reparto por hueco 2026-11-07", () => {
       expect((await dispatch(h, "b", "proj-1", OPUS)).action).toBe("wait");
       expect(await where(h)).toBe("spare");
     });
+  });
+});
+
+describe("a turn that failed for want of a session on its machine (2026-11-10)", () => {
+  // Aitor, 2026-11-10 12:46: «tengo un par de hilos que no corren porque no
+  // ha cambiado de cuenta». A project moved to an account with room but no
+  // Claude Code session on the machine its thread runs on; bb logged
+  // «Not logged in · Please run /login» with no errorInfo, and nothing moved
+  // it nor retried it.
+  const ROOM = {
+    main: () => Response.json(payload(10, 10)),
+    spare: () => Response.json(payload(10, 60)),
+    work: () => Response.json(payload(5, 20)),
+  };
+  const NOT_LOGGED_IN = "Not logged in · Please run /login";
+  const EXPIRED =
+    "Failed to authenticate: this login reached its time limit and cannot be renewed. Run `claude auth login` to sign in again";
+  /** bb's log of a turn of `threadId` that failed with `detail`, no errorInfo. */
+  function lostLog(threadId: string, requestId: string, detail: string, seq = 1): LoggedEvent[] {
+    return [
+      {
+        seq,
+        type: "client/turn/requested",
+        data: { requestId, execution: { model: "claude-opus-5-5" } },
+      },
+      {
+        seq: seq + 1,
+        type: "provider/error",
+        data: { providerThreadId: "p", threadId, message: "Provider error", detail },
+      },
+    ];
+  }
+  /** The failure bb announces for it: no errorInfo, no limit report. */
+  const lost = (overrides: Partial<PluginTurnFailedEvent> = {}) =>
+    failure({ errorInfo: null, rateLimits: null, ...overrides });
+
+  it("moves the project off the account and retries the turn at once", async () => {
+    const h = await host(ROOM, {
+      threadEvents: { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", lost());
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    expect(h.retries).toEqual([
+      {
+        threadId: "thread-1",
+        turnRequestId: "creq_1",
+        reason: expect.stringMatching(/^Switched to account work.*main sin sesión en/),
+      },
+    ]);
   });
 });
