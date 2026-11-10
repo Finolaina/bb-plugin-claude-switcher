@@ -125,6 +125,40 @@ export function isRefusal(failure: PluginTurnFailedEvent): boolean {
 }
 
 /**
+ * What Claude Code says when the account has no working session on the
+ * machine the turn ran on (bb's log, 2026-11-10: a provider/error with no
+ * errorInfo, the text in its detail): no login there, a login past its
+ * time limit, or a token the API no longer takes.
+ */
+const SESSION_LOSS =
+  /not logged in|please run \/login|login reached its time limit|cannot be renewed|\b401\b|authentication_error|oauth token has expired/i;
+
+/** The text of a failed turn says its account has no session on its machine. */
+export function isSessionLoss(text: string): boolean {
+  return SESSION_LOSS.test(text);
+}
+
+/** The code this plugin gives a failure it read as a session lost (see sessionLost). */
+const SESSION_LOST_CODE = "claude-switcher:session-lost";
+
+/**
+ * The failure, judged as the refusal it is: bb sends it with no errorInfo,
+ * which is no business of this plugin, so it is given the refusal's
+ * category and this plugin's own code (see isSessionLost).
+ */
+export function sessionLost(failure: PluginTurnFailedEvent): PluginTurnFailedEvent {
+  return {
+    ...failure,
+    errorInfo: { category: "unauthorized", providerCode: SESSION_LOST_CODE, httpStatusCode: null },
+  };
+}
+
+/** A refusal this plugin read from the failure's text: the account's on that machine only. */
+export function isSessionLost(failure: PluginTurnFailedEvent): boolean {
+  return failure.errorInfo?.providerCode === SESSION_LOST_CODE;
+}
+
+/**
  * Why this failure is none of this plugin's business, or null when it is.
  * Cheap and pure: call it before measuring anything.
  */

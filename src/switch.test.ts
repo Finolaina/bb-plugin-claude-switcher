@@ -13,12 +13,16 @@ import {
   decidePlacement,
   decideSwitch,
   isCalorTick,
+  isRefusal,
+  isSessionLoss,
+  isSessionLost,
   modelFamily,
   opusInstead,
   opusInsteadText,
   placedOn,
   settle,
   reserveWait,
+  sessionLost,
   unreadTeamSeats,
   type PlacementInput,
   type SwitchInput,
@@ -712,6 +716,48 @@ describe("a turn the account refused", () => {
     ).toEqual({ kind: "decline", reason: "no-account-usable" });
     // Whatever the attempt: the account must be marked (code-reviewer r9).
     expect(declineReason(refused({ attemptNumber: ATTEMPTS }))).toBeNull();
+  });
+});
+
+describe("a turn that failed for want of a session on its machine", () => {
+  // bb's log of 2026-11-10 (provider/error, errorInfo null): the texts
+  // Claude Code gave on a machine where the account had no session.
+  it("is told by its text, whatever the case", () => {
+    for (const text of [
+      "Not logged in · Please run /login",
+      "not logged in",
+      "Please run /login",
+      "Failed to authenticate: this login reached its time limit and cannot be renewed. Run `claude auth login` to sign in again",
+      "API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth token has expired.\"}}",
+      "OAUTH TOKEN HAS EXPIRED",
+      "authentication_error",
+      "HTTP 401",
+    ])
+      expect(isSessionLoss(text), text).toBe(true);
+  });
+
+  it("is not a limit, a crash nor any other text", () => {
+    for (const text of [
+      "You've hit your 5-hour limit · resets 6pm (Europe/Madrid)",
+      "You've reached your Fable limit. Switch to another model",
+      'Provider "claude-code" exited unexpectedly with code 0',
+      "context window exceeded at 4010 tokens",
+      "",
+    ])
+      expect(isSessionLoss(text), text).toBe(false);
+  });
+
+  it("is judged as a refusal of the account, and tells itself apart from bb's own", () => {
+    const own = sessionLost(failure({ errorInfo: null, rateLimits: null }));
+    expect(isRefusal(own)).toBe(true);
+    expect(isSessionLost(own)).toBe(true);
+    expect(declineReason(own)).toBeNull();
+    expect(declineReason(sessionLost(failure({ errorInfo: null, attemptNumber: ATTEMPTS })))).toBeNull();
+    const bbs = failure({
+      errorInfo: { category: "unauthorized", providerCode: null, httpStatusCode: 401 },
+      rateLimits: null,
+    });
+    expect(isSessionLost(bbs)).toBe(false);
   });
 });
 
