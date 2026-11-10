@@ -4,6 +4,35 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.51] - 2026-11-10
+
+### Corregido
+
+- **Un turno que falla porque la cuenta no tiene sesión en su máquina mueve
+  el proyecto y se reintenta.** Aitor, 2026-11-10: «tengo un par de hilos
+  que no corren porque no ha cambiado de cuenta». bb anuncia ese fallo sin
+  `errorInfo` («Not logged in · Please run /login», «this login reached its
+  time limit and cannot be renewed», un 401 o «OAuth token has expired» en el
+  texto del error) y el plugin lo ignoraba; `history` decía «Stuck threads:
+  0». Ahora el texto del error en el registro de bb lo delata, la cuenta
+  queda marcada en esa máquina (no en las demás: en otra puede tener sesión),
+  el proyecto va a otra cuenta capaz con el criterio de siempre y el turno se
+  reintenta solo; sin otra capaz, se queda en error, dicho en el registro y
+  contado en `history`.
+- Mientras dura la marca (6 h como mucho, `SESSION_LOST_MS`, o hasta que un
+  turno acaba bien en esa cuenta y esa máquina, o un `use` a mano), ningún
+  camino automático lleva ni deja en esa cuenta a un proyecto con hilos en
+  esa máquina: la colocación antes del turno (también al mover por plaza y
+  por hueco), la de un proyecto nuevo, el rescate del refresco, el cambio
+  anticipado, las esperas adelantadas y el juicio de un hilo en error. Un
+  hilo que quedó en error por un login caducado se reintenta en el rescate.
+
+### Añadido
+
+- `health --json` enseña `sinSesion`: cada cuenta sin sesión en una máquina,
+  con la máquina y hasta cuándo dura la marca; `history` cuenta cada fallo
+  así como un hilo atascado, con el motivo «sin sesión en <máquina>».
+
 ## [0.2.50] - 2026-11-10
 
 ### Seguridad
