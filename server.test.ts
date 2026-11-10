@@ -23222,6 +23222,63 @@ describe("a turn that failed for want of a session on its machine (2026-11-10)",
   const lost = (overrides: Partial<PluginTurnFailedEvent> = {}) =>
     failure({ errorInfo: null, rateLimits: null, ...overrides });
 
+  /** proj-1 and proj-2 with threads on the Mac, proj-3 on the NUC only; thread-1 (proj-1) runs on the Mac. */
+  const MACHINES: HostOptions = {
+    environments: {
+      "proj-1": [{ id: "env-1", hostId: "host-mac", path: "/home/someone/site" }],
+      "proj-2": [{ id: "env-2", hostId: "host-mac", path: "/home/someone/other" }],
+      "proj-3": [{ id: "env-3", hostId: "host-nuc", path: "/home/someone/third" }],
+    },
+    hosts: [
+      { id: "host-mac", name: "the laptop" },
+      { id: "host-nuc", name: "the server" },
+    ],
+    threads: { "thread-1": { environmentId: "env-1" } },
+    extraProjects: [{ id: "proj-3", name: "Third" }],
+    projectCreatedAt: { "proj-3": NOW - 24 * HOUR },
+  };
+  /** bb asks before a turn of `threadId` in `projectId`, in Opus. */
+  const before = (h: Awaited<ReturnType<typeof host>>, threadId: string, projectId: string) =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: threadId, projectId }),
+        requestedExecution: { providerId: "claude-code", model: "claude-opus-5-5" },
+        attempt: "start-turn",
+      }),
+    );
+  /** The background reads of the projects' machines, over. */
+  const settled = async () => {
+    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+  };
+  /** main lost its session on the Mac: thread-1's failure, judged. */
+  async function lostOnMac(options: HostOptions = {}) {
+    const h = await host(ROOM, {
+      ...MACHINES,
+      ...options,
+      threadEvents: { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", lost());
+    await settled();
+    return h;
+  }
+
+  it("keeps the account from the turns of another project with threads on that machine", async () => {
+    const h = await lostOnMac();
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([["proj-1", `${ACCOUNTS}/work`]]);
+    await before(h, "thr-2", "proj-2");
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([
+      ["proj-1", `${ACCOUNTS}/work`],
+      ["proj-2", `${ACCOUNTS}/work`],
+    ]);
+  });
+
+  it("leaves the account to a project with no thread on that machine: the login is the machine's", async () => {
+    const h = await lostOnMac();
+    await before(h, "thr-3", "proj-3");
+    expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-1"]);
+  });
+
   it("moves the project off the account and retries the turn at once", async () => {
     const h = await host(ROOM, {
       threadEvents: { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) },

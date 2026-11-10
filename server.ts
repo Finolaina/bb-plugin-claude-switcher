@@ -1645,10 +1645,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * them.
    */
   const limitedAt = new Map<string, Map<string, number>>();
-  /** Until when `name`'s marks stand for a turn in `model` (see limitedAt); null: none does. */
-  function limitedUntil(name: string, model: string): number | null {
+  /**
+   * Until when `name`'s marks stand for a turn in `model` (see limitedAt);
+   * null: none does. With the project, a session lost on one of its
+   * machines too (see sessionLostOn): every path a limit's mark keeps an
+   * account from keeps it from such a project as well (sin-login
+   * 2026-11-10).
+   */
+  function limitedUntil(name: string, model: string, projectId?: string): number | null {
     const now = deps.now();
-    let until: number | null = null;
+    let until: number | null = sessionLostOn(name, projectId)?.until ?? null;
     for (const [scope, end] of limitedAt.get(name) ?? [])
       if ((scope === "" || scope === model.toLowerCase()) && now < end)
         until = Math.max(until ?? end, end);
@@ -1780,6 +1786,21 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function hostLabel(host: string): string {
     return host === "" ? "una máquina sin identificar" : (hostNames.get(host) ?? host);
   }
+  /**
+   * Every project's machines, read in the background once a session is
+   * lost: the decisions that follow keep the account from the projects on
+   * that machine only, and an unread project from all of them.
+   */
+  async function readAllHosts(): Promise<void> {
+    try {
+      const listed = await bb.sdk.projects.list({ includePersonal: true });
+      await Promise.all(listed.map((p) => readHosts(p.id)));
+    } catch (error) {
+      bb.log.warn(
+        `the projects' machines not read (an account without a session on one is kept from every unread project): ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
   /** The machines' names (see hostLabel), read once per machine not named yet. */
   async function nameHost(host: string): Promise<void> {
     if (host === "" || hostNames.has(host)) return;
@@ -1840,8 +1861,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
   }
   /** Why a project moves off `name` before a turn, for the history. */
-  function whyOut(name: string, model: string): string {
+  function whyOut(name: string, model: string, projectId?: string): string {
     if (loggedOut(name)) return "is not logged in";
+    const lost = sessionLostOn(name, projectId);
+    if (lost !== null) return `sin sesión en ${hostLabel(lost.host)}`;
     if (refusing(name)) return "refused a turn";
     if (limitedUntil(name, model) !== null)
       return `answered ${model === "" ? "a turn" : model} with a usage limit that has not reset yet`;
@@ -4241,7 +4264,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         ? `New project placed on account ${decision.account}${current.preferredModel === "" ? "" : ` (${current.preferredModel})`}`
         : decision.why === "back-from-excursion"
           ? `Moved back to account ${decision.account} before the turn: ${fromName} was an excursion for ${excursion?.model ?? "another model"}`
-          : `Moved to account ${decision.account} before the turn: ${fromName} ${whyOut(fromName, current.preferredModel)}`;
+          : `Moved to account ${decision.account} before the turn: ${fromName} ${whyOut(fromName, current.preferredModel, projectId)}`;
     bb.log.info(`thread ${thread.id}: ${reason}`);
     await recordMove(
       {
@@ -4373,6 +4396,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const left = aheadLeft.get(projectId);
     return measuredAccounts(model).filter((usage) => {
       if (usage.name === fromName) return true;
+      if (sessionLostOn(usage.name, projectId) !== null) return false;
       if (
         left !== undefined &&
         usage.name === left.account &&
@@ -4828,8 +4852,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * of it (session, weekly or the model's own window full, or locked)
    * until when; null when it can, or nothing is known of it.
    */
-  function stranded(name: string, now: number, model: string): string | null {
+  function stranded(name: string, now: number, model: string, projectId?: string): string | null {
     if (loggedOut(name)) return "not logged in";
+    // No session there on one of the project's machines (sin-login 2026-11-10).
+    const lost = sessionLostOn(name, projectId);
+    if (lost !== null) return `sin sesión en ${hostLabel(lost.host)}`;
     // A mark standing for the model: out whatever its read says, as in the
     // placement (Astra r8 medium 1).
     const marked = limitedUntil(name, model);
@@ -4897,6 +4924,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           project.account ?? current.defaultAccountName,
           now,
           modelOfProject(project.id),
+          project.id,
         ) === null
       )
         continue;
@@ -4940,7 +4968,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return;
     }
     const model = modelOfProject(projectId);
-    const why = stranded(fromName, now, model);
+    const why = stranded(fromName, now, model, projectId);
     if (why === null) return;
     // For another model than the reserved one, never to an account where
     // it spends the reserve's weekly: that turn waits at the checkpoint.
@@ -4953,7 +4981,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // The pick by hand first, as before a turn (Codex r3 medium 2).
       excursionFrom: wayHome(projectId, model, measuredAccounts(model), now),
       // Nor to an account whose mark stands for the model (Astra r8 medium 1).
-      limitedUntil: (name: string) => limitedUntil(name, model),
+      limitedUntil: (name: string) => limitedUntil(name, model, projectId),
       freeSeats,
       now,
       currentLoggedOut: loggedOut(fromName),
@@ -5293,7 +5321,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // An account whose mark stands for the model is no destination (Astra
       // r5 medium 1). For every model, unlike decideSwitch, where a Fable
       // turn is judged on its numbers (see the judge).
-      limitedUntil: (name: string) => limitedUntil(name, model),
+      limitedUntil: (name: string) => limitedUntil(name, model, projectId),
       excursionFrom: wayHome(projectId, model, measured, now),
       freeSeats:
         own === null
@@ -5658,9 +5686,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         if (other !== null)
           turn.held = {
             sendAt: now + SEAT_RECHECK_MS,
-            reason: `Waiting for a free seat for ${model} on ${other}: ${fromName} ${whyOut(fromName, model)}`,
+            reason: `Waiting for a free seat for ${model} on ${other}: ${fromName} ${whyOut(fromName, model, projectId)}`,
             seatOn: other,
-            seatWhy: `${model}: ${fromName} ${whyOut(fromName, model)}`,
+            seatWhy: `${model}: ${fromName} ${whyOut(fromName, model, projectId)}`,
           };
       }
       return { account: fromName, byDefault: !from.owned, writes };
@@ -5766,7 +5794,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
               `Movido a ${decision.account} antes del turno: ${fromName} guarda la semanal de ${current.preferredModel} y ${decision.account} es una Team con plaza (Team primero)`
           : decision.why === "current-full"
             ? `Moved to account ${decision.account} before the turn: ${fromName} seats full (${fullHere.running + fullHere.reserved + (fullHere.external?.length ?? 0)}/${fullHere.capacity}), ${decision.account} had ${Number.isFinite(roomThere) ? roomThere : "unlimited"} free`
-            : `Moved to account ${decision.account} ${when === "after" ? `after a turn in ${model}` : "before the turn"}: ${fromName} ${whyOut(fromName, model)}`;
+            : `Moved to account ${decision.account} ${when === "after" ? `after a turn in ${model}` : "before the turn"}: ${fromName} ${whyOut(fromName, model, projectId)}`;
       bb.log.info(`thread ${thread.id}: ${reason}`);
       await recordMove(
         {
@@ -6371,7 +6399,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         at.account !== null &&
         teamOut(at.account, model)
       ) {
-        const reason = `Waiting for a Team seat that can run ${model}: the project is on ${at.account}, which ${whyOut(at.account, model)}`;
+        const reason = `Waiting for a Team seat that can run ${model}: the project is on ${at.account}, which ${whyOut(at.account, model, thread.projectId)}`;
         bb.log.info(`thread ${thread.id}: its message waits (${reason})`);
         return { action: "wait", reason, sendAt: deps.now() + SEAT_RECHECK_MS };
       }
@@ -6385,12 +6413,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         const waited = blockedWaits.get(thread.id) ?? 0;
         if (waited < BLOCKED_WAITS) {
           blockedWaits.set(thread.id, waited + 1);
-          const reason = `Waiting to place ${model} again: the project is on ${at.account}, which ${whyOut(at.account, model)}`;
+          const reason = `Waiting to place ${model} again: the project is on ${at.account}, which ${whyOut(at.account, model, thread.projectId)}`;
           bb.log.info(`thread ${thread.id}: its message waits (${reason})`);
           return { action: "wait", reason, sendAt: deps.now() + SEAT_RECHECK_MS };
         }
         bb.log.warn(
-          `thread ${thread.id}: starts on ${at.account}, which ${whyOut(at.account, model)}: its project could not be moved in ${BLOCKED_WAITS} tries`,
+          `thread ${thread.id}: starts on ${at.account}, which ${whyOut(at.account, model, thread.projectId)}: its project could not be moved in ${BLOCKED_WAITS} tries`,
         );
       }
       if (at === null) {
@@ -6462,6 +6490,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       const marks = sessionLostAt.get(name) ?? new Map<string, number>();
       marks.set(host, now);
       sessionLostAt.set(name, marks);
+      void readAllHosts();
       const line = `STUCK: ${name} sin sesión en ${hostLabel(host)}: thread ${event.threadId}${model === "" ? "" : ` (${model})`} failed for want of a login there; ${name} is kept from the projects with threads there for ${SESSION_LOST_MS / 3_600_000} h, or until a turn ends well on it there or it is picked by hand`;
       bb.log.warn(line);
       toHistorial(`thread ${event.threadId} stuck`, (db) =>
@@ -6865,8 +6894,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // The provider's word on the account the turn failed on stands past
     // this judgment: the retry's own placement reads it (see limitedAt).
     // Judged on its failure, the event is a limit or a refusal (handleFailure
-    // ignores the rest); left in error, it may be hours old: no mark.
-    if (!stuck && failedOn !== null)
+    // ignores the rest); left in error, it may be hours old: no mark. A
+    // session lost is marked on its machine only (see markRefused): a mark
+    // of the whole account here would keep it from every machine.
+    if (!stuck && failedOn !== null && !isSessionLost(event))
       markLimited(
         failedOn,
         limitScope(input.accounts.find((a) => a.name === failedOn), model, now)?.toLowerCase() ?? "",
@@ -7518,7 +7549,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return;
     await markHandled(projectId);
     noteMove(projectId, fromName, to, model, before);
-    const reason = `Moved to account ${to}, which can run the waiting turn now: ${fromName} ${noLogin ? "is not logged in" : whyOut(fromName, model)}`;
+    const reason = `Moved to account ${to}, which can run the waiting turn now: ${fromName} ${noLogin ? "is not logged in" : whyOut(fromName, model, projectId)}`;
     bb.log.info(`thread ${threadId}: ${reason}`);
     await recordMove(
       { at: now, threadId, projectId, from: fromName, to, reason },
