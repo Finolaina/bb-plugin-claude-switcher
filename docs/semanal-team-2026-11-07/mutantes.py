@@ -62,7 +62,17 @@ def resumen_de(salida: str) -> str:
     return next((l.strip() for l in salida.splitlines() if "Tests " in l), "sin resumen")
 
 
+def exigir_arbol_limpio(repo: str) -> None:
+    """Se niega a correr si el repo tiene cambios sin guardar: estas pruebas mutan ficheros (pisarian trabajo ajeno)."""
+    r = subprocess.run(["git", "-C", repo, "status", "--porcelain"], capture_output=True, text=True)
+    if r.returncode != 0 or r.stdout.strip():
+        print("NO CORRO: el arbol de trabajo de " + repo + " no esta limpio (git status --porcelain no esta vacio).")
+        print("Guarda o descarta los cambios antes, o corre estas pruebas desde un worktree limpio.")
+        sys.exit(3)
+
+
 def main() -> int:
+    exigir_arbol_limpio(REPO)
     head = subprocess.check_output(["git", "-C", REPO, "rev-parse", "HEAD"], text=True).strip()
     trabajo = tempfile.mkdtemp(prefix="mutantes-")
     clon = os.path.join(trabajo, "clon")

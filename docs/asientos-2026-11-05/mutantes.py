@@ -87,7 +87,17 @@ def vitest() -> tuple[int, str]:
     return r.returncode, resumen
 
 
+def exigir_arbol_limpio(repo: str) -> None:
+    """Se niega a correr si el repo tiene cambios sin guardar: estas pruebas mutan ficheros (pisarian trabajo ajeno)."""
+    r = subprocess.run(["git", "-C", repo, "status", "--porcelain"], capture_output=True, text=True)
+    if r.returncode != 0 or r.stdout.strip():
+        print("NO CORRO: el arbol de trabajo de " + repo + " no esta limpio (git status --porcelain no esta vacio).")
+        print("Guarda o descarta los cambios antes, o corre estas pruebas desde un worktree limpio.")
+        sys.exit(3)
+
+
 def main() -> int:
+    exigir_arbol_limpio(".")
     rc, resumen = vitest()
     print(f"SIN MUTAR  rc={rc} · {resumen}")
     if rc != 0 or "failed" in resumen or "passed" not in resumen:
