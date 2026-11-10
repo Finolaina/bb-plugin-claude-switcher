@@ -23345,6 +23345,25 @@ describe("a turn that failed for want of a session on its machine (2026-11-10)",
     ]);
   });
 
+  it("retries a thread left in error by a login past its time limit, and its next failure moves the project (the rescue)", async () => {
+    // 2026-11-10: a thread had sat in error since 2026-11-08 with «this login
+    // reached its time limit and cannot be renewed», and nothing retried it.
+    const log = { "thread-1": lostLog("thread-1", "creq_1", EXPIRED) };
+    const h = await host(ROOM, {
+      ...MACHINES,
+      threads: { "thread-1": { status: "error", environmentId: "env-1" } },
+      threadEvents: log,
+    });
+    dispose = () => h.harness.dispose();
+    await onePass(h);
+    // The log does not say which account refused: retried where the project is.
+    expect(h.retries.map((r) => r.reason)).toEqual(["Retrying on account main (Opus): it has room now"]);
+    expect(h.envSet).toEqual([]);
+    log["thread-1"] = lostLog("thread-1", "creq_2", EXPIRED, 5);
+    await h.harness.behavior.emitThreadEvent("turn.failed", lost({ requestId: "creq_2", attemptNumber: 2 }));
+    expect(moved(h)).toEqual([["proj-1", ownNote("work")]]);
+  });
+
   it("moves the project off the account and retries the turn at once", async () => {
     const h = await host(ROOM, {
       threadEvents: { "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN) },

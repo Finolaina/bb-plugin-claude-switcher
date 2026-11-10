@@ -98,6 +98,7 @@ import {
   isRefusal,
   isSessionLoss,
   isSessionLost,
+  SESSION_LOST_INFO,
   sessionLost,
   MAX_ATTEMPTS,
   mayAdviseOpus,
@@ -7320,13 +7321,22 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       limit: "1",
       afterSeq: String(turn.seq),
     });
-    const errorInfo =
+    let errorInfo =
       failed?.type === "provider/error"
         ? (failed.data.errorInfo ?? null)
         : failed?.type === "client/turn/rejected"
           ? rejectedErrorInfo(failed.data.reason)
           : undefined;
     if (errorInfo === undefined) return null;
+    // No errorInfo, and a text that says the account has no session on the
+    // thread's machine: the refusal it is, as the failure's handler reads it
+    // (sin-login 2026-11-10: a thread sat in error two days with it).
+    if (
+      failed?.type === "provider/error" &&
+      (errorInfo === null || errorInfo.category === "unknown") &&
+      isSessionLoss(`${failed.data.message} ${failed.data.detail ?? ""}`)
+    )
+      errorInfo = SESSION_LOST_INFO;
     const [reported] = await bb.sdk.threads.events.list({
       threadId,
       types: ["provider/rateLimits/updated"],
