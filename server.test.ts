@@ -23304,7 +23304,7 @@ describe("a turn that failed for want of a session on its machine (2026-11-10)",
 
   it("places a new project with threads on that machine elsewhere (placeProject)", async () => {
     const h = await lostOnMac({
-      ...{ ...MACHINES, environments: { ...MACHINES.environments, "proj-4": [{ id: "env-4", hostId: "host-mac", path: "/home/someone/fourth" }] } },
+      environments: { ...MACHINES.environments, "proj-4": [{ id: "env-4", hostId: "host-mac", path: "/home/someone/fourth" }] },
       extraProjects: [{ id: "proj-3", name: "Third" }, { id: "proj-4", name: "Fourth" }],
     }, MAIN_BEST);
     await h.harness.behavior.emitThreadEvent("thread.created", {
@@ -23437,6 +23437,63 @@ describe("a turn that failed for want of a session on its machine (2026-11-10)",
       ["proj-1", ownNote("work")],
       ["proj-1", ownNote("work")],
     ]);
+  });
+
+  it("moves a project whose thread waits on the account off it, and has bb retry the turn there at once (moveUpWait)", async () => {
+    const h = await lostOnMac({
+      threads: { "thread-1": { environmentId: "env-1" }, "thr-2": { status: "error", environmentId: "env-2" } },
+      threadEvents: {
+        "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN),
+        "thr-2": [{ seq: 1, type: "client/turn/requested", data: { requestId: "creq_r2", execution: { model: "claude-opus-5-5" } } }],
+      },
+      queued: [
+        {
+          id: "r2",
+          threadId: "thr-2",
+          payload: { kind: "retry", attempt: 2, reason: "Waiting for main", retryOfTurnRequestId: "creq_r2" },
+          sendAt: NOW + 2 * HOUR + BUFFER,
+          waitingOn: { kind: "time" },
+          createdAt: NOW - HOUR,
+          model: "claude-opus-5-5",
+        },
+      ],
+    });
+    await onePass(h);
+    expect(h.retries.filter((r) => r.threadId === "thr-2")).toEqual([
+      {
+        threadId: "thr-2",
+        turnRequestId: "creq_r2",
+        reason: "Moved to account work, which can run the waiting turn now: main sin sesión en the laptop",
+      },
+    ]);
+  });
+
+  it("does not retry a thread left in error on the account its machine has no session for (the rescue's judgment)", async () => {
+    const h = await lostOnMac({
+      threads: { "thread-1": { environmentId: "env-1" }, "thr-2": { status: "error", environmentId: "env-2" } },
+      threadEvents: {
+        "thread-1": lostLog("thread-1", "creq_1", NOT_LOGGED_IN),
+        "thr-2": lostLog("thr-2", "creq_8", EXPIRED),
+      },
+    });
+    await onePass(h);
+    expect(h.retries.filter((r) => r.threadId === "thr-2").map((r) => r.reason)).toEqual([
+      "Switched to account work (Opus): main sin sesión en the laptop",
+    ]);
+  });
+
+  it("leaves the turn in error, said and counted, when no other account can run it", async () => {
+    const h = await lostOnMac({}, {
+      main: () => Response.json(payload(1, 1)),
+      spare: () => Response.json(payload(100, 100)),
+      work: () => Response.json(payload(100, 100)),
+    });
+    expect(h.envSet).toEqual([]);
+    expect(h.retries).toEqual([]);
+    expect(h.harness.logEntries.map((e) => e.message)).toContainEqual(
+      expect.stringMatching(/^thread thread-1: no switch \(/),
+    );
+    expect((await h.harness.behavior.runCli(["history", "--dias", "1"])).stdout).toMatch(/Stuck threads: 1\n/);
   });
 
   it("moves the project off the account and retries the turn at once", async () => {

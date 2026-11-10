@@ -6990,7 +6990,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     const reason =
       decision.kind === "switch"
-        ? `Switched to account ${decision.account}${decision.model === null ? "" : ` (${decision.model})`}${refusal && failedOn !== null ? (isSessionLost(event) && !stuck ? `: ${failedOn} sin sesión en ${hostLabel(failedHost.get(event.threadId) ?? "")}` : `: ${failedOn} refused the turn`) : ""}`
+        ? `Switched to account ${decision.account}${decision.model === null ? "" : ` (${decision.model})`}${refusal && failedOn !== null ? (isSessionLost(event) ? `: ${failedOn} ${whyOut(failedOn, model, projectId)}` : `: ${failedOn} refused the turn`) : ""}`
         : decision.kind === "retry"
           ? `Retrying on account ${decision.account}${decision.model === null ? "" : ` (${decision.model})`}: it has room now`
           : advice === null
