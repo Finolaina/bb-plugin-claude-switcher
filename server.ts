@@ -1895,7 +1895,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // (code-reviewer r1, low 5).
     if (limitedUntil(name, model, projectId) !== null)
       return `answered ${model === "" ? "a turn" : model} with a usage limit that has not reset yet`;
-    if (reservedFor(name, model) && canRunHere(name, model))
+    if (reservedFor(name, model, undefined, projectId) && canRunHere(name, model))
       return `would spend ${current.preferredModel}'s weekly`;
     const known = measuredAccounts(model).find((a) => a.name === name);
     if ((known === undefined || known.unknown === true) && unreadKeepsReserve(name))
@@ -2916,9 +2916,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * the account will be when the turn is sent (`at`: a wait's send time;
    * now by default), at the latest: a Max account whose Fable window
    * resets before a wait ends keeps Fable again by then (code-reviewer
-   * r1, M1), as decideSwitch projects its waits.
+   * r1, M1), as decideSwitch projects its waits. `projectId`: a Team
+   * without a session on another machine still takes its turns
+   * (code-reviewer r2, low 2).
    */
-  function reservedFor(name: string, model: string, at = deps.now()): boolean {
+  function reservedFor(name: string, model: string, at = deps.now(), projectId?: string): boolean {
     if (!otherModel(model)) return false;
     const known = measuredAccounts(model).find((a) => a.name === name);
     if (known === undefined || known.unknown === true) return false;
@@ -2926,7 +2928,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       Math.max(at, deps.now()) + RESET_BUFFER_MS + RESET_JITTER_MS;
     return spendsReservedWeekly(settle(known, sendBy), {
       preferredModel: model,
-      ...reserveOf(),
+      ...reserveOf(projectId),
     });
   }
 
@@ -5852,7 +5854,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           : decision.why === "current-reserved" &&
               when === "before" &&
               measuredAccounts(model).some((a) => a.name === fromName && a.unknown !== true) &&
-              !reservedFor(fromName, model)
+              !reservedFor(fromName, model, undefined, projectId)
             ? // Kept for Fable only by «Team primero», not out of its margin.
               `Movido a ${decision.account} antes del turno: ${fromName} guarda la semanal de ${current.preferredModel} y ${decision.account} es una Team con plaza (Team primero)`
           : decision.why === "current-full"
@@ -6631,7 +6633,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // Or keeping the preferred model's weekly, which this turn's model
       // would spend when the retry is sent: judged below, where the rule
       // applies.
-      !reservedFor(recent.to, model, recent.sendAt ?? now)
+      !reservedFor(recent.to, model, recent.sendAt ?? now, projectId)
     ) {
       // Another thread of the project, still running on the old account
       // (whatever its attempt: a leftover can be a retry too): the project
@@ -6675,7 +6677,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         !at.external &&
         started !== currentName &&
         !cannotRun(currentName) &&
-        !reservedFor(currentName, model, sendAt ?? now)
+        !reservedFor(currentName, model, sendAt ?? now, projectId)
       ) {
         // Started on the old account before the project moved: a leftover
         // (a long tool call can outlast the grace window), not a failure of
@@ -7608,7 +7610,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // Nothing to release it on; the wait fires on its own at sendAt and
       // is placed then (code-reviewer r2, CR2-05).
       bb.log.debug(
-        `thread ${threadId}: its wait stays on ${fromName}: no other account can run ${model}${reservedFor(fromName, model, now) ? " and this one keeps " + current.preferredModel : ""}`,
+        `thread ${threadId}: its wait stays on ${fromName}: no other account can run ${model}${reservedFor(fromName, model, now, projectId) ? " and this one keeps " + current.preferredModel : ""}`,
       );
       return;
     }
