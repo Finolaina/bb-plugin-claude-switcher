@@ -1791,6 +1791,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (marks.size === 0) sessionLostAt.delete(name);
     return found;
   }
+  /** Every usage limit's mark still standing, per account and scope (see limitedAt), for health. */
+  function limitMarks(): Array<{ account: string; scope: string; until: number }> {
+    const now = deps.now();
+    return [...limitedAt].flatMap(([account, marks]) =>
+      [...marks].filter(([, until]) => now < until).map(([scope, until]) => ({ account, scope, until })),
+    );
+  }
   /** Every session lost still standing, per account and machine (see sessionLostAt), for health. */
   function sessionMarks(): Array<{ account: string; host: string; hostName: string; until: number }> {
     const now = deps.now();
@@ -5431,7 +5438,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     };
   }
   /** The accounts other than `name` that could take a turn in `model` now: a free seat no queue is ahead for, and the reserve spared. */
-  function freeElsewhere(name: string, model: string): string[] {
+  function freeElsewhere(name: string, model: string, projectId?: string): string[] {
     const now = deps.now();
     return measuredAccounts(model)
       .filter((a) => a.name !== name)
@@ -5440,7 +5447,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         (a) =>
           chooseAccount([a], {
             preferredModel: model,
-            ...reserveOf(),
+            ...reserveOf(projectId),
             freeSeats: seatRoom,
           }) !== null,
       )
@@ -6267,14 +6274,21 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         account = read.account ?? current.defaultAccountName;
       }
       const modelo = modelFamily(held.model) ?? current.preferredModel;
-      const libres = freeElsewhere(account, modelo);
-      if (libres.length === 0) continue;
+      const free = freeElsewhere(account, modelo, known.projectId);
+      if (free.length === 0) continue;
+      // Not one a usage limit's mark keeps from the model: the plugin would
+      // not use it, and the line said it was free (culpa tras recarga,
+      // 2026-11-11). With none left, the line says so, and until when.
+      const ends = free.map((name) => limitedUntil(name, modelo, known.projectId));
+      const libres = free.filter((_, i) => ends[i] === null);
+      const marked = ends.filter((end): end is number => end !== null);
       out.push({
         hilo: held.threadId,
         cuenta: account,
         modelo,
         minutos: Math.floor((now - held.since) / 60_000),
         libres,
+        ...(libres.length === 0 ? { vuelve: isoInZone(Math.min(...marked)) } : {}),
         proyectoOcupado: projectSeated(known.projectId, held.threadId),
       });
     }
@@ -7984,6 +7998,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       atascos: await atascos(),
       esperandoTeam: await esperandoTeam(),
       sinSesion: sessionMarks(),
+      limites: limitMarks(),
       // huecoOpus and fablePerdida per Max or Ultra account (0.2.48).
       ...(current.preferredModel === ""
         ? {}

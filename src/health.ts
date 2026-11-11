@@ -67,6 +67,13 @@ export interface HealthReport {
    * thread's machine could not be told).
    */
   sinSesion: SinSesion[];
+  /**
+   * The usage limits turns failed on, while their mark stands (0.2.52,
+   * Aitor 2026-11-11): the account takes no turn in `modelo` ("todos": in
+   * any model) where the placement, the rescue and a retry look, whatever
+   * its read says, until `hasta`.
+   */
+  limites: Limite[];
   cuentas: Array<{
     nombre: string;
     plan: "ultra" | "max" | "team" | "desconocido";
@@ -112,6 +119,13 @@ export interface SinSesion {
   cuenta: string;
   maquina: string;
   nombreMaquina: string;
+  hasta: string;
+}
+
+/** One account kept from a model by a usage limit (see HealthReport.limites). */
+export interface Limite {
+  cuenta: string;
+  modelo: string;
   hasta: string;
 }
 
@@ -170,6 +184,8 @@ export function healthReport(input: {
   esperandoTeam: EsperaTeam[] | null;
   /** See HealthReport.sinSesion; `until` in ms. */
   sinSesion?: ReadonlyArray<{ account: string; host: string; hostName: string; until: number }>;
+  /** See HealthReport.limites; `scope` "" for every model, else the model's name in lower case; `until` in ms. */
+  limites?: ReadonlyArray<{ account: string; scope: string; until: number }>;
   accounts: HealthAccount[];
   /** The preferred model and the weekly it spends per point of its own window (reserveShare): adds huecoOpus and fablePerdida. */
   reserve?: { model: string; share: number };
@@ -185,6 +201,11 @@ export function healthReport(input: {
       cuenta: m.account,
       maquina: m.host,
       nombreMaquina: m.hostName,
+      hasta: isoInZone(m.until),
+    })),
+    limites: (input.limites ?? []).map((m) => ({
+      cuenta: m.account,
+      modelo: m.scope === "" ? "todos" : m.scope[0]!.toUpperCase() + m.scope.slice(1),
       hasta: isoInZone(m.until),
     })),
     cuentas: input.accounts.map((a) => {
@@ -271,6 +292,9 @@ export function healthText(report: HealthReport): string {
       ...(c.huecoOpus === undefined || c.huecoOpus === null
         ? []
         : [`hueco Opus ${c.huecoOpus} (Fable perdida ${c.fablePerdida})`]),
+      ...report.limites
+        .filter((l) => l.cuenta === c.nombre)
+        .map((l) => `límite ${l.modelo === "todos" ? "" : `${l.modelo} `}hasta ${l.hasta}`),
       c.usable ? "usable" : `no usable: ${c.problema ?? "sin motivo"}`,
     ];
     return `${c.nombre.padEnd(width)}  ${parts.join(" · ")}`;
@@ -282,7 +306,7 @@ export function healthText(report: HealthReport): string {
       ? ["atascos: la cola no se pudo leer"]
       : report.atascos.map(
           (a) =>
-            `atasco: ${a.cuenta} retiene ${a.hilo} (${a.modelo}) ${a.minutos} min; libres: ${a.libres.join(", ")}${a.proyectoOcupado ? "; proyecto con otro hilo en marcha" : ""}`,
+            `atasco: ${a.cuenta} retiene ${a.hilo} (${a.modelo}) ${a.minutos} min; ${a.libres.length === 0 ? `sin cuenta libre para ${a.modelo}${a.vuelve === undefined ? "" : ` hasta ${a.vuelve}`}` : `libres: ${a.libres.join(", ")}`}${a.proyectoOcupado ? "; proyecto con otro hilo en marcha" : ""}`,
         )),
     ...(report.esperandoTeam === null
       ? ["esperando Team: la cola no se pudo leer"]

@@ -18834,6 +18834,38 @@ describe("caminos 2026-11-04", () => {
       expect((await report(h)).atascos).toEqual([]);
     });
 
+    it("an account a usage limit's mark keeps from the thread's model is not free: the line says none is, and until when (2026-11-11)", async () => {
+      const { h, at } = await stuck();
+      // t1's next turn, refused at the door with work's 429 till +2 h: work
+      // is marked, whatever its read says.
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ threadId: "t1", requestId: "creq_t1" }),
+      );
+      at(10 * 60_000);
+      const stuckNow = (await report(h)).atascos!;
+      expect(stuckNow.filter((a) => a.hilo === "t2")).toEqual([
+        {
+          hilo: "t2",
+          cuenta: "spare",
+          modelo: "Opus",
+          minutos: 10,
+          libres: [],
+          vuelve: "2026-09-29T14:00:00+02:00",
+          proyectoOcupado: false,
+        },
+      ]);
+      expect((await h.harness.behavior.runCli(["health"])).stdout).toContain(
+        "atasco: spare retiene t2 (Opus) 10 min; sin cuenta libre para Opus hasta 2026-09-29T14:00:00+02:00",
+      );
+      // Its place in the queue lapsed meanwhile: the holder said is the
+      // project's account, as in the test of the log above.
+      await pass(h);
+      expect(lines(h).filter((l) => l.includes("thread t2 "))).toEqual([
+        "STUCK: main holds thread t2 (Opus) 10 min, no account free for Opus until 2026-09-29T14:00:00+02:00",
+      ]);
+    });
+
     it("a row bb says has failed is not stuck", async () => {
       const { h, at } = await stuck(held({ failureReason: "Thread is archived" }));
       at(10 * 60_000);
@@ -23721,6 +23753,23 @@ describe("a failure is the account's its turn ran on, across a reload (2026-11-1
     expect(h.envSet).toEqual([]);
   });
 
+  it("judged because the project's account is out too, its 429 marks the account the turn ran on, not the project's", async () => {
+    const h = await reloaded({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => Response.json(payload(100, 20)),
+    });
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const late = failure({ threadId: "thread-3", requestId: "creq_9" });
+    late.rateLimits!.windows[0]!.resetsAtMs = NOW + 2 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", late);
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([["proj-1", `${ACCOUNTS}/spare`]]);
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    expect(report.limites).toEqual([
+      { cuenta: "main", modelo: "todos", hasta: "2026-09-29T14:00:00+02:00" },
+    ]);
+  });
+
   it("a turn under way at the reload that no seat counts ran on an account unknown: its 429 marks none", async () => {
     // At the reload proj-1 names an account no longer found: thread-3 is
     // not counted, and nothing says where its turn started.
@@ -23751,5 +23800,27 @@ describe("a failure is the account's its turn ran on, across a reload (2026-11-1
     ]);
     expect(await sent(h, "thread-5", "proj-1")).toEqual({ action: "proceed" });
     expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+  });
+});
+
+describe("the marks of a usage limit, and the threads they hold (2026-11-11)", () => {
+  // Aitor, 2026-11-11: the stuck lines said «libres: B» while the plugin
+  // kept B from that model; health showed B usable and nothing of the mark.
+  it("health shows each account's standing mark, per model or for every model, and until when", async () => {
+    const h = await host({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => Response.json(payload(5, 20)),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    expect(report.version).toBe(1);
+    expect(report.limites).toEqual([
+      { cuenta: "main", modelo: "todos", hasta: "2026-09-29T14:00:00+02:00" },
+    ]);
+    const text = (await h.harness.behavior.runCli(["health"])).stdout;
+    expect(text).toMatch(/^main .*límite hasta 2026-09-29T14:00:00\+02:00/m);
+    expect(text).not.toMatch(/^(spare|work) .*límite/m);
   });
 });
