@@ -126,7 +126,6 @@ import {
   opusRoom,
   reserveToSpare,
   reserving,
-  RESET_TOGETHER_MS,
   spendsReservedWeekly,
   type AccountUsage,
 } from "./src/policy.js";
@@ -7026,6 +7025,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // ponytail: an account truly out whose read lacks the window its 429
       // reports gets a 30-min mark and one failed turn every 30 min, each
       // with this warning; a reading with that window would close it.
+      // Only a reset still ahead: one that passed while the accounts were
+      // read is the account back, and marks it no further (a mark ending in
+      // the past keeps nothing out; a longer one stands; Codex Astra r2
+      // RESET-001).
       if (
         until !== null &&
         until > now &&
@@ -7038,12 +7041,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         );
         until = null;
       }
-      // A reset reported that passed while the accounts were read: the
-      // account is back, no new mark; a longer one stands (Codex Astra r2
-      // RESET-001).
-      if (until !== null && until <= now)
-        bb.log.debug(`account ${failedOn}: the reset its 429 reported has passed; not marked`);
-      else markLimited(failedOn, scope, until ?? now + LIMIT_NO_RESET_MS);
+      markLimited(failedOn, scope, until ?? now + LIMIT_NO_RESET_MS);
     }
     // No Fable on any account, and an account with Opus: the thread is told
     // to switch (D3), whatever the decision's reason, naming where the
