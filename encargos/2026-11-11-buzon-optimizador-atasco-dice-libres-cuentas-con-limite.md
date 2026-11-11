@@ -9,6 +9,12 @@ Estado: EN EL BUZÓN (2026-11-11, de thr_z5m6f8ct5r, Optimizador · continuació
 - `health` daba a la vez team2 «ses 0% · sem 35% · usable» y viaulab «Fable 26% · usable».
 - thr_395w2paadw (Opus) llevaba 20 min esperando plaza en team3 (5/5) con «libres: joytorm, team2, viaulab»; solo arrancó cuando fijé el proyecto a mano (fijación quitada después, a las 10:25).
 
+## Segundo caso, 12:22-12:26 (mismo día)
+
+- thr_u4vwiaewp9 (Opus, Optimizador) cortado por el tope de 5 h de team3; al reanudarlo: «Waiting for a seat on ganaresenas for Opus: joytorm keeps its weekly for Fable; 4/4 threads running, 2 ahead in the queue». `seats`: aitor 4/4, ganaresenas 4/4 (4 esperando), joytorm 6/6 (4 esperando); viaulab 0/5 y team2 0/5 vacías.
+- `health` de las 12:21 da viaulab «sem 22% · Fable 30% · hueco Opus 43 · usable», pero el `history` de las 11:22Z dice «viaulab answered Haiku with a usage limit until 2026-11-16 08:00» (y lo mismo con Fable): una cuenta al 22 % de la semana que rechaza hasta el día 16 en tres modelos. O la medida de uso de viaulab está mal, o el límite que devuelve no es el semanal: sin mirar cuál.
+- Líneas de atasco de ese momento: «ganaresenas retiene thr_fea249xfpx (Opus) 31 min; libres: team2, viaulab».
+
 ## Qué se pide [SUPUESTO: lo propone el Optimizador; no es encargo literal de Aitor]
 
 1. Que «libres» en las líneas de atasco y «usable» en `health` descuenten, por modelo, las cuentas con un límite conocido sin reponer (lo que ya usa el movimiento «before the turn»). Si no queda ninguna, que la línea lo diga: «sin cuenta con <modelo> libre hasta <hora>».
