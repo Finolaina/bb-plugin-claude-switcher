@@ -1672,11 +1672,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * never shortens it: one with no reset reported does not cut a reset
    * known (see limitedAt; Astra r5 medium 2).
    */
-  /**
-   * The marks cut to LIMIT_NO_RESET_MS because their reset was none of the
-   * account's windows, per account and scope, with that reset (see judge).
-   */
-  const shortMarks = new Map<string, { reset: number; until: number }>();
   function markLimited(name: string, scope: string, until: number): void {
     const marks = limitedAt.get(name) ?? new Map<string, number>();
     marks.set(scope, Math.max(marks.get(scope) ?? until, until));
@@ -2715,6 +2710,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       refreshes += 1;
       // Seats reserved for turns that never started are freed with it.
       admitWaiting();
+      // The threads not listed since the load: counted again, or every
+      // failure of a start not recorded stays nobody's (code-reviewer r2,
+      // medium 2).
+      if (!underWayListed) countSeats();
       // What waited on the accounts not read yet does not wait a full recheck.
       if (first && firstReadsAwaited)
         void bb.experimental_hooks
@@ -5126,7 +5125,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /**
    * The threads bb listed with a turn under way as the seats were counted
    * after the load (see rebuildSeats), each until that turn ends (its
-   * `thread.idle` or `turn.failed`), and whether that list was read. A
+   * `thread.idle`, `turn.failed`, a new turn's `thread.active` or the thread
+   * gone), and whether that list was read. A
    * failure of one of them, or one come before the list, is of a turn that
    * started before the load: where it runs is unknown, whatever its seat
    * restored or counted says, and its failure marks nobody (culpa tras
@@ -5140,6 +5140,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function startedBeforeLoad(threadId: string): boolean {
     return !underWayListed || underWayAtLoad.has(threadId);
   }
+  /**
+   * Threads this load saw start a turn before the list was read: that list
+   * may show the turn under way, and it is no turn of before the load
+   * (code-reviewer r2, low 3).
+   */
+  const startedUnlisted = new Set<string>();
   /** From here the thread's turn is no leftover of any account. */
   function forgetStart(threadId: string): void {
     startedOn.delete(threadId);
@@ -5179,6 +5185,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     )
       return;
     seatProjects.set(thread.id, thread.projectId);
+    // A new turn: the one of before the load, if any, is over.
+    underWayAtLoad.delete(thread.id);
+    if (!underWayListed) startedUnlisted.add(thread.id);
     // The previous turn's start is not this turn's, read or still being
     // read (code-reviewer r13).
     const anchor = dispatchEpoch.get(thread.id);
@@ -5287,6 +5296,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** The thread archived or deleted: nothing of its turns runs again, and what is kept for it goes. */
   async function threadGone({ thread }: { thread: ThreadResponse }) {
     forgetStart(thread.id);
+    underWayAtLoad.delete(thread.id);
     turnsUnderWay.delete(thread.id);
     releaseSeat(thread.id, "the thread is gone");
     seatReadWaits.delete(thread.id);
@@ -7010,36 +7020,30 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // A reset that is none of the account's windows as read is no proof
       // the account is out till then: a failure judged on the wrong account
       // kept it from every model for days (culpa tras recarga, 2026-11-11).
-      // Unread, the report stands as before.
+      // Unread, the report stands as before. Nor is a second 429 with the
+      // same reset: two threads of a project fail alike (code-reviewer r2,
+      // medium 1).
+      // ponytail: an account truly out whose read lacks the window its 429
+      // reports gets a 30-min mark and one failed turn every 30 min, each
+      // with this warning; a reading with that window would close it.
       if (
         until !== null &&
+        until > now &&
         blamed !== undefined &&
         blamed.unknown !== true &&
         !resetOfAccount(blamed, until, now, collector.get(failedOn)?.observedAt ?? undefined)
       ) {
-        const key = `${failedOn}\n${scope}`;
-        const before = shortMarks.get(key);
-        // The same reset again, while its short mark stands or within as
-        // long after [SUPUESTO]: the account's after all, though its read
-        // lacks the window (code-reviewer r1, low 5).
-        if (
-          before !== undefined &&
-          Math.abs(before.reset - until) <= RESET_TOGETHER_MS &&
-          now <= before.until + LIMIT_NO_RESET_MS
-        ) {
-          shortMarks.delete(key);
-          bb.log.info(
-            `account ${failedOn}: a second 429 reported the same reset (${isoInZone(until)}); marked until it`,
-          );
-        } else {
-          shortMarks.set(key, { reset: until, until: now + LIMIT_NO_RESET_MS });
-          bb.log.warn(
-            `account ${failedOn}: the reset its 429 reported (${isoInZone(until)}) matches none of its windows as read; marked for ${LIMIT_NO_RESET_MS / 60_000} min only`,
-          );
-          until = null;
-        }
+        bb.log.warn(
+          `account ${failedOn}: the reset its 429 reported (${isoInZone(until)}) matches none of its windows as read; marked for ${LIMIT_NO_RESET_MS / 60_000} min only`,
+        );
+        until = null;
       }
-      markLimited(failedOn, scope, until ?? now + LIMIT_NO_RESET_MS);
+      // A reset reported that passed while the accounts were read: the
+      // account is back, no new mark; a longer one stands (Codex Astra r2
+      // RESET-001).
+      if (until !== null && until <= now)
+        bb.log.debug(`account ${failedOn}: the reset its 429 reported has passed; not marked`);
+      else markLimited(failedOn, scope, until ?? now + LIMIT_NO_RESET_MS);
     }
     // No Fable on any account, and an account with Opus: the thread is told
     // to switch (D3), whatever the decision's reason, naming where the
@@ -8686,8 +8690,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // Started before this load (see underWayAtLoad); a later count adds
       // nothing to it.
       if (!underWayListed)
-        for (const t of running) if (!ended.has(t.id)) underWayAtLoad.add(t.id);
+        for (const t of running)
+          if (!ended.has(t.id) && !startedUnlisted.has(t.id)) underWayAtLoad.add(t.id);
       underWayListed = true;
+      startedUnlisted.clear();
       const listedAt = deps.now();
       // Under way as bb lists them, whatever their seat's read says (Codex
       // PLAZAS-002); not one that ended meanwhile.

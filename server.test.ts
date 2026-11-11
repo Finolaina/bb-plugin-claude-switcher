@@ -23926,6 +23926,112 @@ describe("a turn under way since before a reload: where it runs is unknown, its 
     expect(await limites(h)).toEqual([{ cuenta: "work", modelo: "todos", hasta: "2026-09-29T14:00:00+02:00" }]);
   });
 
+  /** Its project's account unreadable while `down.on`: a turn announced then leaves where it started unknown. */
+  const envDown = (down: { on: boolean }) => () =>
+    down.on ? Promise.reject(new Error("bb is down")) : Promise.resolve();
+  const countsDone = (h: Awaited<ReturnType<typeof host>>, n: number) =>
+    vi.waitFor(
+      () =>
+        expect(
+          h.harness.logEntries.filter((e) => e.message.startsWith("seats counted after loading")).length,
+        ).toBeGreaterThanOrEqual(n),
+      { timeout: 20_000 },
+    );
+  const workMarked = [{ cuenta: "work", modelo: "todos", hasta: "2026-09-29T14:00:00+02:00" }];
+
+  it("a list that failed at the load is read again on a refresh; then a thread not under way is the project's account's again (code-reviewer r2, medium 2)", async () => {
+    const list = { down: true };
+    const h = await reloaded(ALL_FREE, {
+      beforeThreadsList: async () => {
+        if (list.down) throw new Error("bb is down");
+      },
+    });
+    await countsDone(h, 1);
+    list.down = false;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await countsDone(h, 2);
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "thread-1", requestId: "creq_1" }));
+    expect(await limites(h)).toEqual(workMarked);
+  }, 30_000);
+
+  it("a thread this load saw start before a late list is not of before the load, though that list shows it under way (code-reviewer r2, low 3)", async () => {
+    const list = { down: true };
+    const threads: Record<string, Partial<ThreadResponse>> = { "thread-3": { status: "active" } };
+    const h = await reloaded(ALL_FREE, {
+      threads,
+      beforeThreadsList: async () => {
+        if (list.down) throw new Error("bb is down");
+      },
+    });
+    await countsDone(h, 1);
+    // thread-9 starts and ends a turn, then one is sent that bb refuses at
+    // the door; the list, read on a refresh meanwhile, shows it under way.
+    expect(await sent(h, "thread-9", "proj-1")).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-9", projectId: "proj-1" }),
+    });
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "thread-9", projectId: "proj-1" }),
+    });
+    expect(await sent(h, "thread-9", "proj-1")).toEqual({ action: "proceed" });
+    threads["thread-9"] = { status: "active" };
+    list.down = false;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await countsDone(h, 2);
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "thread-9", requestId: "creq_9" }));
+    expect(await limites(h)).toEqual(workMarked);
+  }, 30_000);
+
+  it("a turn of before the load that ended while the threads were listed is no longer under way, though the list shows it", async () => {
+    let listed!: () => void;
+    const held = new Promise<void>((resolve) => (listed = resolve));
+    const h = await reloaded(ALL_FREE, { beforeThreadsList: () => held });
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    listed();
+    await countsDone(h, 1);
+    expect(await sent(h, "thread-3", "proj-1")).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "thread-3", requestId: "creq_10" }));
+    expect(await limites(h)).toEqual(workMarked);
+  });
+
+  it("a thread archived ends its turn of before the load: unarchived, a turn refused at the door is the project's account's (code-reviewer r2, low 3)", async () => {
+    const h = await reloaded(ALL_FREE);
+    await countsDone(h, 1);
+    await h.harness.behavior.emitThreadEvent("thread.archived", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    expect(await sent(h, "thread-3", "proj-1")).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "thread-3", requestId: "creq_10" }));
+    expect(await limites(h)).toEqual(workMarked);
+  });
+
+  it("a later count adds no thread to the turns of before the load: one this load saw start, where unread, is the project's account's (code-reviewer r2, low 5)", async () => {
+    const down = { on: true };
+    const threads: Record<string, Partial<ThreadResponse>> = { "thread-3": { status: "active" } };
+    // The load's count cannot read proj-1's account: incomplete.
+    const h = await reloaded(ALL_FREE, { threads, beforeEnvRead: envDown(down) });
+    await countsDone(h, 1);
+    down.on = false;
+    // thread-9 starts and ends a turn, then one is sent that bb refuses at
+    // the door; a second count shows it under way.
+    expect(await sent(h, "thread-9", "proj-1")).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-9", projectId: "proj-1" }),
+    });
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "thread-9", projectId: "proj-1" }),
+    });
+    expect(await sent(h, "thread-9", "proj-1")).toEqual({ action: "proceed" });
+    threads["thread-9"] = { status: "active" };
+    // A reserve on an incomplete count counts again.
+    await h.harness.behavior.runCli(["reserve", "main", "--id", "n", "--until", new Date(NOW + HOUR).toISOString()]);
+    await countsDone(h, 2);
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "thread-9", requestId: "creq_9" }));
+    expect(await limites(h)).toEqual(workMarked);
+  }, 30_000);
+
   it("control: a turn this load saw start on the project's account marks it with its 429, as ever", async () => {
     const h = await reloaded({
       main: () => Response.json(payload(100, 40)),
@@ -24019,11 +24125,51 @@ describe("the marks of a usage limit, and the threads they hold (2026-11-11)", (
     expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: "2026-09-29T12:30:00+02:00" }]);
   });
 
-  it("a second 429 with the same reset, its short mark just over, marks the account until that reset (code-reviewer r1, low 5)", async () => {
+  // Two threads fail on main one after the other with another account's
+  // reset (the incident's shape): the second is no proof the reset is
+  // main's (code-reviewer r2, medium 1). Of another project still on main:
+  // a sibling of the first, after its project moved, is a leftover retried
+  // where the project went, never judged on main.
+  for (const [gap, until] of [
+    [60_000, "2026-09-29T12:31:00+02:00"],
+    [29 * 60_000, "2026-09-29T12:59:00+02:00"],
+  ] as const)
+    it(`two failures ${gap} ms apart with the same foreign reset mark the account 30 min from the last, never until that reset`, async () => {
+      let clock = NOW;
+      const h = await host(
+        {
+          main: () => Response.json(payload(100, 40)),
+          spare: () => Response.json(payload(10, 60)),
+          work: () => Response.json(payload(5, 20)),
+        },
+        { clock: () => clock },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      const reset = NOW + 6 * 24 * HOUR;
+      const first = failure();
+      first.rateLimits!.windows[0]!.resetsAtMs = reset;
+      await h.harness.behavior.emitThreadEvent("turn.failed", first);
+      clock = NOW + gap;
+      const second = failure({ threadId: "thr-2", requestId: "creq_2" });
+      second.rateLimits!.windows[0]!.resetsAtMs = reset + 2_000;
+      await h.harness.behavior.emitThreadEvent("turn.failed", second);
+      const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+      expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: until }]);
+    });
+
+  it("a reset that passes while the failure reads the accounts makes no mark, and the next turn runs there (Codex Astra r2 RESET-001)", async () => {
     let clock = NOW;
+    let failing = false;
     const h = await host(
       {
-        main: () => Response.json(payload(100, 40)),
+        // The 429 came a minute before main's reset; its read, as the
+        // failure is judged, two minutes later: main renewed.
+        main: () => {
+          if (!failing) return Response.json(payload(100, 40));
+          clock = NOW + 2 * 60_000;
+          return Response.json(payload(0, 40));
+        },
         spare: () => Response.json(payload(10, 60)),
         work: () => Response.json(payload(5, 20)),
       },
@@ -24031,20 +24177,18 @@ describe("the marks of a usage limit, and the threads they hold (2026-11-11)", (
     );
     dispose = () => h.harness.dispose();
     await h.harness.behavior.callRpc("accounts_refresh", null);
-    const reset = NOW + 6 * 24 * HOUR;
-    const first = failure();
-    first.rateLimits!.windows[0]!.resetsAtMs = reset;
-    await h.harness.behavior.emitThreadEvent("turn.failed", first);
-    // Its 30 min over; proj-2, still on main, fails there with the same reset.
-    clock = NOW + 31 * 60_000;
-    const second = failure({ threadId: "thr-2", requestId: "creq_2" });
-    second.rateLimits!.windows[0]!.resetsAtMs = reset + 2_000;
-    await h.harness.behavior.emitThreadEvent("turn.failed", second);
+    failing = true;
+    const f = failure();
+    f.rateLimits!.windows[0]!.resetsAtMs = NOW + 60_000;
+    await h.harness.behavior.emitThreadEvent("turn.failed", f);
     const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
-    expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: "2026-10-05T12:00:02+02:00" }]);
+    expect(report.limites).toEqual([]);
+    // proj-2, also on main, runs its next turn there.
+    expect(await sent(h, "thr-5", "proj-2")).toEqual({ action: "proceed" });
+    expect(h.envSet.filter((e) => e.projectId === "proj-2")).toEqual([]);
   });
 
-  it("a second 429 with another reset stays a short mark", async () => {
+  it("a reset that passed by then keeps a longer mark the account already had", async () => {
     let clock = NOW;
     const h = await host(
       {
@@ -24056,15 +24200,28 @@ describe("the marks of a usage limit, and the threads they hold (2026-11-11)", (
     );
     dispose = () => h.harness.dispose();
     await h.harness.behavior.callRpc("accounts_refresh", null);
-    const first = failure();
-    first.rateLimits!.windows[0]!.resetsAtMs = NOW + 6 * 24 * HOUR;
-    await h.harness.behavior.emitThreadEvent("turn.failed", first);
-    clock = NOW + 31 * 60_000;
-    const second = failure({ threadId: "thr-2", requestId: "creq_2" });
-    second.rateLimits!.windows[0]!.resetsAtMs = NOW + 5 * 24 * HOUR;
-    await h.harness.behavior.emitThreadEvent("turn.failed", second);
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    clock = NOW + 60_000;
+    const late = failure({ threadId: "thread-4", requestId: "creq_4" });
+    late.rateLimits!.windows[0]!.resetsAtMs = NOW + 30_000;
+    await h.harness.behavior.emitThreadEvent("turn.failed", late);
     const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
-    expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: "2026-09-29T13:01:00+02:00" }]);
+    expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: "2026-09-29T14:00:00+02:00" }]);
+  });
+
+  it("a 429 with no reset reported still marks 30 min", async () => {
+    const h = await host({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => Response.json(payload(5, 20)),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const f = failure();
+    for (const w of f.rateLimits!.windows) w.resetsAtMs = null;
+    await h.harness.behavior.emitThreadEvent("turn.failed", f);
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: "2026-09-29T12:30:00+02:00" }]);
   });
 
   it("an account not read is marked until the reset reported, as before", async () => {

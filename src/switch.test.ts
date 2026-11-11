@@ -2884,6 +2884,15 @@ describe("resetOfAccount: whether a reset a 429 reported is one of the account's
     expect(resetOfAccount(unstarted, NOW + WEEK + TOLERANCE + 1, NOW, READ)).toBe(false);
   });
 
+  it("with no read time, a window with no reset ahead opens now, not at any time past (code-reviewer r2, nit 6)", () => {
+    const unstarted = account("unstarted", {
+      session: { usedPercent: 0, resetsAt: null, absent: true },
+      weekly: { usedPercent: 0, resetsAt: null },
+    });
+    expect(resetOfAccount(unstarted, NOW + WEEK - TOLERANCE - 1, NOW)).toBe(false);
+    expect(resetOfAccount(unstarted, NOW + WEEK - TOLERANCE, NOW)).toBe(true);
+  });
+
   it("one whose reset passed after the read opens no sooner than that reset", () => {
     const renewed = account("renewed", {
       session: { usedPercent: 0, resetsAt: null, absent: true },

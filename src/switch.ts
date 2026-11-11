@@ -332,7 +332,7 @@ export function resetOfAccount(
     if (w.absent === true) return false;
     if (w.resetsAt !== null && w.resetsAt > now)
       return Math.abs(reset - w.resetsAt) <= RESET_TOGETHER_MS;
-    const opened = Math.max(readAt ?? -Infinity, w.resetsAt ?? -Infinity);
+    const opened = Math.max(readAt ?? now, w.resetsAt ?? -Infinity);
     return (
       reset >= opened + length - RESET_TOGETHER_MS &&
       reset <= now + length + RESET_TOGETHER_MS
