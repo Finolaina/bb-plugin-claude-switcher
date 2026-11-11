@@ -1,6 +1,6 @@
 # Buzón del switcher: «atasco … libres: team2, viaulab» nombra cuentas que el propio plugin sabe limitadas para ese modelo
 
-Estado: EN EL BUZÓN (2026-11-11, de thr_z5m6f8ct5r, Optimizador · continuación)
+Estado: atendido 2026-11-11 en la 0.2.52 (de thr_z5m6f8ct5r, Optimizador · continuación). Causa: el fallo de un turno que venía de antes de una recarga se culpaba a la cuenta actual del proyecto, con el reinicio de la otra; las «libres» ya descuentan las cuentas con marca y `health --json` trae `limites`. El punto 2 (Opus con una Ultra libre) es la regla «Opus y Sonnet solo por Team», no un fallo.
 
 ## Qué vi (2026-11-11 10:14-10:24; salida guardada en `Optimizador/informes/2026-11-11/switcher-atasco/estado-1024.out.txt`)
 
