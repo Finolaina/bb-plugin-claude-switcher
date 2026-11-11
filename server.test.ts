@@ -24102,6 +24102,36 @@ describe("the marks of a usage limit, and the threads they hold (2026-11-11)", (
       );
     });
 
+  it("a weekly at 0 % read an hour before, its read failing as the 429 comes: a reset a week after that read is its (the read time, not now)", async () => {
+    let clock = NOW;
+    let down = false;
+    const unstarted = {
+      limits: [
+        { kind: "session", percent: 100, resets_at: new Date(NOW + 2 * HOUR).toISOString() },
+        { kind: "weekly_all", percent: 0, resets_at: null },
+      ],
+      five_hour: { locked_reason: null },
+      seven_day: { locked_reason: null },
+    };
+    const h = await host(
+      {
+        main: () => (down ? new Response("busy", { status: 503 }) : Response.json(unstarted)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + HOUR;
+    down = true;
+    const f = failure();
+    f.rateLimits!.windows[0]!.resetsAtMs = NOW + 7 * 24 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", f);
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: "2026-10-06T12:00:00+02:00" }]);
+  });
+
   it("a weekly at 0 % with no reset at its read takes no other account's weekly at +3 days: marked 30 min (code-reviewer r1, medium 1)", async () => {
     const unstarted = {
       limits: [

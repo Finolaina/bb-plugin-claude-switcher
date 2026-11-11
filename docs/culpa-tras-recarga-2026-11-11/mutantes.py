@@ -67,7 +67,7 @@ M = [
      S, "an account not read is marked until the reset reported"),
     ("R2 seguro", "judge no pasa la hora de la lectura (medium 1 en el servidor)", "server.ts",
      "collector.get(failedOn)?.observedAt ?? undefined)", "undefined)",
-     S, "a weekly at 0 % with no reset at its read"),
+     S, "read an hour before"),
     ("R2 seguro", "tolerancia estricta (el corte exacto de 10 min ya no casa)", "src/switch.ts",
      "Math.abs(reset - w.resetsAt) <= RESET_TOGETHER_MS", "Math.abs(reset - w.resetsAt) < RESET_TOGETHER_MS",
      SW, "matches its weekly within the tolerance"),
