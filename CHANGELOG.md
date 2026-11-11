@@ -4,6 +4,56 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.52] - 2026-11-11
+
+### Corregido
+
+- **Un turno en marcha desde antes de una recarga ya no culpa a la cuenta
+  donde está ahora su proyecto.** Aitor, 2026-11-11: «puedes revisar por qué
+  motivo hay hilos en cola y que mejorarías?» y «Arreglalo y publicalo».
+  Medido en el registro de producción del 10 y el 11-nov: dos cuentas con
+  cuota quedaron fuera días enteros con el reinicio de otra. Un turno
+  arrancó en una cuenta, el plugin se recargó mientras corría, el proyecto se
+  movió a otra cuenta y el 429 del turno marcó la cuenta nueva con el
+  reinicio semanal de la vieja. Ahora el fallo de un turno de antes de la
+  carga (bb listó el hilo en marcha al cargar y ese turno no ha acabado, o
+  el fallo llega antes de esa lista) es de una cuenta desconocida: no marca
+  ninguna, ni límite ni negativa, y deciden las mediciones. Lo que restaura la recarga (la plaza)
+  no se usa como prueba de dónde corre: puede ser de otro turno del mismo
+  hilo o de la cuenta del proyecto (Codex Sol r1 RELOAD-001, 002 y 003;
+  code-reviewer r1 low 3 y 4). Ese turno acaba también con uno nuevo
+  (`thread.active`) o con el hilo archivado o borrado, y si la lista de la
+  carga falla, cada refresco la vuelve a leer (code-reviewer r2 medium 2,
+  low 3 y 5).
+- **Seguro: un reinicio que no es de la cuenta no la veta días.** Si el 429
+  informa un reinicio y la cuenta culpada está leída, y ese reinicio no casa
+  con ninguna de sus ventanas, la marca dura solo `LIMIT_NO_RESET_MS` (30
+  min) y el registro lo avisa. Casa con una ventana con reinicio futuro a 10
+  min como mucho (`RESET_TOGETHER_MS`); una sin reinicio por delante (una
+  semanal al 0 %, la sesión aún no abierta de una Team, o una ya renovada)
+  se abrió entre la lectura y ahora, y solo casa un reinicio en esa franja
+  más su duración, o, sin hora de lectura, entre ahora y su duración
+  (code-reviewer r1 medium 1 y low 2; r2 nit 6). Un segundo 429 con el mismo
+  reinicio no lo confirma: dos hilos fallan igual con el reinicio de otra
+  cuenta (code-reviewer r2 medium 1 y low 4). Un reinicio informado que ya
+  pasó mientras se leían las cuentas no marca nada nuevo (Codex Astra r2
+  RESET-001); sin reinicio informado, 30 min como siempre. Se comprueba con
+  la lectura guardada de la cuenta aunque no sea destino (Codex Astra r3
+  RESET-003). Sin leer, como antes.
+- **El aviso de atasco no da por libre una cuenta que el plugin tiene
+  vetada.** Las «libres» de una línea de atasco (`health`, `health --json`,
+  `seats`, el registro y las filas STUCK de `history`) dejan fuera las
+  cuentas con una marca vigente para el modelo del hilo (de límite o de
+  sesión perdida en una máquina del proyecto) y miran la reserva desde ese
+  proyecto; si no queda ninguna, la línea dice «sin cuenta libre para
+  <modelo> hasta <hora>» en vez de nombrar una que no se usaría.
+
+### Añadido
+
+- `health --json` gana `limites`: cada marca de límite vigente con su
+  cuenta, su modelo (o «todos») y hasta cuándo; la línea de cada cuenta en
+  `health` la enseña. La versión del informe sigue siendo 1 (solo se añade).
+
 ## [0.2.51] - 2026-11-10
 
 ### Corregido

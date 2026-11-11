@@ -94,6 +94,7 @@ import {
   decidePlacement,
   decideSwitch,
   reportedFreeAt,
+  resetOfAccount,
   FALLBACK_MODEL,
   isRefusal,
   isSessionLoss,
@@ -1791,6 +1792,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (marks.size === 0) sessionLostAt.delete(name);
     return found;
   }
+  /** Every usage limit's mark still standing, per account and scope (see limitedAt), for health. */
+  function limitMarks(): Array<{ account: string; scope: string; until: number }> {
+    const now = deps.now();
+    return [...limitedAt].flatMap(([account, marks]) =>
+      [...marks].filter(([, until]) => now < until).map(([scope, until]) => ({ account, scope, until })),
+    );
+  }
   /** Every session lost still standing, per account and machine (see sessionLostAt), for health. */
   function sessionMarks(): Array<{ account: string; host: string; hostName: string; until: number }> {
     const now = deps.now();
@@ -2701,6 +2709,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       refreshes += 1;
       // Seats reserved for turns that never started are freed with it.
       admitWaiting();
+      // The threads not listed since the load: counted again, or every
+      // failure of a start not recorded stays nobody's (code-reviewer r2,
+      // medium 2).
+      if (!underWayListed) countSeats();
       // What waited on the accounts not read yet does not wait a full recheck.
       if (first && firstReadsAwaited)
         void bb.experimental_hooks
@@ -5109,6 +5121,30 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * started is unknown (Codex IR17-001).
    */
   const dispatchEpoch = new Map<string, number>();
+  /**
+   * The threads bb listed with a turn under way as the seats were counted
+   * after the load (see rebuildSeats), each until that turn ends (its
+   * `thread.idle`, `turn.failed`, a new turn's `thread.active` or the thread
+   * gone), and whether that list was read. A
+   * failure of one of them, or one come before the list, is of a turn that
+   * started before the load: where it runs is unknown, whatever its seat
+   * restored or counted says, and its failure marks nobody (culpa tras
+   * recarga, 2026-11-11; Codex Sol r1 RELOAD-001 to 003, code-reviewer r1
+   * low 3 and 4). No read of its own: every later turn of the thread, sent
+   * by this load (a release, a retry, one refused at the door), comes after
+   * that end.
+   */
+  const underWayAtLoad = new Set<string>();
+  let underWayListed = false;
+  function startedBeforeLoad(threadId: string): boolean {
+    return !underWayListed || underWayAtLoad.has(threadId);
+  }
+  /**
+   * Threads this load saw start a turn before the list was read: that list
+   * may show the turn under way, and it is no turn of before the load
+   * (code-reviewer r2, low 3).
+   */
+  const startedUnlisted = new Set<string>();
   /** From here the thread's turn is no leftover of any account. */
   function forgetStart(threadId: string): void {
     startedOn.delete(threadId);
@@ -5148,6 +5184,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     )
       return;
     seatProjects.set(thread.id, thread.projectId);
+    // A new turn: the one of before the load, if any, is over.
+    underWayAtLoad.delete(thread.id);
+    if (!underWayListed) startedUnlisted.add(thread.id);
     // The previous turn's start is not this turn's, read or still being
     // read (code-reviewer r13).
     const anchor = dispatchEpoch.get(thread.id);
@@ -5247,6 +5286,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // announces (a turn refused at the door) is the project's account's,
     // not a leftover of the account this turn ran on (code-reviewer r11).
     forgetStart(thread.id);
+    underWayAtLoad.delete(thread.id);
     turnsUnderWay.delete(thread.id);
     // Reserved too: a turn that ended needs none (its next asks again,
     // and one that starts unannounced is counted as it starts).
@@ -5255,6 +5295,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   /** The thread archived or deleted: nothing of its turns runs again, and what is kept for it goes. */
   async function threadGone({ thread }: { thread: ThreadResponse }) {
     forgetStart(thread.id);
+    underWayAtLoad.delete(thread.id);
     turnsUnderWay.delete(thread.id);
     releaseSeat(thread.id, "the thread is gone");
     seatReadWaits.delete(thread.id);
@@ -5431,7 +5472,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     };
   }
   /** The accounts other than `name` that could take a turn in `model` now: a free seat no queue is ahead for, and the reserve spared. */
-  function freeElsewhere(name: string, model: string): string[] {
+  function freeElsewhere(name: string, model: string, projectId?: string): string[] {
     const now = deps.now();
     return measuredAccounts(model)
       .filter((a) => a.name !== name)
@@ -5440,7 +5481,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         (a) =>
           chooseAccount([a], {
             preferredModel: model,
-            ...reserveOf(),
+            ...reserveOf(projectId),
             freeSeats: seatRoom,
           }) !== null,
       )
@@ -6267,14 +6308,23 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         account = read.account ?? current.defaultAccountName;
       }
       const modelo = modelFamily(held.model) ?? current.preferredModel;
-      const libres = freeElsewhere(account, modelo);
-      if (libres.length === 0) continue;
+      const free = freeElsewhere(account, modelo, known.projectId);
+      if (free.length === 0) continue;
+      // Not one a usage limit's mark keeps from the model, nor a session
+      // lost on one of the project's machines (limitedUntil has both): the
+      // plugin would not use it, and the line said it was free (culpa tras
+      // recarga, 2026-11-11). With none left, the line says so, and until
+      // when.
+      const ends = free.map((name) => limitedUntil(name, modelo, known.projectId));
+      const libres = free.filter((_, i) => ends[i] === null);
+      const marked = ends.filter((end): end is number => end !== null);
       out.push({
         hilo: held.threadId,
         cuenta: account,
         modelo,
         minutos: Math.floor((now - held.since) / 60_000),
         libres,
+        ...(libres.length === 0 ? { vuelve: isoInZone(Math.min(...marked)) } : {}),
         proyectoOcupado: projectSeated(known.projectId, held.threadId),
       });
     }
@@ -6962,12 +7012,42 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // ignores the rest); left in error, it may be hours old: no mark. A
     // session lost is marked on its machine only (see markRefused): a mark
     // of the whole account here would keep it from every machine.
-    if (!stuck && failedOn !== null && !isSessionLost(event))
-      markLimited(
-        failedOn,
-        limitScope(input.accounts.find((a) => a.name === failedOn), model, now)?.toLowerCase() ?? "",
-        reportedFreeAt(event) ?? now + LIMIT_NO_RESET_MS,
-      );
+    if (!stuck && failedOn !== null && !isSessionLost(event)) {
+      const blamed = input.accounts.find((a) => a.name === failedOn);
+      const scope = limitScope(blamed, model, now)?.toLowerCase() ?? "";
+      let until = reportedFreeAt(event);
+      // A reset that is none of the account's windows as read is no proof
+      // the account is out till then: a failure judged on the wrong account
+      // kept it from every model for days (culpa tras recarga, 2026-11-11).
+      // Unread, the report stands as before. Nor is a second 429 with the
+      // same reset: two threads of a project fail alike (code-reviewer r2,
+      // medium 1).
+      // ponytail: an account truly out whose read lacks the window its 429
+      // reports gets a 30-min mark and one failed turn every 30 min, each
+      // with this warning; a reading with that window would close it.
+      // Only a reset still ahead: one that passed while the accounts were
+      // read is the account back, and marks it no further (a mark ending in
+      // the past keeps nothing out; a longer one stands; Codex Astra r2
+      // RESET-001). Checked on the account's cached read, a destination or
+      // not: one left out of the destinations (its read failing, a full
+      // window reset since) still has the windows that tell (Codex Astra r3
+      // RESET-003).
+      const cached = collector.get(failedOn);
+      const read = cached?.usage == null ? undefined : { name: failedOn, ...cached.usage };
+      if (
+        until !== null &&
+        until > now &&
+        read !== undefined &&
+        read.unknown !== true &&
+        !resetOfAccount(read, until, now, cached?.observedAt ?? undefined)
+      ) {
+        bb.log.warn(
+          `account ${failedOn}: the reset its 429 reported (${isoInZone(until)}) matches none of its windows as read; marked for ${LIMIT_NO_RESET_MS / 60_000} min only`,
+        );
+        until = null;
+      }
+      markLimited(failedOn, scope, until ?? now + LIMIT_NO_RESET_MS);
+    }
     // No Fable on any account, and an account with Opus: the thread is told
     // to switch (D3), whatever the decision's reason, naming where the
     // dispatch would run its Opus turn (Sol B2-002: the same placement).
@@ -7146,6 +7226,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // The seat its dispatch reserved, before it is released: where the turn
     // runs while its start is still read (Astra SEATS-R04).
     const seatHeld = seats.seatOf(event.threadId)?.account;
+    // Read before anything is awaited: a dispatch meanwhile is a new turn's.
+    const beforeLoad = startedBeforeLoad(event.threadId);
+    underWayAtLoad.delete(event.threadId);
     forgetStart(event.threadId);
     turnsUnderWay.delete(event.threadId);
     releaseSeat(event.threadId, "its turn failed");
@@ -7192,6 +7275,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       failedHost.set(event.threadId, host);
       await nameHost(host);
     }
+    // A turn of before this load: where it ran is unknown, its failure
+    // nobody's (see underWayAtLoad). After the session lost's own look at
+    // its seat, which stays as it was.
+    if (started === undefined && beforeLoad) started = null;
     try {
       await inProjectQueue(thread.projectId, () =>
         handleFailure(
@@ -7984,6 +8071,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       atascos: await atascos(),
       esperandoTeam: await esperandoTeam(),
       sinSesion: sessionMarks(),
+      limites: limitMarks(),
       // huecoOpus and fablePerdida per Max or Ultra account (0.2.48).
       ...(current.preferredModel === ""
         ? {}
@@ -8602,6 +8690,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         if (page.length < PAGE) break;
       }
       seedProjectModels(latest);
+      // Started before this load (see underWayAtLoad); a later count adds
+      // nothing to it.
+      if (!underWayListed)
+        for (const t of running)
+          if (!ended.has(t.id) && !startedUnlisted.has(t.id)) underWayAtLoad.add(t.id);
+      underWayListed = true;
+      startedUnlisted.clear();
       const listedAt = deps.now();
       // Under way as bb lists them, whatever their seat's read says (Codex
       // PLAZAS-002); not one that ended meanwhile.

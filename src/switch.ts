@@ -16,6 +16,7 @@ import {
   isUsable,
   modelWindow,
   reserving,
+  RESET_TOGETHER_MS,
   spendsReservedWeekly,
   type AccountUsage,
   type Choice,
@@ -302,6 +303,45 @@ export function reportedFreeAt(failure: PluginTurnFailedEvent): number | null {
     .map((w) => w.resetsAtMs)
     .filter((ms): ms is number => ms !== null);
   return reported.length === 0 ? null : Math.max(...reported);
+}
+
+/** How long each kind of window runs from its start: the session 5 hours, the weekly and a model's 7 days. */
+const SESSION_WINDOW_MS = 5 * 3_600_000;
+const WEEK_WINDOW_MS = 7 * 24 * 3_600_000;
+
+/**
+ * Whether `reset`, as a 429 on `account` reported it, is one of the
+ * account's own windows as read at `readAt` (culpa tras recarga,
+ * 2026-11-11: a turn's failure judged on another account marked that one
+ * for days with this reset). A window with its reset ahead: within
+ * RESET_TOGETHER_MS of it (reads and reports differ by a second or two:
+ * 17:59:58 against 18:00:00). One with none ahead (none open at the read,
+ * as a Team seat's session or a weekly at 0 %, or one passed since): it
+ * opened no sooner than the read or that reset, whichever is later, and no
+ * later than now, so it resets within its length of those, the tolerance
+ * either side (code-reviewer r1, medium 1 and low 2). `readAt` unknown: no
+ * lower bound but a reset passed.
+ */
+export function resetOfAccount(
+  account: AccountUsage,
+  reset: number,
+  now: number,
+  readAt?: number,
+): boolean {
+  const fits = (w: UsageWindow, length: number) => {
+    if (w.absent === true) return false;
+    if (w.resetsAt !== null && w.resetsAt > now)
+      return Math.abs(reset - w.resetsAt) <= RESET_TOGETHER_MS;
+    const opened = Math.max(readAt ?? now, w.resetsAt ?? -Infinity);
+    return (
+      reset >= opened + length - RESET_TOGETHER_MS &&
+      reset <= now + length + RESET_TOGETHER_MS
+    );
+  };
+  return (
+    fits(account.session, SESSION_WINDOW_MS) ||
+    [account.weekly, ...Object.values(account.models)].some((w) => fits(w, WEEK_WINDOW_MS))
+  );
 }
 
 export function decideSwitch(input: SwitchInput): SwitchDecision {

@@ -27,8 +27,18 @@ export interface Atasco {
   cuenta: string;
   modelo: string;
   minutos: number;
-  /** The accounts that could run it now, with a seat free. Never empty. */
+  /**
+   * The accounts that could run it now, with a seat free. Empty only when
+   * every such account is kept from its model by a usage limit's mark (the
+   * plugin would not use it: culpa tras recarga, 2026-11-11).
+   */
   libres: string[];
+  /**
+   * With `libres` empty: when the first of those marks ends (ISO 8601, see
+   * isoInZone). A mark of a usage limit, or of a session lost on one of the
+   * project's machines (both are limitedUntil's).
+   */
+  vuelve?: string;
   /** Another thread of its project is at work, so no automatic move for seats. */
   proyectoOcupado: boolean;
 }
@@ -66,9 +76,11 @@ export function heldLong(
 /** The line the log gets, at most once per STUCK_WAIT_MS and thread. */
 export function atascoLine(a: Atasco): string {
   const free =
-    a.libres.length === 1
-      ? `${a.libres[0]} is free`
-      : `${a.libres.join(", ")} are free`;
+    a.libres.length === 0
+      ? `no account free for ${a.modelo}${a.vuelve === undefined ? "" : ` until ${a.vuelve}`}`
+      : a.libres.length === 1
+        ? `${a.libres[0]} is free`
+        : `${a.libres.join(", ")} are free`;
   return `STUCK: ${a.cuenta} holds thread ${a.hilo} (${a.modelo}) ${a.minutos} min, ${free}${a.proyectoOcupado ? "; another thread of its project is at work" : ""}`;
 }
 

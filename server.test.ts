@@ -18834,6 +18834,81 @@ describe("caminos 2026-11-04", () => {
       expect((await report(h)).atascos).toEqual([]);
     });
 
+    it("an account a usage limit's mark keeps from the thread's model is not free: the line says none is, and until when (2026-11-11)", async () => {
+      const { h, at } = await stuck();
+      // t1's next turn, refused at the door with work's 429 till +2 h: work
+      // is marked, whatever its read says.
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ threadId: "t1", requestId: "creq_t1" }),
+      );
+      at(10 * 60_000);
+      const stuckNow = (await report(h)).atascos!;
+      expect(stuckNow.filter((a) => a.hilo === "t2")).toEqual([
+        {
+          hilo: "t2",
+          cuenta: "spare",
+          modelo: "Opus",
+          minutos: 10,
+          libres: [],
+          vuelve: "2026-09-29T14:00:00+02:00",
+          proyectoOcupado: false,
+        },
+      ]);
+      expect((await h.harness.behavior.runCli(["health"])).stdout).toContain(
+        "atasco: spare retiene t2 (Opus) 10 min; sin cuenta libre para Opus hasta 2026-09-29T14:00:00+02:00",
+      );
+      // Its place in the queue lapsed meanwhile: the holder said is the
+      // project's account, as in the test of the log above.
+      await pass(h);
+      expect(lines(h).filter((l) => l.includes("thread t2 "))).toEqual([
+        "STUCK: main holds thread t2 (Opus) 10 min, no account free for Opus until 2026-09-29T14:00:00+02:00",
+      ]);
+    });
+
+    it("an Ultra is free for the held Opus turn only when no Team takes it from where its project runs: a session lost on another machine does not count (2026-11-11)", async () => {
+      // t2 (proj-3) runs on the server; work lost its session on the laptop
+      // only. work still takes t2's Opus turn there, so main (room 11, over
+      // an overflow of 10) is not free for it.
+      const { h, at } = await stuck(held(), {
+        threads: { t2: { projectId: "proj-3" }, t1: { environmentId: "env-1" } },
+        environments: {
+          "proj-1": [{ id: "env-1", hostId: "host-mac", path: "/home/someone/site" }],
+          "proj-3": [{ id: "env-3", hostId: "host-nuc", path: "/home/someone/third" }],
+        },
+        hosts: [
+          { id: "host-mac", name: "the laptop" },
+          { id: "host-nuc", name: "the server" },
+        ],
+        threadEvents: {
+          t1: [
+            { seq: 1, type: "client/turn/requested", data: { requestId: "creq_t1", execution: { model: OPUS } } },
+            {
+              seq: 2,
+              type: "provider/error",
+              data: { providerThreadId: "p", threadId: "t1", message: "Provider error", detail: "Not logged in · Please run /login" },
+            },
+          ],
+        },
+      });
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ threadId: "t1", requestId: "creq_t1", errorInfo: null, rateLimits: null }),
+      );
+      for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+      const marked = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+      expect(marked.sinSesion.map((m: { cuenta: string; maquina: string }) => [m.cuenta, m.maquina])).toEqual([
+        ["work", "host-mac"],
+      ]);
+      await h.harness.behavior.setSettings({ opusOverflowRoom: 10 });
+      at(10 * 60_000);
+      // proj-3's machines are read in the background on the first look.
+      await report(h);
+      for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+      const t2 = (await report(h)).atascos!.filter((a) => a.hilo === "t2");
+      expect(t2.map((a) => a.libres)).toEqual([["work"]]);
+    });
+
     it("a row bb says has failed is not stuck", async () => {
       const { h, at } = await stuck(held({ failureReason: "Thread is archived" }));
       at(10 * 60_000);
@@ -22645,8 +22720,9 @@ describe("reparto por hueco 2026-11-07", () => {
 
       // With the session or the general weekly full too (resetting at +1 h),
       // the 429 may be theirs: the mark is the whole account's. At +90 min
-      // work's read, settled, runs Opus again, but its 429 (till +5 h) still
-      // stands: the Opus turn stays on main.
+      // work's read, settled, runs Opus again, but its 429 (till +4 h, one
+      // of its windows: 0.2.52 marks a reset that is none of them 30 min
+      // only) still stands: the Opus turn stays on main.
       for (const full of ["session", "weekly_all"] as const)
         it(`a Fable turn's 429 on work read with Fable and the ${full} window full: the mark is the whole account's (Astra r3 medium 2)`, async () => {
           let clock = NOW;
@@ -22678,7 +22754,7 @@ describe("reparto por hueco 2026-11-07", () => {
           teamLogin(h, "work");
           await h.harness.behavior.callRpc("accounts_refresh", null);
           const f = failure();
-          f.rateLimits!.windows[0]!.resetsAtMs = NOW + 5 * HOUR;
+          f.rateLimits!.windows[0]!.resetsAtMs = NOW + 4 * HOUR;
           await h.harness.behavior.emitThreadEvent("turn.failed", f);
           clock = NOW + 90 * 60_000;
           expect(await dispatch(h, "o2", "proj-2", OPUS)).toEqual({ action: "proceed" });
@@ -22702,7 +22778,9 @@ describe("reparto por hueco 2026-11-07", () => {
         });
 
       // Two marks of work standing for an Opus turn, its own (read with Opus
-      // at 100 %, till +3 h) and the whole account's (till +1 h): a third
+      // at 100 %, till its window's reset, +4 h) and the whole account's
+      // (till its session's, +2 h; 0.2.52: a reset that is none of its
+      // windows marks 30 min only): a third
       // Opus turn failing on spare, with main kept for Fable, waits for work
       // till the later of the two (Astra r4 medium 3).
       it("an Opus turn waits for a marked Team seat till the latest of its marks (Astra r4 medium 3)", async () => {
@@ -22743,16 +22821,16 @@ describe("reparto por hueco 2026-11-07", () => {
           f.rateLimits!.windows[0]!.resetsAtMs = until;
           return f;
         };
-        await h.harness.behavior.emitThreadEvent("turn.failed", reported("thread-1", "creq_1", NOW + 3 * HOUR));
+        await h.harness.behavior.emitThreadEvent("turn.failed", reported("thread-1", "creq_1", NOW + 4 * HOUR));
         opusFull = 0;
         clock += 1000;
         await h.harness.behavior.callRpc("accounts_refresh", null);
-        await h.harness.behavior.emitThreadEvent("turn.failed", reported("thread-2", "creq_2", NOW + HOUR));
+        await h.harness.behavior.emitThreadEvent("turn.failed", reported("thread-2", "creq_2", NOW + 2 * HOUR));
         clock += 1000;
         await h.harness.behavior.emitThreadEvent("turn.failed", reported("thread-3", "creq_3", NOW + 5 * HOUR));
         expect(h.retries.find((r) => r.threadId === "thread-3")).toMatchObject({
           reason: "Waiting for Opus on work",
-          sendAt: NOW + 3 * HOUR + 15_000,
+          sendAt: NOW + 4 * HOUR + 15_000,
         });
       });
 
@@ -23679,5 +23757,546 @@ describe("a turn that failed for want of a session on its machine (2026-11-10)",
         reason: expect.stringMatching(/^Switched to account work.*main sin sesión en/),
       },
     ]);
+  });
+});
+
+describe("a turn under way since before a reload: where it runs is unknown, its failure marks nobody (2026-11-11)", () => {
+  // Aitor, 2026-11-11: «puedes revisar por qué motivo hay hilos en cola…».
+  // A turn started on one account, the plugin reloaded while it ran, its
+  // project moved to another account, and its 429 marked the new account
+  // with the old account's reset: days kept from every model with room.
+  // What a reload restores (the seat) does not prove where the turn runs
+  // either (Codex Sol r1 RELOAD-001 to 003): such a failure marks nobody.
+  /** proj-1 now on work; thread-3 under way at the load, its seat stored on main. */
+  async function reloaded(usage: Record<string, () => Response>, options: HostOptions = {}) {
+    const h = await host(usage, {
+      threads: { "thread-3": { status: "active" } },
+      kvPreset: { "running-seats": { "thread-3": "uuid-main" } },
+      presetEnv: {
+        "proj-1": [{ name: ENV_VAR, note: ownNote("work"), secret: true, value: null }],
+      },
+      ...options,
+    });
+    dispose = () => h.harness.dispose();
+    return h;
+  }
+  const limites = async (h: Awaited<ReturnType<typeof host>>) =>
+    JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout).limites;
+  const refused = (threadId: string) =>
+    failure({
+      threadId,
+      requestId: "creq_9",
+      errorInfo: { category: "unauthorized", providerCode: null, httpStatusCode: 403 },
+      rateLimits: null,
+    });
+
+  it("the incident: its 429 with the old account's reset marks neither account, and it runs again on the project's", async () => {
+    const h = await reloaded({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => Response.json(payload(5, 20)),
+    });
+    const late = failure({ threadId: "thread-3", requestId: "creq_9" });
+    // main's weekly reset, three days ahead.
+    late.rateLimits!.windows[0]!.resetsAtMs = NOW + 3 * 24 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", late);
+    expect(h.retries.map((r) => [r.threadId, r.reason, r.sendAt])).toEqual([
+      ["thread-3", "Retrying on account work: it has room now", undefined],
+    ]);
+    expect(h.envSet).toEqual([]);
+    expect(await limites(h)).toEqual([]);
+  });
+
+  it("with the project's account out too, it moves on the measurements and marks nobody", async () => {
+    const h = await reloaded({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => Response.json(payload(100, 20)),
+    });
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const late = failure({ threadId: "thread-3", requestId: "creq_9" });
+    await h.harness.behavior.emitThreadEvent("turn.failed", late);
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([["proj-1", `${ACCOUNTS}/spare`]]);
+    expect(await limites(h)).toEqual([]);
+  });
+
+  it("RELOAD-001: its seat stored on an account no longer found counts on the project's, and a refusal does not keep that account out", async () => {
+    const h = await reloaded(ALL_FREE, { kvPreset: { "running-seats": { "thread-3": "gone-account" } } });
+    await h.harness.behavior.emitThreadEvent("turn.failed", refused("thread-3"));
+    expect(h.retries.map((r) => r.reason)).toEqual(["Retrying on account work: it has room now"]);
+    // work is not refusing: another turn of the project starts there.
+    expect(await sent(h, "thread-5", "proj-1")).toEqual({ action: "proceed" });
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("RELOAD-002: its seat stored on the old account is the thread's, not this turn's: a refusal does not keep the old account out", async () => {
+    // Its seat stored on spare; spare measures best: a new project goes
+    // there unless spare refuses.
+    const h = await reloaded(
+      {
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(1, 1)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { kvPreset: { "running-seats": { "thread-3": "uuid-spare" } } },
+    );
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent("turn.failed", refused("thread-3"));
+    // Nor the project's: another turn of it starts on work.
+    expect(await sent(h, "thread-5", "proj-1")).toEqual({ action: "proceed" });
+    expect(h.envSet).toEqual([]);
+    await h.harness.behavior.emitThreadEvent("thread.created", {
+      thread: thread({ id: "thr-new", projectId: "proj-3" }),
+    });
+    expect(h.envSet.at(-1)).toEqual(
+      expect.objectContaining({ projectId: "proj-3", value: `${ACCOUNTS}/spare` }),
+    );
+  });
+
+  it("RELOAD-003 and low 4: a failure that comes before the threads are listed after the load marks nobody", async () => {
+    let listed!: () => void;
+    const held = new Promise<void>((resolve) => (listed = resolve));
+    const h = await reloaded(
+      {
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { beforeThreadsList: () => held },
+    );
+    const late = failure({ threadId: "thread-3", requestId: "creq_9" });
+    late.rateLimits!.windows[0]!.resetsAtMs = NOW + 3 * 24 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", late);
+    listed();
+    expect(await limites(h)).toEqual([]);
+    expect(h.retries.map((r) => r.reason)).toEqual(["Retrying on account work: it has room now"]);
+  });
+
+  it("a turn under way at the reload that no seat counts marks nobody either", async () => {
+    // At the reload proj-1 names an account no longer found: thread-3 is
+    // not counted.
+    let clock = NOW;
+    const h = await reloaded(ALL_FREE, {
+      clock: () => clock,
+      kvPreset: {},
+      presetEnv: {
+        "proj-1": [{ name: ENV_VAR, note: ownNote("ghost"), secret: true, value: null }],
+      },
+    });
+    expect((await h.harness.behavior.runCli(["use", "proj-1", "work"])).exitCode).toBe(0);
+    // Past the grace of that pick.
+    clock = NOW + 5 * 60_000;
+    const late = failure({ threadId: "thread-3", requestId: "creq_9" });
+    late.rateLimits!.windows[0]!.resetsAtMs = NOW + 3 * 24 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", late);
+    expect(h.retries.map((r) => [r.threadId, r.reason, r.sendAt])).toEqual([
+      ["thread-3", "Retrying on account work: it has room now", undefined],
+    ]);
+    expect(await limites(h)).toEqual([]);
+  });
+
+  it("once its turn of before the load has ended, a turn this load sends, refused at the door, is the project's account's", async () => {
+    const h = await reloaded({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => Response.json(payload(5, 20)),
+    });
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    expect(await sent(h, "thread-3", "proj-1")).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "thread-3", requestId: "creq_10" }));
+    expect(await limites(h)).toEqual([{ cuenta: "work", modelo: "todos", hasta: "2026-09-29T14:00:00+02:00" }]);
+  });
+
+  it("once its turn of before the load has failed, the failure of the retry this load sent is the project's account's", async () => {
+    const h = await reloaded({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => Response.json(payload(5, 20)),
+    });
+    const late = failure({ threadId: "thread-3", requestId: "creq_9" });
+    late.rateLimits!.windows[0]!.resetsAtMs = NOW + 3 * 24 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", late);
+    expect(await limites(h)).toEqual([]);
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ threadId: "thread-3", requestId: "creq_10", attemptNumber: 2 }),
+    );
+    expect(await limites(h)).toEqual([{ cuenta: "work", modelo: "todos", hasta: "2026-09-29T14:00:00+02:00" }]);
+  });
+
+  /** Its project's account unreadable while `down.on`: a turn announced then leaves where it started unknown. */
+  const envDown = (down: { on: boolean }) => () =>
+    down.on ? Promise.reject(new Error("bb is down")) : Promise.resolve();
+  const countsDone = (h: Awaited<ReturnType<typeof host>>, n: number) =>
+    vi.waitFor(
+      () =>
+        expect(
+          h.harness.logEntries.filter((e) => e.message.startsWith("seats counted after loading")).length,
+        ).toBeGreaterThanOrEqual(n),
+      { timeout: 20_000 },
+    );
+  const workMarked = [{ cuenta: "work", modelo: "todos", hasta: "2026-09-29T14:00:00+02:00" }];
+
+  it("a list that failed at the load is read again on a refresh; then a thread not under way is the project's account's again (code-reviewer r2, medium 2)", async () => {
+    const list = { down: true };
+    const h = await reloaded(ALL_FREE, {
+      beforeThreadsList: async () => {
+        if (list.down) throw new Error("bb is down");
+      },
+    });
+    await countsDone(h, 1);
+    list.down = false;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await countsDone(h, 2);
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "thread-1", requestId: "creq_1" }));
+    expect(await limites(h)).toEqual(workMarked);
+  }, 30_000);
+
+  it("a thread this load saw start before a late list is not of before the load, though that list shows it under way (code-reviewer r2, low 3)", async () => {
+    const list = { down: true };
+    const threads: Record<string, Partial<ThreadResponse>> = { "thread-3": { status: "active" } };
+    const h = await reloaded(ALL_FREE, {
+      threads,
+      beforeThreadsList: async () => {
+        if (list.down) throw new Error("bb is down");
+      },
+    });
+    await countsDone(h, 1);
+    // thread-9 starts and ends a turn, then one is sent that bb refuses at
+    // the door; the list, read on a refresh meanwhile, shows it under way.
+    expect(await sent(h, "thread-9", "proj-1")).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-9", projectId: "proj-1" }),
+    });
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "thread-9", projectId: "proj-1" }),
+    });
+    expect(await sent(h, "thread-9", "proj-1")).toEqual({ action: "proceed" });
+    threads["thread-9"] = { status: "active" };
+    list.down = false;
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await countsDone(h, 2);
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "thread-9", requestId: "creq_9" }));
+    expect(await limites(h)).toEqual(workMarked);
+  }, 30_000);
+
+  it("a turn of before the load that ended while the threads were listed is no longer under way, though the list shows it", async () => {
+    let listed!: () => void;
+    const held = new Promise<void>((resolve) => (listed = resolve));
+    const h = await reloaded(ALL_FREE, { beforeThreadsList: () => held });
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    listed();
+    await countsDone(h, 1);
+    expect(await sent(h, "thread-3", "proj-1")).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "thread-3", requestId: "creq_10" }));
+    expect(await limites(h)).toEqual(workMarked);
+  });
+
+  it("a thread archived ends its turn of before the load: unarchived, a turn refused at the door is the project's account's (code-reviewer r2, low 3)", async () => {
+    const h = await reloaded(ALL_FREE);
+    await countsDone(h, 1);
+    await h.harness.behavior.emitThreadEvent("thread.archived", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    expect(await sent(h, "thread-3", "proj-1")).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "thread-3", requestId: "creq_10" }));
+    expect(await limites(h)).toEqual(workMarked);
+  });
+
+  it("a later count adds no thread to the turns of before the load: one this load saw start, where unread, is the project's account's (code-reviewer r2, low 5)", async () => {
+    const down = { on: true };
+    const threads: Record<string, Partial<ThreadResponse>> = { "thread-3": { status: "active" } };
+    // The load's count cannot read proj-1's account: incomplete.
+    const h = await reloaded(ALL_FREE, { threads, beforeEnvRead: envDown(down) });
+    await countsDone(h, 1);
+    down.on = false;
+    // thread-9 starts and ends a turn, then one is sent that bb refuses at
+    // the door; a second count shows it under way.
+    expect(await sent(h, "thread-9", "proj-1")).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-9", projectId: "proj-1" }),
+    });
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "thread-9", projectId: "proj-1" }),
+    });
+    expect(await sent(h, "thread-9", "proj-1")).toEqual({ action: "proceed" });
+    threads["thread-9"] = { status: "active" };
+    // A reserve on an incomplete count counts again.
+    await h.harness.behavior.runCli(["reserve", "main", "--id", "n", "--until", new Date(NOW + HOUR).toISOString()]);
+    await countsDone(h, 2);
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "thread-9", requestId: "creq_9" }));
+    expect(await limites(h)).toEqual(workMarked);
+  }, 30_000);
+
+  it("control: a turn this load saw start on the project's account marks it with its 429, as ever", async () => {
+    const h = await reloaded({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => Response.json(payload(5, 20)),
+    });
+    await sent(h, "thread-7", "proj-1");
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-7", projectId: "proj-1" }),
+    });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "thread-7", requestId: "creq_7" }));
+    expect(await limites(h)).toEqual([{ cuenta: "work", modelo: "todos", hasta: "2026-09-29T14:00:00+02:00" }]);
+  });
+});
+
+describe("the marks of a usage limit, and the threads they hold (2026-11-11)", () => {
+  // Aitor, 2026-11-11: the stuck lines said «libres: B» while the plugin
+  // kept B from that model; health showed B usable and nothing of the mark.
+  it("health shows each account's standing mark, per model or for every model, and until when", async () => {
+    const h = await host({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => Response.json(payload(5, 20)),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    expect(report.version).toBe(1);
+    expect(report.limites).toEqual([
+      { cuenta: "main", modelo: "todos", hasta: "2026-09-29T14:00:00+02:00" },
+    ]);
+    const text = (await h.harness.behavior.runCli(["health"])).stdout;
+    expect(text).toMatch(/^main .*límite hasta 2026-09-29T14:00:00\+02:00/m);
+    expect(text).not.toMatch(/^(spare|work) .*límite/m);
+  });
+
+  // A reset reported that is none of the account's windows as read: a mark
+  // of LIMIT_NO_RESET_MS (30 min), said in the log; one of them (here its
+  // weekly, +3 d, within RESET_TOGETHER_MS, 10 min): the reset reported.
+  // Literal on purpose, as BUFFER.
+  for (const [late, until] of [
+    [10 * 60_000, "2026-10-02T12:10:00+02:00"],
+    [10 * 60_000 + 1, "2026-09-29T12:30:00+02:00"],
+  ] as const)
+    it(`a 429 whose reset is ${late} ms past the account's weekly marks it until ${until}`, async () => {
+      const h = await host({
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      const f = failure();
+      f.rateLimits!.windows[0]!.resetsAtMs = NOW + 3 * 24 * HOUR + late;
+      await h.harness.behavior.emitThreadEvent("turn.failed", f);
+      const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+      expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: until }]);
+      const warned = h.harness.logEntries.filter((e) => e.message.includes("matches none of its windows"));
+      expect(warned.map((e) => [e.level, e.message])).toEqual(
+        late > 10 * 60_000
+          ? [
+              [
+                "warn",
+                "account main: the reset its 429 reported (2026-10-02T12:10:00+02:00) matches none of its windows as read; marked for 30 min only",
+              ],
+            ]
+          : [],
+      );
+    });
+
+  it("a weekly at 0 % read an hour before, its read failing as the 429 comes: a reset a week after that read is its (the read time, not now)", async () => {
+    let clock = NOW;
+    let down = false;
+    const unstarted = {
+      limits: [
+        { kind: "session", percent: 100, resets_at: new Date(NOW + 2 * HOUR).toISOString() },
+        { kind: "weekly_all", percent: 0, resets_at: null },
+      ],
+      five_hour: { locked_reason: null },
+      seven_day: { locked_reason: null },
+    };
+    const h = await host(
+      {
+        main: () => (down ? new Response("busy", { status: 503 }) : Response.json(unstarted)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + HOUR;
+    down = true;
+    const f = failure();
+    f.rateLimits!.windows[0]!.resetsAtMs = NOW + 7 * 24 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", f);
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: "2026-10-06T12:00:00+02:00" }]);
+  });
+
+  it("an account left out of the destinations (its read failing, its full session reset since) is still checked on its cached read: marked 30 min, said (Codex Astra r3 RESET-003)", async () => {
+    let clock = NOW;
+    let down = false;
+    const full = {
+      limits: [
+        { kind: "session", percent: 100, resets_at: new Date(NOW + 30 * 60_000).toISOString() },
+        { kind: "weekly_all", percent: 35, resets_at: new Date(NOW + 3 * 24 * HOUR).toISOString() },
+      ],
+      five_hour: { locked_reason: null },
+      seven_day: { locked_reason: null },
+    };
+    const h = await host(
+      {
+        main: () => (down ? new Response("busy", { status: 503 }) : Response.json(full)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + HOUR;
+    down = true;
+    const f = failure();
+    f.rateLimits!.windows[0]!.resetsAtMs = NOW + 6 * 24 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", f);
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: "2026-09-29T13:30:00+02:00" }]);
+    expect(h.harness.logEntries.some((e) => e.level === "warn" && e.message.includes("matches none of its windows"))).toBe(true);
+  });
+
+  it("a weekly at 0 % with no reset at its read takes no other account's weekly at +3 days: marked 30 min (code-reviewer r1, medium 1)", async () => {
+    const unstarted = {
+      limits: [
+        { kind: "session", percent: 100, resets_at: new Date(NOW + 2 * HOUR).toISOString() },
+        { kind: "weekly_all", percent: 0, resets_at: null },
+      ],
+      five_hour: { locked_reason: null },
+      seven_day: { locked_reason: null },
+    };
+    const h = await host({
+      main: () => Response.json(unstarted),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => Response.json(payload(5, 20)),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const f = failure();
+    f.rateLimits!.windows[0]!.resetsAtMs = NOW + 3 * 24 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", f);
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: "2026-09-29T12:30:00+02:00" }]);
+  });
+
+  // Two threads fail on main one after the other with another account's
+  // reset (the incident's shape): the second is no proof the reset is
+  // main's (code-reviewer r2, medium 1). Of another project still on main:
+  // a sibling of the first, after its project moved, is a leftover retried
+  // where the project went, never judged on main.
+  for (const [gap, until] of [
+    [60_000, "2026-09-29T12:31:00+02:00"],
+    [29 * 60_000, "2026-09-29T12:59:00+02:00"],
+  ] as const)
+    it(`two failures ${gap} ms apart with the same foreign reset mark the account 30 min from the last, never until that reset`, async () => {
+      let clock = NOW;
+      const h = await host(
+        {
+          main: () => Response.json(payload(100, 40)),
+          spare: () => Response.json(payload(10, 60)),
+          work: () => Response.json(payload(5, 20)),
+        },
+        { clock: () => clock },
+      );
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      const reset = NOW + 6 * 24 * HOUR;
+      const first = failure();
+      first.rateLimits!.windows[0]!.resetsAtMs = reset;
+      await h.harness.behavior.emitThreadEvent("turn.failed", first);
+      clock = NOW + gap;
+      const second = failure({ threadId: "thr-2", requestId: "creq_2" });
+      second.rateLimits!.windows[0]!.resetsAtMs = reset + 2_000;
+      await h.harness.behavior.emitThreadEvent("turn.failed", second);
+      const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+      expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: until }]);
+    });
+
+  it("a reset that passes while the failure reads the accounts makes no mark, and the next turn runs there (Codex Astra r2 RESET-001)", async () => {
+    let clock = NOW;
+    let failing = false;
+    const h = await host(
+      {
+        // The 429 came a minute before main's reset; its read, as the
+        // failure is judged, two minutes later: main renewed.
+        main: () => {
+          if (!failing) return Response.json(payload(100, 40));
+          clock = NOW + 2 * 60_000;
+          return Response.json(payload(0, 40));
+        },
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    failing = true;
+    const f = failure();
+    f.rateLimits!.windows[0]!.resetsAtMs = NOW + 60_000;
+    await h.harness.behavior.emitThreadEvent("turn.failed", f);
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    expect(report.limites).toEqual([]);
+    // proj-2, also on main, runs its next turn there.
+    expect(await sent(h, "thr-5", "proj-2")).toEqual({ action: "proceed" });
+    expect(h.envSet.filter((e) => e.projectId === "proj-2")).toEqual([]);
+  });
+
+  it("a reset that passed by then keeps a longer mark the account already had", async () => {
+    let clock = NOW;
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    clock = NOW + 60_000;
+    const late = failure({ threadId: "thread-4", requestId: "creq_4" });
+    late.rateLimits!.windows[0]!.resetsAtMs = NOW + 30_000;
+    await h.harness.behavior.emitThreadEvent("turn.failed", late);
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: "2026-09-29T14:00:00+02:00" }]);
+  });
+
+  it("a 429 with no reset reported still marks 30 min", async () => {
+    const h = await host({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => Response.json(payload(5, 20)),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const f = failure();
+    for (const w of f.rateLimits!.windows) w.resetsAtMs = null;
+    await h.harness.behavior.emitThreadEvent("turn.failed", f);
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: "2026-09-29T12:30:00+02:00" }]);
+  });
+
+  it("an account not read is marked until the reset reported, as before", async () => {
+    const h = await host({
+      main: () => new Response("busy", { status: 503 }),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => Response.json(payload(5, 20)),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const f = failure();
+    f.rateLimits!.windows[0]!.resetsAtMs = NOW + 6 * 24 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", f);
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: "2026-10-05T12:00:00+02:00" }]);
   });
 });

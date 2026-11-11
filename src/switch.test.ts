@@ -20,6 +20,7 @@ import {
   opusInstead,
   opusInsteadText,
   placedOn,
+  resetOfAccount,
   settle,
   reserveWait,
   sessionLost,
@@ -2833,5 +2834,94 @@ describe("decideSwitch with an account marked by an earlier failure (Astra r3 hi
       account: "work",
       model: null,
     });
+  });
+});
+
+describe("resetOfAccount: whether a reset a 429 reported is one of the account's windows (culpa tras recarga, 2026-11-11)", () => {
+  // Literal on purpose (= RESET_TOGETHER_MS): importing it would let it drift.
+  const TOLERANCE = 10 * 60_000;
+  const WEEK = 7 * 24 * HOUR;
+  const WEEKLY = NOW + 3 * 24 * HOUR;
+  /** An Ultra with no 5-hour window: only its weekly and Fable's (+4 d) can match. */
+  const ultra = account("ultra", {
+    session: { usedPercent: 0, resetsAt: null, absent: true },
+    weekly: { usedPercent: 35, resetsAt: WEEKLY },
+    models: { Fable: { usedPercent: 20, resetsAt: NOW + 4 * 24 * HOUR } },
+  });
+  const READ = NOW - HOUR;
+
+  it("matches its weekly within the tolerance either side, to the millisecond", () => {
+    expect(resetOfAccount(ultra, WEEKLY + TOLERANCE, NOW, READ)).toBe(true);
+    expect(resetOfAccount(ultra, WEEKLY + TOLERANCE + 1, NOW, READ)).toBe(false);
+    expect(resetOfAccount(ultra, WEEKLY - TOLERANCE, NOW, READ)).toBe(true);
+    expect(resetOfAccount(ultra, WEEKLY - TOLERANCE - 1, NOW, READ)).toBe(false);
+  });
+
+  it("matches a model's own window", () => {
+    expect(resetOfAccount(ultra, NOW + 4 * 24 * HOUR - 2_000, NOW, READ)).toBe(true);
+  });
+
+  it("another account's weekly, days apart, is none of its", () => {
+    expect(resetOfAccount(ultra, NOW + 5 * 24 * HOUR, NOW, READ)).toBe(false);
+  });
+
+  it("a weekly not started at the read (0 %, no reset) opens after it: another account's weekly at +3 days is none of its (code-reviewer r1, medium 1)", () => {
+    const unstarted = account("unstarted", {
+      session: { usedPercent: 0, resetsAt: null, absent: true },
+      weekly: { usedPercent: 0, resetsAt: null },
+    });
+    expect(resetOfAccount(unstarted, WEEKLY, NOW, NOW - 5 * 60_000)).toBe(false);
+  });
+
+  it("a weekly with no reset ahead resets between its read plus a week and now plus a week, the tolerance either side, to the millisecond", () => {
+    const unstarted = account("unstarted", {
+      session: { usedPercent: 0, resetsAt: null, absent: true },
+      weekly: { usedPercent: 0, resetsAt: null },
+    });
+    expect(resetOfAccount(unstarted, READ + WEEK - TOLERANCE - 1, NOW, READ)).toBe(false);
+    expect(resetOfAccount(unstarted, READ + WEEK - TOLERANCE, NOW, READ)).toBe(true);
+    expect(resetOfAccount(unstarted, NOW + WEEK + TOLERANCE, NOW, READ)).toBe(true);
+    expect(resetOfAccount(unstarted, NOW + WEEK + TOLERANCE + 1, NOW, READ)).toBe(false);
+  });
+
+  it("with no read time, a window with no reset ahead opens now, not at any time past (code-reviewer r2, nit 6)", () => {
+    const unstarted = account("unstarted", {
+      session: { usedPercent: 0, resetsAt: null, absent: true },
+      weekly: { usedPercent: 0, resetsAt: null },
+    });
+    expect(resetOfAccount(unstarted, NOW + WEEK - TOLERANCE - 1, NOW)).toBe(false);
+    expect(resetOfAccount(unstarted, NOW + WEEK - TOLERANCE, NOW)).toBe(true);
+  });
+
+  it("one whose reset passed after the read opens no sooner than that reset", () => {
+    const renewed = account("renewed", {
+      session: { usedPercent: 0, resetsAt: null, absent: true },
+      weekly: { usedPercent: 90, resetsAt: NOW - 30 * 60_000 },
+    });
+    const opened = NOW - 30 * 60_000;
+    expect(resetOfAccount(renewed, opened + WEEK - TOLERANCE - 1, NOW, READ)).toBe(false);
+    expect(resetOfAccount(renewed, opened + WEEK - TOLERANCE, NOW, READ)).toBe(true);
+  });
+
+  it("a session with no reset ahead resets within 5 hours of when it opened: a Team whose read shows none open, to the millisecond", () => {
+    const team = account("team", {
+      session: { usedPercent: 0, resetsAt: null },
+      weekly: { usedPercent: 35, resetsAt: WEEKLY },
+      team: true,
+    });
+    const read = NOW - 10 * 60_000;
+    expect(resetOfAccount(team, read + 5 * HOUR - TOLERANCE - 1, NOW, read)).toBe(false);
+    expect(resetOfAccount(team, read + 5 * HOUR - TOLERANCE, NOW, read)).toBe(true);
+    expect(resetOfAccount(team, NOW + 5 * HOUR + TOLERANCE, NOW, read)).toBe(true);
+    expect(resetOfAccount(team, NOW + 5 * HOUR + TOLERANCE + 1, NOW, read)).toBe(false);
+  });
+
+  it("a session with its reset known ahead takes only that reset: one at +2 h is not a 429's at +4 h 50 (code-reviewer r1, low 2)", () => {
+    const busy = account("busy", {
+      session: { usedPercent: 60, resetsAt: NOW + 2 * HOUR },
+      weekly: { usedPercent: 35, resetsAt: WEEKLY },
+    });
+    expect(resetOfAccount(busy, NOW + 2 * HOUR + TOLERANCE, NOW, READ)).toBe(true);
+    expect(resetOfAccount(busy, NOW + 4 * HOUR + 50 * 60_000, NOW, READ)).toBe(false);
   });
 });
