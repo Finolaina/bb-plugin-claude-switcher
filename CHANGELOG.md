@@ -21,7 +21,10 @@ project uses [Semantic Versioning](https://semver.org/).
   ninguna, ni límite ni negativa, y deciden las mediciones. Lo que restaura la recarga (la plaza)
   no se usa como prueba de dónde corre: puede ser de otro turno del mismo
   hilo o de la cuenta del proyecto (Codex Sol r1 RELOAD-001, 002 y 003;
-  code-reviewer r1 low 3 y 4).
+  code-reviewer r1 low 3 y 4). Ese turno acaba también con uno nuevo
+  (`thread.active`) o con el hilo archivado o borrado, y si la lista de la
+  carga falla, cada refresco la vuelve a leer (code-reviewer r2 medium 2,
+  low 3 y 5).
 - **Seguro: un reinicio que no es de la cuenta no la veta días.** Si el 429
   informa un reinicio y la cuenta culpada está leída, y ese reinicio no casa
   con ninguna de sus ventanas, la marca dura solo `LIMIT_NO_RESET_MS` (30
@@ -29,9 +32,13 @@ project uses [Semantic Versioning](https://semver.org/).
   min como mucho (`RESET_TOGETHER_MS`); una sin reinicio por delante (una
   semanal al 0 %, la sesión aún no abierta de una Team, o una ya renovada)
   se abrió entre la lectura y ahora, y solo casa un reinicio en esa franja
-  más su duración (code-reviewer r1 medium 1 y low 2). Un segundo 429 con el
-  mismo reinicio, con la marca corta vigente o vencida hace menos de 30
-  min, marca hasta ese reinicio (low 5). Sin leer, como antes.
+  más su duración, o, sin hora de lectura, entre ahora y su duración
+  (code-reviewer r1 medium 1 y low 2; r2 nit 6). Un segundo 429 con el mismo
+  reinicio no lo confirma: dos hilos fallan igual con el reinicio de otra
+  cuenta (code-reviewer r2 medium 1 y low 4). Un reinicio informado que ya
+  pasó mientras se leían las cuentas no marca nada nuevo (Codex Astra r2
+  RESET-001); sin reinicio informado, 30 min como siempre. Sin leer, como
+  antes.
 - **El aviso de atasco no da por libre una cuenta que el plugin tiene
   vetada.** Las «libres» de una línea de atasco (`health`, `health --json`,
   `seats`, el registro y las filas STUCK de `history`) dejan fuera las
