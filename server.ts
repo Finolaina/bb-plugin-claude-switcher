@@ -126,6 +126,7 @@ import {
   opusRoom,
   reserveToSpare,
   reserving,
+  RESET_TOGETHER_MS,
   spendsReservedWeekly,
   type AccountUsage,
 } from "./src/policy.js";
@@ -1671,6 +1672,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * never shortens it: one with no reset reported does not cut a reset
    * known (see limitedAt; Astra r5 medium 2).
    */
+  /**
+   * The marks cut to LIMIT_NO_RESET_MS because their reset was none of the
+   * account's windows, per account and scope, with that reset (see judge).
+   */
+  const shortMarks = new Map<string, { reset: number; until: number }>();
   function markLimited(name: string, scope: string, until: number): void {
     const marks = limitedAt.get(name) ?? new Map<string, number>();
     marks.set(scope, Math.max(marks.get(scope) ?? until, until));
@@ -7002,22 +7008,41 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // of the whole account here would keep it from every machine.
     if (!stuck && failedOn !== null && !isSessionLost(event)) {
       const blamed = input.accounts.find((a) => a.name === failedOn);
+      const scope = limitScope(blamed, model, now)?.toLowerCase() ?? "";
       let until = reportedFreeAt(event);
       // A reset that is none of the account's windows as read is no proof
       // the account is out till then: a failure judged on the wrong account
       // kept it from every model for days (culpa tras recarga, 2026-11-11).
       // Unread, the report stands as before.
-      if (until !== null && blamed !== undefined && blamed.unknown !== true && !resetOfAccount(blamed, until, now)) {
-        bb.log.warn(
-          `account ${failedOn}: the reset its 429 reported (${isoInZone(until)}) matches none of its windows as read; marked for ${LIMIT_NO_RESET_MS / 60_000} min only`,
-        );
-        until = null;
+      if (
+        until !== null &&
+        blamed !== undefined &&
+        blamed.unknown !== true &&
+        !resetOfAccount(blamed, until, now, collector.get(failedOn)?.observedAt ?? undefined)
+      ) {
+        const key = `${failedOn}\n${scope}`;
+        const before = shortMarks.get(key);
+        // The same reset again, while its short mark stands or within as
+        // long after [SUPUESTO]: the account's after all, though its read
+        // lacks the window (code-reviewer r1, low 5).
+        if (
+          before !== undefined &&
+          Math.abs(before.reset - until) <= RESET_TOGETHER_MS &&
+          now <= before.until + LIMIT_NO_RESET_MS
+        ) {
+          shortMarks.delete(key);
+          bb.log.info(
+            `account ${failedOn}: a second 429 reported the same reset (${isoInZone(until)}); marked until it`,
+          );
+        } else {
+          shortMarks.set(key, { reset: until, until: now + LIMIT_NO_RESET_MS });
+          bb.log.warn(
+            `account ${failedOn}: the reset its 429 reported (${isoInZone(until)}) matches none of its windows as read; marked for ${LIMIT_NO_RESET_MS / 60_000} min only`,
+          );
+          until = null;
+        }
       }
-      markLimited(
-        failedOn,
-        limitScope(blamed, model, now)?.toLowerCase() ?? "",
-        until ?? now + LIMIT_NO_RESET_MS,
-      );
+      markLimited(failedOn, scope, until ?? now + LIMIT_NO_RESET_MS);
     }
     // No Fable on any account, and an account with Opus: the thread is told
     // to switch (D3), whatever the decision's reason, naming where the

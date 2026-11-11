@@ -22677,8 +22677,9 @@ describe("reparto por hueco 2026-11-07", () => {
 
       // With the session or the general weekly full too (resetting at +1 h),
       // the 429 may be theirs: the mark is the whole account's. At +90 min
-      // work's read, settled, runs Opus again, but its 429 (till +5 h) still
-      // stands: the Opus turn stays on main.
+      // work's read, settled, runs Opus again, but its 429 (till +4 h, one
+      // of its windows: 0.2.52 marks a reset that is none of them 30 min
+      // only) still stands: the Opus turn stays on main.
       for (const full of ["session", "weekly_all"] as const)
         it(`a Fable turn's 429 on work read with Fable and the ${full} window full: the mark is the whole account's (Astra r3 medium 2)`, async () => {
           let clock = NOW;
@@ -22710,7 +22711,7 @@ describe("reparto por hueco 2026-11-07", () => {
           teamLogin(h, "work");
           await h.harness.behavior.callRpc("accounts_refresh", null);
           const f = failure();
-          f.rateLimits!.windows[0]!.resetsAtMs = NOW + 5 * HOUR;
+          f.rateLimits!.windows[0]!.resetsAtMs = NOW + 4 * HOUR;
           await h.harness.behavior.emitThreadEvent("turn.failed", f);
           clock = NOW + 90 * 60_000;
           expect(await dispatch(h, "o2", "proj-2", OPUS)).toEqual({ action: "proceed" });
@@ -22734,7 +22735,9 @@ describe("reparto por hueco 2026-11-07", () => {
         });
 
       // Two marks of work standing for an Opus turn, its own (read with Opus
-      // at 100 %, till +3 h) and the whole account's (till +1 h): a third
+      // at 100 %, till its window's reset, +4 h) and the whole account's
+      // (till its session's, +2 h; 0.2.52: a reset that is none of its
+      // windows marks 30 min only): a third
       // Opus turn failing on spare, with main kept for Fable, waits for work
       // till the later of the two (Astra r4 medium 3).
       it("an Opus turn waits for a marked Team seat till the latest of its marks (Astra r4 medium 3)", async () => {
@@ -22775,16 +22778,16 @@ describe("reparto por hueco 2026-11-07", () => {
           f.rateLimits!.windows[0]!.resetsAtMs = until;
           return f;
         };
-        await h.harness.behavior.emitThreadEvent("turn.failed", reported("thread-1", "creq_1", NOW + 3 * HOUR));
+        await h.harness.behavior.emitThreadEvent("turn.failed", reported("thread-1", "creq_1", NOW + 4 * HOUR));
         opusFull = 0;
         clock += 1000;
         await h.harness.behavior.callRpc("accounts_refresh", null);
-        await h.harness.behavior.emitThreadEvent("turn.failed", reported("thread-2", "creq_2", NOW + HOUR));
+        await h.harness.behavior.emitThreadEvent("turn.failed", reported("thread-2", "creq_2", NOW + 2 * HOUR));
         clock += 1000;
         await h.harness.behavior.emitThreadEvent("turn.failed", reported("thread-3", "creq_3", NOW + 5 * HOUR));
         expect(h.retries.find((r) => r.threadId === "thread-3")).toMatchObject({
           reason: "Waiting for Opus on work",
-          sendAt: NOW + 3 * HOUR + 15_000,
+          sendAt: NOW + 4 * HOUR + 15_000,
         });
       });
 
@@ -23915,6 +23918,77 @@ describe("the marks of a usage limit, and the threads they hold (2026-11-11)", (
           : [],
       );
     });
+
+  it("a weekly at 0 % with no reset at its read takes no other account's weekly at +3 days: marked 30 min (code-reviewer r1, medium 1)", async () => {
+    const unstarted = {
+      limits: [
+        { kind: "session", percent: 100, resets_at: new Date(NOW + 2 * HOUR).toISOString() },
+        { kind: "weekly_all", percent: 0, resets_at: null },
+      ],
+      five_hour: { locked_reason: null },
+      seven_day: { locked_reason: null },
+    };
+    const h = await host({
+      main: () => Response.json(unstarted),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => Response.json(payload(5, 20)),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const f = failure();
+    f.rateLimits!.windows[0]!.resetsAtMs = NOW + 3 * 24 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", f);
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: "2026-09-29T12:30:00+02:00" }]);
+  });
+
+  it("a second 429 with the same reset, its short mark just over, marks the account until that reset (code-reviewer r1, low 5)", async () => {
+    let clock = NOW;
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const reset = NOW + 6 * 24 * HOUR;
+    const first = failure();
+    first.rateLimits!.windows[0]!.resetsAtMs = reset;
+    await h.harness.behavior.emitThreadEvent("turn.failed", first);
+    // Its 30 min over; proj-2, still on main, fails there with the same reset.
+    clock = NOW + 31 * 60_000;
+    const second = failure({ threadId: "thr-2", requestId: "creq_2" });
+    second.rateLimits!.windows[0]!.resetsAtMs = reset + 2_000;
+    await h.harness.behavior.emitThreadEvent("turn.failed", second);
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: "2026-10-05T12:00:02+02:00" }]);
+  });
+
+  it("a second 429 with another reset stays a short mark", async () => {
+    let clock = NOW;
+    const h = await host(
+      {
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const first = failure();
+    first.rateLimits!.windows[0]!.resetsAtMs = NOW + 6 * 24 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", first);
+    clock = NOW + 31 * 60_000;
+    const second = failure({ threadId: "thr-2", requestId: "creq_2" });
+    second.rateLimits!.windows[0]!.resetsAtMs = NOW + 5 * 24 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", second);
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: "2026-09-29T13:01:00+02:00" }]);
+  });
 
   it("an account not read is marked until the reset reported, as before", async () => {
     const h = await host({

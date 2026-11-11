@@ -311,24 +311,36 @@ const WEEK_WINDOW_MS = 7 * 24 * 3_600_000;
 
 /**
  * Whether `reset`, as a 429 on `account` reported it, is one of the
- * account's own windows as read (culpa tras recarga, 2026-11-11: a turn's
- * failure judged on another account marked that one for days with this
- * reset). Within RESET_TOGETHER_MS of a window's reset (reads and reports
- * differ by a second or two: 17:59:58 against 18:00:00); a window with no
- * reset ahead (none open, or passed since the read) may reset at any time
- * within its length from now; and any reset within the next 5 hours is the
- * session's of an account with a 5-hour window, whatever its read says (a
- * Team seat's read may not show the session the 429 opened).
+ * account's own windows as read at `readAt` (culpa tras recarga,
+ * 2026-11-11: a turn's failure judged on another account marked that one
+ * for days with this reset). A window with its reset ahead: within
+ * RESET_TOGETHER_MS of it (reads and reports differ by a second or two:
+ * 17:59:58 against 18:00:00). One with none ahead (none open at the read,
+ * as a Team seat's session or a weekly at 0 %, or one passed since): it
+ * opened no sooner than the read or that reset, whichever is later, and no
+ * later than now, so it resets within its length of those, the tolerance
+ * either side (code-reviewer r1, medium 1 and low 2). `readAt` unknown: no
+ * lower bound but a reset passed.
  */
-export function resetOfAccount(account: AccountUsage, reset: number, now: number): boolean {
-  const near = (w: UsageWindow, length: number) =>
-    w.resetsAt !== null && w.resetsAt > now
-      ? Math.abs(reset - w.resetsAt) <= RESET_TOGETHER_MS
-      : reset <= now + length + RESET_TOGETHER_MS;
-  if (account.session.absent !== true && reset <= now + SESSION_WINDOW_MS + RESET_TOGETHER_MS)
-    return true;
-  return [account.weekly, ...Object.values(account.models)].some(
-    (w) => w.absent !== true && near(w, WEEK_WINDOW_MS),
+export function resetOfAccount(
+  account: AccountUsage,
+  reset: number,
+  now: number,
+  readAt?: number,
+): boolean {
+  const fits = (w: UsageWindow, length: number) => {
+    if (w.absent === true) return false;
+    if (w.resetsAt !== null && w.resetsAt > now)
+      return Math.abs(reset - w.resetsAt) <= RESET_TOGETHER_MS;
+    const opened = Math.max(readAt ?? -Infinity, w.resetsAt ?? -Infinity);
+    return (
+      reset >= opened + length - RESET_TOGETHER_MS &&
+      reset <= now + length + RESET_TOGETHER_MS
+    );
+  };
+  return (
+    fits(account.session, SESSION_WINDOW_MS) ||
+    [account.weekly, ...Object.values(account.models)].some((w) => fits(w, WEEK_WINDOW_MS))
   );
 }
 
