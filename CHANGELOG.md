@@ -8,30 +8,37 @@ project uses [Semantic Versioning](https://semver.org/).
 
 ### Corregido
 
-- **La culpa de un fallo es de la cuenta donde corrió el turno, también
-  tras una recarga.** Aitor, 2026-11-11: «puedes revisar por qué motivo hay
-  hilos en cola y que mejorarías?» y «Arreglalo y publicalo». Medido en el
-  registro de producción del 10 y el 11-nov: dos cuentas con cuota quedaron
-  fuera días enteros con el reinicio de otra. Un turno arrancó en una
-  cuenta, el plugin se recargó mientras corría (su plaza volvió del
-  almacenamiento, pero no dónde arrancó), el proyecto se movió a otra cuenta
-  y el 429 del turno marcó la cuenta nueva con el reinicio semanal de la
-  vieja. Ahora, al cargar, un turno en marcha contado en una plaza recupera
-  también dónde arrancó para juzgar su fallo; uno que no se puede contar
-  queda como desconocido y su fallo no marca ninguna cuenta.
+- **Un turno en marcha desde antes de una recarga ya no culpa a la cuenta
+  donde está ahora su proyecto.** Aitor, 2026-11-11: «puedes revisar por qué
+  motivo hay hilos en cola y que mejorarías?» y «Arreglalo y publicalo».
+  Medido en el registro de producción del 10 y el 11-nov: dos cuentas con
+  cuota quedaron fuera días enteros con el reinicio de otra. Un turno
+  arrancó en una cuenta, el plugin se recargó mientras corría, el proyecto se
+  movió a otra cuenta y el 429 del turno marcó la cuenta nueva con el
+  reinicio semanal de la vieja. Ahora el fallo de un hilo que esta carga no
+  ha visto arrancar (bb lo listó en marcha al cargar, o el fallo llega antes
+  de esa lista) es de una cuenta desconocida: no marca ninguna, ni límite ni
+  negativa, y deciden las mediciones. Lo que restaura la recarga (la plaza)
+  no se usa como prueba de dónde corre: puede ser de otro turno del mismo
+  hilo o de la cuenta del proyecto (Codex Sol r1 RELOAD-001, 002 y 003;
+  code-reviewer r1 low 3 y 4).
 - **Seguro: un reinicio que no es de la cuenta no la veta días.** Si el 429
   informa un reinicio y la cuenta culpada está leída, y ese reinicio no casa
-  con ninguna de sus ventanas (sesión de 5 h, semanal, ventanas por modelo;
-  10 min de tolerancia, la de `RESET_TOGETHER_MS`), la marca dura solo
-  `LIMIT_NO_RESET_MS` (30 min) y el registro lo avisa. En una cuenta con
-  ventana de 5 h, cualquier reinicio dentro de las próximas 5 h es suyo
-  (una Team cuya lectura aún no enseña la sesión). Sin leer, como antes.
+  con ninguna de sus ventanas, la marca dura solo `LIMIT_NO_RESET_MS` (30
+  min) y el registro lo avisa. Casa con una ventana con reinicio futuro a 10
+  min como mucho (`RESET_TOGETHER_MS`); una sin reinicio por delante (una
+  semanal al 0 %, la sesión aún no abierta de una Team, o una ya renovada)
+  se abrió entre la lectura y ahora, y solo casa un reinicio en esa franja
+  más su duración (code-reviewer r1 medium 1 y low 2). Un segundo 429 con el
+  mismo reinicio, con la marca corta vigente o vencida hace menos de 30
+  min, marca hasta ese reinicio (low 5). Sin leer, como antes.
 - **El aviso de atasco no da por libre una cuenta que el plugin tiene
   vetada.** Las «libres» de una línea de atasco (`health`, `health --json`,
   `seats`, el registro y las filas STUCK de `history`) dejan fuera las
-  cuentas con una marca de límite vigente para el modelo del hilo (la de
-  sesión perdida incluida); si no queda ninguna, la línea dice «sin cuenta
-  libre para <modelo> hasta <hora>» en vez de nombrar una que no se usaría.
+  cuentas con una marca vigente para el modelo del hilo (de límite o de
+  sesión perdida en una máquina del proyecto) y miran la reserva desde ese
+  proyecto; si no queda ninguna, la línea dice «sin cuenta libre para
+  <modelo> hasta <hora>» en vez de nombrar una que no se usaría.
 
 ### Añadido
 
