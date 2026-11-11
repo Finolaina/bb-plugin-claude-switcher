@@ -4,6 +4,41 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.52] - 2026-11-11
+
+### Corregido
+
+- **La culpa de un fallo es de la cuenta donde corrió el turno, también
+  tras una recarga.** Aitor, 2026-11-11: «puedes revisar por qué motivo hay
+  hilos en cola y que mejorarías?» y «Arreglalo y publicalo». Medido en el
+  registro de producción del 10 y el 11-nov: dos cuentas con cuota quedaron
+  fuera días enteros con el reinicio de otra. Un turno arrancó en una
+  cuenta, el plugin se recargó mientras corría (su plaza volvió del
+  almacenamiento, pero no dónde arrancó), el proyecto se movió a otra cuenta
+  y el 429 del turno marcó la cuenta nueva con el reinicio semanal de la
+  vieja. Ahora, al cargar, un turno en marcha contado en una plaza recupera
+  también dónde arrancó para juzgar su fallo; uno que no se puede contar
+  queda como desconocido y su fallo no marca ninguna cuenta.
+- **Seguro: un reinicio que no es de la cuenta no la veta días.** Si el 429
+  informa un reinicio y la cuenta culpada está leída, y ese reinicio no casa
+  con ninguna de sus ventanas (sesión de 5 h, semanal, ventanas por modelo;
+  10 min de tolerancia, la de `RESET_TOGETHER_MS`), la marca dura solo
+  `LIMIT_NO_RESET_MS` (30 min) y el registro lo avisa. En una cuenta con
+  ventana de 5 h, cualquier reinicio dentro de las próximas 5 h es suyo
+  (una Team cuya lectura aún no enseña la sesión). Sin leer, como antes.
+- **El aviso de atasco no da por libre una cuenta que el plugin tiene
+  vetada.** Las «libres» de una línea de atasco (`health`, `health --json`,
+  `seats`, el registro y las filas STUCK de `history`) dejan fuera las
+  cuentas con una marca de límite vigente para el modelo del hilo (la de
+  sesión perdida incluida); si no queda ninguna, la línea dice «sin cuenta
+  libre para <modelo> hasta <hora>» en vez de nombrar una que no se usaría.
+
+### Añadido
+
+- `health --json` gana `limites`: cada marca de límite vigente con su
+  cuenta, su modelo (o «todos») y hasta cuándo; la línea de cada cuenta en
+  `health` la enseña. La versión del informe sigue siendo 1 (solo se añade).
+
 ## [0.2.51] - 2026-11-10
 
 ### Corregido
