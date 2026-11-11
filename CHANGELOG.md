@@ -37,8 +37,9 @@ project uses [Semantic Versioning](https://semver.org/).
   reinicio no lo confirma: dos hilos fallan igual con el reinicio de otra
   cuenta (code-reviewer r2 medium 1 y low 4). Un reinicio informado que ya
   pasó mientras se leían las cuentas no marca nada nuevo (Codex Astra r2
-  RESET-001); sin reinicio informado, 30 min como siempre. Sin leer, como
-  antes.
+  RESET-001); sin reinicio informado, 30 min como siempre. Se comprueba con
+  la lectura guardada de la cuenta aunque no sea destino (Codex Astra r3
+  RESET-003). Sin leer, como antes.
 - **El aviso de atasco no da por libre una cuenta que el plugin tiene
   vetada.** Las «libres» de una línea de atasco (`health`, `health --json`,
   `seats`, el registro y las filas STUCK de `history`) dejan fuera las
