@@ -24132,6 +24132,37 @@ describe("the marks of a usage limit, and the threads they hold (2026-11-11)", (
     expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: "2026-10-06T12:00:00+02:00" }]);
   });
 
+  it("an account left out of the destinations (its read failing, its full session reset since) is still checked on its cached read: marked 30 min, said (Codex Astra r3 RESET-003)", async () => {
+    let clock = NOW;
+    let down = false;
+    const full = {
+      limits: [
+        { kind: "session", percent: 100, resets_at: new Date(NOW + 30 * 60_000).toISOString() },
+        { kind: "weekly_all", percent: 35, resets_at: new Date(NOW + 3 * 24 * HOUR).toISOString() },
+      ],
+      five_hour: { locked_reason: null },
+      seven_day: { locked_reason: null },
+    };
+    const h = await host(
+      {
+        main: () => (down ? new Response("busy", { status: 503 }) : Response.json(full)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { clock: () => clock },
+    );
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    clock = NOW + HOUR;
+    down = true;
+    const f = failure();
+    f.rateLimits!.windows[0]!.resetsAtMs = NOW + 6 * 24 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", f);
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: "2026-09-29T13:30:00+02:00" }]);
+    expect(h.harness.logEntries.some((e) => e.level === "warn" && e.message.includes("matches none of its windows"))).toBe(true);
+  });
+
   it("a weekly at 0 % with no reset at its read takes no other account's weekly at +3 days: marked 30 min (code-reviewer r1, medium 1)", async () => {
     const unstarted = {
       limits: [

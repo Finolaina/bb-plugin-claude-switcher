@@ -7028,13 +7028,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       // Only a reset still ahead: one that passed while the accounts were
       // read is the account back, and marks it no further (a mark ending in
       // the past keeps nothing out; a longer one stands; Codex Astra r2
-      // RESET-001).
+      // RESET-001). Checked on the account's cached read, a destination or
+      // not: one left out of the destinations (its read failing, a full
+      // window reset since) still has the windows that tell (Codex Astra r3
+      // RESET-003).
+      const cached = collector.get(failedOn);
+      const read = cached?.usage == null ? undefined : { name: failedOn, ...cached.usage };
       if (
         until !== null &&
         until > now &&
-        blamed !== undefined &&
-        blamed.unknown !== true &&
-        !resetOfAccount(blamed, until, now, collector.get(failedOn)?.observedAt ?? undefined)
+        read !== undefined &&
+        read.unknown !== true &&
+        !resetOfAccount(read, until, now, cached?.observedAt ?? undefined)
       ) {
         bb.log.warn(
           `account ${failedOn}: the reset its 429 reported (${isoInZone(until)}) matches none of its windows as read; marked for ${LIMIT_NO_RESET_MS / 60_000} min only`,
