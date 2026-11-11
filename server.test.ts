@@ -23681,3 +23681,75 @@ describe("a turn that failed for want of a session on its machine (2026-11-10)",
     ]);
   });
 });
+
+describe("a failure is the account's its turn ran on, across a reload (2026-11-11)", () => {
+  // Aitor, 2026-11-11: «puedes revisar por qué motivo hay hilos en cola…».
+  // A turn started on one account, the plugin reloaded while it ran (where
+  // it started, in memory, was lost; its seat came back from storage), its
+  // project moved to another account, and its 429 marked the new account
+  // with the old account's reset: days kept from every model with room.
+  /** proj-1 now on work; thread-3's turn started on main before the reload (its stored seat). */
+  async function reloaded(usage: Record<string, () => Response>, options: HostOptions = {}) {
+    const h = await host(usage, {
+      threads: { "thread-3": { status: "active" } },
+      kvPreset: { "running-seats": { "thread-3": "uuid-main" } },
+      presetEnv: {
+        "proj-1": [{ name: ENV_VAR, note: ownNote("work"), secret: true, value: null }],
+      },
+      ...options,
+    });
+    dispose = () => h.harness.dispose();
+    return h;
+  }
+
+  it("retries the turn on the project's account and leaves that account unmarked: the 429 is the account its seat was on", async () => {
+    const h = await reloaded({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => Response.json(payload(5, 20)),
+    });
+    const late = failure({ threadId: "thread-3", requestId: "creq_9" });
+    // main's weekly reset, three days ahead.
+    late.rateLimits!.windows[0]!.resetsAtMs = NOW + 3 * 24 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", late);
+    expect(h.retries.map((r) => [r.threadId, r.reason, r.sendAt])).toEqual([
+      ["thread-3", "Retrying on account work", undefined],
+    ]);
+    expect(h.envSet).toEqual([]);
+    // work is no mark's: a new thread of the project starts there.
+    expect(await sent(h, "thread-5", "proj-1")).toEqual({ action: "proceed" });
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("a turn under way at the reload that no seat counts ran on an account unknown: its 429 marks none", async () => {
+    // At the reload proj-1 names an account no longer found: thread-3 is
+    // not counted, and nothing says where its turn started.
+    let clock = NOW;
+    const h = await reloaded(
+      {
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      {
+        clock: () => clock,
+        kvPreset: {},
+        presetEnv: {
+          "proj-1": [{ name: ENV_VAR, note: ownNote("ghost"), secret: true, value: null }],
+        },
+      },
+    );
+    expect((await h.harness.behavior.runCli(["use", "proj-1", "work"])).exitCode).toBe(0);
+    // Past the grace of that pick.
+    clock = NOW + 5 * 60_000;
+    const late = failure({ threadId: "thread-3", requestId: "creq_9" });
+    late.rateLimits!.windows[0]!.resetsAtMs = NOW + 3 * 24 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", late);
+    // Judged on the measurements: work has room, and stays the project's.
+    expect(h.retries.map((r) => [r.threadId, r.reason, r.sendAt])).toEqual([
+      ["thread-3", "Retrying on account work: it has room now", undefined],
+    ]);
+    expect(await sent(h, "thread-5", "proj-1")).toEqual({ action: "proceed" });
+    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+  });
+});

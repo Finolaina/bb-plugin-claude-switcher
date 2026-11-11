@@ -8646,19 +8646,26 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                   ? seatKey(stored)
                   : undefined;
           };
+          // Not counted: where its turn started is unknown, so its failure
+          // marks no account, rather than the one its project sits on then
+          // (culpa tras recarga, 2026-11-11).
+          const unknownStart = () => {
+            if (!ended.has(t.id) && !startedOn.has(t.id) && seats.seatOf(t.id) === null)
+              startedOn.set(t.id, null);
+          };
           let seat: string | null = null;
           if (storedKey() === undefined) {
-            if (at === null) return;
+            if (at === null) return unknownStart();
             // On an account set outside this plugin: no seats. On one not
             // among the accounts found: nobody's, never the default's (Astra
             // SEATS-R3-001).
             const found = seatFor(at);
-            if (found === null) return;
+            if (found === null) return unknownStart();
             if (found === UNKNOWN_SEAT) {
               bb.log.debug(
                 `thread ${t.id} not counted after loading: its project's account is not among the accounts found`,
               );
-              return;
+              return unknownStart();
             }
             seat = found;
           }
@@ -8685,6 +8692,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           const key = storedKey() ?? (seat === null ? undefined : seatKey(seat));
           if (key === undefined) return;
           seats.confirm(t.id, key, deps.now());
+          // Where its turn started, for the judgment of its failure as well
+          // as for its seat: after a move of its project, a failure judged
+          // on the project's account marked that account with this one's
+          // reset (culpa tras recarga, 2026-11-11). Not over a start
+          // announced meanwhile.
+          if (!startedOn.has(t.id)) startedOn.set(t.id, seatName(key));
           // Unread stored starts: an account inferred from the project is
           // not stored over them (Astra RS-007).
           if (!runningUnread) runningSeats.set(t.id, key);
