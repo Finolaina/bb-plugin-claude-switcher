@@ -23823,4 +23823,53 @@ describe("the marks of a usage limit, and the threads they hold (2026-11-11)", (
     expect(text).toMatch(/^main .*límite hasta 2026-09-29T14:00:00\+02:00/m);
     expect(text).not.toMatch(/^(spare|work) .*límite/m);
   });
+
+  // A reset reported that is none of the account's windows as read: a mark
+  // of LIMIT_NO_RESET_MS (30 min), said in the log; one of them (here its
+  // weekly, +3 d, within RESET_TOGETHER_MS, 10 min): the reset reported.
+  // Literal on purpose, as BUFFER.
+  for (const [late, until] of [
+    [10 * 60_000, "2026-10-02T12:10:00+02:00"],
+    [10 * 60_000 + 1, "2026-09-29T12:30:00+02:00"],
+  ] as const)
+    it(`a 429 whose reset is ${late} ms past the account's weekly marks it until ${until}`, async () => {
+      const h = await host({
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(10, 60)),
+        work: () => Response.json(payload(5, 20)),
+      });
+      dispose = () => h.harness.dispose();
+      await h.harness.behavior.callRpc("accounts_refresh", null);
+      const f = failure();
+      f.rateLimits!.windows[0]!.resetsAtMs = NOW + 3 * 24 * HOUR + late;
+      await h.harness.behavior.emitThreadEvent("turn.failed", f);
+      const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+      expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: until }]);
+      const warned = h.harness.logEntries.filter((e) => e.message.includes("matches none of its windows"));
+      expect(warned.map((e) => [e.level, e.message])).toEqual(
+        late > 10 * 60_000
+          ? [
+              [
+                "warn",
+                "account main: the reset its 429 reported (2026-10-02T12:10:00+02:00) matches none of its windows as read; marked for 30 min only",
+              ],
+            ]
+          : [],
+      );
+    });
+
+  it("an account not read is marked until the reset reported, as before", async () => {
+    const h = await host({
+      main: () => new Response("busy", { status: 503 }),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => Response.json(payload(5, 20)),
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const f = failure();
+    f.rateLimits!.windows[0]!.resetsAtMs = NOW + 6 * 24 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", f);
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: "2026-10-05T12:00:00+02:00" }]);
+  });
 });

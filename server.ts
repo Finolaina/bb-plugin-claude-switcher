@@ -94,6 +94,7 @@ import {
   decidePlacement,
   decideSwitch,
   reportedFreeAt,
+  resetOfAccount,
   FALLBACK_MODEL,
   isRefusal,
   isSessionLoss,
@@ -6976,12 +6977,25 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // ignores the rest); left in error, it may be hours old: no mark. A
     // session lost is marked on its machine only (see markRefused): a mark
     // of the whole account here would keep it from every machine.
-    if (!stuck && failedOn !== null && !isSessionLost(event))
+    if (!stuck && failedOn !== null && !isSessionLost(event)) {
+      const blamed = input.accounts.find((a) => a.name === failedOn);
+      let until = reportedFreeAt(event);
+      // A reset that is none of the account's windows as read is no proof
+      // the account is out till then: a failure judged on the wrong account
+      // kept it from every model for days (culpa tras recarga, 2026-11-11).
+      // Unread, the report stands as before.
+      if (until !== null && blamed !== undefined && blamed.unknown !== true && !resetOfAccount(blamed, until, now)) {
+        bb.log.warn(
+          `account ${failedOn}: the reset its 429 reported (${isoInZone(until)}) matches none of its windows as read; marked for ${LIMIT_NO_RESET_MS / 60_000} min only`,
+        );
+        until = null;
+      }
       markLimited(
         failedOn,
-        limitScope(input.accounts.find((a) => a.name === failedOn), model, now)?.toLowerCase() ?? "",
-        reportedFreeAt(event) ?? now + LIMIT_NO_RESET_MS,
+        limitScope(blamed, model, now)?.toLowerCase() ?? "",
+        until ?? now + LIMIT_NO_RESET_MS,
       );
+    }
     // No Fable on any account, and an account with Opus: the thread is told
     // to switch (D3), whatever the decision's reason, naming where the
     // dispatch would run its Opus turn (Sol B2-002: the same placement).

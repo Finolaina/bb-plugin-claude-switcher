@@ -16,6 +16,7 @@ import {
   isUsable,
   modelWindow,
   reserving,
+  RESET_TOGETHER_MS,
   spendsReservedWeekly,
   type AccountUsage,
   type Choice,
@@ -302,6 +303,33 @@ export function reportedFreeAt(failure: PluginTurnFailedEvent): number | null {
     .map((w) => w.resetsAtMs)
     .filter((ms): ms is number => ms !== null);
   return reported.length === 0 ? null : Math.max(...reported);
+}
+
+/** How long each kind of window runs from its start: the session 5 hours, the weekly and a model's 7 days. */
+const SESSION_WINDOW_MS = 5 * 3_600_000;
+const WEEK_WINDOW_MS = 7 * 24 * 3_600_000;
+
+/**
+ * Whether `reset`, as a 429 on `account` reported it, is one of the
+ * account's own windows as read (culpa tras recarga, 2026-11-11: a turn's
+ * failure judged on another account marked that one for days with this
+ * reset). Within RESET_TOGETHER_MS of a window's reset (reads and reports
+ * differ by a second or two: 17:59:58 against 18:00:00); a window with no
+ * reset ahead (none open, or passed since the read) may reset at any time
+ * within its length from now; and any reset within the next 5 hours is the
+ * session's of an account with a 5-hour window, whatever its read says (a
+ * Team seat's read may not show the session the 429 opened).
+ */
+export function resetOfAccount(account: AccountUsage, reset: number, now: number): boolean {
+  const near = (w: UsageWindow, length: number) =>
+    w.resetsAt !== null && w.resetsAt > now
+      ? Math.abs(reset - w.resetsAt) <= RESET_TOGETHER_MS
+      : reset <= now + length + RESET_TOGETHER_MS;
+  if (account.session.absent !== true && reset <= now + SESSION_WINDOW_MS + RESET_TOGETHER_MS)
+    return true;
+  return [account.weekly, ...Object.values(account.models)].some(
+    (w) => w.absent !== true && near(w, WEEK_WINDOW_MS),
+  );
 }
 
 export function decideSwitch(input: SwitchInput): SwitchDecision {
