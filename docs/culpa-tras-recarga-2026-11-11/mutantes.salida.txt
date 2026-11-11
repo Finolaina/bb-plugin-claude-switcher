@@ -1,0 +1,17 @@
+HEAD fdaeb45052a42d7c0e5d442193d9ace9caab13e9
+MUERE      R1 recarga · al cargar no se recupera dónde arrancó el turno (se culpa la cuenta del proyecto) · server.test.ts 'leaves that account unmarked' · Tests  1 failed | 910 skipped (911)
+MUERE      R1 recarga · lo mismo, visto en la marca de health (juicio con la cuenta del proyecto fuera) · server.test.ts "judged because the project's account is out too" · Tests  1 failed | 910 skipped (911)
+MUERE      R1 recarga · un turno en marcha sin contar al cargar no queda desconocido · server.test.ts 'no seat counts' · Tests  1 failed | 910 skipped (911)
+MUERE      R2 seguro · sin el seguro: el reinicio informado vale siempre · server.test.ts '600001 ms past' · Tests  1 failed | 910 skipped (911)
+MUERE      R2 seguro · el seguro también en una cuenta sin leer · server.test.ts 'an account not read is marked until the reset reported' · Tests  1 failed | 910 skipped (911)
+MUERE      R2 seguro · tolerancia estricta (el corte exacto de 10 min ya no casa) · src/switch.test.ts 'matches its weekly within the tolerance' · Tests  1 failed | 164 skipped (165)
+MUERE      R2 seguro · sin la regla de las 5 h (una Team sin sesión abierta en su lectura) · src/switch.test.ts 'any reset within the next 5 hours' · Tests  1 failed | 164 skipped (165)
+MUERE      R2 seguro · una ventana sin reinicio por delante no casa con nada · src/switch.test.ts 'not ahead' · Tests  1 failed | 164 skipped (165)
+MUERE      R2 seguro · sin las ventanas por modelo · src/switch.test.ts "matches a model's own window" · Tests  1 failed | 164 skipped (165)
+MUERE      R3 atasco · las libres no miran las marcas (la línea vuelve a mentir) · server.test.ts "usage limit's mark keeps" · Tests  1 failed | 910 skipped (911)
+MUERE      R3 atasco · sin la hora en que vuelve la primera marcada · server.test.ts "usage limit's mark keeps" · Tests  1 failed | 910 skipped (911)
+MUERE      R3 atasco · la línea del registro con las libres vacías no lo dice · server.test.ts "usage limit's mark keeps" · Tests  1 failed | 910 skipped (911)
+MUERE      R3 health · health --json sin las marcas · server.test.ts "health shows each account's standing mark" · Tests  1 failed | 910 skipped (911)
+MUERE      R3 health · la línea de la cuenta no enseña su marca · server.test.ts "health shows each account's standing mark" · Tests  1 failed | 910 skipped (911)
+SIN MUTAR  rc=0 · Tests  1545 passed | 1 skipped (1546)
+mutantes: 14, sin morir o sin aplicar: 0
