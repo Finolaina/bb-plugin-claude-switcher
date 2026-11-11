@@ -23842,6 +23842,9 @@ describe("a turn under way since before a reload: where it runs is unknown, its 
     );
     await h.harness.behavior.callRpc("accounts_refresh", null);
     await h.harness.behavior.emitThreadEvent("turn.failed", refused("thread-3"));
+    // Nor the project's: another turn of it starts on work.
+    expect(await sent(h, "thread-5", "proj-1")).toEqual({ action: "proceed" });
+    expect(h.envSet).toEqual([]);
     await h.harness.behavior.emitThreadEvent("thread.created", {
       thread: thread({ id: "thr-new", projectId: "proj-3" }),
     });
