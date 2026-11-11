@@ -23714,13 +23714,14 @@ describe("a turn that failed for want of a session on its machine (2026-11-10)",
   });
 });
 
-describe("a failure is the account's its turn ran on, across a reload (2026-11-11)", () => {
+describe("a turn under way since before a reload: where it runs is unknown, its failure marks nobody (2026-11-11)", () => {
   // Aitor, 2026-11-11: «puedes revisar por qué motivo hay hilos en cola…».
-  // A turn started on one account, the plugin reloaded while it ran (where
-  // it started, in memory, was lost; its seat came back from storage), its
+  // A turn started on one account, the plugin reloaded while it ran, its
   // project moved to another account, and its 429 marked the new account
   // with the old account's reset: days kept from every model with room.
-  /** proj-1 now on work; thread-3's turn started on main before the reload (its stored seat). */
+  // What a reload restores (the seat) does not prove where the turn runs
+  // either (Codex Sol r1 RELOAD-001 to 003): such a failure marks nobody.
+  /** proj-1 now on work; thread-3 under way at the load, its seat stored on main. */
   async function reloaded(usage: Record<string, () => Response>, options: HostOptions = {}) {
     const h = await host(usage, {
       threads: { "thread-3": { status: "active" } },
@@ -23733,8 +23734,17 @@ describe("a failure is the account's its turn ran on, across a reload (2026-11-1
     dispose = () => h.harness.dispose();
     return h;
   }
+  const limites = async (h: Awaited<ReturnType<typeof host>>) =>
+    JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout).limites;
+  const refused = (threadId: string) =>
+    failure({
+      threadId,
+      requestId: "creq_9",
+      errorInfo: { category: "unauthorized", providerCode: null, httpStatusCode: 403 },
+      rateLimits: null,
+    });
 
-  it("retries the turn on the project's account and leaves that account unmarked: the 429 is the account its seat was on", async () => {
+  it("the incident: its 429 with the old account's reset marks neither account, and it runs again on the project's", async () => {
     const h = await reloaded({
       main: () => Response.json(payload(100, 40)),
       spare: () => Response.json(payload(10, 60)),
@@ -23745,15 +23755,13 @@ describe("a failure is the account's its turn ran on, across a reload (2026-11-1
     late.rateLimits!.windows[0]!.resetsAtMs = NOW + 3 * 24 * HOUR;
     await h.harness.behavior.emitThreadEvent("turn.failed", late);
     expect(h.retries.map((r) => [r.threadId, r.reason, r.sendAt])).toEqual([
-      ["thread-3", "Retrying on account work", undefined],
+      ["thread-3", "Retrying on account work: it has room now", undefined],
     ]);
     expect(h.envSet).toEqual([]);
-    // work is no mark's: a new thread of the project starts there.
-    expect(await sent(h, "thread-5", "proj-1")).toEqual({ action: "proceed" });
-    expect(h.envSet).toEqual([]);
+    expect(await limites(h)).toEqual([]);
   });
 
-  it("judged because the project's account is out too, its 429 marks the account the turn ran on, not the project's", async () => {
+  it("with the project's account out too, it moves on the measurements and marks nobody", async () => {
     const h = await reloaded({
       main: () => Response.json(payload(100, 40)),
       spare: () => Response.json(payload(10, 60)),
@@ -23761,45 +23769,95 @@ describe("a failure is the account's its turn ran on, across a reload (2026-11-1
     });
     await h.harness.behavior.callRpc("accounts_refresh", null);
     const late = failure({ threadId: "thread-3", requestId: "creq_9" });
-    late.rateLimits!.windows[0]!.resetsAtMs = NOW + 2 * HOUR;
     await h.harness.behavior.emitThreadEvent("turn.failed", late);
     expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([["proj-1", `${ACCOUNTS}/spare`]]);
-    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
-    expect(report.limites).toEqual([
-      { cuenta: "main", modelo: "todos", hasta: "2026-09-29T14:00:00+02:00" },
-    ]);
+    expect(await limites(h)).toEqual([]);
   });
 
-  it("a turn under way at the reload that no seat counts ran on an account unknown: its 429 marks none", async () => {
-    // At the reload proj-1 names an account no longer found: thread-3 is
-    // not counted, and nothing says where its turn started.
-    let clock = NOW;
+  it("RELOAD-001: its seat stored on an account no longer found counts on the project's, and a refusal does not keep that account out", async () => {
+    const h = await reloaded(ALL_FREE, { kvPreset: { "running-seats": { "thread-3": "gone-account" } } });
+    await h.harness.behavior.emitThreadEvent("turn.failed", refused("thread-3"));
+    expect(h.retries.map((r) => r.reason)).toEqual(["Retrying on account work: it has room now"]);
+    // work is not refusing: another turn of the project starts there.
+    expect(await sent(h, "thread-5", "proj-1")).toEqual({ action: "proceed" });
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("RELOAD-002: its seat stored on the old account is the thread's, not this turn's: a refusal does not keep the old account out", async () => {
+    // Its seat stored on spare; spare measures best: a new project goes
+    // there unless spare refuses.
+    const h = await reloaded(
+      {
+        main: () => Response.json(payload(100, 40)),
+        spare: () => Response.json(payload(1, 1)),
+        work: () => Response.json(payload(5, 20)),
+      },
+      { kvPreset: { "running-seats": { "thread-3": "uuid-spare" } } },
+    );
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent("turn.failed", refused("thread-3"));
+    await h.harness.behavior.emitThreadEvent("thread.created", {
+      thread: thread({ id: "thr-new", projectId: "proj-3" }),
+    });
+    expect(h.envSet.at(-1)).toEqual(
+      expect.objectContaining({ projectId: "proj-3", value: `${ACCOUNTS}/spare` }),
+    );
+  });
+
+  it("RELOAD-003 and low 4: a failure that comes before the threads are listed after the load marks nobody", async () => {
+    let listed!: () => void;
+    const held = new Promise<void>((resolve) => (listed = resolve));
     const h = await reloaded(
       {
         main: () => Response.json(payload(100, 40)),
         spare: () => Response.json(payload(10, 60)),
         work: () => Response.json(payload(5, 20)),
       },
-      {
-        clock: () => clock,
-        kvPreset: {},
-        presetEnv: {
-          "proj-1": [{ name: ENV_VAR, note: ownNote("ghost"), secret: true, value: null }],
-        },
-      },
+      { beforeThreadsList: () => held },
     );
+    const late = failure({ threadId: "thread-3", requestId: "creq_9" });
+    late.rateLimits!.windows[0]!.resetsAtMs = NOW + 3 * 24 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", late);
+    listed();
+    expect(await limites(h)).toEqual([]);
+    expect(h.retries.map((r) => r.reason)).toEqual(["Retrying on account work: it has room now"]);
+  });
+
+  it("a turn under way at the reload that no seat counts marks nobody either", async () => {
+    // At the reload proj-1 names an account no longer found: thread-3 is
+    // not counted.
+    let clock = NOW;
+    const h = await reloaded(ALL_FREE, {
+      clock: () => clock,
+      kvPreset: {},
+      presetEnv: {
+        "proj-1": [{ name: ENV_VAR, note: ownNote("ghost"), secret: true, value: null }],
+      },
+    });
     expect((await h.harness.behavior.runCli(["use", "proj-1", "work"])).exitCode).toBe(0);
     // Past the grace of that pick.
     clock = NOW + 5 * 60_000;
     const late = failure({ threadId: "thread-3", requestId: "creq_9" });
     late.rateLimits!.windows[0]!.resetsAtMs = NOW + 3 * 24 * HOUR;
     await h.harness.behavior.emitThreadEvent("turn.failed", late);
-    // Judged on the measurements: work has room, and stays the project's.
     expect(h.retries.map((r) => [r.threadId, r.reason, r.sendAt])).toEqual([
       ["thread-3", "Retrying on account work: it has room now", undefined],
     ]);
-    expect(await sent(h, "thread-5", "proj-1")).toEqual({ action: "proceed" });
-    expect(h.envSet.map((e) => e.value)).toEqual([`${ACCOUNTS}/work`]);
+    expect(await limites(h)).toEqual([]);
+  });
+
+  it("control: a turn this load saw start on the project's account marks it with its 429, as ever", async () => {
+    const h = await reloaded({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => Response.json(payload(5, 20)),
+    });
+    await sent(h, "thread-7", "proj-1");
+    await h.harness.behavior.emitThreadEvent("thread.active", {
+      thread: thread({ id: "thread-7", projectId: "proj-1" }),
+    });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "thread-7", requestId: "creq_7" }));
+    expect(await limites(h)).toEqual([{ cuenta: "work", modelo: "todos", hasta: "2026-09-29T14:00:00+02:00" }]);
   });
 });
 

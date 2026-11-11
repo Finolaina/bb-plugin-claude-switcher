@@ -5117,6 +5117,26 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * started is unknown (Codex IR17-001).
    */
   const dispatchEpoch = new Map<string, number>();
+  /**
+   * The threads this load of the plugin has seen start a turn: sent past
+   * its dispatch checkpoint or announced by `thread.active`. No read: every
+   * start this plugin judges passes by one of the two.
+   */
+  const seenStart = new Set<string>();
+  /**
+   * The threads bb listed with a turn under way as the seats were counted
+   * after the load (see rebuildSeats), and whether that list was read. A
+   * failure of a thread not seen to start since, listed then or come before
+   * the list, is of a turn that started before the load: where it runs is
+   * unknown, whatever its seat restored or counted says, and its failure
+   * marks nobody (culpa tras recarga, 2026-11-11; Codex Sol r1 RELOAD-001
+   * to 003, code-reviewer r1 low 3 and 4).
+   */
+  const underWayAtLoad = new Set<string>();
+  let underWayListed = false;
+  function startedBeforeLoad(threadId: string): boolean {
+    return !seenStart.has(threadId) && (!underWayListed || underWayAtLoad.has(threadId));
+  }
   /** From here the thread's turn is no leftover of any account. */
   function forgetStart(threadId: string): void {
     startedOn.delete(threadId);
@@ -5156,6 +5176,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     )
       return;
     seatProjects.set(thread.id, thread.projectId);
+    seenStart.add(thread.id);
     // The previous turn's start is not this turn's, read or still being
     // read (code-reviewer r13).
     const anchor = dispatchEpoch.get(thread.id);
@@ -5255,6 +5276,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // announces (a turn refused at the door) is the project's account's,
     // not a leftover of the account this turn ran on (code-reviewer r11).
     forgetStart(thread.id);
+    underWayAtLoad.delete(thread.id);
     turnsUnderWay.delete(thread.id);
     // Reserved too: a turn that ended needs none (its next asks again,
     // and one that starts unannounced is counted as it starts).
@@ -6542,6 +6564,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     // Where the project stands as the turn is sent, for `thread.active`.
     dispatchEpoch.set(thread.id, movesOf(thread.projectId).epoch);
+    seenStart.add(thread.id);
     // With its seat, nothing awaited in between: a sibling's move cannot land
     // between the two (Astra FINAL-R8-001). A message queued behind a running
     // turn does not get here: that turn comes later, and is asked about again
@@ -7174,6 +7197,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // The seat its dispatch reserved, before it is released: where the turn
     // runs while its start is still read (Astra SEATS-R04).
     const seatHeld = seats.seatOf(event.threadId)?.account;
+    // Read before anything is awaited: a dispatch meanwhile is a new turn's.
+    const beforeLoad = startedBeforeLoad(event.threadId);
+    underWayAtLoad.delete(event.threadId);
     forgetStart(event.threadId);
     turnsUnderWay.delete(event.threadId);
     releaseSeat(event.threadId, "its turn failed");
@@ -7220,6 +7246,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       failedHost.set(event.threadId, host);
       await nameHost(host);
     }
+    // A turn of before this load: where it ran is unknown, its failure
+    // nobody's (see underWayAtLoad). After the session lost's own look at
+    // its seat, which stays as it was.
+    if (started === undefined && beforeLoad) started = null;
     try {
       await inProjectQueue(thread.projectId, () =>
         handleFailure(
@@ -8631,6 +8661,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         if (page.length < PAGE) break;
       }
       seedProjectModels(latest);
+      // Started before this load, unless seen to start since (see
+      // underWayAtLoad); a later count adds nothing to it.
+      if (!underWayListed)
+        for (const t of running)
+          if (!ended.has(t.id) && !seenStart.has(t.id)) underWayAtLoad.add(t.id);
+      underWayListed = true;
       const listedAt = deps.now();
       // Under way as bb lists them, whatever their seat's read says (Codex
       // PLAZAS-002); not one that ended meanwhile.
@@ -8675,26 +8711,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                   ? seatKey(stored)
                   : undefined;
           };
-          // Not counted: where its turn started is unknown, so its failure
-          // marks no account, rather than the one its project sits on then
-          // (culpa tras recarga, 2026-11-11).
-          const unknownStart = () => {
-            if (!ended.has(t.id) && !startedOn.has(t.id) && seats.seatOf(t.id) === null)
-              startedOn.set(t.id, null);
-          };
           let seat: string | null = null;
           if (storedKey() === undefined) {
-            if (at === null) return unknownStart();
+            if (at === null) return;
             // On an account set outside this plugin: no seats. On one not
             // among the accounts found: nobody's, never the default's (Astra
             // SEATS-R3-001).
             const found = seatFor(at);
-            if (found === null) return unknownStart();
+            if (found === null) return;
             if (found === UNKNOWN_SEAT) {
               bb.log.debug(
                 `thread ${t.id} not counted after loading: its project's account is not among the accounts found`,
               );
-              return unknownStart();
+              return;
             }
             seat = found;
           }
@@ -8721,12 +8750,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           const key = storedKey() ?? (seat === null ? undefined : seatKey(seat));
           if (key === undefined) return;
           seats.confirm(t.id, key, deps.now());
-          // Where its turn started, for the judgment of its failure as well
-          // as for its seat: after a move of its project, a failure judged
-          // on the project's account marked that account with this one's
-          // reset (culpa tras recarga, 2026-11-11). Not over a start
-          // announced meanwhile.
-          if (!startedOn.has(t.id)) startedOn.set(t.id, seatName(key));
           // Unread stored starts: an account inferred from the project is
           // not stored over them (Astra RS-007).
           if (!runningUnread) runningSeats.set(t.id, key);
