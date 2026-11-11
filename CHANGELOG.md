@@ -15,10 +15,10 @@ project uses [Semantic Versioning](https://semver.org/).
   cuota quedaron fuera días enteros con el reinicio de otra. Un turno
   arrancó en una cuenta, el plugin se recargó mientras corría, el proyecto se
   movió a otra cuenta y el 429 del turno marcó la cuenta nueva con el
-  reinicio semanal de la vieja. Ahora el fallo de un hilo que esta carga no
-  ha visto arrancar (bb lo listó en marcha al cargar, o el fallo llega antes
-  de esa lista) es de una cuenta desconocida: no marca ninguna, ni límite ni
-  negativa, y deciden las mediciones. Lo que restaura la recarga (la plaza)
+  reinicio semanal de la vieja. Ahora el fallo de un turno de antes de la
+  carga (bb listó el hilo en marcha al cargar y ese turno no ha acabado, o
+  el fallo llega antes de esa lista) es de una cuenta desconocida: no marca
+  ninguna, ni límite ni negativa, y deciden las mediciones. Lo que restaura la recarga (la plaza)
   no se usa como prueba de dónde corre: puede ser de otro turno del mismo
   hilo o de la cuenta del proyecto (Codex Sol r1 RELOAD-001, 002 y 003;
   code-reviewer r1 low 3 y 4).

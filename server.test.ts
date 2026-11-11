@@ -23892,6 +23892,37 @@ describe("a turn under way since before a reload: where it runs is unknown, its 
     expect(await limites(h)).toEqual([]);
   });
 
+  it("once its turn of before the load has ended, a turn this load sends, refused at the door, is the project's account's", async () => {
+    const h = await reloaded({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => Response.json(payload(5, 20)),
+    });
+    await h.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: thread({ id: "thread-3", projectId: "proj-1" }),
+    });
+    expect(await sent(h, "thread-3", "proj-1")).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure({ threadId: "thread-3", requestId: "creq_10" }));
+    expect(await limites(h)).toEqual([{ cuenta: "work", modelo: "todos", hasta: "2026-09-29T14:00:00+02:00" }]);
+  });
+
+  it("once its turn of before the load has failed, the failure of the retry this load sent is the project's account's", async () => {
+    const h = await reloaded({
+      main: () => Response.json(payload(100, 40)),
+      spare: () => Response.json(payload(10, 60)),
+      work: () => Response.json(payload(5, 20)),
+    });
+    const late = failure({ threadId: "thread-3", requestId: "creq_9" });
+    late.rateLimits!.windows[0]!.resetsAtMs = NOW + 3 * 24 * HOUR;
+    await h.harness.behavior.emitThreadEvent("turn.failed", late);
+    expect(await limites(h)).toEqual([]);
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ threadId: "thread-3", requestId: "creq_10", attemptNumber: 2 }),
+    );
+    expect(await limites(h)).toEqual([{ cuenta: "work", modelo: "todos", hasta: "2026-09-29T14:00:00+02:00" }]);
+  });
+
   it("control: a turn this load saw start on the project's account marks it with its 429, as ever", async () => {
     const h = await reloaded({
       main: () => Response.json(payload(100, 40)),

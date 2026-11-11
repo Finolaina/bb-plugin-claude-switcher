@@ -5124,24 +5124,21 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   const dispatchEpoch = new Map<string, number>();
   /**
-   * The threads this load of the plugin has seen start a turn: sent past
-   * its dispatch checkpoint or announced by `thread.active`. No read: every
-   * start this plugin judges passes by one of the two.
-   */
-  const seenStart = new Set<string>();
-  /**
    * The threads bb listed with a turn under way as the seats were counted
-   * after the load (see rebuildSeats), and whether that list was read. A
-   * failure of a thread not seen to start since, listed then or come before
-   * the list, is of a turn that started before the load: where it runs is
-   * unknown, whatever its seat restored or counted says, and its failure
-   * marks nobody (culpa tras recarga, 2026-11-11; Codex Sol r1 RELOAD-001
-   * to 003, code-reviewer r1 low 3 and 4).
+   * after the load (see rebuildSeats), each until that turn ends (its
+   * `thread.idle` or `turn.failed`), and whether that list was read. A
+   * failure of one of them, or one come before the list, is of a turn that
+   * started before the load: where it runs is unknown, whatever its seat
+   * restored or counted says, and its failure marks nobody (culpa tras
+   * recarga, 2026-11-11; Codex Sol r1 RELOAD-001 to 003, code-reviewer r1
+   * low 3 and 4). No read of its own: every later turn of the thread, sent
+   * by this load (a release, a retry, one refused at the door), comes after
+   * that end.
    */
   const underWayAtLoad = new Set<string>();
   let underWayListed = false;
   function startedBeforeLoad(threadId: string): boolean {
-    return !seenStart.has(threadId) && (!underWayListed || underWayAtLoad.has(threadId));
+    return !underWayListed || underWayAtLoad.has(threadId);
   }
   /** From here the thread's turn is no leftover of any account. */
   function forgetStart(threadId: string): void {
@@ -5182,7 +5179,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     )
       return;
     seatProjects.set(thread.id, thread.projectId);
-    seenStart.add(thread.id);
     // The previous turn's start is not this turn's, read or still being
     // read (code-reviewer r13).
     const anchor = dispatchEpoch.get(thread.id);
@@ -6572,7 +6568,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     // Where the project stands as the turn is sent, for `thread.active`.
     dispatchEpoch.set(thread.id, movesOf(thread.projectId).epoch);
-    seenStart.add(thread.id);
     // With its seat, nothing awaited in between: a sibling's move cannot land
     // between the two (Astra FINAL-R8-001). A message queued behind a running
     // turn does not get here: that turn comes later, and is asked about again
@@ -8688,11 +8683,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         if (page.length < PAGE) break;
       }
       seedProjectModels(latest);
-      // Started before this load, unless seen to start since (see
-      // underWayAtLoad); a later count adds nothing to it.
+      // Started before this load (see underWayAtLoad); a later count adds
+      // nothing to it.
       if (!underWayListed)
-        for (const t of running)
-          if (!ended.has(t.id) && !seenStart.has(t.id)) underWayAtLoad.add(t.id);
+        for (const t of running) if (!ended.has(t.id)) underWayAtLoad.add(t.id);
       underWayListed = true;
       const listedAt = deps.now();
       // Under way as bb lists them, whatever their seat's read says (Codex
