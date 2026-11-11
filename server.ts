@@ -6305,9 +6305,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       const modelo = modelFamily(held.model) ?? current.preferredModel;
       const free = freeElsewhere(account, modelo, known.projectId);
       if (free.length === 0) continue;
-      // Not one a usage limit's mark keeps from the model: the plugin would
-      // not use it, and the line said it was free (culpa tras recarga,
-      // 2026-11-11). With none left, the line says so, and until when.
+      // Not one a usage limit's mark keeps from the model, nor a session
+      // lost on one of the project's machines (limitedUntil has both): the
+      // plugin would not use it, and the line said it was free (culpa tras
+      // recarga, 2026-11-11). With none left, the line says so, and until
+      // when.
       const ends = free.map((name) => limitedUntil(name, modelo, known.projectId));
       const libres = free.filter((_, i) => ends[i] === null);
       const marked = ends.filter((end): end is number => end !== null);

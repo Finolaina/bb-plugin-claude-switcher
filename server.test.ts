@@ -18866,6 +18866,49 @@ describe("caminos 2026-11-04", () => {
       ]);
     });
 
+    it("an Ultra is free for the held Opus turn only when no Team takes it from where its project runs: a session lost on another machine does not count (2026-11-11)", async () => {
+      // t2 (proj-3) runs on the server; work lost its session on the laptop
+      // only. work still takes t2's Opus turn there, so main (room 11, over
+      // an overflow of 10) is not free for it.
+      const { h, at } = await stuck(held(), {
+        threads: { t2: { projectId: "proj-3" }, t1: { environmentId: "env-1" } },
+        environments: {
+          "proj-1": [{ id: "env-1", hostId: "host-mac", path: "/home/someone/site" }],
+          "proj-3": [{ id: "env-3", hostId: "host-nuc", path: "/home/someone/third" }],
+        },
+        hosts: [
+          { id: "host-mac", name: "the laptop" },
+          { id: "host-nuc", name: "the server" },
+        ],
+        threadEvents: {
+          t1: [
+            { seq: 1, type: "client/turn/requested", data: { requestId: "creq_t1", execution: { model: OPUS } } },
+            {
+              seq: 2,
+              type: "provider/error",
+              data: { providerThreadId: "p", threadId: "t1", message: "Provider error", detail: "Not logged in · Please run /login" },
+            },
+          ],
+        },
+      });
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        failure({ threadId: "t1", requestId: "creq_t1", errorInfo: null, rateLimits: null }),
+      );
+      for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+      const marked = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+      expect(marked.sinSesion.map((m: { cuenta: string; maquina: string }) => [m.cuenta, m.maquina])).toEqual([
+        ["work", "host-mac"],
+      ]);
+      await h.harness.behavior.setSettings({ opusOverflowRoom: 10 });
+      at(10 * 60_000);
+      // proj-3's machines are read in the background on the first look.
+      await report(h);
+      for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+      const t2 = (await report(h)).atascos!.filter((a) => a.hilo === "t2");
+      expect(t2.map((a) => a.libres)).toEqual([["work"]]);
+    });
+
     it("a row bb says has failed is not stuck", async () => {
       const { h, at } = await stuck(held({ failureReason: "Thread is archived" }));
       at(10 * 60_000);

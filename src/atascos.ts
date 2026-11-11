@@ -33,7 +33,11 @@ export interface Atasco {
    * plugin would not use it: culpa tras recarga, 2026-11-11).
    */
   libres: string[];
-  /** With `libres` empty: when the first of those marks ends (ISO 8601, see isoInZone). */
+  /**
+   * With `libres` empty: when the first of those marks ends (ISO 8601, see
+   * isoInZone). A mark of a usage limit, or of a session lost on one of the
+   * project's machines (both are limitedUntil's).
+   */
   vuelve?: string;
   /** Another thread of its project is at work, so no automatic move for seats. */
   proyectoOcupado: boolean;
