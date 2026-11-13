@@ -13,6 +13,7 @@ import {
   decidePlacement,
   decideSwitch,
   isCalorTick,
+  isNetworkBlock,
   isRefusal,
   isSessionLoss,
   isSessionLost,
@@ -112,7 +113,6 @@ describe("settle", () => {
       models: { Fable: { usedPercent: 0, resetsAt: null } },
     });
   });
-
 
   it("zeroes a window whose reset has passed and leaves the rest alone", () => {
     const stale = account("work", {
@@ -596,10 +596,17 @@ describe("decideSwitch with a reserved model: a Max account that keeps it is no 
       weekly: { usedPercent: 50, resetsAt: NOW + 60 * HOUR },
       models: { Fable: { usedPercent: 100, resetsAt: NOW + 60 * HOUR } },
     });
-    const teamSoon = { ...seatOut, session: { usedPercent: 100, resetsAt: NOW + HOUR } };
+    const teamSoon = {
+      ...seatOut,
+      session: { usedPercent: 100, resetsAt: NOW + HOUR },
+    };
     expect(
       decideSwitch(opus({ accounts: [failed, outOfFable, teamSoon] })),
-    ).toMatchObject({ kind: "wait", account: "team1", sendAt: NOW + HOUR + BUFFER });
+    ).toMatchObject({
+      kind: "wait",
+      account: "team1",
+      sendAt: NOW + HOUR + BUFFER,
+    });
   });
 
   it("waits for a Max account out of Fable until its weekly resets when it frees sooner than the Team seat (Aitor 2026-11-06)", () => {
@@ -629,15 +636,20 @@ describe("decideSwitch with a reserved model: a Max account that keeps it is no 
       weekly: { usedPercent: 50, resetsAt: NOW + 60 * HOUR },
       models: { Fable: { usedPercent: 100, resetsAt: NOW + 10_000 } },
     });
-    expect(
-      decideSwitch(opus({ failure: past, accounts: [main] })),
-    ).toEqual({ kind: "decline", reason: "reserved-for-preferred-model" });
+    expect(decideSwitch(opus({ failure: past, accounts: [main] }))).toEqual({
+      kind: "decline",
+      reason: "reserved-for-preferred-model",
+    });
     // Returning after the latest possible send instead: a wait on main
     // until 2026-11-06; since, a Max account is no wait for Opus either.
-    const later = { ...main, models: { Fable: { usedPercent: 100, resetsAt: NOW + 60_000 } } };
-    expect(
-      decideSwitch(opus({ failure: past, accounts: [later] })),
-    ).toEqual({ kind: "decline", reason: "reserved-for-preferred-model" });
+    const later = {
+      ...main,
+      models: { Fable: { usedPercent: 100, resetsAt: NOW + 60_000 } },
+    };
+    expect(decideSwitch(opus({ failure: past, accounts: [later] }))).toEqual({
+      kind: "decline",
+      reason: "reserved-for-preferred-model",
+    });
   });
 
   it("still says no-account-usable when nothing is reserved either", () => {
@@ -729,7 +741,7 @@ describe("a turn that failed for want of a session on its machine", () => {
       "not logged in",
       "Please run /login",
       "Failed to authenticate: this login reached its time limit and cannot be renewed. Run `claude auth login` to sign in again",
-      "API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth token has expired.\"}}",
+      'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired."}}',
       "OAUTH TOKEN HAS EXPIRED",
       "authentication_error",
       "HTTP 401",
@@ -761,12 +773,55 @@ describe("a turn that failed for want of a session on its machine", () => {
     expect(isRefusal(own)).toBe(true);
     expect(isSessionLost(own)).toBe(true);
     expect(declineReason(own)).toBeNull();
-    expect(declineReason(sessionLost(failure({ errorInfo: null, attemptNumber: ATTEMPTS })))).toBeNull();
+    expect(
+      declineReason(
+        sessionLost(failure({ errorInfo: null, attemptNumber: ATTEMPTS })),
+      ),
+    ).toBeNull();
     const bbs = failure({
-      errorInfo: { category: "unauthorized", providerCode: null, httpStatusCode: 401 },
+      errorInfo: {
+        category: "unauthorized",
+        providerCode: null,
+        httpStatusCode: 401,
+      },
       rateLimits: null,
     });
     expect(isSessionLost(bbs)).toBe(false);
+  });
+});
+
+describe("a turn the network refused, not the account (2026-11-13)", () => {
+  // bb's log of 2026-11-13, 10:47 to 11:17: a provider/error with errorInfo
+  // unauthorized, HTTP 403, and Cloudflare's block page in its detail.
+  it("is told by Cloudflare's block page, whatever the case", () => {
+    for (const text of [
+      "Provider error Failed to authenticate. API Error: 403 Attention Required! | Cloudflare",
+      "Failed to authenticate. API Error: 403 Attention Required! | Cloudflare",
+      "attention required! | cloudflare",
+      "API Error: 403 <!DOCTYPE html><title>Just a moment...</title>",
+      "HTTP 403 from Cloudflare",
+      "cloudflare: 403 forbidden",
+    ])
+      expect(isNetworkBlock(text), text).toBe(true);
+  });
+
+  it("is not a refusal of the account, a session lost nor any other text", () => {
+    for (const text of [
+      // The account's own refusals (2026-09-30: subscription access off).
+      'API Error: 403 {"type":"error","error":{"type":"permission_error","message":"OAuth authentication is currently not allowed for this organization."}}',
+      "Failed to authenticate. API Error: 403 This organization has been disabled.",
+      "HTTP 403 Forbidden",
+      // A session lost on its machine (see isSessionLoss).
+      "Not logged in · Please run /login",
+      "Failed to authenticate: this login reached its time limit and cannot be renewed. Run `claude auth login` to sign in again",
+      'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired."}}',
+      // Cloudflare named with no block: a 401, a 429, or no status at all.
+      "API Error: 401 Unauthorized via Cloudflare",
+      "You've hit your 5-hour limit · resets 6pm (Europe/Madrid)",
+      "deploy the worker to Cloudflare",
+      "",
+    ])
+      expect(isNetworkBlock(text), text).toBe(false);
   });
 });
 
@@ -847,9 +902,9 @@ describe("decidePlacement", () => {
       account: "work",
       why: "new-project",
     });
-    expect(
-      decidePlacement({ ...input, isNew: false, accounts: [] }),
-    ).toEqual({ kind: "keep" });
+    expect(decidePlacement({ ...input, isNew: false, accounts: [] })).toEqual({
+      kind: "keep",
+    });
     // Not known to be logged out: nothing measured of it, it is left alone.
     expect(
       decidePlacement({ ...input, isNew: false, currentLoggedOut: false }),
@@ -1059,7 +1114,12 @@ describe("decidePlacement with a reserved model (2026-10-13: the Max accounts ar
         decidePlacement({
           ...onSeat,
           accounts: [
-            { ...seat, models: { Fable: { usedPercent: 100, resetsAt: NOW + 72 * HOUR } } },
+            {
+              ...seat,
+              models: {
+                Fable: { usedPercent: 100, resetsAt: NOW + 72 * HOUR },
+              },
+            },
             maxWithFable,
           ],
         }),
@@ -1087,24 +1147,50 @@ describe("decidePlacement with a reserved model (2026-10-13: the Max accounts ar
     });
 
     it("keeps the project on the seat while home is out of Fable, blocked, unmeasured or vetoed (excursionFrom null)", () => {
-      const out = { ...maxWithFable, models: { Fable: { usedPercent: 100, resetsAt: NOW + 24 * HOUR } } };
-      expect(decidePlacement({ ...onSeat, accounts: [seat, out] })).toEqual({ kind: "keep" });
-      const blocked = { ...maxWithFable, session: { usedPercent: 100, resetsAt: NOW + HOUR } };
-      expect(decidePlacement({ ...onSeat, accounts: [seat, blocked] })).toEqual({ kind: "keep" });
-      expect(decidePlacement({ ...onSeat, accounts: [seat] })).toEqual({ kind: "keep" });
+      const out = {
+        ...maxWithFable,
+        models: { Fable: { usedPercent: 100, resetsAt: NOW + 24 * HOUR } },
+      };
+      expect(decidePlacement({ ...onSeat, accounts: [seat, out] })).toEqual({
+        kind: "keep",
+      });
+      const blocked = {
+        ...maxWithFable,
+        session: { usedPercent: 100, resetsAt: NOW + HOUR },
+      };
+      expect(decidePlacement({ ...onSeat, accounts: [seat, blocked] })).toEqual(
+        { kind: "keep" },
+      );
+      expect(decidePlacement({ ...onSeat, accounts: [seat] })).toEqual({
+        kind: "keep",
+      });
       expect(
-        decidePlacement({ ...onSeat, accounts: [seat, maxWithFable], excursionFrom: null }),
+        decidePlacement({
+          ...onSeat,
+          accounts: [seat, maxWithFable],
+          excursionFrom: null,
+        }),
       ).toEqual({ kind: "keep" });
     });
 
     it("falls back to current-blocked when neither home nor the seat can run Fable", () => {
-      const out = { ...maxWithFable, models: { Fable: { usedPercent: 100, resetsAt: NOW + 24 * HOUR } } };
-      const other = account("main", { models: { Fable: { usedPercent: 3, resetsAt: NOW + 30 * HOUR } } });
+      const out = {
+        ...maxWithFable,
+        models: { Fable: { usedPercent: 100, resetsAt: NOW + 24 * HOUR } },
+      };
+      const other = account("main", {
+        models: { Fable: { usedPercent: 3, resetsAt: NOW + 30 * HOUR } },
+      });
       expect(
         decidePlacement({
           ...onSeat,
           accounts: [
-            { ...seat, models: { Fable: { usedPercent: 100, resetsAt: NOW + 72 * HOUR } } },
+            {
+              ...seat,
+              models: {
+                Fable: { usedPercent: 100, resetsAt: NOW + 72 * HOUR },
+              },
+            },
             out,
             other,
           ],
@@ -1138,7 +1224,11 @@ describe("decidePlacement with a reserved model (2026-10-13: the Max accounts ar
 
     it("means nothing to a turn in another model", () => {
       expect(
-        decidePlacement({ ...onSeat, preferredModel: "Opus", accounts: [seat, maxWithFable] }),
+        decidePlacement({
+          ...onSeat,
+          preferredModel: "Opus",
+          accounts: [seat, maxWithFable],
+        }),
       ).toEqual({ kind: "keep" });
     });
   });
@@ -1535,7 +1625,9 @@ describe("opusInstead: a Fable thread no account can run is told to switch to Op
       unknown: true,
       models: {},
     });
-    expect(advice(fable({ accounts: [team5, team1, team2, unknown] }))).toBeNull();
+    expect(
+      advice(fable({ accounts: [team5, team1, team2, unknown] })),
+    ).toBeNull();
   });
 
   it("a Max account with Fable usable as the only one that could run Opus: nothing said (it has Fable, and the Max accounts are Fable's)", () => {
@@ -1550,15 +1642,26 @@ describe("opusInstead: a Fable thread no account can run is told to switch to Op
       failedAccount: "team5",
       accounts: [team5, team1, max1],
     });
-    expect(decideSwitch(leftover)).toMatchObject({ kind: "wait", account: "max1" });
+    expect(decideSwitch(leftover)).toMatchObject({
+      kind: "wait",
+      account: "max1",
+    });
     expect(advice(leftover)).toBeNull();
     // The turn failed on it: its report rules it out, while its numbers,
     // not read again yet, still keep Fable. Never named for Opus.
-    const failedOnMax = fable({ currentAccount: "max1", accounts: [max1, team1] });
-    expect(decideSwitch(failedOnMax)).toMatchObject({ kind: "wait", account: "max1" });
+    const failedOnMax = fable({
+      currentAccount: "max1",
+      accounts: [max1, team1],
+    });
+    expect(decideSwitch(failedOnMax)).toMatchObject({
+      kind: "wait",
+      account: "max1",
+    });
     expect(advice(failedOnMax)).toBeNull();
     // With a seat that can run Opus, that seat is named, not the Max.
-    expect(advice(fable({ currentAccount: "max1", accounts: [max1, team1, team2] }))).toBe("team2");
+    expect(
+      advice(fable({ currentAccount: "max1", accounts: [max1, team1, team2] })),
+    ).toBe("team2");
   });
 
   it("names the account the turn just failed on when its numbers say it runs Opus, as the placement before an Opus turn would: no exclusion but its numbers (fix-B2-r3)", () => {
@@ -1574,20 +1677,33 @@ describe("opusInstead: a Fable thread no account can run is told to switch to Op
     const failed = fable({ accounts: [stale, team1, team2] });
     // The wait leaves the project on team1, its session out: an Opus turn
     // moves to the best other, team5 (its Opus window runs out first).
-    expect(decideSwitch(failed)).toMatchObject({ kind: "wait", account: "team1" });
+    expect(decideSwitch(failed)).toMatchObject({
+      kind: "wait",
+      account: "team1",
+    });
     expect(advice(failed)).toBe("team5");
     // Declined, the project stays on team5, which runs Opus by its numbers:
     // an Opus turn stays there.
-    expect(told({ kind: "decline", reason: "no-account-usable" }, failed)).toBe("team5");
+    expect(told({ kind: "decline", reason: "no-account-usable" }, failed)).toBe(
+      "team5",
+    );
     // Its numbers out of the session: never named.
     const out = seat("team5", {
       session: { usedPercent: 100, resetsAt: NOW + HOUR },
       models: stale.models,
     });
-    expect(told({ kind: "decline", reason: "no-account-usable" }, fable({ accounts: [out, team1, team2] }))).toBe("team2");
+    expect(
+      told(
+        { kind: "decline", reason: "no-account-usable" },
+        fable({ accounts: [out, team1, team2] }),
+      ),
+    ).toBe("team2");
     // Left in error, the same.
     const rescued = { ...failed, stuck: true };
-    expect(decideSwitch(rescued)).toMatchObject({ kind: "wait", account: "team1" });
+    expect(decideSwitch(rescued)).toMatchObject({
+      kind: "wait",
+      account: "team1",
+    });
     expect(advice(rescued)).toBe("team5");
   });
 
@@ -1629,7 +1745,9 @@ describe("opusInstead: a Fable thread no account can run is told to switch to Op
         Opus: { usedPercent: 100, resetsAt: NOW + 96 * HOUR },
       },
     });
-    expect(advice(fable({ failure: warning, accounts: [warned, team1, opusOut] }))).toBe("team5");
+    expect(
+      advice(fable({ failure: warning, accounts: [warned, team1, opusOut] })),
+    ).toBe("team5");
     // Numbers read before the refusal that still show Fable: it was just
     // refused Fable, so they do not stop the advice.
     const stale = seat("team5", {
@@ -1644,7 +1762,9 @@ describe("opusInstead: a Fable thread no account can run is told to switch to Op
       session: { usedPercent: 100, resetsAt: NOW + HOUR },
       models: { Fable: { usedPercent: 100, resetsAt: NOW + 2 * HOUR } },
     });
-    expect(advice(fable({ failure: warning, accounts: [full, team1, team2] }))).toBe("team2");
+    expect(
+      advice(fable({ failure: warning, accounts: [full, team1, team2] })),
+    ).toBe("team2");
   });
 
   it("a Max account the turn failed on, whose numbers still keep Fable, is never named for Opus (the Max accounts are Fable's; here under a warning report)", () => {
@@ -1731,7 +1851,9 @@ describe("opusInstead: a Fable thread no account can run is told to switch to Op
     expect(decideSwitch(i)).toMatchObject({ kind: "wait", account: "team1" });
     expect(advice(i)).toBe("team1");
     // Declined, the project stays on team5, which cannot run Opus: team2.
-    expect(told({ kind: "decline", reason: "no-account-usable" }, i)).toBe("team2");
+    expect(told({ kind: "decline", reason: "no-account-usable" }, i)).toBe(
+      "team2",
+    );
   });
 
   it("says nothing for a switch, a retry or any other decline", () => {
@@ -1807,16 +1929,28 @@ describe("opusInstead: a Fable thread no account can run is told to switch to Op
     });
     const stuck = fable({ stuck: true, accounts: [fresh, team1, team2] });
     expect(decideSwitch(stuck)).toMatchObject({ kind: "retry" });
-    expect(told({ kind: "decline", reason: "no-account-usable" }, stuck)).toBeNull();
+    expect(
+      told({ kind: "decline", reason: "no-account-usable" }, stuck),
+    ).toBeNull();
   });
 
   it("an account whose read lacks a window: nothing said; the project on an account out of the measurements: kept there, nothing said", () => {
     // An incomplete answer is no proof of anything: nothing is said before
     // the placement is even asked (code-reviewer r4, N3).
     const unknown = seat("team5", { blocked: true, unknown: true, models: {} });
-    expect(told({ kind: "decline", reason: "no-account-usable" }, fable({ accounts: [unknown, team1, team2] }))).toBeNull();
+    expect(
+      told(
+        { kind: "decline", reason: "no-account-usable" },
+        fable({ accounts: [unknown, team1, team2] }),
+      ),
+    ).toBeNull();
     // Asked straight: the placement keeps a project whose account it cannot judge.
-    expect(told({ kind: "decline", reason: "no-account-usable" }, fable({ currentAccount: "team9" }))).toBeNull();
+    expect(
+      told(
+        { kind: "decline", reason: "no-account-usable" },
+        fable({ currentAccount: "team9" }),
+      ),
+    ).toBeNull();
   });
 
   it("the text names the model, Opus and the account", () => {
@@ -1853,13 +1987,20 @@ describe("placedOn: where the placement before a turn runs it", () => {
   });
 
   it("kept where it runs the model: that account", () => {
-    expect(decidePlacement(opus("team1", [seat("team1", 60), seat("team2", 0)]))).toEqual({ kind: "keep" });
-    expect(placedOn(opus("team1", [seat("team1", 60), seat("team2", 0)]))).toBe("team1");
+    expect(
+      decidePlacement(opus("team1", [seat("team1", 60), seat("team2", 0)])),
+    ).toEqual({ kind: "keep" });
+    expect(placedOn(opus("team1", [seat("team1", 60), seat("team2", 0)]))).toBe(
+      "team1",
+    );
   });
 
   it("moved: the account it moves to", () => {
     const accounts = [seat("team1", 100), seat("team2", 0)];
-    expect(decidePlacement(opus("team1", accounts))).toMatchObject({ kind: "move", account: "team2" });
+    expect(decidePlacement(opus("team1", accounts))).toMatchObject({
+      kind: "move",
+      account: "team2",
+    });
     expect(placedOn(opus("team1", accounts))).toBe("team2");
     // Off a Max account that keeps Fable, to a seat.
     expect(placedOn(opus("max1", [max, seat("team2", 0)]))).toBe("team2");
@@ -1867,12 +2008,24 @@ describe("placedOn: where the placement before a turn runs it", () => {
 
   it("kept where it cannot run the model: none", () => {
     // Out of its session, and no other account runs Opus.
-    expect(placedOn(opus("team1", [seat("team1", 100), seat("team2", 0, 100)]))).toBeNull();
+    expect(
+      placedOn(opus("team1", [seat("team1", 100), seat("team2", 0, 100)])),
+    ).toBeNull();
     // On a Max account that keeps Fable, no account spares it: kept there, never named.
-    expect(decidePlacement(opus("max1", [max, seat("team2", 100)]))).toEqual({ kind: "keep", why: "current-reserved" });
+    expect(decidePlacement(opus("max1", [max, seat("team2", 100)]))).toEqual({
+      kind: "keep",
+      why: "current-reserved",
+    });
     expect(placedOn(opus("max1", [max, seat("team2", 100)]))).toBeNull();
     // Its account unknown or not measured: kept, nothing known.
-    expect(placedOn(opus("team1", [{ ...seat("team1", 0), blocked: true, unknown: true }, seat("team2", 0)]))).toBeNull();
+    expect(
+      placedOn(
+        opus("team1", [
+          { ...seat("team1", 0), blocked: true, unknown: true },
+          seat("team2", 0),
+        ]),
+      ),
+    ).toBeNull();
     expect(placedOn(opus("team9", [seat("team2", 0)]))).toBeNull();
   });
 
@@ -1886,7 +2039,9 @@ describe("placedOn: where the placement before a turn runs it", () => {
     });
     expect(placedOn(opus("team1", [reset]))).toBe("team1");
     // A Max account keeping Fable runs a Fable turn.
-    expect(placedOn({ ...opus("max1", [max]), preferredModel: "Fable" })).toBe("max1");
+    expect(placedOn({ ...opus("max1", [max]), preferredModel: "Fable" })).toBe(
+      "max1",
+    );
   });
 });
 
@@ -1976,7 +2131,9 @@ describe("seats steer where a project goes, and never move one by themselves", (
 
   it("a switch on a limit picks a target with a free seat, and falls back to quota alone when none has one (the only move that may: Astra SEATS-R05)", () => {
     const accounts = [
-      account("main", { session: { usedPercent: 100, resetsAt: NOW + 2 * HOUR } }),
+      account("main", {
+        session: { usedPercent: 100, resetsAt: NOW + 2 * HOUR },
+      }),
       account("work", { session: { usedPercent: 1, resetsAt: NOW + HOUR } }),
       account("spare", { session: { usedPercent: 40, resetsAt: NOW + HOUR } }),
     ];
@@ -1984,9 +2141,9 @@ describe("seats steer where a project goes, and never move one by themselves", (
       kind: "switch",
       account: "spare",
     });
-    expect(
-      decideSwitch(input({ accounts, freeSeats: () => 0 })),
-    ).toMatchObject({ kind: "switch", account: "work" });
+    expect(decideSwitch(input({ accounts, freeSeats: () => 0 }))).toMatchObject(
+      { kind: "switch", account: "work" },
+    );
   });
 
   it("a thread left in error is retried on its own account even with no free seat there", () => {
@@ -2010,7 +2167,9 @@ describe("seats steer where a project goes, and never move one by themselves", (
       accounts: [
         account("main", { session: { usedPercent: 95, resetsAt: NOW + HOUR } }),
         account("work", { session: { usedPercent: 1, resetsAt: NOW + HOUR } }),
-        account("spare", { session: { usedPercent: 40, resetsAt: NOW + HOUR } }),
+        account("spare", {
+          session: { usedPercent: 40, resetsAt: NOW + HOUR },
+        }),
       ],
     };
     expect(decideAhead({ ...ahead, freeSeats })).toMatchObject({
@@ -2032,10 +2191,23 @@ describe("decidePlacement of background work (SPEC 2026-10-30 §2)", () => {
 
   it("puts a new project of background work behind the accounts saved for the user", () => {
     expect(
-      decidePlacement({ currentAccount: "main", isNew: true, accounts, preferredModel: "", now: NOW, savedForUser: saved }),
+      decidePlacement({
+        currentAccount: "main",
+        isNew: true,
+        accounts,
+        preferredModel: "",
+        now: NOW,
+        savedForUser: saved,
+      }),
     ).toEqual({ kind: "keep" });
     expect(
-      decidePlacement({ currentAccount: "main", isNew: true, accounts, preferredModel: "", now: NOW }),
+      decidePlacement({
+        currentAccount: "main",
+        isNew: true,
+        accounts,
+        preferredModel: "",
+        now: NOW,
+      }),
     ).toEqual({ kind: "move", account: "work", why: "new-project" });
   });
 
@@ -2057,24 +2229,40 @@ describe("background work in every choice of another account (Codex ULTRA-R01)",
   // main cannot run; work is the best by quota but saved for the user,
   // spare is worse by quota and free for background work.
   const accounts = [
-    account("main", { session: { usedPercent: 100, resetsAt: NOW + 2 * HOUR } }),
+    account("main", {
+      session: { usedPercent: 100, resetsAt: NOW + 2 * HOUR },
+    }),
     account("work", { session: { usedPercent: 5, resetsAt: NOW + HOUR } }),
     account("spare", { session: { usedPercent: 60, resetsAt: NOW + HOUR } }),
   ];
   const saved = (name: string) => name === "work";
 
   it("moves a project already placed off a blocked account to the account not saved for the user", () => {
-    const placed = { currentAccount: "main", isNew: false, accounts, preferredModel: "", now: NOW };
+    const placed = {
+      currentAccount: "main",
+      isNew: false,
+      accounts,
+      preferredModel: "",
+      now: NOW,
+    };
     expect(decidePlacement({ ...placed, savedForUser: saved })).toEqual({
       kind: "move",
       account: "spare",
       why: "current-blocked",
     });
     // The user's own thread: as before, the best by quota.
-    expect(decidePlacement(placed)).toEqual({ kind: "move", account: "work", why: "current-blocked" });
+    expect(decidePlacement(placed)).toEqual({
+      kind: "move",
+      account: "work",
+      why: "current-blocked",
+    });
     // Only a saved account left: background work still runs there.
     expect(
-      decidePlacement({ ...placed, accounts: accounts.slice(0, 2), savedForUser: saved }),
+      decidePlacement({
+        ...placed,
+        accounts: accounts.slice(0, 2),
+        savedForUser: saved,
+      }),
     ).toEqual({ kind: "move", account: "work", why: "current-blocked" });
   });
 
@@ -2103,8 +2291,14 @@ describe("background work in every choice of another account (Codex ULTRA-R01)",
       now: NOW,
       currentLoggedOut: true,
     };
-    expect(decidePlacement({ ...reserved, preferredModel: "Opus" })).toEqual({ kind: "keep" });
-    expect(decidePlacement(reserved)).toEqual({ kind: "move", account: "work", why: "current-blocked" });
+    expect(decidePlacement({ ...reserved, preferredModel: "Opus" })).toEqual({
+      kind: "keep",
+    });
+    expect(decidePlacement(reserved)).toEqual({
+      kind: "move",
+      account: "work",
+      why: "current-blocked",
+    });
     expect(decidePlacement({ ...reserved, savedForUser: saved })).toEqual({
       kind: "move",
       account: "spare",
@@ -2118,8 +2312,12 @@ describe("background work in every choice of another account (Codex ULTRA-R01)",
       team: true,
       session: { usedPercent: 100, resetsAt: NOW + 2 * HOUR },
     });
-    const home = account("work", { models: { Fable: { usedPercent: 5, resetsAt: NOW + 30 * HOUR } } });
-    const other = account("spare", { models: { Fable: { usedPercent: 50, resetsAt: NOW + 30 * HOUR } } });
+    const home = account("work", {
+      models: { Fable: { usedPercent: 5, resetsAt: NOW + 30 * HOUR } },
+    });
+    const other = account("spare", {
+      models: { Fable: { usedPercent: 50, resetsAt: NOW + 30 * HOUR } },
+    });
     const excursion = {
       currentAccount: "team1",
       isNew: false,
@@ -2128,7 +2326,11 @@ describe("background work in every choice of another account (Codex ULTRA-R01)",
       excursionFrom: "work",
       now: NOW,
     };
-    expect(decidePlacement(excursion)).toEqual({ kind: "move", account: "work", why: "back-from-excursion" });
+    expect(decidePlacement(excursion)).toEqual({
+      kind: "move",
+      account: "work",
+      why: "back-from-excursion",
+    });
     expect(decidePlacement({ ...excursion, savedForUser: saved })).toEqual({
       kind: "move",
       account: "spare",
@@ -2142,10 +2344,16 @@ describe("background work in every choice of another account (Codex ULTRA-R01)",
       account: "spare",
       model: null,
     });
-    expect(decideSwitch(input({ accounts }))).toEqual({ kind: "switch", account: "work", model: null });
+    expect(decideSwitch(input({ accounts }))).toEqual({
+      kind: "switch",
+      account: "work",
+      model: null,
+    });
     // With no free seat anywhere, the quota choice keeps the same order.
     expect(
-      decideSwitch(input({ accounts, savedForUser: saved, freeSeats: () => 0 })),
+      decideSwitch(
+        input({ accounts, savedForUser: saved, freeSeats: () => 0 }),
+      ),
     ).toEqual({ kind: "switch", account: "spare", model: null });
   });
 
@@ -2158,15 +2366,22 @@ describe("background work in every choice of another account (Codex ULTRA-R01)",
       accounts: [
         account("main", { session: { usedPercent: 95, resetsAt: NOW + HOUR } }),
         account("work", { session: { usedPercent: 1, resetsAt: NOW + HOUR } }),
-        account("spare", { session: { usedPercent: 40, resetsAt: NOW + HOUR } }),
+        account("spare", {
+          session: { usedPercent: 40, resetsAt: NOW + HOUR },
+        }),
       ],
     };
-    expect(decideAhead({ ...ahead, savedForUser: saved })).toMatchObject({ kind: "move", account: "spare" });
+    expect(decideAhead({ ...ahead, savedForUser: saved })).toMatchObject({
+      kind: "move",
+      account: "spare",
+    });
     expect(decideAhead(ahead)).toMatchObject({ kind: "move", account: "work" });
   });
 
   it("names the account not saved for the user as the best for background work", () => {
-    expect(bestAccount(accounts.slice(1), "", NOW, undefined, undefined, saved)).toBe("spare");
+    expect(
+      bestAccount(accounts.slice(1), "", NOW, undefined, undefined, saved),
+    ).toBe("spare");
     expect(bestAccount(accounts.slice(1), "", NOW)).toBe("work");
   });
 });
@@ -2179,11 +2394,21 @@ describe("decidePlacement with the current account's seats full", () => {
     Fable: { usedPercent, resetsAt: NOW + 4 * HOUR },
   });
   const accounts = [
-    account("siloeads", { weekly: { usedPercent: 68, resetsAt: NOW + 3 * 24 * HOUR }, models: fable(77) }),
-    account("joytorm", { weekly: { usedPercent: 21, resetsAt: NOW + 5 * 24 * HOUR }, models: fable(18) }),
-    account("ganaresenas", { weekly: { usedPercent: 53, resetsAt: NOW + 4 * 24 * HOUR }, models: fable(50) }),
+    account("siloeads", {
+      weekly: { usedPercent: 68, resetsAt: NOW + 3 * 24 * HOUR },
+      models: fable(77),
+    }),
+    account("joytorm", {
+      weekly: { usedPercent: 21, resetsAt: NOW + 5 * 24 * HOUR },
+      models: fable(18),
+    }),
+    account("ganaresenas", {
+      weekly: { usedPercent: 53, resetsAt: NOW + 4 * 24 * HOUR },
+      models: fable(50),
+    }),
   ];
-  const seated = (free: Record<string, number>) => (name: string) => free[name] ?? 0;
+  const seated = (free: Record<string, number>) => (name: string) =>
+    free[name] ?? 0;
   const full = (overrides: Partial<PlacementInput> = {}): PlacementInput => ({
     currentAccount: "siloeads",
     isNew: false,
@@ -2226,7 +2451,9 @@ describe("decidePlacement with the current account's seats full", () => {
       accounts[2]!,
     ];
     expect(
-      decidePlacement(full({ accounts: out, freeSeats: seated({ joytorm: 4 }) })),
+      decidePlacement(
+        full({ accounts: out, freeSeats: seated({ joytorm: 4 }) }),
+      ),
     ).toEqual({ kind: "keep" });
     expect(decidePlacement(full({ aheadThreshold: 50 }))).toEqual({
       kind: "move",
@@ -2279,7 +2506,9 @@ describe("unreadTeamSeats", () => {
 
   it("a window full with no date of reset is not read as free", () => {
     const full = { usedPercent: 100, resetsAt: null };
-    expect(seat(account("work", { unknown: true, weekly: full }))?.weekly).toEqual(full);
+    expect(
+      seat(account("work", { unknown: true, weekly: full }))?.weekly,
+    ).toEqual(full);
   });
 });
 
@@ -2299,23 +2528,40 @@ const CALOR_TEXTOS = [
   .find((f) => existsSync(f));
 
 describe("isCalorTick", () => {
-  it.skipIf(CALOR_TEXTOS === undefined)("recognises the tick Calor sends today, read from its source", () => {
-    const source = readFileSync(CALOR_TEXTOS!, "utf8");
-    const tick = /export function textoTic\(opId: string\): string \{\s*return `([^`]*)`;/.exec(source);
-    expect(tick, "textoTic not found in Calor's textos.ts").not.toBeNull();
-    const text = tick![1]!.replace("${opId}", "97d91f3e-4f58-4569-a477-00e157c210c2");
-    expect(text).not.toContain("${");
-    expect(isCalorTick(text)).toBe(true);
-  });
+  it.skipIf(CALOR_TEXTOS === undefined)(
+    "recognises the tick Calor sends today, read from its source",
+    () => {
+      const source = readFileSync(CALOR_TEXTOS!, "utf8");
+      const tick =
+        /export function textoTic\(opId: string\): string \{\s*return `([^`]*)`;/.exec(
+          source,
+        );
+      expect(tick, "textoTic not found in Calor's textos.ts").not.toBeNull();
+      const text = tick![1]!.replace(
+        "${opId}",
+        "97d91f3e-4f58-4569-a477-00e157c210c2",
+      );
+      expect(text).not.toContain("${");
+      expect(isCalorTick(text)).toBe(true);
+    },
+  );
 
   it("is Calor's own text and nothing near it", () => {
     const id = "97d91f3e-4f58-4569-a477-00e157c210c2";
-    expect(isCalorTick(`calor: tic de caché #${id}. Responde exactamente «calor ok», sin usar herramientas y sin razonar más.`)).toBe(true);
+    expect(
+      isCalorTick(
+        `calor: tic de caché #${id}. Responde exactamente «calor ok», sin usar herramientas y sin razonar más.`,
+      ),
+    ).toBe(true);
     expect(isCalorTick(`  calor: tic de caché #${id}. Responde`)).toBe(true);
-    expect(isCalorTick(`calor: cierre automático #${id} (6 h sin actividad).`)).toBe(false);
+    expect(
+      isCalorTick(`calor: cierre automático #${id} (6 h sin actividad).`),
+    ).toBe(false);
     expect(isCalorTick("calor: tic de caché #sin-uuid. Responde")).toBe(false);
     expect(isCalorTick(`Calor: tic de caché #${id}. Responde`)).toBe(false);
-    expect(isCalorTick(`mira este texto: calor: tic de caché #${id}. Responde`)).toBe(false);
+    expect(
+      isCalorTick(`mira este texto: calor: tic de caché #${id}. Responde`),
+    ).toBe(false);
     expect(isCalorTick("")).toBe(false);
   });
 });
@@ -2332,7 +2578,10 @@ describe("a thread left in error on an account picked by hand", () => {
         stuck: true,
         currentAccount: "main",
         accounts: [
-          account("main", { weekly: { usedPercent: 70, resetsAt: NOW + 48 * HOUR }, models: fable }),
+          account("main", {
+            weekly: { usedPercent: 70, resetsAt: NOW + 48 * HOUR },
+            models: fable,
+          }),
           account("seat", { team: true }),
         ],
         preferredModel: "Opus",
@@ -2351,7 +2600,10 @@ describe("a thread left in error on an account picked by hand", () => {
         stuck: true,
         currentAccount: "main",
         accounts: [
-          account("main", { weekly: { usedPercent: 70, resetsAt: NOW + 48 * HOUR }, models: fable }),
+          account("main", {
+            weekly: { usedPercent: 70, resetsAt: NOW + 48 * HOUR },
+            models: fable,
+          }),
           account("seat", { team: true }),
         ],
         preferredModel: "Fable",
@@ -2395,7 +2647,11 @@ describe("an Ultra out of Fable comes after an unread Team seat (Codex R047-003)
 
   it("from a Team seat out of its session, the unread Team seat first", () => {
     expect(
-      decidePlacement({ ...base, currentAccount: "work", accounts: [out, spent, unread] }),
+      decidePlacement({
+        ...base,
+        currentAccount: "work",
+        accounts: [out, spent, unread],
+      }),
     ).toEqual({ kind: "move", account: "fresh", why: "current-blocked" });
   });
 
@@ -2437,23 +2693,42 @@ describe("an Ultra out of Fable comes after an unread Team seat (Codex R047-003)
       freeSeats: (name: string) => ({ work: 0, other: 1, spent: 6 })[name] ?? 0,
     };
     // Seats for all only: none on a Team, so it keeps; the server then asks for one seat.
-    expect(decidePlacement({ ...crowded, seatsWantedOnly: true })).toEqual({ kind: "keep" });
-    expect(decidePlacement(crowded)).toEqual({ kind: "move", account: "other", why: "current-full" });
+    expect(decidePlacement({ ...crowded, seatsWantedOnly: true })).toEqual({
+      kind: "keep",
+    });
+    expect(decidePlacement(crowded)).toEqual({
+      kind: "move",
+      account: "other",
+      why: "current-full",
+    });
   });
 
   it("waiting before the turn: at the same reset, the Team seat before the Ultra out of Fable (Codex R047-R2-004)", () => {
     const hour = { usedPercent: 100, resetsAt: NOW + HOUR };
     const spentOut = { ...spent, name: "a-spent", session: hour };
     const teamOut = account("z-team", { team: true, session: hour });
-    const here = account("work", { team: true, session: { usedPercent: 100, resetsAt: NOW + 3 * HOUR } });
+    const here = account("work", {
+      team: true,
+      session: { usedPercent: 100, resetsAt: NOW + 3 * HOUR },
+    });
     expect(
-      reserveWait({ ...base, unreadTeams: [], currentAccount: "work", accounts: [here, spentOut, teamOut] }),
+      reserveWait({
+        ...base,
+        unreadTeams: [],
+        currentAccount: "work",
+        accounts: [here, spentOut, teamOut],
+      }),
     ).toEqual({ account: "z-team", at: NOW + HOUR });
   });
 
   it("with no Team seat at all, the Ultra out of Fable", () => {
     expect(
-      decidePlacement({ ...base, unreadTeams: [], currentAccount: "work", accounts: [out, spent] }),
+      decidePlacement({
+        ...base,
+        unreadTeams: [],
+        currentAccount: "work",
+        accounts: [out, spent],
+      }),
     ).toEqual({ kind: "move", account: "spent", why: "current-blocked" });
   });
 });
@@ -2486,7 +2761,11 @@ describe("Opus solo por Team: placement of a project pinned to an Ultra (2026-11
   });
 
   it("an Opus turn with a Team seat free moves there", () => {
-    expect(place("Opus", 1)).toEqual({ kind: "move", account: "seat", why: "current-reserved" });
+    expect(place("Opus", 1)).toEqual({
+      kind: "move",
+      account: "seat",
+      why: "current-reserved",
+    });
   });
 
   it("a Fable turn stays on the picked Ultra", () => {
@@ -2498,7 +2777,12 @@ describe("Opus solo por Team: placement of a project pinned to an Ultra (2026-11
 // a Fable turn on a Max/Ultra whose general weekly will run out before its
 // Fable does moves to one with at least roomMoveGap more room and a seat.
 describe("decidePlacement moves a Fable turn by room (0.2.48, B3)", () => {
-  const ultra = (name: string, weekly: number, fable: number, more: Partial<AccountUsage> = {}) =>
+  const ultra = (
+    name: string,
+    weekly: number,
+    fable: number,
+    more: Partial<AccountUsage> = {},
+  ) =>
     account(name, {
       weekly: { usedPercent: weekly, resetsAt: NOW + 48 * HOUR },
       models: { Fable: { usedPercent: fable, resetsAt: NOW + 48 * HOUR } },
@@ -2518,26 +2802,48 @@ describe("decidePlacement moves a Fable turn by room (0.2.48, B3)", () => {
     now: NOW,
     ...overrides,
   });
-  const move = (account: string) => ({ kind: "move", account, why: "fable-room" });
+  const move = (account: string) => ({
+    kind: "move",
+    account,
+    why: "fable-room",
+  });
 
   it("current -9.5 and another at 46 with a seat: moves", () => {
     expect(decidePlacement(turn())).toEqual(move("siloeads"));
   });
 
   it("cut of the gap: another at -9.5 + 20 = 10.5 moves, at 10.4 and at 9 it stays", () => {
-    expect(decidePlacement(turn({ accounts: [viaulab, ultra("b", 89, 99)] }))).toEqual(move("b"));
-    expect(decidePlacement(turn({ accounts: [viaulab, ultra("b", 89.1, 99)] }))).toEqual({ kind: "keep" });
-    expect(decidePlacement(turn({ accounts: [viaulab, ultra("b", 90.5, 99)] }))).toEqual({ kind: "keep" });
+    expect(
+      decidePlacement(turn({ accounts: [viaulab, ultra("b", 89, 99)] })),
+    ).toEqual(move("b"));
+    expect(
+      decidePlacement(turn({ accounts: [viaulab, ultra("b", 89.1, 99)] })),
+    ).toEqual({ kind: "keep" });
+    expect(
+      decidePlacement(turn({ accounts: [viaulab, ultra("b", 90.5, 99)] })),
+    ).toEqual({ kind: "keep" });
   });
 
   it("cut of the current room: -0.5 moves, 0 and +1 stay", () => {
-    expect(decidePlacement(turn({ accounts: [ultra("viaulab", 50.5, 0), siloeads] }))).toEqual(move("siloeads"));
-    expect(decidePlacement(turn({ accounts: [ultra("viaulab", 50, 0), siloeads] }))).toEqual({ kind: "keep" });
-    expect(decidePlacement(turn({ accounts: [ultra("viaulab", 49, 0), siloeads] }))).toEqual({ kind: "keep" });
+    expect(
+      decidePlacement(
+        turn({ accounts: [ultra("viaulab", 50.5, 0), siloeads] }),
+      ),
+    ).toEqual(move("siloeads"));
+    expect(
+      decidePlacement(turn({ accounts: [ultra("viaulab", 50, 0), siloeads] })),
+    ).toEqual({ kind: "keep" });
+    expect(
+      decidePlacement(turn({ accounts: [ultra("viaulab", 49, 0), siloeads] })),
+    ).toEqual({ kind: "keep" });
   });
 
   it("with a sibling at work, only below -10: -9 and -10 stay, -10.5 moves", () => {
-    const at = (weekly: number) => turn({ projectSeated: true, accounts: [ultra("viaulab", weekly, 0), siloeads] });
+    const at = (weekly: number) =>
+      turn({
+        projectSeated: true,
+        accounts: [ultra("viaulab", weekly, 0), siloeads],
+      });
     expect(decidePlacement(at(59))).toEqual({ kind: "keep" });
     expect(decidePlacement(at(60))).toEqual({ kind: "keep" });
     expect(decidePlacement(at(60.5))).toEqual(move("siloeads"));
@@ -2545,40 +2851,86 @@ describe("decidePlacement moves a Fable turn by room (0.2.48, B3)", () => {
 
   it("with a sibling at work, not within stuckMoveMinutes of the project's last move", () => {
     expect(
-      decidePlacement(turn({ projectSeated: true, movedRecently: true, accounts: [ultra("viaulab", 70, 0), siloeads] })),
+      decidePlacement(
+        turn({
+          projectSeated: true,
+          movedRecently: true,
+          accounts: [ultra("viaulab", 70, 0), siloeads],
+        }),
+      ),
     ).toEqual({ kind: "keep" });
     // Alone, a recent move does not hold it: nothing else moves with it.
-    expect(decidePlacement(turn({ movedRecently: true }))).toEqual(move("siloeads"));
+    expect(decidePlacement(turn({ movedRecently: true }))).toEqual(
+      move("siloeads"),
+    );
   });
 
   it("the account with the most room among those far enough ahead, with a seat", () => {
     const mariscal = ultra("mariscal", 30, 30); // room 35
-    expect(decidePlacement(turn({ accounts: [viaulab, mariscal, siloeads] }))).toEqual(move("siloeads"));
     expect(
-      decidePlacement(turn({ accounts: [viaulab, mariscal, siloeads], freeSeats: (n) => (n === "siloeads" ? 0 : 4) })),
+      decidePlacement(turn({ accounts: [viaulab, mariscal, siloeads] })),
+    ).toEqual(move("siloeads"));
+    expect(
+      decidePlacement(
+        turn({
+          accounts: [viaulab, mariscal, siloeads],
+          freeSeats: (n) => (n === "siloeads" ? 0 : 4),
+        }),
+      ),
     ).toEqual(move("mariscal"));
-    expect(decidePlacement(turn({ freeSeats: (n) => (n === "siloeads" ? 0 : 4) }))).toEqual({ kind: "keep" });
+    expect(
+      decidePlacement(turn({ freeSeats: (n) => (n === "siloeads" ? 0 : 4) })),
+    ).toEqual({ kind: "keep" });
   });
 
   it("never to a Team seat, an unread account or one that cannot run Fable", () => {
-    const team = account("team", { team: true, models: { Fable: { usedPercent: 0, resetsAt: NOW + 48 * HOUR } } });
-    expect(decidePlacement(turn({ accounts: [viaulab, team] }))).toEqual({ kind: "keep" });
+    const team = account("team", {
+      team: true,
+      models: { Fable: { usedPercent: 0, resetsAt: NOW + 48 * HOUR } },
+    });
+    expect(decidePlacement(turn({ accounts: [viaulab, team] }))).toEqual({
+      kind: "keep",
+    });
     expect(
-      decidePlacement(turn({ accounts: [viaulab, ultra("siloeads", 10, 12, { unknown: true, blocked: true })] })),
+      decidePlacement(
+        turn({
+          accounts: [
+            viaulab,
+            ultra("siloeads", 10, 12, { unknown: true, blocked: true }),
+          ],
+        }),
+      ),
     ).toEqual({ kind: "keep" });
-    expect(decidePlacement(turn({ accounts: [viaulab, ultra("siloeads", 10, 100)] }))).toEqual({ kind: "keep" });
+    expect(
+      decidePlacement(
+        turn({ accounts: [viaulab, ultra("siloeads", 10, 100)] }),
+      ),
+    ).toEqual({ kind: "keep" });
   });
 
   it("a pick by hand, an Opus turn, no gap or no share: no move by room", () => {
     expect(decidePlacement(turn({ pinned: true }))).toEqual({ kind: "keep" });
-    expect(decidePlacement(turn({ roomMoveGap: undefined }))).toEqual({ kind: "keep" });
-    expect(decidePlacement(turn({ reserveShare: undefined }))).toEqual({ kind: "keep" });
-    expect(decidePlacement(turn({ preferredModel: "Opus" }))).not.toEqual(move("siloeads"));
+    expect(decidePlacement(turn({ roomMoveGap: undefined }))).toEqual({
+      kind: "keep",
+    });
+    expect(decidePlacement(turn({ reserveShare: undefined }))).toEqual({
+      kind: "keep",
+    });
+    expect(decidePlacement(turn({ preferredModel: "Opus" }))).not.toEqual(
+      move("siloeads"),
+    );
   });
 
   it("D8: with the reads down (the current account unknown) it does not move", () => {
     expect(
-      decidePlacement(turn({ accounts: [ultra("viaulab", 86, 53, { unknown: true, blocked: true }), siloeads] })),
+      decidePlacement(
+        turn({
+          accounts: [
+            ultra("viaulab", 86, 53, { unknown: true, blocked: true }),
+            siloeads,
+          ],
+        }),
+      ),
     ).toEqual({ kind: "keep" });
   });
 });
@@ -2599,7 +2951,10 @@ describe("decidePlacement with the seats full, for Fable with a share (0.2.48, B
     weekly: { usedPercent: 40, resetsAt: NOW + 48 * HOUR },
     models: { Fable: { usedPercent: 53, resetsAt: NOW + 48 * HOUR } },
   });
-  const full = (free: Record<string, number>, overrides: Partial<PlacementInput> = {}): PlacementInput => ({
+  const full = (
+    free: Record<string, number>,
+    overrides: Partial<PlacementInput> = {},
+  ): PlacementInput => ({
     currentAccount: "here",
     isNew: false,
     accounts: [here, ultra, team],
@@ -2613,20 +2968,36 @@ describe("decidePlacement with the seats full, for Fable with a share (0.2.48, B
   });
 
   it("an Ultra seat before a Team seat, also one with seats for all", () => {
-    expect(decidePlacement(full({ ultra: 1, team: 2 }))).toEqual({ kind: "move", account: "ultra", why: "current-full" });
-    expect(decidePlacement(full({ ultra: 1, team: 2 }, { seatsWanted: 2 }))).toEqual({ kind: "move", account: "ultra", why: "current-full" });
+    expect(decidePlacement(full({ ultra: 1, team: 2 }))).toEqual({
+      kind: "move",
+      account: "ultra",
+      why: "current-full",
+    });
+    expect(
+      decidePlacement(full({ ultra: 1, team: 2 }, { seatsWanted: 2 })),
+    ).toEqual({ kind: "move", account: "ultra", why: "current-full" });
   });
 
   it("seats for all only: none on an Ultra, so none (the server then asks for one seat)", () => {
-    expect(decidePlacement(full({ ultra: 1, team: 2 }, { seatsWanted: 2, seatsWantedOnly: true }))).toEqual({ kind: "keep" });
+    expect(
+      decidePlacement(
+        full({ ultra: 1, team: 2 }, { seatsWanted: 2, seatsWantedOnly: true }),
+      ),
+    ).toEqual({ kind: "keep" });
   });
 
   it("no Ultra seat: the Team seat", () => {
-    expect(decidePlacement(full({ ultra: 0, team: 1 }))).toEqual({ kind: "move", account: "team", why: "current-full" });
+    expect(decidePlacement(full({ ultra: 0, team: 1 }))).toEqual({
+      kind: "move",
+      account: "team",
+      why: "current-full",
+    });
   });
 
   it("without a share: the order before 0.2.48 (the Team seat by deadline)", () => {
-    expect(decidePlacement(full({ ultra: 1, team: 2 }, { reserveShare: undefined }))).toEqual({ kind: "move", account: "team", why: "current-full" });
+    expect(
+      decidePlacement(full({ ultra: 1, team: 2 }, { reserveShare: undefined })),
+    ).toEqual({ kind: "move", account: "team", why: "current-full" });
   });
 });
 
@@ -2639,7 +3010,10 @@ describe("Opus overflows to the Ultra with room (0.2.48, B5)", () => {
       weekly: { usedPercent: weekly, resetsAt: NOW + 48 * HOUR },
       models: { Fable: { usedPercent: fable, resetsAt: NOW + 72 * HOUR } },
     });
-  const outTeam = account("work", { team: true, session: { usedPercent: 100, resetsAt: NOW + HOUR } });
+  const outTeam = account("work", {
+    team: true,
+    session: { usedPercent: 100, resetsAt: NOW + HOUR },
+  });
   const fullTeam = account("spare", { team: true });
   const roomy = ultra("roomy", 10, 12); // room 46
   const tight = ultra("tight", 86, 53); // room -9.5
@@ -2658,34 +3032,73 @@ describe("Opus overflows to the Ultra with room (0.2.48, B5)", () => {
   });
 
   it("from a Team out of its session, every other Team full: to the Ultra with room 46", () => {
-    expect(decidePlacement(base())).toEqual({ kind: "move", account: "roomy", why: "current-blocked" });
+    expect(decidePlacement(base())).toEqual({
+      kind: "move",
+      account: "roomy",
+      why: "current-blocked",
+    });
   });
 
   it("an unread Team seat goes first", () => {
-    expect(decidePlacement(base({ unreadTeams: ["fresh"] }))).toEqual({ kind: "move", account: "fresh", why: "current-blocked" });
+    expect(decidePlacement(base({ unreadTeams: ["fresh"] }))).toEqual({
+      kind: "move",
+      account: "fresh",
+      why: "current-blocked",
+    });
   });
 
   it("from a full Team seat (seats full), to the Ultra with room; none with room: it waits", () => {
-    const full = base({ currentAccount: "spare", accounts: [fullTeam, tight, roomy], seatsFull: true });
-    expect(decidePlacement(full)).toEqual({ kind: "move", account: "roomy", why: "current-full" });
-    expect(decidePlacement({ ...full, accounts: [fullTeam, tight] })).toEqual({ kind: "keep" });
+    const full = base({
+      currentAccount: "spare",
+      accounts: [fullTeam, tight, roomy],
+      seatsFull: true,
+    });
+    expect(decidePlacement(full)).toEqual({
+      kind: "move",
+      account: "roomy",
+      why: "current-full",
+    });
+    expect(decidePlacement({ ...full, accounts: [fullTeam, tight] })).toEqual({
+      kind: "keep",
+    });
   });
 
   it("opusOverflowRoom 100: kept where it is, as in 0.2.44", () => {
-    expect(decidePlacement(base({ opusOverflowRoom: 100 }))).toEqual({ kind: "keep", why: "current-blocked" });
+    expect(decidePlacement(base({ opusOverflowRoom: 100 }))).toEqual({
+      kind: "keep",
+      why: "current-blocked",
+    });
   });
 
   it("a project on such an Ultra stays while no Team takes the turn, and goes to a Team seat once one does", () => {
-    expect(decidePlacement(base({ currentAccount: "roomy" }))).toEqual({ kind: "keep" });
-    const teamFree = base({ currentAccount: "roomy", noTeamTakes: () => false, freeSeats: () => 4 });
-    expect(decidePlacement(teamFree)).toEqual({ kind: "move", account: "spare", why: "current-reserved" });
+    expect(decidePlacement(base({ currentAccount: "roomy" }))).toEqual({
+      kind: "keep",
+    });
+    const teamFree = base({
+      currentAccount: "roomy",
+      noTeamTakes: () => false,
+      freeSeats: () => 4,
+    });
+    expect(decidePlacement(teamFree)).toEqual({
+      kind: "move",
+      account: "spare",
+      why: "current-reserved",
+    });
   });
 
   it("reserveWait: the Ultra with room, free now, before a Team out for an hour; a Team free now still first", () => {
-    const held = base({ currentAccount: "tight", accounts: [outTeam, tight, roomy] });
+    const held = base({
+      currentAccount: "tight",
+      accounts: [outTeam, tight, roomy],
+    });
     expect(reserveWait(held)).toEqual({ account: "roomy", at: 0 });
-    expect(reserveWait({ ...held, opusOverflowRoom: 100 })).toEqual({ account: "work", at: NOW + HOUR });
-    expect(reserveWait({ ...held, accounts: [outTeam, fullTeam, tight, roomy] })).toEqual({ account: "spare", at: 0 });
+    expect(reserveWait({ ...held, opusOverflowRoom: 100 })).toEqual({
+      account: "work",
+      at: NOW + HOUR,
+    });
+    expect(
+      reserveWait({ ...held, accounts: [outTeam, fullTeam, tight, roomy] }),
+    ).toEqual({ account: "spare", at: 0 });
   });
 
   // Astra r5 medium 1: a mark from an earlier 429 (server's limitedAt) keeps
@@ -2693,10 +3106,18 @@ describe("Opus overflows to the Ultra with room (0.2.48, B5)", () => {
   // login, as out of a switch's; the current account is still judged on its
   // numbers; reserveWait waits for a marked one no sooner than its mark.
   describe("with an account marked by an earlier failure (Astra r5 medium 1)", () => {
-    const marked = (name: string, until: number) => (n: string) => (n === name ? until : null);
+    const marked = (name: string, until: number) => (n: string) =>
+      n === name ? until : null;
 
     it("an unread Team seat marked is no destination: to the Ultra with room", () => {
-      expect(decidePlacement(base({ unreadTeams: ["fresh"], limitedUntil: marked("fresh", NOW + HOUR) }))).toEqual({
+      expect(
+        decidePlacement(
+          base({
+            unreadTeams: ["fresh"],
+            limitedUntil: marked("fresh", NOW + HOUR),
+          }),
+        ),
+      ).toEqual({
         kind: "move",
         account: "roomy",
         why: "current-blocked",
@@ -2704,7 +3125,9 @@ describe("Opus overflows to the Ultra with room (0.2.48, B5)", () => {
     });
 
     it("the Ultra with room marked is no destination: kept where it is", () => {
-      expect(decidePlacement(base({ limitedUntil: marked("roomy", NOW + HOUR) }))).toEqual({ kind: "keep", why: "current-blocked" });
+      expect(
+        decidePlacement(base({ limitedUntil: marked("roomy", NOW + HOUR) })),
+      ).toEqual({ kind: "keep", why: "current-blocked" });
     });
 
     // Astra r6: its read lags the 429 that marked it, so it is not one the
@@ -2712,10 +3135,22 @@ describe("Opus overflows to the Ultra with room (0.2.48, B5)", () => {
     // none, kept as blocked. Its login says Ultra: judged as unread instead,
     // it would be kept as one that spends the reserve ("current-reserved").
     it("a project on a marked Ultra moves to another able; with none, kept as blocked (Astra r6)", () => {
-      const placed = base({ currentAccount: "roomy", limitedUntil: marked("roomy", NOW + HOUR), unreadKeepsReserve: (n) => n === "roomy" });
-      expect(decidePlacement(placed)).toEqual({ kind: "keep", why: "current-blocked" });
+      const placed = base({
+        currentAccount: "roomy",
+        limitedUntil: marked("roomy", NOW + HOUR),
+        unreadKeepsReserve: (n) => n === "roomy",
+      });
+      expect(decidePlacement(placed)).toEqual({
+        kind: "keep",
+        why: "current-blocked",
+      });
       const other = ultra("other", 20, 20); // room 40
-      expect(decidePlacement({ ...placed, accounts: [outTeam, fullTeam, tight, roomy, other] })).toEqual({
+      expect(
+        decidePlacement({
+          ...placed,
+          accounts: [outTeam, fullTeam, tight, roomy, other],
+        }),
+      ).toEqual({
         kind: "move",
         account: "other",
         why: "current-blocked",
@@ -2726,7 +3161,14 @@ describe("Opus overflows to the Ultra with room (0.2.48, B5)", () => {
     // early keep for an account with nothing measured looks at the mark
     // first.
     it("a project on an unread Team seat a 429 marked moves to the Ultra with room (Astra r7)", () => {
-      expect(decidePlacement(base({ currentAccount: "fresh", limitedUntil: marked("fresh", NOW + HOUR) }))).toEqual({
+      expect(
+        decidePlacement(
+          base({
+            currentAccount: "fresh",
+            limitedUntil: marked("fresh", NOW + HOUR),
+          }),
+        ),
+      ).toEqual({
         kind: "move",
         account: "roomy",
         why: "current-blocked",
@@ -2734,9 +3176,16 @@ describe("Opus overflows to the Ultra with room (0.2.48, B5)", () => {
     });
 
     it("reserveWait: the Ultra marked till +3 h waits behind the Team out for an hour; marked till +30 min, it frees then", () => {
-      const held = base({ currentAccount: "tight", accounts: [outTeam, tight, roomy] });
-      expect(reserveWait({ ...held, limitedUntil: marked("roomy", NOW + 3 * HOUR) })).toEqual({ account: "work", at: NOW + HOUR });
-      expect(reserveWait({ ...held, limitedUntil: marked("roomy", NOW + HOUR / 2) })).toEqual({ account: "roomy", at: NOW + HOUR / 2 });
+      const held = base({
+        currentAccount: "tight",
+        accounts: [outTeam, tight, roomy],
+      });
+      expect(
+        reserveWait({ ...held, limitedUntil: marked("roomy", NOW + 3 * HOUR) }),
+      ).toEqual({ account: "work", at: NOW + HOUR });
+      expect(
+        reserveWait({ ...held, limitedUntil: marked("roomy", NOW + HOUR / 2) }),
+      ).toEqual({ account: "roomy", at: NOW + HOUR / 2 });
     });
   });
 
@@ -2762,7 +3211,10 @@ describe("Opus overflows to the Ultra with room (0.2.48, B5)", () => {
   // ruled out (the measurements judge).
   it("noTeamTakes is asked with the account that just failed ruled out", () => {
     const asked: (string | null | undefined)[] = [];
-    const liveTeam = account("work", { team: true, session: { usedPercent: 20, resetsAt: NOW + HOUR } });
+    const liveTeam = account("work", {
+      team: true,
+      session: { usedPercent: 20, resetsAt: NOW + HOUR },
+    });
     const judged = (stuck: boolean, team = liveTeam) =>
       decideSwitch(
         input({
@@ -2780,10 +3232,18 @@ describe("Opus overflows to the Ultra with room (0.2.48, B5)", () => {
           freeSeats: () => 4,
         }),
       );
-    expect(judged(false)).toEqual({ kind: "switch", account: "roomy", model: "Opus" });
+    expect(judged(false)).toEqual({
+      kind: "switch",
+      account: "roomy",
+      model: "Opus",
+    });
     expect(asked).toContain("work");
     asked.length = 0;
-    expect(judged(true)).toEqual({ kind: "retry", account: "work", model: "Opus" });
+    expect(judged(true)).toEqual({
+      kind: "retry",
+      account: "work",
+      model: "Opus",
+    });
     // Left in error with work measured out: the Ultra is weighed, and no
     // account is ruled out of «no Team takes it».
     asked.length = 0;
@@ -2797,10 +3257,13 @@ describe("Opus overflows to the Ultra with room (0.2.48, B5)", () => {
 // (server's limitedAt) is no destination of a switch, and is waited for no
 // sooner than the provider said, as the account the turn just failed on.
 describe("decideSwitch with an account marked by an earlier failure (Astra r3 high 1)", () => {
-  const marked = (until: number) => (name: string) => (name === "work" ? until : null);
+  const marked = (until: number) => (name: string) =>
+    name === "work" ? until : null;
 
   it("marked till +3 h: no switch to it; the wait is on main, free at +2 h", () => {
-    expect(decideSwitch(input({ limitedUntil: marked(NOW + 3 * HOUR) }))).toMatchObject({
+    expect(
+      decideSwitch(input({ limitedUntil: marked(NOW + 3 * HOUR) })),
+    ).toMatchObject({
       kind: "wait",
       account: "main",
       sendAt: NOW + 2 * HOUR + BUFFER,
@@ -2808,7 +3271,9 @@ describe("decideSwitch with an account marked by an earlier failure (Astra r3 hi
   });
 
   it("marked till +1 h: the wait is on it, at +1 h, not at once", () => {
-    expect(decideSwitch(input({ limitedUntil: marked(NOW + HOUR) }))).toMatchObject({
+    expect(
+      decideSwitch(input({ limitedUntil: marked(NOW + HOUR) })),
+    ).toMatchObject({
       kind: "wait",
       account: "work",
       sendAt: NOW + HOUR + BUFFER,
@@ -2819,9 +3284,21 @@ describe("decideSwitch with an account marked by an earlier failure (Astra r3 hi
   // unknown is judged on the current account's numbers first; a mark there
   // keeps the retry off it.
   it("a failure whose account is unknown does not retry on the current account its mark keeps out", () => {
-    const here = input({ failedAccount: null, accounts: [account("main"), account("work")] });
-    expect(decideSwitch(here)).toEqual({ kind: "retry", account: "main", model: null });
-    expect(decideSwitch({ ...here, limitedUntil: (n) => (n === "main" ? NOW + 2 * HOUR : null) })).toEqual({
+    const here = input({
+      failedAccount: null,
+      accounts: [account("main"), account("work")],
+    });
+    expect(decideSwitch(here)).toEqual({
+      kind: "retry",
+      account: "main",
+      model: null,
+    });
+    expect(
+      decideSwitch({
+        ...here,
+        limitedUntil: (n) => (n === "main" ? NOW + 2 * HOUR : null),
+      }),
+    ).toEqual({
       kind: "switch",
       account: "work",
       model: null,
@@ -2829,7 +3306,11 @@ describe("decideSwitch with an account marked by an earlier failure (Astra r3 hi
   });
 
   it("a thread left in error is judged on the measurements: the mark plays no part", () => {
-    expect(decideSwitch(input({ stuck: true, limitedUntil: marked(NOW + 3 * HOUR) }))).toEqual({
+    expect(
+      decideSwitch(
+        input({ stuck: true, limitedUntil: marked(NOW + 3 * HOUR) }),
+      ),
+    ).toEqual({
       kind: "switch",
       account: "work",
       model: null,
@@ -2852,13 +3333,19 @@ describe("resetOfAccount: whether a reset a 429 reported is one of the account's
 
   it("matches its weekly within the tolerance either side, to the millisecond", () => {
     expect(resetOfAccount(ultra, WEEKLY + TOLERANCE, NOW, READ)).toBe(true);
-    expect(resetOfAccount(ultra, WEEKLY + TOLERANCE + 1, NOW, READ)).toBe(false);
+    expect(resetOfAccount(ultra, WEEKLY + TOLERANCE + 1, NOW, READ)).toBe(
+      false,
+    );
     expect(resetOfAccount(ultra, WEEKLY - TOLERANCE, NOW, READ)).toBe(true);
-    expect(resetOfAccount(ultra, WEEKLY - TOLERANCE - 1, NOW, READ)).toBe(false);
+    expect(resetOfAccount(ultra, WEEKLY - TOLERANCE - 1, NOW, READ)).toBe(
+      false,
+    );
   });
 
   it("matches a model's own window", () => {
-    expect(resetOfAccount(ultra, NOW + 4 * 24 * HOUR - 2_000, NOW, READ)).toBe(true);
+    expect(resetOfAccount(ultra, NOW + 4 * 24 * HOUR - 2_000, NOW, READ)).toBe(
+      true,
+    );
   });
 
   it("another account's weekly, days apart, is none of its", () => {
@@ -2870,7 +3357,9 @@ describe("resetOfAccount: whether a reset a 429 reported is one of the account's
       session: { usedPercent: 0, resetsAt: null, absent: true },
       weekly: { usedPercent: 0, resetsAt: null },
     });
-    expect(resetOfAccount(unstarted, WEEKLY, NOW, NOW - 5 * 60_000)).toBe(false);
+    expect(resetOfAccount(unstarted, WEEKLY, NOW, NOW - 5 * 60_000)).toBe(
+      false,
+    );
   });
 
   it("a weekly with no reset ahead resets between its read plus a week and now plus a week, the tolerance either side, to the millisecond", () => {
@@ -2878,10 +3367,18 @@ describe("resetOfAccount: whether a reset a 429 reported is one of the account's
       session: { usedPercent: 0, resetsAt: null, absent: true },
       weekly: { usedPercent: 0, resetsAt: null },
     });
-    expect(resetOfAccount(unstarted, READ + WEEK - TOLERANCE - 1, NOW, READ)).toBe(false);
-    expect(resetOfAccount(unstarted, READ + WEEK - TOLERANCE, NOW, READ)).toBe(true);
-    expect(resetOfAccount(unstarted, NOW + WEEK + TOLERANCE, NOW, READ)).toBe(true);
-    expect(resetOfAccount(unstarted, NOW + WEEK + TOLERANCE + 1, NOW, READ)).toBe(false);
+    expect(
+      resetOfAccount(unstarted, READ + WEEK - TOLERANCE - 1, NOW, READ),
+    ).toBe(false);
+    expect(resetOfAccount(unstarted, READ + WEEK - TOLERANCE, NOW, READ)).toBe(
+      true,
+    );
+    expect(resetOfAccount(unstarted, NOW + WEEK + TOLERANCE, NOW, READ)).toBe(
+      true,
+    );
+    expect(
+      resetOfAccount(unstarted, NOW + WEEK + TOLERANCE + 1, NOW, READ),
+    ).toBe(false);
   });
 
   it("with no read time, a window with no reset ahead opens now, not at any time past (code-reviewer r2, nit 6)", () => {
@@ -2889,7 +3386,9 @@ describe("resetOfAccount: whether a reset a 429 reported is one of the account's
       session: { usedPercent: 0, resetsAt: null, absent: true },
       weekly: { usedPercent: 0, resetsAt: null },
     });
-    expect(resetOfAccount(unstarted, NOW + WEEK - TOLERANCE - 1, NOW)).toBe(false);
+    expect(resetOfAccount(unstarted, NOW + WEEK - TOLERANCE - 1, NOW)).toBe(
+      false,
+    );
     expect(resetOfAccount(unstarted, NOW + WEEK - TOLERANCE, NOW)).toBe(true);
   });
 
@@ -2899,8 +3398,12 @@ describe("resetOfAccount: whether a reset a 429 reported is one of the account's
       weekly: { usedPercent: 90, resetsAt: NOW - 30 * 60_000 },
     });
     const opened = NOW - 30 * 60_000;
-    expect(resetOfAccount(renewed, opened + WEEK - TOLERANCE - 1, NOW, READ)).toBe(false);
-    expect(resetOfAccount(renewed, opened + WEEK - TOLERANCE, NOW, READ)).toBe(true);
+    expect(
+      resetOfAccount(renewed, opened + WEEK - TOLERANCE - 1, NOW, READ),
+    ).toBe(false);
+    expect(resetOfAccount(renewed, opened + WEEK - TOLERANCE, NOW, READ)).toBe(
+      true,
+    );
   });
 
   it("a session with no reset ahead resets within 5 hours of when it opened: a Team whose read shows none open, to the millisecond", () => {
@@ -2910,10 +3413,18 @@ describe("resetOfAccount: whether a reset a 429 reported is one of the account's
       team: true,
     });
     const read = NOW - 10 * 60_000;
-    expect(resetOfAccount(team, read + 5 * HOUR - TOLERANCE - 1, NOW, read)).toBe(false);
-    expect(resetOfAccount(team, read + 5 * HOUR - TOLERANCE, NOW, read)).toBe(true);
-    expect(resetOfAccount(team, NOW + 5 * HOUR + TOLERANCE, NOW, read)).toBe(true);
-    expect(resetOfAccount(team, NOW + 5 * HOUR + TOLERANCE + 1, NOW, read)).toBe(false);
+    expect(
+      resetOfAccount(team, read + 5 * HOUR - TOLERANCE - 1, NOW, read),
+    ).toBe(false);
+    expect(resetOfAccount(team, read + 5 * HOUR - TOLERANCE, NOW, read)).toBe(
+      true,
+    );
+    expect(resetOfAccount(team, NOW + 5 * HOUR + TOLERANCE, NOW, read)).toBe(
+      true,
+    );
+    expect(
+      resetOfAccount(team, NOW + 5 * HOUR + TOLERANCE + 1, NOW, read),
+    ).toBe(false);
   });
 
   it("a session with its reset known ahead takes only that reset: one at +2 h is not a 429's at +4 h 50 (code-reviewer r1, low 2)", () => {
@@ -2921,7 +3432,11 @@ describe("resetOfAccount: whether a reset a 429 reported is one of the account's
       session: { usedPercent: 60, resetsAt: NOW + 2 * HOUR },
       weekly: { usedPercent: 35, resetsAt: WEEKLY },
     });
-    expect(resetOfAccount(busy, NOW + 2 * HOUR + TOLERANCE, NOW, READ)).toBe(true);
-    expect(resetOfAccount(busy, NOW + 4 * HOUR + 50 * 60_000, NOW, READ)).toBe(false);
+    expect(resetOfAccount(busy, NOW + 2 * HOUR + TOLERANCE, NOW, READ)).toBe(
+      true,
+    );
+    expect(resetOfAccount(busy, NOW + 4 * HOUR + 50 * 60_000, NOW, READ)).toBe(
+      false,
+    );
   });
 });

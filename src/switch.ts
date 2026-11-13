@@ -143,10 +143,27 @@ export function isSessionLoss(text: string): boolean {
 }
 
 /**
+ * Cloudflare's block page in front of the API: the network (its IP) was
+ * refused, not the account (bb's log, 2026-11-13: «API Error: 403 Attention
+ * Required! | Cloudflare», errorInfo unauthorized, five accounts with quota
+ * vetoed in three minutes). Its title, its challenge page, or Cloudflare
+ * named with a 403; never a text that says a session is lost.
+ */
+const NETWORK_BLOCK =
+  /attention required!? \| cloudflare|just a moment(?:\.\.\.|…)|\b403\b[\s\S]*\bcloudflare\b|\bcloudflare\b[\s\S]*\b403\b/i;
+
+/** The text of a failed turn is Cloudflare's block page, not the account's refusal. */
+export function isNetworkBlock(text: string): boolean {
+  return NETWORK_BLOCK.test(text) && !isSessionLoss(text);
+}
+
+/**
  * What this plugin gives a failure it read as a session lost: the refusal's
  * category, and its own code (see isSessionLost).
  */
-export const SESSION_LOST_INFO: NonNullable<PluginTurnFailedEvent["errorInfo"]> = {
+export const SESSION_LOST_INFO: NonNullable<
+  PluginTurnFailedEvent["errorInfo"]
+> = {
   category: "unauthorized",
   providerCode: "claude-switcher:session-lost",
   httpStatusCode: null,
@@ -156,7 +173,9 @@ export const SESSION_LOST_INFO: NonNullable<PluginTurnFailedEvent["errorInfo"]> 
  * The failure, judged as the refusal it is: bb sends it with no errorInfo,
  * which is no business of this plugin (see SESSION_LOST_INFO).
  */
-export function sessionLost(failure: PluginTurnFailedEvent): PluginTurnFailedEvent {
+export function sessionLost(
+  failure: PluginTurnFailedEvent,
+): PluginTurnFailedEvent {
   return { ...failure, errorInfo: SESSION_LOST_INFO };
 }
 
@@ -250,7 +269,11 @@ export function settle(account: AccountUsage, now: number): AccountUsage {
  * it yet: what it is missing does not change that the account cannot run
  * `model` now (Astra FINAL-R9-001). Any other incomplete answer says nothing.
  */
-export function measuredOut(account: AccountUsage, model: string, now: number): boolean {
+export function measuredOut(
+  account: AccountUsage,
+  model: string,
+  now: number,
+): boolean {
   if (account.unknown !== true) return false;
   const settled = settle(account, now);
   return [
@@ -340,7 +363,9 @@ export function resetOfAccount(
   };
   return (
     fits(account.session, SESSION_WINDOW_MS) ||
-    [account.weekly, ...Object.values(account.models)].some((w) => fits(w, WEEK_WINDOW_MS))
+    [account.weekly, ...Object.values(account.models)].some((w) =>
+      fits(w, WEEK_WINDOW_MS),
+    )
   );
 }
 
@@ -379,7 +404,9 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
     stuck ? null : (input.limitedUntil?.(name) ?? null);
   if (stuck || failedOn === null) {
     // Not one a mark keeps out (Astra r7): its read lags the 429.
-    const own = accounts.filter((a) => a.name === input.currentAccount && marked(a.name) === null);
+    const own = accounts.filter(
+      (a) => a.name === input.currentAccount && marked(a.name) === null,
+    );
     // A pick by hand holds for the reserved model and Haiku, never for a
     // model held off the reserve (Aitor 2026-11-06, «sí o sí»).
     const here = chooseAccount(
@@ -448,8 +475,7 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
     // Max account whose weekly and reserved window reset together keeps
     // the reserve again then). From now at the earliest: a reset already
     // past, reported or measured, does not date the send before now.
-    const sendBy =
-      Math.max(at, input.now) + RESET_BUFFER_MS + RESET_JITTER_MS;
+    const sendBy = Math.max(at, input.now) + RESET_BUFFER_MS + RESET_JITTER_MS;
     if (spendsReservedWeekly(settle(account, sendBy), options)) {
       reserved = true;
       continue;
@@ -541,7 +567,10 @@ export function mayAdviseOpus(
  */
 export function adviseOpus(
   decision: SwitchDecision,
-  input: Pick<SwitchInput, "accounts" | "preferredModel" | "reserveModel" | "now">,
+  input: Pick<
+    SwitchInput,
+    "accounts" | "preferredModel" | "reserveModel" | "now"
+  >,
   unread: readonly string[],
   ruledOut: string | null,
 ): boolean {
@@ -601,7 +630,9 @@ export function opusInstead(
     input.failedAccount === undefined
       ? input.currentAccount
       : input.failedAccount;
-  if (!adviseOpus(decision, input, unread, input.stuck === true ? null : failedOn))
+  if (
+    !adviseOpus(decision, input, unread, input.stuck === true ? null : failedOn)
+  )
     return null;
   return placedOn({
     ...placement,
@@ -819,7 +850,13 @@ export function bestAccount(
   return (
     chooseSeated(
       accounts.map((a) => settle(a, now)),
-      { preferredModel, reserveModel, savedForUser, reserveSpareUpTo, reserveShare },
+      {
+        preferredModel,
+        reserveModel,
+        savedForUser,
+        reserveSpareUpTo,
+        reserveShare,
+      },
       freeSeats,
     )?.account ?? null
   );
@@ -890,7 +927,11 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   // A current account marked by a 429 does not run the turn whatever its
   // read says, or with nothing read (Astra r6, r7): the read lags the 429.
   const currentMarked = markedOut(input, input.currentAccount);
-  if (!loggedOut && !currentMarked && (current === undefined || current.unknown === true)) {
+  if (
+    !loggedOut &&
+    !currentMarked &&
+    (current === undefined || current.unknown === true)
+  ) {
     if (
       pinHolds ||
       input.unreadKeepsReserve?.(input.currentAccount) !== true ||
@@ -919,7 +960,9 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   if (runs && (pinHolds || !spendsReservedWeekly(current, options))) {
     // A pick by hand holds the reserved model where it is.
     const forRoom =
-      input.pinned === true ? null : roomMove(current, accounts, input, options);
+      input.pinned === true
+        ? null
+        : roomMove(current, accounts, input, options);
     if (forRoom !== null)
       return { kind: "move", account: forRoom, why: "fable-room" };
     if (
@@ -954,7 +997,9 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     const free = input.freeSeats;
     const pick = (pool: AccountUsage[]) =>
       (wanted > 1 && free !== undefined
-        ? chooseSeated(pool, options, (name) => (free(name) >= wanted ? free(name) : 0))
+        ? chooseSeated(pool, options, (name) =>
+            free(name) >= wanted ? free(name) : 0,
+          )
         : null) ??
       (input.seatsWantedOnly === true && wanted > 1
         ? null
@@ -1059,12 +1104,18 @@ function destinationTeamSeats(input: PlacementInput): AccountUsage[] {
  * A mark keeps `name` out (see PlacementInput.limitedUntil). The current
  * account too: marked, it runs nothing either (Astra r6, r7).
  */
-function markedOut(input: Pick<PlacementInput, "limitedUntil">, name: string): boolean {
+function markedOut(
+  input: Pick<PlacementInput, "limitedUntil">,
+  name: string,
+): boolean {
   return (input.limitedUntil?.(name) ?? null) !== null;
 }
 
 export function unreadTeamSeats(
-  input: Pick<PlacementInput, "accounts" | "unreadTeams" | "currentAccount" | "now">,
+  input: Pick<
+    PlacementInput,
+    "accounts" | "unreadTeams" | "currentAccount" | "now"
+  >,
 ): AccountUsage[] {
   const known = (window: UsageWindow | undefined): UsageWindow =>
     window === undefined || window.missing === true
@@ -1128,7 +1179,9 @@ export function reserveWait(
     )
       earliest = { account: account.name, at, late };
   }
-  return earliest === null ? null : { account: earliest.account, at: earliest.at };
+  return earliest === null
+    ? null
+    : { account: earliest.account, at: earliest.at };
 }
 
 /**
