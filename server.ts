@@ -6785,6 +6785,12 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     limitedAt.delete(name);
     const sessionsLost = [...(sessionLostAt.get(name) ?? [])].filter(([, at]) => now < at + SESSION_LOST_MS).length;
     sessionLostAt.delete(name);
+    // Nor one of a run's accounts any more (R2-003).
+    for (const [host, recent] of refusalsOn) {
+      const kept = recent.filter((r) => r.account !== name);
+      if (kept.length === 0) refusalsOn.delete(host);
+      else refusalsOn.set(host, kept);
+    }
     const out = { account: name, refusal, limits, sessionsLost };
     if (!refusal && limits === 0 && sessionsLost === 0) return out;
     const line = `account ${name} unblocked by hand: ${unblockedText(out)}`;
@@ -6947,8 +6953,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       const seen = refusalSeen.get(event.threadId);
       const host = seen?.host ?? "";
       // The API's own error body is Anthropic's answer about that
-      // credential: never the machine's (see stormFrom).
-      const counts = !isApiErrorBody(text);
+      // credential, and a session lost is the account's login there: never
+      // the machine's (see stormFrom; R2-001).
+      const counts = !isApiErrorBody(text) && !(text !== null && isSessionLoss(text));
       if (seen !== undefined) seen.counts = counts;
       if (text !== null && isNetworkBlock(text)) {
         noteBlock(host, event, deps.now());

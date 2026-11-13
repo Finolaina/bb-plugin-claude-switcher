@@ -24737,6 +24737,8 @@ describe("the circuit breaker: three accounts refusing on one machine within 5 m
       model?: string;
       text?: string;
       presetEnv?: Record<string, EnvVar[]>;
+      /** Run before the failure of each index, at its clock. */
+      before?: (i: number, h: Awaited<ReturnType<typeof host>>) => Promise<void>;
     } = {},
   ) {
     let clock = NOW;
@@ -24759,6 +24761,7 @@ describe("the circuit breaker: three accounts refusing on one machine within 5 m
     await h.harness.behavior.callRpc("accounts_refresh", null);
     for (const [i, offset] of offsets.entries()) {
       clock = NOW + offset;
+      await options.before?.(i, h);
       await h.harness.behavior.emitThreadEvent(
         "turn.failed",
         refused({ requestId: `creq_${i + 1}` }),
@@ -24851,6 +24854,36 @@ describe("the circuit breaker: three accounts refusing on one machine within 5 m
     await settled();
     expect((await vetoed(h)).sort()).toHaveLength(3);
     expect(await vetoed(h)).toContain("team");
+    expect(stormLines(h)).toEqual([]);
+  });
+
+  it("three refusals whose text is a session lost do not open it: each account has no login there (R2-001)", async () => {
+    for (const text of [
+      "Not logged in · Please run /login",
+      "this login reached its time limit and cannot be renewed",
+      "Failed to authenticate. API Error: 401",
+    ]) {
+      const h = await refusals([0, 30_000, 60_000], { text });
+      expect(await vetoed(h)).toHaveLength(3);
+      expect(stormLines(h)).toEqual([]);
+      h.harness.dispose();
+    }
+  });
+
+  it("an account unblocked by hand no longer counts towards a run: the third refusal leaves two set aside (R2-003)", async () => {
+    let lifted = "";
+    const h = await refusals([0, 60_000, 120_000], {
+      before: async (i, h) => {
+        if (i !== 2) return;
+        lifted = (await vetoed(h))[0]!;
+        expect(
+          (await h.harness.behavior.runCli(["unblock", lifted])).exitCode,
+        ).toBe(0);
+      },
+    });
+    const left = await vetoed(h);
+    expect(left).toHaveLength(2);
+    expect(left).not.toContain(lifted);
     expect(stormLines(h)).toEqual([]);
   });
 
@@ -24970,6 +25003,11 @@ it("a turn that started after the run opened and ends well on that machine close
   const before = await start("thr-a");
   await fail(3);
   expect(await open()).toEqual(["host-nuc"]);
+  // Started 1 ms after the run opened, on the server: ends well below.
+  clock = NOW + 20_001;
+  const after = await start("thr-b");
+  // Started before, ends well: no proof.
+  clock = NOW + 25_000;
   await before();
   expect(await open()).toEqual(["host-nuc"]);
   // On another machine: no proof of this one.
@@ -24977,9 +25015,7 @@ it("a turn that started after the run opened and ends well on that machine close
   const elsewhere = await start("thr-3", "proj-3", "env-3");
   await elsewhere();
   expect(await open()).toEqual(["host-nuc"]);
-  // Started 1 ms after the run opened, on the server, and ends well: closed.
-  clock = NOW + 20_001;
-  const after = await start("thr-b");
+  // The one started 1 ms after the run opened ends well: closed.
   clock = NOW + 40_000;
   await after();
   expect(await open()).toEqual([]);
