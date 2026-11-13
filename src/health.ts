@@ -75,15 +75,16 @@ export interface HealthReport {
    */
   limites: Limite[];
   /**
-   * The accounts set aside by a refusal, while it stands (0.2.53, Aitor
+   * The accounts set aside by a refusal, while it stands (0.2.54, Aitor
    * 2026-11-13): no turn is placed there until `hasta`, or until lifted
-   * (`unblock`, `use`, or a run of refusals on one machine taken as the
-   * machine's). `http`: the status bb gave, null when none.
+   * (`unblock`, a turn that ends well there, or a run of refusals on one
+   * machine taken as the machine's). `http`: the status bb gave, null when
+   * none.
    */
   rechazos: Rechazo[];
   /**
    * The machines whose refusals are taken as their network's, not the
-   * accounts', while the run lasts (0.2.53): «bloqueo de red» (a page of
+   * accounts', while the run lasts (0.2.54): «bloqueo de red» (a page of
    * Cloudflare's or HTML) or «cortacircuitos» (several accounts refused
    * there within minutes). `maquina` is bb's host id ("" when unknown).
    */
