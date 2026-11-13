@@ -1680,7 +1680,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * REFUSAL_STORM_ACCOUNTS accounts refused there within REFUSAL_STORM_MS
    * (see stormFrom); open until REFUSAL_STORM_MS without a refusal there.
    */
-  const storms = new Map<string, { since: number; last: number }>();
+  const storms = new Map<string, { since: number; opened: number; last: number }>();
   /** Each machine's run of network blocks, for its one STUCK line (see noteBlock). */
   const blockRuns = new Map<string, { since: number; last: number }>();
   /**
@@ -5354,6 +5354,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     if (typeof ran === "string" && since !== undefined) {
       sessionBack(ran, { host, since });
       refusalBack(ran);
+      stormBack(host ?? "", since);
     }
     // Its turn ended there: a later failure that no new `thread.active`
     // announces (a turn refused at the door) is the project's account's,
@@ -6797,6 +6798,21 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         runs.push({ host, hostName: hostLabel(host), since: storm.since, until: storm.last + REFUSAL_STORM_MS, why: "cortacircuitos" });
     return runs;
   }
+  /**
+   * A turn started `since` ended well on `host` ("" unknown): the network
+   * there works, and a run of refusals opened before it started was no
+   * block of it (three accounts refusing for real with a text unread would
+   * keep it open for good, its own retries every 2 min). From here, a
+   * refusal there is its account's again.
+   */
+  function stormBack(host: string, since: number): void {
+    const storm = storms.get(host);
+    if (storm === undefined || since <= storm.opened) return;
+    storms.delete(host);
+    bb.log.info(
+      `${hostLabel(host)}: a turn started after its run of refusals opened ended well; the run is closed, a refusal there is its account's again`,
+    );
+  }
   /** A machine's run of refusals taken as its own is open (see storms). */
   function stormOpen(host: string, now: number): boolean {
     const storm = storms.get(host);
@@ -6822,7 +6838,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       return false;
     }
     refusalsOn.delete(host);
-    storms.set(host, { since: recent[0]!.at, last: now });
+    storms.set(host, { since: recent[0]!.at, opened: now, last: now });
     const lifted: string[] = [];
     for (const r of recent) {
       if (refusedAt.get(r.account) !== r.at) continue;

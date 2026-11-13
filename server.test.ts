@@ -24902,6 +24902,95 @@ describe("the circuit breaker: three accounts refusing on one machine within 5 m
     expect(await vetoed(h)).toHaveLength(1);
   });
 
+it("a turn that started after the run opened and ends well on that machine closes it; one started before, or on another machine, does not", async () => {
+  let clock = NOW;
+  const turns: Array<[string, string]> = [1, 2, 3, 4].map((n) => [
+    `creq_${n}`,
+    FORBIDDEN,
+  ]);
+  const log = { "thread-1": refusedLog("thread-1", turns.slice(0, 1)) };
+  const h = await host(FIVE, {
+    ...MACHINES,
+    clock: () => clock,
+    threads: {
+      ...MACHINES.threads,
+      "thr-a": { environmentId: "env-1", projectId: "proj-1" },
+      "thr-b": { environmentId: "env-1", projectId: "proj-1" },
+    },
+    threadEvents: log,
+  });
+  dispose = () => h.harness.dispose();
+  teamSeats(h);
+  await h.harness.behavior.callRpc("accounts_refresh", null);
+  const fail = async (n: number) => {
+    log["thread-1"] = refusedLog("thread-1", turns.slice(0, n));
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      refused({ requestId: `creq_${n}` }),
+    );
+    await settled();
+    h.queued.length = 0;
+  };
+  /** A turn of `id` (proj-1, on the server unless `environmentId`) starts now; the returned call ends it well. */
+  const start = async (
+    id: string,
+    projectId = "proj-1",
+    environmentId = "env-1",
+  ) => {
+    const t = thread({ id, projectId, environmentId });
+    expect(
+      await h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: t,
+          requestedExecution: {
+            providerId: "claude-code",
+            model: "claude-fable-5-5",
+          },
+          attempt: "start-turn",
+        }),
+      ),
+    ).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("thread.active", { thread: t });
+    await settled();
+    return () =>
+      h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: t,
+        lastAssistantText: null,
+      });
+  };
+  const open = async () =>
+    (await healthOf(h))
+      .red!.filter((r) => r.motivo === "cortacircuitos")
+      .map((r) => r.maquina);
+  await fail(1);
+  clock = NOW + 10_000;
+  await fail(2);
+  clock = NOW + 20_000;
+  // Started in the same instant the run opens: no proof.
+  const before = await start("thr-a");
+  await fail(3);
+  expect(await open()).toEqual(["host-nuc"]);
+  await before();
+  expect(await open()).toEqual(["host-nuc"]);
+  // On another machine: no proof of this one.
+  clock = NOW + 30_000;
+  const elsewhere = await start("thr-3", "proj-3", "env-3");
+  await elsewhere();
+  expect(await open()).toEqual(["host-nuc"]);
+  // Started 1 ms after the run opened, on the server, and ends well: closed.
+  clock = NOW + 20_001;
+  const after = await start("thr-b");
+  clock = NOW + 40_000;
+  await after();
+  expect(await open()).toEqual([]);
+  expect(h.harness.logEntries.map((e) => e.message)).toContain(
+    "the server: a turn started after its run of refusals opened ended well; the run is closed, a refusal there is its account's again",
+  );
+  // From here a refusal there is its account's again.
+  clock = NOW + 50_000;
+  await fail(4);
+  expect((await healthOf(h)).rechazos).toHaveLength(1);
+});
   it("opened, the accounts of the run take a Fable turn again at once", async () => {
     const h = await refusals([0, 10_000, 20_000]);
     const moves = h.envSet.length;
