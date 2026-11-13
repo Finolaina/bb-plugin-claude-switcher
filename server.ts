@@ -6736,6 +6736,56 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       }),
     );
   }
+  /** What `unblock` lifted from an account. */
+  interface Unblocked {
+    account: string;
+    refusal: boolean;
+    limits: number;
+    sessionsLost: number;
+  }
+  function unblockedText(u: Unblocked): string {
+    return [
+      ...(u.refusal ? ["its refusal's veto"] : []),
+      ...(u.limits > 0 ? [`${u.limits} usage limit's mark${u.limits === 1 ? "" : "s"}`] : []),
+      ...(u.sessionsLost > 0 ? [`its session lost on ${u.sessionsLost} machine${u.sessionsLost === 1 ? "" : "s"}`] : []),
+    ].join(", ") + " lifted";
+  }
+  /**
+   * `bb claude-switcher unblock`: the account is taken as back now (Aitor
+   * 2026-11-13: «podemos pasar hilos fallidos a otras cuentas ultra con
+   * cuota»): its refusal's veto, its usage limits' marks (every scope) and
+   * its sessions lost (every machine) go, in the log and the history, and
+   * bb asks again at once for what waits. A new refusal or failure marks it
+   * again.
+   */
+  function unblock(name: string): Unblocked {
+    const now = deps.now();
+    const refusal = refusing(name);
+    refusedAt.delete(name);
+    refusedHttp.delete(name);
+    const limits = [...(limitedAt.get(name) ?? [])].filter(([, until]) => now < until).length;
+    limitedAt.delete(name);
+    const sessionsLost = [...(sessionLostAt.get(name) ?? [])].filter(([, at]) => now < at + SESSION_LOST_MS).length;
+    sessionLostAt.delete(name);
+    const out = { account: name, refusal, limits, sessionsLost };
+    if (!refusal && limits === 0 && sessionsLost === 0) return out;
+    const line = `account ${name} unblocked by hand: ${unblockedText(out)}`;
+    bb.log.info(line);
+    toHistorial(`account ${name} unblocked`, (db) =>
+      addStuck(db, {
+        at: now,
+        thread: "",
+        account: name,
+        model: "",
+        minutes: 0,
+        free: [],
+        projectBusy: false,
+        line: `unblock: ${name} by hand: ${unblockedText(out)}`,
+      }),
+    );
+    askWaitingAgain(`${name} was unblocked`);
+    return out;
+  }
   /** The machines' runs still open (see blockRuns and storms), for health. */
   function networkRuns(now: number): Array<{ host: string; hostName: string; since: number; until: number; why: string }> {
     const runs: Array<{ host: string; hostName: string; since: number; until: number; why: string }> = [];
@@ -8587,6 +8637,32 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
                 : key === null
                   ? `not held: ${options.id} (nothing to release)\n`
                   : `${out.account}: seat held by ${options.id} released\n`,
+            };
+          },
+        }),
+        unblock: cliCommand({
+          summary:
+            "Take an account as back now: lifts its refusal's veto, every usage limit's mark and every session lost of it on any machine, and asks again for what waits. If it refuses or fails again, it is set aside again",
+          positionals: [
+            { name: "account", description: "Account name", required: true },
+          ] as const,
+          options: { json: JSON_OPTION },
+          async run({ positionals, options }) {
+            await discover();
+            const name = positionals.account;
+            if (!accounts.some((a) => a.name === name))
+              throw new PluginCliError(
+                `Unknown account "${name}"; known: ${accounts.map((a) => a.name).join(", ") || "none"}`,
+                { code: "unknown_account" },
+              );
+            const out = unblock(name);
+            return {
+              exitCode: 0,
+              stdout: options.json
+                ? `${JSON.stringify(out, null, 2)}\n`
+                : out.refusal || out.limits > 0 || out.sessionsLost > 0
+                  ? `${name}: ${unblockedText(out)}\n`
+                  : `${name}: nothing set aside\n`,
             };
           },
         }),

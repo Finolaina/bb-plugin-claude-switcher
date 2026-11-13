@@ -24933,6 +24933,173 @@ describe("the circuit breaker: three accounts refusing on one machine within 5 m
     expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-1", "proj-1"]);
   });
 });
+describe("bb claude-switcher unblock: an account set aside, back by hand without a reload (0.2.54)", () => {
+  const own = (account: string) => [
+    {
+      name: ENV_VAR,
+      note: ownNote(account),
+      secret: true as const,
+      value: null,
+    },
+  ];
+  const opusBefore = (
+    h: Awaited<ReturnType<typeof host>>,
+    threadId: string,
+    projectId: string,
+  ) =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: threadId, projectId }),
+        requestedExecution: {
+          providerId: "claude-code",
+          model: "claude-opus-5-5",
+        },
+        attempt: "start-turn",
+      }),
+    );
+
+  it("lifts the refusal's veto, and a turn that waited for a Team seat starts at once, not at the next refresh", async () => {
+    // Every Team seat refused with the API's own body (no circuit breaker):
+    // an Opus turn of proj-2, on work, waits.
+    const turns: Array<[string, string]> = [1, 2, 3].map((n) => [
+      `creq_${n}`,
+      API_403,
+    ]);
+    const log = {
+      "thread-1": refusedLog("thread-1", turns.slice(0, 1), "claude-opus-5-5"),
+    };
+    const h = await host(FIVE, {
+      ...MACHINES,
+      presetEnv: { "proj-1": own("work"), "proj-2": own("work") },
+      threadEvents: log,
+    });
+    dispose = () => h.harness.dispose();
+    teamSeats(h);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    for (const n of [1, 2, 3]) {
+      log["thread-1"] = refusedLog(
+        "thread-1",
+        turns.slice(0, n),
+        "claude-opus-5-5",
+      );
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        refused({ requestId: `creq_${n}` }),
+      );
+      await settled();
+      h.queued.length = 0;
+    }
+    expect((await healthOf(h)).rechazos!.map((r) => r.cuenta).sort()).toEqual([
+      "default",
+      "team",
+      "work",
+    ]);
+    expect(await opusBefore(h, "thr-2", "proj-2")).toMatchObject({
+      action: "wait",
+    });
+    const moves = h.envSet.length;
+    const rechecks = h.harness.recheckCount;
+    const out = await h.harness.behavior.runCli(["unblock", "work"]);
+    expect(out.exitCode).toBe(0);
+    expect(out.stdout).toMatch(/^work: /);
+    expect(h.harness.recheckCount).toBe(rechecks + 1);
+    expect(await opusBefore(h, "thr-2", "proj-2")).toEqual({
+      action: "proceed",
+    });
+    expect(h.envSet).toHaveLength(moves);
+    const report = await healthOf(h);
+    expect(report.rechazos!.map((r) => r.cuenta).sort()).toEqual([
+      "default",
+      "team",
+    ]);
+    expect(report.cuentas.find((c) => c.nombre === "work")).toMatchObject({
+      usable: true,
+      problema: null,
+    });
+    expect(h.harness.logEntries.map((e) => e.message)).toContainEqual(
+      expect.stringMatching(/^account work unblocked by hand: /),
+    );
+    expect(
+      (await h.harness.behavior.runCli(["history", "--dias", "1"])).stdout,
+    ).toMatch(/unblock: work by hand/);
+  });
+
+  it("lifts every usage limit's mark and every session lost of the account", async () => {
+    const h = await host(FIVE, {
+      ...MACHINES,
+      threadEvents: {
+        "thr-2": [
+          {
+            seq: 1,
+            type: "client/turn/requested",
+            data: {
+              requestId: "creq_7",
+              execution: { model: "claude-fable-5-5" },
+            },
+          },
+          {
+            seq: 2,
+            type: "provider/error",
+            data: {
+              providerThreadId: "p",
+              threadId: "thr-2",
+              message: "Provider error",
+              detail: "Not logged in · Please run /login",
+            },
+          },
+        ],
+      },
+    });
+    dispose = () => h.harness.dispose();
+    teamSeats(h);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // A 429 of main (a limit's mark), and a session lost of main on the server.
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({
+        threadId: "thr-2",
+        requestId: "creq_7",
+        errorInfo: null,
+        rateLimits: null,
+      }),
+    );
+    await settled();
+    let report = JSON.parse(
+      (await h.harness.behavior.runCli(["health", "--json"])).stdout,
+    );
+    expect(report.limites.map((l: { cuenta: string }) => l.cuenta)).toContain(
+      "main",
+    );
+    expect(report.sinSesion.map((m: { cuenta: string }) => m.cuenta)).toEqual([
+      "main",
+    ]);
+    const out = await h.harness.behavior.runCli(["unblock", "main", "--json"]);
+    expect(JSON.parse(out.stdout)).toMatchObject({
+      account: "main",
+      refusal: false,
+      limits: 1,
+      sessionsLost: 1,
+    });
+    report = JSON.parse(
+      (await h.harness.behavior.runCli(["health", "--json"])).stdout,
+    );
+    expect(report.limites).toEqual([]);
+    expect(report.sinSesion).toEqual([]);
+  });
+
+  it("an unknown account is an error, and an account with nothing to lift says so", async () => {
+    const h = await host(FIVE, MACHINES);
+    dispose = () => h.harness.dispose();
+    teamSeats(h);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const unknown = await h.harness.behavior.runCli(["unblock", "nobody"]);
+    expect(unknown.exitCode).not.toBe(0);
+    const nothing = await h.harness.behavior.runCli(["unblock", "spare"]);
+    expect(nothing.exitCode).toBe(0);
+    expect(nothing.stdout).toBe("spare: nothing set aside\n");
+  });
+});
 });
 
 describe("a turn the network refused, not its account (2026-11-13)", () => {
