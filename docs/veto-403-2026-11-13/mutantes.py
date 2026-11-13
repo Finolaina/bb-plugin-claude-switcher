@@ -44,8 +44,8 @@ M = [
      ".filter((r) => now - r.at <= REFUSAL_STORM_MS);", ".filter(() => true);",
      S, "the third at 5 min"),
     ("cortacircuitos", "las máquinas se suman", "server.ts",
-     "      refusalSeen.set(event.threadId, { host, counts: true });",
-     "      refusalSeen.set(event.threadId, { host: \"\", counts: true });",
+     "    const recent = (refusalsOn.get(host) ?? []).filter(",
+     "    const recent = [...refusalsOn.values()].flat().filter(",
      S, "refusals on two machines are not added together"),
     ("cortacircuitos", "el cuerpo JSON de la API cuenta para la racha", "server.ts",
      "      const counts = !isApiErrorBody(text);", "      const counts = true;",
@@ -58,9 +58,13 @@ M = [
      "      refusedAt.delete(r.account);\n      lifted.push(r.account);",
      "      lifted.push(r.account);",
      S, "take an Opus turn again at once"),
-    ("cortacircuitos", "abierta, una negativa allí veta como siempre", "server.ts",
-     "      if (counts && stormOpen(host, at)) {", "      if (false) {",
-     S, "open, a refusal there sets nothing aside"),
+    # Quitar el atajo entero de handleFailure ya no muere: markRefused mira la racha
+    # abierta (VETO-001) y retiene el fallo igual; el atajo solo cambia los restos
+    # (reintento a los 2 min y no en el acto), sin prueba propia. Se muta lo que sí decide.
+    ("cortacircuitos", "abierta, una negativa allí no la alarga", "server.ts",
+     "      if (counts && stormOpen(host, at)) {\n        storms.get(host)!.last = at;\n",
+     "      if (counts && stormOpen(host, at)) {\n",
+     S, "VETO-002"),
     ("cortacircuitos", "la 3.ª se juzga y mueve el proyecto", "server.ts",
      "      if (!markRefused(failedOn, now, event, model)) {", "      if (!markRefused(failedOn, now, event, model) && false) {",
      S, "the third at exactly 5 min opens it"),
