@@ -24991,6 +24991,161 @@ it("a turn that started after the run opened and ends well on that machine close
   await fail(4);
   expect((await healthOf(h)).rechazos).toHaveLength(1);
 });
+it("five threads of five projects refused at once on one machine: no account is left set aside (VETO-001)", async () => {
+  const names = ["main", "spare", "work", "default", "team"];
+  const ids = [1, 2, 3, 4, 5];
+  const h = await host(FIVE, {
+    ...MACHINES,
+    environments: Object.fromEntries(
+      ids.map((n) => [
+        `proj-${n}`,
+        [{ id: `env-${n}`, hostId: "host-nuc", path: `/home/someone/p${n}` }],
+      ]),
+    ),
+    threads: Object.fromEntries(
+      ids.map((n) => [
+        `t${n}`,
+        { environmentId: `env-${n}`, projectId: `proj-${n}` },
+      ]),
+    ),
+    extraProjects: [3, 4, 5].map((n) => ({ id: `proj-${n}`, name: `P${n}` })),
+    projectCreatedAt: {
+      "proj-3": NOW - 24 * HOUR,
+      "proj-4": NOW - 24 * HOUR,
+      "proj-5": NOW - 24 * HOUR,
+    },
+    presetEnv: Object.fromEntries(
+      ids.slice(1).map((n) => [`proj-${n}`, own(names[n - 1]!)]),
+    ),
+    threadEvents: Object.fromEntries(
+      ids.map((n) => [
+        `t${n}`,
+        refusedLog(`t${n}`, [[`creq_${n}`, FORBIDDEN]]),
+      ]),
+    ),
+  });
+  dispose = () => h.harness.dispose();
+  teamSeats(h);
+  await h.harness.behavior.callRpc("accounts_refresh", null);
+  await Promise.all(
+    ids.map((n) =>
+      h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        refused({ threadId: `t${n}`, requestId: `creq_${n}` }),
+      ),
+    ),
+  );
+  await settled();
+  expect(await vetoed(h)).toEqual([]);
+  expect(stormLines(h)).toHaveLength(1);
+});
+
+for (const [offset, open] of [
+  [15 * 60_000, true],
+  [15 * 60_000 + 1, false],
+] as const)
+  it(`a run stays open at most 15 min from its first refusal, however often refused: ${offset} ms, ${open ? "still open" : "closed, counted from zero"} (VETO-002)`, async () => {
+    const h = await refusals([
+      0,
+      10_000,
+      20_000,
+      4 * 60_000,
+      8 * 60_000,
+      12 * 60_000,
+      offset,
+    ]);
+    expect(await vetoed(h)).toHaveLength(open ? 0 : 1);
+    expect(
+      (await healthOf(h)).red!.filter((r) => r.motivo === "cortacircuitos"),
+    ).toEqual(
+      open
+        ? [
+            {
+              maquina: "host-nuc",
+              nombre: "the server",
+              desde: "2026-09-29T12:00:00+02:00",
+              hasta: "2026-09-29T12:15:00+02:00",
+              motivo: "cortacircuitos",
+            },
+          ]
+        : [],
+    );
+  });
+
+it("a second failure of the same thread, queued behind the first, keeps its machine (VETO-003)", async () => {
+  let clock = NOW;
+  const turns: Array<[string, string]> = [1, 2, 3].map((n) => [
+    `creq_${n}`,
+    FORBIDDEN,
+  ]);
+  const log: Record<string, LoggedEvent[]> = {
+    "thread-1": refusedLog("thread-1", turns.slice(0, 1)),
+    "thr-2": refusedLog("thr-2", [
+      ["creq_a", FORBIDDEN],
+      ["creq_b", FORBIDDEN],
+    ]),
+  };
+  const h = await host(FIVE, {
+    ...MACHINES,
+    clock: () => clock,
+    threadEvents: log,
+  });
+  dispose = () => h.harness.dispose();
+  teamSeats(h);
+  await h.harness.behavior.callRpc("accounts_refresh", null);
+  for (const [i, offset] of [0, 10_000, 20_000].entries()) {
+    clock = NOW + offset;
+    log["thread-1"] = refusedLog("thread-1", turns.slice(0, i + 1));
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      refused({ requestId: `creq_${i + 1}` }),
+    );
+    await settled();
+    h.queued.length = 0;
+  }
+  expect(stormLines(h)).toHaveLength(1);
+  clock = NOW + 30_000;
+  await Promise.all(
+    ["creq_a", "creq_b"].map((requestId) =>
+      h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        refused({ threadId: "thr-2", requestId }),
+      ),
+    ),
+  );
+  await settled();
+  expect(await vetoed(h)).toEqual([]);
+});
+
+it("refusals on a machine unknown neither count towards a run nor open one: set aside as in 0.2.53 (VETO-004)", async () => {
+  let clock = NOW;
+  const turns: Array<[string, string]> = [1, 2, 3].map((n) => [
+    `creq_${n}`,
+    FORBIDDEN,
+  ]);
+  const log = { "thread-1": refusedLog("thread-1", turns.slice(0, 1)) };
+  const h = await host(FIVE, {
+    ...MACHINES,
+    environments: {},
+    clock: () => clock,
+    threadEvents: log,
+  });
+  dispose = () => h.harness.dispose();
+  teamSeats(h);
+  await h.harness.behavior.callRpc("accounts_refresh", null);
+  for (const [i, offset] of [0, 10_000, 20_000].entries()) {
+    clock = NOW + offset;
+    log["thread-1"] = refusedLog("thread-1", turns.slice(0, i + 1));
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      refused({ requestId: `creq_${i + 1}` }),
+    );
+    await settled();
+    h.queued.length = 0;
+  }
+  expect(await vetoed(h)).toHaveLength(3);
+  expect(stormLines(h)).toEqual([]);
+});
   it("opened, the accounts of the run take a Fable turn again at once", async () => {
     const h = await refusals([0, 10_000, 20_000]);
     const moves = h.envSet.length;
@@ -25177,6 +25332,32 @@ describe("bb claude-switcher unblock: an account set aside, back by hand without
     expect(report.sinSesion).toEqual([]);
   });
 
+it("history counts no stuck thread for an unblock: it shows it apart, as a note, in text and json (VETO-005)", async () => {
+  const h = await host(FIVE, {
+    ...MACHINES,
+    threadEvents: { "thread-1": refusedLog("thread-1", [["creq_1", API_403]]) },
+  });
+  dispose = () => h.harness.dispose();
+  teamSeats(h);
+  await h.harness.behavior.callRpc("accounts_refresh", null);
+  await h.harness.behavior.emitThreadEvent("turn.failed", refused());
+  await settled();
+  await h.harness.behavior.runCli(["unblock", "main"]);
+  const text = (await h.harness.behavior.runCli(["history", "--dias", "1"]))
+    .stdout;
+  expect(text).toMatch(/Stuck threads: 0\n/);
+  expect(text).toMatch(
+    /Notes: 1\n.*unblock: main by hand: its refusal's veto lifted/,
+  );
+  const json = JSON.parse(
+    (await h.harness.behavior.runCli(["history", "--dias", "1", "--json"]))
+      .stdout,
+  );
+  expect(json.stuck).toEqual([]);
+  expect(json.notes.map((n: { line: string }) => n.line)).toEqual([
+    "unblock: main by hand: its refusal's veto lifted",
+  ]);
+});
   it("an unknown account is an error, and an account with nothing to lift says so", async () => {
     const h = await host(FIVE, MACHINES);
     dispose = () => h.harness.dispose();

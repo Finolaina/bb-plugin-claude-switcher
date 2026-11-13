@@ -190,6 +190,13 @@ export const NETWORK_STREAK_MS = 10 * 60_000;
 export const REFUSAL_STORM_ACCOUNTS = 3;
 export const REFUSAL_STORM_MS = 5 * 60_000;
 /**
+ * A run of refusals taken as its machine's stays open at most this long from
+ * its first refusal, however often refused since (its own retries keep it
+ * fresh): then it closes and the refusals count from zero again. [SUPUESTO]
+ * 15 min: the block of 2026-11-13 lasted 30 min, one test again.
+ */
+export const REFUSAL_STORM_MAX_MS = 15 * 60_000;
+/**
  * How long a usage limit with no reset reported keeps its account marked
  * (see limitedAt). [SUPUESTO] 30 min: no default of bb's or ours fits, and
  * the next turn there may fail once more after it (Astra r4 high 1).
@@ -6696,9 +6703,19 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       );
       return true;
     }
-    // A run of refusals on one machine is the machine's (see stormFrom).
+    // A run of refusals on one machine is the machine's (see stormFrom); one
+    // opened while this failure was judged (its reads wait) holds it too
+    // (VETO-001). A machine unknown ("") is no machine: refusals there
+    // neither count nor open a run (VETO-004).
     const seen = refusalSeen.get(event.threadId);
-    if (seen?.counts !== false && stormFrom(name, seen?.host ?? "", now, event, model)) return false;
+    const host = seen?.host ?? "";
+    if (seen?.counts !== false && host !== "") {
+      if (stormOpen(host, now)) {
+        storms.get(host)!.last = now;
+        return false;
+      }
+      if (stormFrom(name, host, now, event, model)) return false;
+    }
     refusedAt.set(name, now);
     refusedHttp.set(name, event.errorInfo?.httpStatusCode ?? null);
     bb.log.warn(
@@ -6794,8 +6811,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       if (now - run.last < NETWORK_STREAK_MS)
         runs.push({ host, hostName: hostLabel(host), since: run.since, until: run.last + NETWORK_STREAK_MS, why: "bloqueo de red" });
     for (const [host, storm] of storms)
-      if (now - storm.last <= REFUSAL_STORM_MS)
-        runs.push({ host, hostName: hostLabel(host), since: storm.since, until: storm.last + REFUSAL_STORM_MS, why: "cortacircuitos" });
+      if (stormOpen(host, now))
+        runs.push({
+          host,
+          hostName: hostLabel(host),
+          since: storm.since,
+          until: Math.min(storm.last + REFUSAL_STORM_MS, storm.since + REFUSAL_STORM_MAX_MS),
+          why: "cortacircuitos",
+        });
     return runs;
   }
   /**
@@ -6817,7 +6840,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   function stormOpen(host: string, now: number): boolean {
     const storm = storms.get(host);
     if (storm === undefined) return false;
-    if (now - storm.last <= REFUSAL_STORM_MS) return true;
+    if (now - storm.last <= REFUSAL_STORM_MS && now - storm.since <= REFUSAL_STORM_MAX_MS) return true;
     storms.delete(host);
     return false;
   }
@@ -7587,10 +7610,14 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // its seat, which stays as it was.
     if (started === undefined && beforeLoad) started = null;
     // A refusal's machine, for a run of refusals there (see stormFrom).
+    // Its own entry: a later failure of the thread, queued behind this one,
+    // sets its own, which this one's end must not take (VETO-003).
+    let seen: { host: string; counts: boolean } | undefined;
     if (isRefusal(failed) && !isSessionLost(failed)) {
       const host = await threadHost(thread);
       await nameHost(host);
-      refusalSeen.set(event.threadId, { host, counts: true });
+      seen = { host, counts: true };
+      refusalSeen.set(event.threadId, seen);
     }
     try {
       await inProjectQueue(thread.projectId, () =>
@@ -7610,7 +7637,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         `thread ${event.threadId}: bb already has a retry of the turn (${error instanceof Error ? error.message : String(error)})`,
       );
     } finally {
-      refusalSeen.delete(event.threadId);
+      if (seen !== undefined && refusalSeen.get(event.threadId) === seen) refusalSeen.delete(event.threadId);
     }
   });
 
@@ -8726,10 +8753,21 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
               const samples = readSamples(historial, since);
               const stuck = readStuck(historial, since);
               const moves = s.history.filter((r) => r.at >= since);
+              // A row with no thread is a note, no stuck thread (VETO-005).
               if (options.json)
                 return {
                   exitCode: 0,
-                  stdout: `${JSON.stringify({ dias, moves, stuck, samples }, null, 2)}\n`,
+                  stdout: `${JSON.stringify(
+                    {
+                      dias,
+                      moves,
+                      stuck: stuck.filter((r) => r.thread !== ""),
+                      notes: stuck.filter((r) => r.thread === ""),
+                      samples,
+                    },
+                    null,
+                    2,
+                  )}\n`,
                 };
               const moved = moves.map(
                 (r) =>
