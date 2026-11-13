@@ -48,7 +48,7 @@ M = [
      "    const recent = [...refusalsOn.values()].flat().filter(",
      S, "refusals on two machines are not added together"),
     ("cortacircuitos", "el cuerpo JSON de la API cuenta para la racha", "server.ts",
-     "      const counts = !isApiErrorBody(text);", "      const counts = true;",
+     "      const counts = !isApiErrorBody(text) && !(", "      const counts = true && !(",
      S, "three refusals whose text is the API"),
     ("cortacircuitos", "no se levantan los vetos de la racha (Fable no vuelve)", "server.ts",
      "      refusedAt.delete(r.account);\n      lifted.push(r.account);",
