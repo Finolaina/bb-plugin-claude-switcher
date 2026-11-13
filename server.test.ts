@@ -24462,4 +24462,158 @@ describe("a refusal that is the machine's network, not the account (2026-11-13)"
     });
     expect(h.envSet).toEqual([]);
   });
+it("a 403 whose text is the API's own error body sets the account aside for 6 h, as before, and health says why and until when", async () => {
+  const h = await host(FIVE, {
+    ...MACHINES,
+    threadEvents: { "thread-1": refusedLog("thread-1", [["creq_1", API_403]]) },
+  });
+  dispose = () => h.harness.dispose();
+  await h.harness.behavior.callRpc("accounts_refresh", null);
+  await h.harness.behavior.emitThreadEvent("turn.failed", refused());
+  await settled();
+  expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-1"]);
+  const report = await healthOf(h);
+  expect(report.rechazos).toEqual([
+    { cuenta: "main", http: 403, hasta: "2026-09-29T18:00:00+02:00" },
+  ]);
+  const main = report.cuentas.find((c) => c.nombre === "main")!;
+  expect(main).toMatchObject({
+    usable: false,
+    problema: "vetada por rechazo (HTTP 403) hasta 2026-09-29T18:00:00+02:00",
+  });
+  expect(report.red).toEqual([]);
+  expect((await h.harness.behavior.runCli(["health"])).stdout).not.toContain(
+    "sin motivo",
+  );
+});
+
+it("«Not logged in» still goes as a session lost on its machine", async () => {
+  const h = await host(FIVE, {
+    ...MACHINES,
+    threadEvents: {
+      "thread-1": [
+        {
+          seq: 1,
+          type: "client/turn/requested",
+          data: {
+            requestId: "creq_1",
+            execution: { model: "claude-fable-5-5" },
+          },
+        },
+        {
+          seq: 2,
+          type: "provider/error",
+          data: {
+            providerThreadId: "p",
+            threadId: "thread-1",
+            message: "Provider error",
+            detail: "Not logged in · Please run /login",
+          },
+        },
+      ],
+    },
+  });
+  dispose = () => h.harness.dispose();
+  await h.harness.behavior.callRpc("accounts_refresh", null);
+  await h.harness.behavior.emitThreadEvent(
+    "turn.failed",
+    failure({ errorInfo: null, rateLimits: null }),
+  );
+  await settled();
+  const report = JSON.parse(
+    (await h.harness.behavior.runCli(["health", "--json"])).stdout,
+  );
+  expect(
+    report.sinSesion.map(
+      (m: { cuenta: string; maquina: string }) => `${m.cuenta}@${m.maquina}`,
+    ),
+  ).toEqual(["main@host-nuc"]);
+  expect(report.rechazos).toEqual([]);
+  expect(report.red).toEqual([]);
+});
+
+it("one STUCK line per machine and run of blocks, a run ending 10 min without one there; health shows the run", async () => {
+  let clock = NOW;
+  const turns: Array<[string, string]> = [1, 2, 3, 4].map((n) => [
+    `creq_${n}`,
+    CLOUDFLARE,
+  ]);
+  const h = await host(FIVE, {
+    ...MACHINES,
+    clock: () => clock,
+    threadEvents: { "thread-1": refusedLog("thread-1", turns) },
+  });
+  dispose = () => h.harness.dispose();
+  await h.harness.behavior.callRpc("accounts_refresh", null);
+  const fail = async (n: number) => {
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      refused({ requestId: `creq_${n}`, attemptNumber: 1 }),
+    );
+    await settled();
+    h.queued.length = 0;
+  };
+  await fail(1);
+  clock = NOW + 9 * 60_000;
+  await fail(2);
+  expect((await healthOf(h)).red).toEqual([
+    {
+      maquina: "host-nuc",
+      nombre: "the server",
+      desde: "2026-09-29T12:00:00+02:00",
+      hasta: "2026-09-29T12:19:00+02:00",
+      motivo: "bloqueo de red",
+    },
+  ]);
+  // 10 min after the latest: a new run, a new line.
+  clock = NOW + 19 * 60_000;
+  await fail(3);
+  const stuck = h.harness.logEntries.filter((e) =>
+    /^STUCK: the server: its network refuses/.test(e.message),
+  );
+  expect(stuck).toHaveLength(2);
+  const history = (await h.harness.behavior.runCli(["history", "--dias", "1"]))
+    .stdout;
+  expect(history).toMatch(/Stuck threads: 2\n/);
+  expect(
+    h.harness.logEntries.filter((e) => /refused a turn/.test(e.message)),
+  ).toEqual([]);
+});
+
+it("a thread left in error by a block is retried where it is by the rescue of every refresh, and its next block sets nothing aside", async () => {
+  const log = { "thread-1": refusedLog("thread-1", [["creq_1", CLOUDFLARE]]) };
+  const h = await host(FIVE, {
+    ...MACHINES,
+    listed: ["proj-1"],
+    threads: {
+      ...MACHINES.threads,
+      "thread-1": { status: "error", environmentId: "env-1" },
+    },
+    threadEvents: log,
+  });
+  dispose = () => h.harness.dispose();
+  const calls = h.usageCalls.length;
+  const run = h.harness.behavior.runService("usage-refresh");
+  await vi.waitFor(() =>
+    expect(h.usageCalls.length).toBeGreaterThanOrEqual(calls + 4),
+  );
+  await vi.waitFor(() => expect(h.retries).toHaveLength(1));
+  run.controller.abort();
+  await run.done;
+  expect(h.retries[0]!.reason).toMatch(/^Retrying on account main/);
+  expect(h.retries[0]!.sendAt).toBeUndefined();
+  log["thread-1"] = refusedLog("thread-1", [
+    ["creq_1", CLOUDFLARE],
+    ["creq_2", CLOUDFLARE],
+  ]);
+  await h.harness.behavior.emitThreadEvent(
+    "turn.failed",
+    refused({ requestId: "creq_2", attemptNumber: 6 }),
+  );
+  await settled();
+  // Past its fifth attempt: no retry of its own, left for the next refresh; nothing set aside, nothing moved.
+  expect(h.retries).toHaveLength(1);
+  expect(h.envSet).toEqual([]);
+  expect((await healthOf(h)).rechazos).toEqual([]);
+});
 });

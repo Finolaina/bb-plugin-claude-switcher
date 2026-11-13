@@ -6669,6 +6669,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       }),
     );
   }
+  /** The machines' runs still open (see blockRuns and storms), for health. */
+  function networkRuns(now: number): Array<{ host: string; hostName: string; since: number; until: number; why: string }> {
+    const runs: Array<{ host: string; hostName: string; since: number; until: number; why: string }> = [];
+    for (const [host, run] of blockRuns)
+      if (now - run.last < NETWORK_STREAK_MS)
+        runs.push({ host, hostName: hostLabel(host), since: run.since, until: run.last + NETWORK_STREAK_MS, why: "bloqueo de red" });
+    for (const [host, storm] of storms)
+      if (now - storm.last <= REFUSAL_STORM_MS)
+        runs.push({ host, hostName: hostLabel(host), since: storm.since, until: storm.last + REFUSAL_STORM_MS, why: "cortacircuitos" });
+    return runs;
+  }
   /** A machine's run of refusals taken as its own is open (see storms). */
   function stormOpen(host: string, now: number): boolean {
     const storm = storms.get(host);
@@ -8267,6 +8278,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       esperandoTeam: await esperandoTeam(),
       sinSesion: sessionMarks(),
       limites: limitMarks(),
+      rechazos: [...refusedAt]
+        .filter(([name]) => refusing(name))
+        .map(([account, r]) => ({ account, http: r.http, until: r.at + REFUSAL_MS })),
+      red: networkRuns(now),
       // huecoOpus and fablePerdida per Max or Ultra account (0.2.48).
       ...(current.preferredModel === ""
         ? {}
