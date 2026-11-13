@@ -21,6 +21,11 @@ project uses [Semantic Versioning](https://semver.org/).
   cuenta como un bloqueo de red. Se cierra antes en cuanto un turno que
   arrancó después de abrirse acaba bien en esa máquina (`stormBack`): la
   red va, y desde ahí una negativa allí vuelve a ser de su cuenta.
+  Abierta como mucho 15 min desde su primera negativa
+  (`REFUSAL_STORM_MAX_MS`, [SUPUESTO]); luego las negativas cuentan desde
+  cero. Una racha que se abre mientras se juzga un fallo también lo
+  retiene (cinco fallos a la vez ya no dejan vetadas a las últimas), y una
+  máquina desconocida no cuenta ni abre racha.
   No cuentan las negativas cuyo texto es el
   cuerpo de error de la API (`isApiErrorBody`): ahí contestó Anthropic sobre
   esa credencial. Umbrales [SUPUESTO], elegidos con el registro de ese día.
@@ -31,7 +36,8 @@ project uses [Semantic Versioning](https://semver.org/).
 
 - **`bb claude-switcher unblock <cuenta>`**: quita el veto por rechazo, las
   marcas de límite (todos los ámbitos) y las de sesión perdida (todas las
-  máquinas) de esa cuenta, lo apunta en el registro y en `history --dias`,
+  máquinas) de esa cuenta, lo apunta en el registro y en `history --dias`
+  (sección «Notes», no cuenta como hilo atascado),
   y vuelve a preguntar en el acto a los turnos que esperan.
 - **`health` dice siempre por qué**: `problema` nombra el rechazo
   («vetada por rechazo (HTTP 403) hasta …»), la marca de límite («marcada
