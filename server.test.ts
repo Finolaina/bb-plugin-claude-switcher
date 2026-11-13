@@ -24430,9 +24430,35 @@ describe("a turn the network refused, not its account (2026-11-13)", () => {
     await h.harness.behavior.emitThreadEvent("thread.idle", { thread: running, lastAssistantText: null });
     await newProject(h);
     expect(h.envSet.map((e) => e.projectId)).toEqual(lifted ? ["proj-1"] : ["proj-1", "proj-3"]);
+    // The next turn of a project on main runs there once main is back: no
+    // other mark of the refusal keeps it out (Codex Astra r1 NET-001).
+    expect(await before(h, "thr-4", "proj-2")).toEqual({ action: "proceed" });
+    expect(h.envSet.map((e) => e.projectId)).toEqual(lifted ? ["proj-1"] : ["proj-1", "proj-3", "proj-2"]);
     const line = `account main: a turn ended well on it ${after / 1000} s after its refusal; taken as back`;
     if (lifted) expect(messages(h, "info")).toContain(line);
     else expect(messages(h, "info")).not.toContainEqual(expect.stringContaining("after its refusal"));
+  });
+
+  it.each([
+    ["the block, then a real refusal of a later turn", CLOUDFLARE, "Failed to authenticate. API Error: 403 This organization has been disabled.", false],
+    ["a real refusal, then the block on a later turn", "Failed to authenticate. API Error: 403 This organization has been disabled.", CLOUDFLARE, true],
+  ])("reads the failed turn's own error, not a later turn's: %s (Codex Astra r1 NET-002)", async (_order, own, later, marked) => {
+    const [requested, error] = logOf(own)["thread-1"]!;
+    const next = logOf(later)["thread-1"]!;
+    const h = await host(MAIN_BEST, {
+      threadEvents: {
+        "thread-1": [
+          requested!,
+          error!,
+          { ...next[0]!, seq: 3, data: { ...next[0]!.data, requestId: "creq_2" } },
+          { ...next[1]!, seq: 4 },
+        ],
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", refused());
+    expect(h.envSet.map((e) => e.projectId)).toEqual(marked ? ["proj-1"] : []);
+    expect(messages(h, "warn").some((m) => m.includes("account main refused a turn"))).toBe(marked);
   });
 
   it("a pick by hand does not lift the mark", async () => {

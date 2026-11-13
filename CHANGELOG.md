@@ -20,11 +20,17 @@ project uses [Semantic Versioning](https://semver.org/).
   marca ninguna cuenta, el proyecto no se mueve y el turno se reintenta en
   la misma cuenta a los 2 min (`NETWORK_BLOCK_RETRY_MS`) mientras le queden
   intentos; agotados, queda en error para el rescate. Si el texto no se
-  puede leer, se juzga como antes.
+  puede leer, se juzga como antes. Solo cuenta el error anterior al
+  siguiente turno del hilo: el fallo puede esperar en la cola del proyecto
+  mientras otro turno corre y falla con otro texto (Codex Astra r1 NET-002).
 - **Un turno que acaba bien levanta la marca de negativa de su cuenta** si
   acaba al menos 60 s (`REFUSAL_PROOF_MS`) después de la marca. Ese día
   turnos que ya corrían en las cuentas marcadas acabaron bien y la marca
-  siguió horas. Nada más la levanta antes de las 6 h.
+  siguió horas. Nada más la levanta antes de las 6 h. Una negativa ya no
+  deja además una marca de límite de cuota (30 min o el reinicio del último
+  informe del hilo, que no era suyo): esa marca sobrevivía a la vuelta de
+  la cuenta (Codex Astra r1 NET-001). Las cuentas que rechazan siguen fuera
+  por `refusedAt`, que `measuredAccounts` ya trata como bloqueadas.
 
 ## [0.2.52] - 2026-11-11
 

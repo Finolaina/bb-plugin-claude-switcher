@@ -1893,7 +1893,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    * The text of the failed turn's error in bb's log; null when the log does
    * not name the turn or cannot be read. bb's failure event carries no
    * text: a session lost (isSessionLoss) or a network block
-   * (isNetworkBlock) is told by this alone.
+   * (isNetworkBlock) is told by this alone. Only an error before the
+   * thread's next turn is the turn's: its failure may wait in the project's
+   * queue while another turn of the thread runs and fails (Codex Astra r1
+   * NET-002).
    */
   async function failureText(threadId: string, requestId: string): Promise<string | null> {
     try {
@@ -1903,17 +1906,22 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         order: "desc",
         limit: "20",
       });
-      const own = turns.find(
+      const at = turns.findIndex(
         (r) => r.type === "client/turn/requested" && r.data.requestId === requestId,
       );
-      if (own === undefined) return null;
-      const [failed] = await bb.sdk.threads.events.list({
+      if (at === -1) return null;
+      const own = turns[at]!;
+      // Newest first: the turn requested right after this one, if any.
+      const next = turns[at - 1];
+      const errors = await bb.sdk.threads.events.list({
         threadId,
         types: ["provider/error"],
-        order: "desc",
-        limit: "1",
+        order: next === undefined ? "desc" : "asc",
+        limit: next === undefined ? "1" : "50",
         afterSeq: String(own.seq),
       });
+      const failed =
+        next === undefined ? errors[0] : errors.filter((r) => r.seq < next.seq).at(-1);
       if (failed?.type !== "provider/error") return null;
       return `${failed.data.message} ${failed.data.detail ?? ""}`;
     } catch (error) {
@@ -7076,8 +7084,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // Judged on its failure, the event is a limit or a refusal (handleFailure
     // ignores the rest); left in error, it may be hours old: no mark. A
     // session lost is marked on its machine only (see markRefused): a mark
-    // of the whole account here would keep it from every machine.
-    if (!stuck && failedOn !== null && !isSessionLost(event)) {
+    // of the whole account here would keep it from every machine. Nor a
+    // refusal: refusedAt keeps it out, and a turn that ends well there lifts
+    // that (refusalBack), which a limit's mark would outlast (Codex Astra r1
+    // NET-001).
+    if (!stuck && failedOn !== null && !refusal) {
       const blamed = input.accounts.find((a) => a.name === failedOn);
       const scope = limitScope(blamed, model, now)?.toLowerCase() ?? "";
       let until = reportedFreeAt(event);
