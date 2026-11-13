@@ -772,6 +772,41 @@ describe("a turn that failed for want of a session on its machine", () => {
   });
 });
 
+describe("a turn the network refused, not the account (2026-11-13)", () => {
+  // bb's log of 2026-11-13, 10:47 to 11:17: a provider/error with errorInfo
+  // unauthorized, HTTP 403, and Cloudflare's block page in its detail.
+  it("is told by Cloudflare's block page, whatever the case", () => {
+    for (const text of [
+      "Provider error Failed to authenticate. API Error: 403 Attention Required! | Cloudflare",
+      "Failed to authenticate. API Error: 403 Attention Required! | Cloudflare",
+      "attention required! | cloudflare",
+      "API Error: 403 <!DOCTYPE html><title>Just a moment...</title>",
+      "HTTP 403 from Cloudflare",
+      "cloudflare: 403 forbidden",
+    ])
+      expect(isNetworkBlock(text), text).toBe(true);
+  });
+
+  it("is not a refusal of the account, a session lost nor any other text", () => {
+    for (const text of [
+      // The account's own refusals (2026-09-30: subscription access off).
+      'API Error: 403 {"type":"error","error":{"type":"permission_error","message":"OAuth authentication is currently not allowed for this organization."}}',
+      "Failed to authenticate. API Error: 403 This organization has been disabled.",
+      "HTTP 403 Forbidden",
+      // A session lost on its machine (see isSessionLoss).
+      "Not logged in · Please run /login",
+      "Failed to authenticate: this login reached its time limit and cannot be renewed. Run `claude auth login` to sign in again",
+      'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired."}}',
+      // Cloudflare named with no block: a 401, a 429, or no status at all.
+      "API Error: 401 Unauthorized via Cloudflare",
+      "You've hit your 5-hour limit · resets 6pm (Europe/Madrid)",
+      "deploy the worker to Cloudflare",
+      "",
+    ])
+      expect(isNetworkBlock(text), text).toBe(false);
+  });
+});
+
 describe("decidePlacement", () => {
   const fable = (usedPercent: number) => ({
     Fable: { usedPercent, resetsAt: NOW + 4 * HOUR },
@@ -2928,31 +2963,14 @@ describe("resetOfAccount: whether a reset a 429 reported is one of the account's
   });
 });
 
-describe("a refusal that is the machine's network, not the account (2026-11-13)", () => {
-  // bb's log of 2026-11-13, 10:47-11:17 (provider/error, errorInfo
-  // unauthorized, HTTP 403): Cloudflare blocked a machine's network.
+describe("a refusal whose text is the API's own error body (2026-11-13)", () => {
+  // A refusal the API answered in JSON is about that credential: it never
+  // counts towards a run of refusals on one machine (see stormFrom).
   const CLOUDFLARE = "Provider error Failed to authenticate. API Error: 403 Attention Required! | Cloudflare";
   const API_403 =
     'Provider error API Error: 403 {"type":"error","error":{"type":"permission_error","message":"OAuth authentication is currently not allowed for this organization."}}';
   const API_401 =
     'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired."}}';
-
-  it("is told by a block or challenge page of Cloudflare, or any HTML body, whatever the case", () => {
-    for (const text of [
-      CLOUDFLARE,
-      "attention required! | cloudflare",
-      "Just a moment...",
-      "API Error: 403 <!DOCTYPE html><html><head><title>Forbidden</title></head></html>",
-      "API Error: 503 <HTML><BODY>Service Unavailable</BODY></HTML>",
-      "served by CLOUDFLARE",
-    ])
-      expect(isNetworkBlock(text), text).toBe(true);
-  });
-
-  it("is not the API's own error body, a session lost nor nothing read", () => {
-    for (const text of [API_403, API_401, "Not logged in · Please run /login", "", null])
-      expect(isNetworkBlock(text), String(text)).toBe(false);
-  });
 
   it("tells the API's error body: Anthropic answered about that credential", () => {
     expect(isApiErrorBody(API_403)).toBe(true);

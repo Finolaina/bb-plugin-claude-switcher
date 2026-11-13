@@ -143,22 +143,24 @@ export function isSessionLoss(text: string): boolean {
 }
 
 /**
- * A page of Cloudflare's (a block, «Attention Required», or a challenge,
- * «Just a moment»), or any HTML body: what a refusal says when the machine's
- * network is blocked on the way to the API (bb's log, 2026-11-13: «Failed to
- * authenticate. API Error: 403 Attention Required! | Cloudflare» on every
- * account in turn). The API itself answers in JSON.
+ * Cloudflare's block page in front of the API: the network (its IP) was
+ * refused, not the account (bb's log, 2026-11-13: «API Error: 403 Attention
+ * Required! | Cloudflare», errorInfo unauthorized, five accounts with quota
+ * vetoed in three minutes). Its title, its challenge page, or Cloudflare
+ * named with a 403; never a text that says a session is lost.
  */
-const NETWORK_BLOCK = /attention required|cloudflare|just a moment|<!doctype html|<html/i;
+const NETWORK_BLOCK =
+  /attention required!? \| cloudflare|just a moment(?:\.\.\.|…)|\b403\b[\s\S]*\bcloudflare\b|\bcloudflare\b[\s\S]*\b403\b/i;
 
-/** The text of a refusal is a block of the machine's network, not the account's answer (see NETWORK_BLOCK). */
-export function isNetworkBlock(text: string | null): boolean {
-  return text !== null && NETWORK_BLOCK.test(text);
+/** The text of a failed turn is Cloudflare's block page, not the account's refusal. */
+export function isNetworkBlock(text: string): boolean {
+  return NETWORK_BLOCK.test(text) && !isSessionLoss(text);
 }
 
 /**
  * The API's own error body (`{"type":"error","error":{…}}`): Anthropic
- * answered about that credential, so the refusal is the account's.
+ * answered about that credential, so the refusal is the account's and never
+ * the machine's (see stormFrom in server.ts).
  */
 export function isApiErrorBody(text: string | null): boolean {
   return text !== null && /"type"\s*:\s*"error"/.test(text);
