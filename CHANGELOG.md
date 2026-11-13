@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.53] - 2026-11-13
+
+### Corregido
+
+- **Un bloqueo de red ya no veta cuentas 6 h.** Aitor, 2026-11-13: «si hay
+  cuentas libres haga un repaso para redirigir nuevos hilos y que no
+  fallen». Medido en el registro de producción ese día: durante media hora
+  los turnos fallaron con la página de bloqueo de Cloudflare (HTTP 403,
+  «Attention Required! | Cloudflare», `errorInfo` `unauthorized`), el
+  plugin lo leyó como la negativa de cada cuenta y en tres minutos dejó
+  cinco cuentas con cuota fuera 6 h, con hilos esperando o en error hasta
+  una recarga. Ahora, antes de marcar una negativa, se lee el texto del
+  fallo en el registro de bb (`isNetworkBlock`): si es esa página, no se
+  marca ninguna cuenta, el proyecto no se mueve y el turno se reintenta en
+  la misma cuenta a los 2 min (`NETWORK_BLOCK_RETRY_MS`) mientras le queden
+  intentos; agotados, queda en error para el rescate. Si el texto no se
+  puede leer, se juzga como antes.
+- **Un turno que acaba bien levanta la marca de negativa de su cuenta** si
+  acaba al menos 60 s (`REFUSAL_PROOF_MS`) después de la marca. Ese día
+  turnos que ya corrían en las cuentas marcadas acabaron bien y la marca
+  siguió horas. Nada más la levanta antes de las 6 h.
+
 ## [0.2.52] - 2026-11-11
 
 ### Corregido
