@@ -12,7 +12,9 @@ import {
   decideAhead,
   decidePlacement,
   decideSwitch,
+  isApiErrorBody,
   isCalorTick,
+  isNetworkBlock,
   isRefusal,
   isSessionLoss,
   isSessionLost,
@@ -2923,5 +2925,40 @@ describe("resetOfAccount: whether a reset a 429 reported is one of the account's
     });
     expect(resetOfAccount(busy, NOW + 2 * HOUR + TOLERANCE, NOW, READ)).toBe(true);
     expect(resetOfAccount(busy, NOW + 4 * HOUR + 50 * 60_000, NOW, READ)).toBe(false);
+  });
+});
+
+describe("a refusal that is the machine's network, not the account (2026-11-13)", () => {
+  // bb's log of 2026-11-13, 10:47-11:17 (provider/error, errorInfo
+  // unauthorized, HTTP 403): Cloudflare blocked a machine's network.
+  const CLOUDFLARE = "Provider error Failed to authenticate. API Error: 403 Attention Required! | Cloudflare";
+  const API_403 =
+    'Provider error API Error: 403 {"type":"error","error":{"type":"permission_error","message":"OAuth authentication is currently not allowed for this organization."}}';
+  const API_401 =
+    'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired."}}';
+
+  it("is told by a block or challenge page of Cloudflare, or any HTML body, whatever the case", () => {
+    for (const text of [
+      CLOUDFLARE,
+      "attention required! | cloudflare",
+      "Just a moment...",
+      "API Error: 403 <!DOCTYPE html><html><head><title>Forbidden</title></head></html>",
+      "API Error: 503 <HTML><BODY>Service Unavailable</BODY></HTML>",
+      "served by CLOUDFLARE",
+    ])
+      expect(isNetworkBlock(text), text).toBe(true);
+  });
+
+  it("is not the API's own error body, a session lost nor nothing read", () => {
+    for (const text of [API_403, API_401, "Not logged in · Please run /login", "", null])
+      expect(isNetworkBlock(text), String(text)).toBe(false);
+  });
+
+  it("tells the API's error body: Anthropic answered about that credential", () => {
+    expect(isApiErrorBody(API_403)).toBe(true);
+    expect(isApiErrorBody(API_401)).toBe(true);
+    expect(isApiErrorBody('{ "type": "error", "error": {} }')).toBe(true);
+    for (const text of [CLOUDFLARE, "Not logged in · Please run /login", "", null])
+      expect(isApiErrorBody(text), String(text)).toBe(false);
   });
 });
