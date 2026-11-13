@@ -28,7 +28,8 @@ project uses [Semantic Versioning](https://semver.org/).
   máquina desconocida no cuenta ni abre racha.
   No cuentan las negativas cuyo texto es el
   cuerpo de error de la API (`isApiErrorBody`): ahí contestó Anthropic sobre
-  esa credencial. Umbrales [SUPUESTO], elegidos con el registro de ese día.
+  esa credencial, ni las de una sesión perdida (sin login en esa máquina).
+  Umbrales [SUPUESTO], elegidos con el registro de ese día.
 - **Una línea STUCK por máquina y racha de bloqueos de red**, no una por
   fallo (`noteBlock`); la racha acaba a los 10 min sin bloqueos allí.
 
@@ -38,12 +39,15 @@ project uses [Semantic Versioning](https://semver.org/).
   marcas de límite (todos los ámbitos) y las de sesión perdida (todas las
   máquinas) de esa cuenta, lo apunta en el registro y en `history --dias`
   (sección «Notes», no cuenta como hilo atascado),
-  y vuelve a preguntar en el acto a los turnos que esperan.
+  y vuelve a preguntar en el acto a los turnos que esperan; la cuenta deja
+  de contar en una racha en curso.
 - **`health` dice siempre por qué**: `problema` nombra el rechazo
   («vetada por rechazo (HTTP 403) hasta …»), la marca de límite («marcada
   por límite (toda la cuenta | Opus) hasta …») y la sesión perdida; el
   «sin motivo» ya no puede salir. `health --json` gana `rechazos` (cuenta,
   http, hasta) y `red` (máquina, nombre, desde, hasta, motivo).
+  `problema` no nulo no significa no usable: una marca de límite de un
+  modelo o una sesión perdida en otra máquina salen con `usable` verdadero.
 
 ## [0.2.53] - 2026-11-13
 
