@@ -18,7 +18,10 @@ project uses [Semantic Versioning](https://semver.org/).
   misma máquina dentro de 5 min se quitan los vetos de esa racha, una línea
   STUCK lo dice y, mientras siga abierta (5 min sin negativas allí), una
   negativa en esa máquina no veta a nadie y se reintenta en la misma
-  cuenta como un bloqueo de red. No cuentan las negativas cuyo texto es el
+  cuenta como un bloqueo de red. Se cierra antes en cuanto un turno que
+  arrancó después de abrirse acaba bien en esa máquina (`stormBack`): la
+  red va, y desde ahí una negativa allí vuelve a ser de su cuenta.
+  No cuentan las negativas cuyo texto es el
   cuerpo de error de la API (`isApiErrorBody`): ahí contestó Anthropic sobre
   esa credencial. Umbrales [SUPUESTO], elegidos con el registro de ese día.
 - **Una línea STUCK por máquina y racha de bloqueos de red**, no una por
