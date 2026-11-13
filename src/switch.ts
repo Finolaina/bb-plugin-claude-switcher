@@ -143,6 +143,21 @@ export function isSessionLoss(text: string): boolean {
 }
 
 /**
+ * Cloudflare's block page in front of the API: the network (its IP) was
+ * refused, not the account (bb's log, 2026-11-13: «API Error: 403 Attention
+ * Required! | Cloudflare», errorInfo unauthorized, five accounts with quota
+ * vetoed in three minutes). Its title, its challenge page, or Cloudflare
+ * named with a 403; never a text that says a session is lost.
+ */
+const NETWORK_BLOCK =
+  /attention required!? \| cloudflare|just a moment(?:\.\.\.|…)|\b403\b[\s\S]*\bcloudflare\b|\bcloudflare\b[\s\S]*\b403\b/i;
+
+/** The text of a failed turn is Cloudflare's block page, not the account's refusal. */
+export function isNetworkBlock(text: string): boolean {
+  return NETWORK_BLOCK.test(text) && !isSessionLoss(text);
+}
+
+/**
  * What this plugin gives a failure it read as a session lost: the refusal's
  * category, and its own code (see isSessionLost).
  */

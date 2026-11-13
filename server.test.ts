@@ -25,6 +25,8 @@ import {
   RESERVE_RECHECK_MS,
   SEAT_RECHECK_MS,
   SEAT_TTL_MS,
+  NETWORK_BLOCK_RETRY_MS,
+  REFUSAL_PROOF_MS,
   SESSION_LOST_MS,
   type State,
 } from "./server.js";
@@ -24298,5 +24300,176 @@ describe("the marks of a usage limit, and the threads they hold (2026-11-11)", (
     await h.harness.behavior.emitThreadEvent("turn.failed", f);
     const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
     expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: "2026-10-05T12:00:00+02:00" }]);
+  });
+});
+
+describe("a turn the network refused, not its account (2026-11-13)", () => {
+  // Aitor, 2026-11-13: «si hay cuentas libres haga un repaso para redirigir
+  // nuevos hilos y que no fallen». bb's log that day: for half an hour every
+  // turn failed with Cloudflare's block page (HTTP 403, errorInfo
+  // unauthorized), read as each account's refusal: five accounts with quota
+  // were chosen for nothing for 6 h, and turns that then ended well on them
+  // did not bring them back.
+  /** main measures best: kept from it only by a mark. */
+  const MAIN_BEST = {
+    main: () => Response.json(payload(1, 40)),
+    spare: () => Response.json(payload(10, 60)),
+    work: () => Response.json(payload(5, 20)),
+  };
+  const CLOUDFLARE = "Failed to authenticate. API Error: 403 Attention Required! | Cloudflare";
+  /** bb's log of thread-1's turn creq_1, failed with `detail`, as on 2026-11-13. */
+  const logOf = (detail: string): Record<string, LoggedEvent[]> => ({
+    "thread-1": [
+      { seq: 1, type: "client/turn/requested", data: { requestId: "creq_1", execution: { model: "claude-opus-5-5" } } },
+      {
+        seq: 2,
+        type: "provider/error",
+        data: {
+          providerThreadId: "p",
+          threadId: "thread-1",
+          message: "Provider error",
+          detail,
+          errorInfo: { category: "unauthorized", providerCode: null, httpStatusCode: 403 },
+        },
+      },
+    ],
+  });
+  /** As bb announces it: unauthorized, HTTP 403, no limit report. */
+  const refused = (overrides: Partial<PluginTurnFailedEvent> = {}) =>
+    failure({
+      errorInfo: { category: "unauthorized", providerCode: null, httpStatusCode: 403 },
+      rateLimits: null,
+      ...overrides,
+    });
+  const newProject = (h: Awaited<ReturnType<typeof host>>) =>
+    h.harness.behavior.emitThreadEvent("thread.created", { thread: thread({ id: "thr-new", projectId: "proj-3" }) });
+  const messages = (h: Awaited<ReturnType<typeof host>>, level: string) =>
+    h.harness.logEntries.filter((e) => e.level === level).map((e) => e.message);
+
+  it("marks no account, moves nothing and retries the turn on the same account two minutes later", async () => {
+    expect(NETWORK_BLOCK_RETRY_MS).toBe(2 * 60_000);
+    const h = await host(MAIN_BEST, { threadEvents: logOf(CLOUDFLARE) });
+    dispose = () => h.harness.dispose();
+    const { errors } = await h.harness.behavior.emitThreadEvent("turn.failed", refused());
+    expect(errors).toEqual([]);
+    expect(h.envSet).toEqual([]);
+    expect(h.retries).toEqual([
+      {
+        threadId: "thread-1",
+        turnRequestId: "creq_1",
+        reason: "Retrying on account main: the network refused the turn (Cloudflare's block page)",
+        sendAt: NOW + 2 * 60_000,
+      },
+    ]);
+    expect(messages(h, "warn")).toContain(
+      "network refused a turn of thread thread-1 (HTTP 403, Cloudflare): no account marked; retried on main at 2026-09-29T10:02:00.000Z",
+    );
+    expect(messages(h, "warn")).not.toContainEqual(expect.stringContaining("refused a turn (HTTP"));
+    // main is chosen as before: a new project stays on it.
+    await newProject(h);
+    expect(h.envSet).toEqual([]);
+  });
+
+  it("leaves the thread in error once its retries are spent, still marking nobody", async () => {
+    const h = await host(MAIN_BEST, { threadEvents: logOf(CLOUDFLARE) });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", refused({ attemptNumber: 5 }));
+    expect(h.retries).toEqual([]);
+    expect(h.envSet).toEqual([]);
+    expect(messages(h, "warn")).toContain(
+      "network refused a turn of thread thread-1 (HTTP 403, Cloudflare): no account marked; every retry spent, left in error for the rescue",
+    );
+    await newProject(h);
+    expect(h.envSet).toEqual([]);
+  });
+
+  it.each([
+    ["its text cannot be read", { threadEventsError: "HTTP 503: internal error" }],
+    ["the log does not name the turn", { threadEvents: {} }],
+    ["its text is the account's own refusal", { threadEvents: logOf("Failed to authenticate. API Error: 403 This organization has been disabled.") }],
+  ])("marks the account and moves the project as before when %s", async (_why, options) => {
+    const h = await host(MAIN_BEST, options);
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", refused());
+    expect(h.envSet.map((e) => [e.projectId, e.value])).toEqual([["proj-1", `${ACCOUNTS}/work`]]);
+    expect(messages(h, "warn")).toContainEqual(expect.stringContaining("account main refused a turn"));
+    await newProject(h);
+    expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-1", "proj-3"]);
+  });
+
+  /** bb asks before a turn of `threadId` in `projectId`. */
+  const before = (h: Awaited<ReturnType<typeof host>>, threadId: string, projectId: string) =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: threadId, projectId }),
+        requestedExecution: { providerId: "claude-code", model: "claude-opus-5-5" },
+        attempt: "start-turn",
+      }),
+    );
+  const settled = async () => {
+    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+  };
+
+  it.each([
+    [59_999, false],
+    [60_000, true],
+  ])("a turn that ends well on the refusing account %i ms after its mark lifts it: %s", async (after, lifted) => {
+    expect(REFUSAL_PROOF_MS).toBe(60_000);
+    let clock = NOW;
+    // No log of the failure: marked as before.
+    const h = await host(MAIN_BEST, { clock: () => clock });
+    dispose = () => h.harness.dispose();
+    // A turn of another project runs on main as main refuses one.
+    expect(await before(h, "thr-2", "proj-2")).toEqual({ action: "proceed" });
+    const running = thread({ id: "thr-2", projectId: "proj-2" });
+    await h.harness.behavior.emitThreadEvent("thread.active", { thread: running });
+    await settled();
+    await h.harness.behavior.emitThreadEvent("turn.failed", refused());
+    expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-1"]);
+    clock = NOW + after;
+    await h.harness.behavior.emitThreadEvent("thread.idle", { thread: running, lastAssistantText: null });
+    await newProject(h);
+    expect(h.envSet.map((e) => e.projectId)).toEqual(lifted ? ["proj-1"] : ["proj-1", "proj-3"]);
+    // The next turn of a project on main runs there once main is back: no
+    // other mark of the refusal keeps it out (Codex Astra r1 NET-001).
+    expect(await before(h, "thr-4", "proj-2")).toEqual({ action: "proceed" });
+    expect(h.envSet.map((e) => e.projectId)).toEqual(lifted ? ["proj-1"] : ["proj-1", "proj-3", "proj-2"]);
+    const line = `account main: a turn ended well on it ${after / 1000} s after its refusal; taken as back`;
+    if (lifted) expect(messages(h, "info")).toContain(line);
+    else expect(messages(h, "info")).not.toContainEqual(expect.stringContaining("after its refusal"));
+  });
+
+  it.each([
+    ["the block, then a real refusal of a later turn", CLOUDFLARE, "Failed to authenticate. API Error: 403 This organization has been disabled.", false],
+    ["a real refusal, then the block on a later turn", "Failed to authenticate. API Error: 403 This organization has been disabled.", CLOUDFLARE, true],
+  ])("reads the failed turn's own error, not a later turn's: %s (Codex Astra r1 NET-002)", async (_order, own, later, marked) => {
+    const [requested, error] = logOf(own)["thread-1"]!;
+    const next = logOf(later)["thread-1"]!;
+    const h = await host(MAIN_BEST, {
+      threadEvents: {
+        "thread-1": [
+          requested!,
+          error!,
+          { ...next[0]!, seq: 3, data: { ...next[0]!.data, requestId: "creq_2" } },
+          { ...next[1]!, seq: 4 },
+        ],
+      },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", refused());
+    expect(h.envSet.map((e) => e.projectId)).toEqual(marked ? ["proj-1"] : []);
+    expect(messages(h, "warn").some((m) => m.includes("account main refused a turn"))).toBe(marked);
+  });
+
+  it("a pick by hand does not lift the mark", async () => {
+    let clock = NOW;
+    const h = await host(MAIN_BEST, { clock: () => clock });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.emitThreadEvent("turn.failed", refused());
+    clock = NOW + 10 * 60_000;
+    await h.harness.behavior.runCli(["use", "proj-2", "main"]);
+    await newProject(h);
+    expect(h.envSet.map((e) => e.projectId)).toContain("proj-3");
+    expect(messages(h, "info")).not.toContainEqual(expect.stringContaining("after its refusal"));
   });
 });

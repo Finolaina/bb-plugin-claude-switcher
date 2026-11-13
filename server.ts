@@ -96,6 +96,7 @@ import {
   reportedFreeAt,
   resetOfAccount,
   FALLBACK_MODEL,
+  isNetworkBlock,
   isRefusal,
   isSessionLoss,
   isSessionLost,
@@ -159,6 +160,21 @@ export const PROJECTS_FRESH_MS = 30_000;
  * its usage still measures fine.
  */
 export const REFUSAL_MS = 6 * 60 * 60_000;
+/**
+ * A turn that ends well on a refusing account this long after its refusal
+ * brings it back (refusalBack): it runs turns again. [SUPUESTO] 60 s, so
+ * that a turn ending in the same instant as the refusal proves nothing
+ * (2026-11-13: turns ended well 10 to 74 min after their account's mark).
+ */
+export const REFUSAL_PROOF_MS = 60_000;
+/**
+ * A turn the network refused (Cloudflare's block page, see isNetworkBlock)
+ * is retried this long after, on the same account: another account does
+ * not mend the network, and a move loses the thread's cache. [SUPUESTO]
+ * 2 min: the block of 2026-11-13 lasted half an hour, and the retries are
+ * capped by MAX_ATTEMPTS.
+ */
+export const NETWORK_BLOCK_RETRY_MS = 2 * 60_000;
 /**
  * How long a usage limit with no reset reported keeps its account marked
  * (see limitedAt). [SUPUESTO] 30 min: no default of bb's or ours fits, and
@@ -1698,6 +1714,21 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     return at !== undefined && deps.now() - at < REFUSAL_MS;
   }
   /**
+   * A turn ended well on `name`: its refusal's mark goes if it stood
+   * REFUSAL_PROOF_MS or more (2026-11-13: accounts that ran turns well kept
+   * their mark for hours). Nothing else ends it before REFUSAL_MS.
+   */
+  function refusalBack(name: string): void {
+    const at = refusedAt.get(name);
+    if (at === undefined || !refusing(name)) return;
+    const after = deps.now() - at;
+    if (after < REFUSAL_PROOF_MS) return;
+    refusedAt.delete(name);
+    bb.log.info(
+      `account ${name}: a turn ended well on it ${Math.round(after / 1000)} s after its refusal; taken as back`,
+    );
+  }
+  /**
    * The accounts a turn failed on for want of a session, per machine (bb's
    * host id; "" when the thread's machine could not be told), and when
    * (Aitor 2026-11-10: «no han cambiado de cuentas»). A login is a
@@ -1859,12 +1890,15 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     );
   }
   /**
-   * The text of the failed turn's error in bb's log, when it says the
-   * account has no session on its machine (see isSessionLoss); null when it
-   * says anything else, or the log does not name the turn. bb announces such
-   * a failure with no errorInfo: its text is the only word of it.
+   * The text of the failed turn's error in bb's log; null when the log does
+   * not name the turn or cannot be read. bb's failure event carries no
+   * text: a session lost (isSessionLoss) or a network block
+   * (isNetworkBlock) is told by this alone. Only an error before the
+   * thread's next turn is the turn's: its failure may wait in the project's
+   * queue while another turn of the thread runs and fails (Codex Astra r1
+   * NET-002).
    */
-  async function sessionLossText(threadId: string, requestId: string): Promise<string | null> {
+  async function failureText(threadId: string, requestId: string): Promise<string | null> {
     try {
       const turns = await bb.sdk.threads.events.list({
         threadId,
@@ -1872,23 +1906,27 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         order: "desc",
         limit: "20",
       });
-      const own = turns.find(
+      const at = turns.findIndex(
         (r) => r.type === "client/turn/requested" && r.data.requestId === requestId,
       );
-      if (own === undefined) return null;
-      const [failed] = await bb.sdk.threads.events.list({
+      if (at === -1) return null;
+      const own = turns[at]!;
+      // Newest first: the turn requested right after this one, if any.
+      const next = turns[at - 1];
+      const errors = await bb.sdk.threads.events.list({
         threadId,
         types: ["provider/error"],
-        order: "desc",
-        limit: "1",
+        order: next === undefined ? "desc" : "asc",
+        limit: next === undefined ? "1" : "50",
         afterSeq: String(own.seq),
       });
+      const failed =
+        next === undefined ? errors[0] : errors.filter((r) => r.seq < next.seq).at(-1);
       if (failed?.type !== "provider/error") return null;
-      const text = `${failed.data.message} ${failed.data.detail ?? ""}`;
-      return isSessionLoss(text) ? text : null;
+      return `${failed.data.message} ${failed.data.detail ?? ""}`;
     } catch (error) {
       bb.log.warn(
-        `thread ${threadId}: its failure not read from bb's log (a session lost is not told): ${error instanceof Error ? error.message : String(error)}`,
+        `thread ${threadId}: its failure not read from bb's log (a session lost or a network block is not told): ${error instanceof Error ? error.message : String(error)}`,
       );
       return null;
     }
@@ -5281,7 +5319,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       thread.environmentId === null
         ? undefined
         : hostsRead.get(thread.projectId)?.byEnvironment.get(thread.environmentId);
-    if (typeof ran === "string" && since !== undefined) sessionBack(ran, { host, since });
+    if (typeof ran === "string" && since !== undefined) {
+      sessionBack(ran, { host, since });
+      refusalBack(ran);
+    }
     // Its turn ended there: a later failure that no new `thread.active`
     // announces (a turn refused at the door) is the project's account's,
     // not a leftover of the account this turn ran on (code-reviewer r11).
@@ -6629,6 +6670,28 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
 
   /**
+   * A turn the network refused (see isNetworkBlock): no account is marked
+   * and the project stays, the turn is retried where it is in
+   * NETWORK_BLOCK_RETRY_MS while attempts are left, then left in error for
+   * the rescue (2026-11-13).
+   */
+  async function networkBlocked(event: PluginTurnFailedEvent, projectId: string): Promise<void> {
+    const prefix = `network refused a turn of thread ${event.threadId} (HTTP ${event.errorInfo?.httpStatusCode ?? "?"}, Cloudflare): no account marked`;
+    if (event.attemptNumber >= MAX_ATTEMPTS) {
+      bb.log.warn(`${prefix}; every retry spent, left in error for the rescue`);
+      return;
+    }
+    const on = (await projectAccount(projectId)).account ?? current.defaultAccountName;
+    const sendAt = deps.now() + NETWORK_BLOCK_RETRY_MS;
+    await retryTurn(
+      event,
+      `Retrying on account ${on}: the network refused the turn (Cloudflare's block page)`,
+      sendAt,
+    );
+    bb.log.warn(`${prefix}; retried on ${on} at ${new Date(sendAt).toISOString()}`);
+  }
+
+  /**
    * `started`: the account the failed turn started on; null when unknown
    * (see `startedOn`), undefined when no start was recorded.
    */
@@ -6641,6 +6704,16 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     /** The thread is background work (see isBackground). */
     background: boolean,
   ): Promise<void> {
+    // Before any shortcut below marks or moves: every refusal judged on its
+    // failure comes through here, and a network block is nobody's
+    // (2026-11-13). Its text unread: judged as a refusal, as before.
+    if (isRefusal(event) && !isSessionLost(event)) {
+      const text = await failureText(event.threadId, event.requestId);
+      if (text !== null && isNetworkBlock(text)) {
+        await networkBlocked(event, projectId);
+        return;
+      }
+    }
     const now = deps.now();
     // The log first, for the turn that failed: a Send now or an edited
     // message skips the checkpoint and the cache still names the model of
@@ -7011,8 +7084,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // Judged on its failure, the event is a limit or a refusal (handleFailure
     // ignores the rest); left in error, it may be hours old: no mark. A
     // session lost is marked on its machine only (see markRefused): a mark
-    // of the whole account here would keep it from every machine.
-    if (!stuck && failedOn !== null && !isSessionLost(event)) {
+    // of the whole account here would keep it from every machine. Nor a
+    // refusal: refusedAt keeps it out, and a turn that ends well there lifts
+    // that (refusalBack), which a limit's mark would outlast (Codex Astra r1
+    // NET-001).
+    if (!stuck && failedOn !== null && !refusal) {
       const blamed = input.accounts.find((a) => a.name === failedOn);
       const scope = limitScope(blamed, model, now)?.toLowerCase() ?? "";
       let until = reportedFreeAt(event);
@@ -7259,7 +7335,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     let failed = event;
     if (mayBeLost) {
-      if ((await sessionLossText(event.threadId, event.requestId)) === null) {
+      const text = await failureText(event.threadId, event.requestId);
+      if (text === null || !isSessionLoss(text)) {
         bb.log.debug(`thread ${event.threadId}: ignored (${declined})`);
         return;
       }

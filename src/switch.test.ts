@@ -13,6 +13,7 @@ import {
   decidePlacement,
   decideSwitch,
   isCalorTick,
+  isNetworkBlock,
   isRefusal,
   isSessionLoss,
   isSessionLost,
@@ -767,6 +768,41 @@ describe("a turn that failed for want of a session on its machine", () => {
       rateLimits: null,
     });
     expect(isSessionLost(bbs)).toBe(false);
+  });
+});
+
+describe("a turn the network refused, not the account (2026-11-13)", () => {
+  // bb's log of 2026-11-13, 10:47 to 11:17: a provider/error with errorInfo
+  // unauthorized, HTTP 403, and Cloudflare's block page in its detail.
+  it("is told by Cloudflare's block page, whatever the case", () => {
+    for (const text of [
+      "Provider error Failed to authenticate. API Error: 403 Attention Required! | Cloudflare",
+      "Failed to authenticate. API Error: 403 Attention Required! | Cloudflare",
+      "attention required! | cloudflare",
+      "API Error: 403 <!DOCTYPE html><title>Just a moment...</title>",
+      "HTTP 403 from Cloudflare",
+      "cloudflare: 403 forbidden",
+    ])
+      expect(isNetworkBlock(text), text).toBe(true);
+  });
+
+  it("is not a refusal of the account, a session lost nor any other text", () => {
+    for (const text of [
+      // The account's own refusals (2026-09-30: subscription access off).
+      'API Error: 403 {"type":"error","error":{"type":"permission_error","message":"OAuth authentication is currently not allowed for this organization."}}',
+      "Failed to authenticate. API Error: 403 This organization has been disabled.",
+      "HTTP 403 Forbidden",
+      // A session lost on its machine (see isSessionLoss).
+      "Not logged in · Please run /login",
+      "Failed to authenticate: this login reached its time limit and cannot be renewed. Run `claude auth login` to sign in again",
+      'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired."}}',
+      // Cloudflare named with no block: a 401, a 429, or no status at all.
+      "API Error: 401 Unauthorized via Cloudflare",
+      "You've hit your 5-hour limit · resets 6pm (Europe/Madrid)",
+      "deploy the worker to Cloudflare",
+      "",
+    ])
+      expect(isNetworkBlock(text), text).toBe(false);
   });
 });
 
