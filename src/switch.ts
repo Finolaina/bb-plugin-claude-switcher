@@ -158,6 +158,15 @@ export function isNetworkBlock(text: string): boolean {
 }
 
 /**
+ * The API's own error body (`{"type":"error","error":{…}}`): Anthropic
+ * answered about that credential, so the refusal is the account's and never
+ * the machine's (see stormFrom in server.ts).
+ */
+export function isApiErrorBody(text: string | null): boolean {
+  return text !== null && /"type"\s*:\s*"error"/.test(text);
+}
+
+/**
  * What this plugin gives a failure it read as a session lost: the refusal's
  * category, and its own code (see isSessionLost).
  */

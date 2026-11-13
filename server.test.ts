@@ -24302,6 +24302,1111 @@ describe("the marks of a usage limit, and the threads they hold (2026-11-11)", (
     expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: "2026-10-05T12:00:00+02:00" }]);
   });
 });
+describe("a refusal that is the machine's network, not the account (2026-11-13)", () => {
+  // Aitor, 2026-11-13 ~12:50: «hay cuota pero todas esperan team3». From
+  // 10:47 to 11:17 Cloudflare blocked one machine's network: every turn
+  // there failed with this 403, bb's category «unauthorized», and five
+  // accounts were set aside for 6 h in 2 min 47 s, one after the other.
+  const CLOUDFLARE =
+    "Failed to authenticate. API Error: 403 Attention Required! | Cloudflare";
+  const API_403 =
+    'API Error: 403 {"type":"error","error":{"type":"permission_error","message":"OAuth authentication is currently not allowed for this organization."}}';
+  /** Two Ultra (main the best of them) and three Team seats, all with room. */
+  const FIVE = {
+    main: () => Response.json(payload(5, 10, 10)),
+    spare: () => Response.json(payload(20, 30, 20)),
+    work: () => Response.json(teamPayload(10, 10)),
+    default: () => Response.json(teamPayload(15, 10)),
+    team: () => Response.json(teamPayload(20, 10)),
+  };
+  const DIRS = () => ["spare", "work", "default", "team"];
+  /** thread-1 (proj-1) runs on the server; thr-2 (proj-2) too; thr-3 (proj-3) on the laptop. */
+  const MACHINES: HostOptions = {
+    // As in production: Fable kept on the Max and Ultra, Opus by Team.
+    settings: { preferredModel: "Fable" },
+    dirs: DIRS,
+    environments: {
+      "proj-1": [
+        { id: "env-1", hostId: "host-nuc", path: "/home/someone/site" },
+      ],
+      "proj-2": [
+        { id: "env-2", hostId: "host-nuc", path: "/home/someone/other" },
+      ],
+      "proj-3": [
+        { id: "env-3", hostId: "host-mac", path: "/home/someone/third" },
+      ],
+    },
+    hosts: [
+      { id: "host-mac", name: "the laptop" },
+      { id: "host-nuc", name: "the server" },
+    ],
+    threads: {
+      "thread-1": { environmentId: "env-1" },
+      "thr-2": { environmentId: "env-2", projectId: "proj-2" },
+      "thr-3": { environmentId: "env-3", projectId: "proj-3" },
+    },
+    extraProjects: [{ id: "proj-3", name: "Third" }],
+    projectCreatedAt: { "proj-3": NOW - 24 * HOUR },
+  };
+  /** bb's log of `threadId`: each turn requested in Fable, and its provider error with `detail`. */
+  function refusedLog(
+    threadId: string,
+    turns: Array<[requestId: string, detail: string]>,
+    model = "claude-fable-5-5",
+  ): LoggedEvent[] {
+    return turns.flatMap(([requestId, detail], i) => [
+      {
+        seq: 2 * i + 1,
+        type: "client/turn/requested",
+        data: { requestId, execution: { model } },
+      },
+      {
+        seq: 2 * i + 2,
+        type: "provider/error",
+        data: {
+          providerThreadId: "p",
+          threadId,
+          message: "Provider error",
+          detail,
+          errorInfo: {
+            category: "unauthorized",
+            providerCode: null,
+            httpStatusCode: 403,
+          },
+        },
+      },
+    ]);
+  }
+  /** The failure bb announces for it: the 403 as bb categorized it, no limit report. */
+  const refused = (overrides: Partial<PluginTurnFailedEvent> = {}) =>
+    failure({
+      errorInfo: {
+        category: "unauthorized",
+        providerCode: null,
+        httpStatusCode: 403,
+      },
+      rateLimits: null,
+      ...overrides,
+    });
+  /** work, default and team logged in as Team seats (their .claude.json says so). */
+  const teamSeats = (h: Awaited<ReturnType<typeof host>>) => {
+    for (const name of ["work", "default", "team"])
+      h.files[`${ACCOUNTS}/${name}/.claude.json`] = JSON.stringify({
+        oauthAccount: {
+          accountUuid: `uuid-${name}`,
+          emailAddress: `${name}@example.com`,
+          organizationType: "claude_team",
+        },
+      });
+  };
+  const settled = async () => {
+    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+  };
+  const healthOf = async (h: Awaited<ReturnType<typeof host>>) =>
+    JSON.parse(
+      (await h.harness.behavior.runCli(["health", "--json"])).stdout,
+    ) as {
+      cuentas: Array<{
+        nombre: string;
+        usable: boolean;
+        problema: string | null;
+      }>;
+      limites: unknown[];
+      rechazos?: Array<{ cuenta: string; http: number | null; hasta: string }>;
+      red?: Array<{
+        maquina: string;
+        nombre: string;
+        desde: string;
+        hasta: string;
+        motivo: string;
+      }>;
+    };
+  const fableBefore = (
+    h: Awaited<ReturnType<typeof host>>,
+    threadId: string,
+    projectId: string,
+  ) =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: threadId, projectId }),
+        requestedExecution: {
+          providerId: "claude-code",
+          model: "claude-fable-5-5",
+        },
+        attempt: "start-turn",
+      }),
+    );
+
+  it("the morning of 2026-11-13: a Cloudflare 403 on every retry vetoes no account, moves nothing, and the Ultra with room still takes another turn", async () => {
+    let clock = NOW;
+    const turns: Array<[string, string]> = [1, 2, 3, 4, 5].map((n) => [
+      `creq_${n}`,
+      CLOUDFLARE,
+    ]);
+    const h = await host(FIVE, {
+      ...MACHINES,
+      clock: () => clock,
+      threadEvents: { "thread-1": refusedLog("thread-1", turns) },
+    });
+    dispose = () => h.harness.dispose();
+    teamSeats(h);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    for (const n of [1, 2, 3, 4, 5]) {
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        refused({ requestId: `creq_${n}`, attemptNumber: n }),
+      );
+      await settled();
+      // Dispatched: its queued retry leaves the queue, as in bb.
+      h.queued.length = 0;
+      clock += 10_000;
+    }
+    expect(h.envSet).toEqual([]);
+    // Retried where it is, after a short wait, while attempts are left; the fifth is left in error.
+    expect(h.retries.map((r) => [r.turnRequestId, r.sendAt])).toEqual([
+      ["creq_1", NOW + 120_000],
+      ["creq_2", NOW + 10_000 + 120_000],
+      ["creq_3", NOW + 20_000 + 120_000],
+      ["creq_4", NOW + 30_000 + 120_000],
+    ]);
+    const report = await healthOf(h);
+    expect(report.cuentas.filter((c) => !c.usable)).toEqual([]);
+    expect(report.limites).toEqual([]);
+    expect(report.rechazos).toEqual([]);
+    // main, the best Ultra, still takes a Fable turn of another project: nothing moves it off.
+    expect(await fableBefore(h, "thr-2", "proj-2")).toEqual({
+      action: "proceed",
+    });
+    expect(h.envSet).toEqual([]);
+  });
+it("a 403 whose text is the API's own error body sets the account aside for 6 h, as before, and health says why and until when", async () => {
+  const h = await host(FIVE, {
+    ...MACHINES,
+    threadEvents: { "thread-1": refusedLog("thread-1", [["creq_1", API_403]]) },
+  });
+  dispose = () => h.harness.dispose();
+  teamSeats(h);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+  await h.harness.behavior.emitThreadEvent("turn.failed", refused());
+  await settled();
+  expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-1"]);
+  const report = await healthOf(h);
+  expect(report.rechazos).toEqual([
+    { cuenta: "main", http: 403, hasta: "2026-09-29T18:00:00+02:00" },
+  ]);
+  const main = report.cuentas.find((c) => c.nombre === "main")!;
+  expect(main).toMatchObject({
+    usable: false,
+    problema: "vetada por rechazo (HTTP 403) hasta 2026-09-29T18:00:00+02:00",
+  });
+  expect(report.red).toEqual([]);
+  expect((await h.harness.behavior.runCli(["health"])).stdout).not.toContain(
+    "sin motivo",
+  );
+});
+
+it("«Not logged in» still goes as a session lost on its machine", async () => {
+  const h = await host(FIVE, {
+    ...MACHINES,
+    threadEvents: {
+      "thread-1": [
+        {
+          seq: 1,
+          type: "client/turn/requested",
+          data: {
+            requestId: "creq_1",
+            execution: { model: "claude-fable-5-5" },
+          },
+        },
+        {
+          seq: 2,
+          type: "provider/error",
+          data: {
+            providerThreadId: "p",
+            threadId: "thread-1",
+            message: "Provider error",
+            detail: "Not logged in · Please run /login",
+          },
+        },
+      ],
+    },
+  });
+  dispose = () => h.harness.dispose();
+  teamSeats(h);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+  await h.harness.behavior.emitThreadEvent(
+    "turn.failed",
+    failure({ errorInfo: null, rateLimits: null }),
+  );
+  await settled();
+  const report = JSON.parse(
+    (await h.harness.behavior.runCli(["health", "--json"])).stdout,
+  );
+  expect(
+    report.sinSesion.map(
+      (m: { cuenta: string; maquina: string }) => `${m.cuenta}@${m.maquina}`,
+    ),
+  ).toEqual(["main@host-nuc"]);
+  expect(report.rechazos).toEqual([]);
+  expect(report.red).toEqual([]);
+});
+
+it("one STUCK line per machine and run of blocks, a run ending 10 min without one there; health shows the run", async () => {
+  let clock = NOW;
+  const turns: Array<[string, string]> = [1, 2, 3, 4].map((n) => [
+    `creq_${n}`,
+    CLOUDFLARE,
+  ]);
+  const h = await host(FIVE, {
+    ...MACHINES,
+    clock: () => clock,
+    threadEvents: { "thread-1": refusedLog("thread-1", turns) },
+  });
+  dispose = () => h.harness.dispose();
+  teamSeats(h);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+  const fail = async (n: number) => {
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      refused({ requestId: `creq_${n}`, attemptNumber: 1 }),
+    );
+    await settled();
+    h.queued.length = 0;
+  };
+  await fail(1);
+  clock = NOW + 9 * 60_000;
+  await fail(2);
+  expect((await healthOf(h)).red).toEqual([
+    {
+      maquina: "host-nuc",
+      nombre: "the server",
+      desde: "2026-09-29T12:00:00+02:00",
+      hasta: "2026-09-29T12:19:00+02:00",
+      motivo: "bloqueo de red",
+    },
+  ]);
+  // 10 min after the latest: a new run, a new line.
+  clock = NOW + 19 * 60_000;
+  await fail(3);
+  const stuck = h.harness.logEntries.filter((e) =>
+    e.message.startsWith("STUCK: the server: its network refuses"),
+  );
+  expect(stuck).toHaveLength(2);
+  const history = (await h.harness.behavior.runCli(["history", "--dias", "1"]))
+    .stdout;
+  expect(history).toMatch(/Stuck threads: 2\n/);
+  expect(
+    h.harness.logEntries.filter((e) => /^account \w+ refused a turn/.test(e.message)),
+  ).toEqual([]);
+});
+
+it("a thread left in error by a block is retried where it is by the rescue of every refresh, and its next block sets nothing aside", async () => {
+  const log = { "thread-1": refusedLog("thread-1", [["creq_1", CLOUDFLARE]]) };
+  const h = await host(FIVE, {
+    ...MACHINES,
+    listed: ["proj-1"],
+    threads: {
+      ...MACHINES.threads,
+      "thread-1": { status: "error", environmentId: "env-1" },
+    },
+    threadEvents: log,
+  });
+  dispose = () => h.harness.dispose();
+  const calls = h.usageCalls.length;
+  const run = h.harness.behavior.runService("usage-refresh");
+  await vi.waitFor(() =>
+    expect(h.usageCalls.length).toBeGreaterThanOrEqual(calls + 4),
+  );
+  await vi.waitFor(() => expect(h.retries).toHaveLength(1));
+  run.controller.abort();
+  await run.done;
+  expect(h.retries[0]!.reason).toMatch(/^Retrying on account main/);
+  expect(h.retries[0]!.sendAt).toBeUndefined();
+  log["thread-1"] = refusedLog("thread-1", [
+    ["creq_1", CLOUDFLARE],
+    ["creq_2", CLOUDFLARE],
+  ]);
+  await h.harness.behavior.emitThreadEvent(
+    "turn.failed",
+    refused({ requestId: "creq_2", attemptNumber: 6 }),
+  );
+  await settled();
+  // Past its fifth attempt: no retry of its own, left for the next refresh; nothing set aside, nothing moved.
+  expect(h.retries).toHaveLength(1);
+  expect(h.envSet).toEqual([]);
+  expect((await healthOf(h)).rechazos).toEqual([]);
+});
+it("a refusal puts no usage limit's mark with the thread's stored report, even when its reset is one of the account's windows", async () => {
+  // 2026-11-13: after each «refused a turn», the judge marked the account
+  // till the reset of an old 429 of another account; Team seats share
+  // their resets, so one such mark lasted till its weekly renewed, days on.
+  const h = await host(FIVE, {
+    ...MACHINES,
+    threadEvents: { "thread-1": refusedLog("thread-1", [["creq_1", API_403]]) },
+  });
+  dispose = () => h.harness.dispose();
+  teamSeats(h);
+  await h.harness.behavior.callRpc("accounts_refresh", null);
+  const old = failure().rateLimits!;
+  // main's weekly, as read (payload: 3 days ahead).
+  old.windows[0]!.resetsAtMs = NOW + 3 * 24 * HOUR;
+  await h.harness.behavior.emitThreadEvent(
+    "turn.failed",
+    refused({ rateLimits: old }),
+  );
+  await settled();
+  const report = await healthOf(h);
+  expect(report.limites).toEqual([]);
+  // Set aside by the refusal alone, for its 6 h.
+  expect(report.rechazos).toEqual([
+    { cuenta: "main", http: 403, hasta: "2026-09-29T18:00:00+02:00" },
+  ]);
+});
+
+it("a Team seat set aside by a refusal takes no Opus turn for 6 h, and takes one again from then on (no limit's mark needed)", async () => {
+  let clock = NOW;
+  const own = (account: string) => [
+    {
+      name: ENV_VAR,
+      note: ownNote(account),
+      secret: true as const,
+      value: null,
+    },
+  ];
+  const h = await host(FIVE, {
+    ...MACHINES,
+    clock: () => clock,
+    presetEnv: {
+      "proj-1": own("work"),
+      "proj-2": own("work"),
+      "proj-3": own("work"),
+    },
+    threadEvents: {
+      "thread-1": refusedLog(
+        "thread-1",
+        [["creq_1", API_403]],
+        "claude-opus-5-5",
+      ),
+    },
+  });
+  dispose = () => h.harness.dispose();
+  teamSeats(h);
+  await h.harness.behavior.callRpc("accounts_refresh", null);
+  await h.harness.behavior.emitThreadEvent("turn.failed", refused());
+  await settled();
+  const opusBefore = (threadId: string, projectId: string) =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: threadId, projectId }),
+        requestedExecution: {
+          providerId: "claude-code",
+          model: "claude-opus-5-5",
+        },
+        attempt: "start-turn",
+      }),
+    );
+  clock = NOW + 6 * HOUR - 1;
+  await h.harness.behavior.callRpc("accounts_refresh", null);
+  await opusBefore("thr-2", "proj-2");
+  expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([
+    ["proj-1", ownNote("default")],
+    ["proj-2", ownNote("default")],
+  ]);
+  // From 6 h on, work takes an Opus turn again: proj-3 stays on it.
+  clock = NOW + 6 * HOUR;
+  await h.harness.behavior.callRpc("accounts_refresh", null);
+  expect(await opusBefore("thr-3", "proj-3")).toEqual({ action: "proceed" });
+  expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-1", "proj-2"]);
+  expect((await healthOf(h)).rechazos).toEqual([]);
+});
+
+describe("the circuit breaker: three accounts refusing on one machine within 5 min is the machine", () => {
+  const FORBIDDEN = "Failed to authenticate. API Error: 403 Forbidden";
+  const own = (account: string) => [
+    {
+      name: ENV_VAR,
+      note: ownNote(account),
+      secret: true as const,
+      value: null,
+    },
+  ];
+  /** thread-1 refused with `text` at each offset from NOW, each time on the account its project sits on then. */
+  async function refusals(
+    offsets: number[],
+    options: {
+      model?: string;
+      text?: string;
+      presetEnv?: Record<string, EnvVar[]>;
+      /** Run before the failure of each index, at its clock. */
+      before?: (i: number, h: Awaited<ReturnType<typeof host>>) => Promise<void>;
+    } = {},
+  ) {
+    let clock = NOW;
+    const turns: Array<[string, string]> = offsets.map((_, i) => [
+      `creq_${i + 1}`,
+      options.text ?? FORBIDDEN,
+    ]);
+    const h = await host(FIVE, {
+      ...MACHINES,
+      clock: () => clock,
+      ...(options.presetEnv === undefined
+        ? {}
+        : { presetEnv: options.presetEnv }),
+      threadEvents: {
+        "thread-1": refusedLog("thread-1", turns, options.model),
+      },
+    });
+    dispose = () => h.harness.dispose();
+    teamSeats(h);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    for (const [i, offset] of offsets.entries()) {
+      clock = NOW + offset;
+      await options.before?.(i, h);
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        refused({ requestId: `creq_${i + 1}` }),
+      );
+      await settled();
+      h.queued.length = 0;
+    }
+    return h;
+  }
+  const stormLines = (h: Awaited<ReturnType<typeof host>>) =>
+    h.harness.logEntries.filter((e) =>
+      /accounts refused turns there within 5 min/.test(e.message),
+    );
+  const vetoed = async (h: Awaited<ReturnType<typeof host>>) =>
+    (await healthOf(h)).rechazos!.map((r) => r.cuenta);
+
+  it("two accounts do not open it: both stay set aside", async () => {
+    const h = await refusals([0, 60_000]);
+    expect(await vetoed(h)).toHaveLength(2);
+    expect(stormLines(h)).toEqual([]);
+  });
+
+  it("the third at exactly 5 min opens it: the vetoes of the run are lifted, the third sets nothing aside, one STUCK line", async () => {
+    const h = await refusals([0, 60_000, 5 * 60_000]);
+    expect(await vetoed(h)).toEqual([]);
+    // Moved off the first two, then retried where it is.
+    expect(h.envSet).toHaveLength(2);
+    expect(h.retries.at(-1)).toMatchObject({
+      turnRequestId: "creq_3",
+      sendAt: NOW + 5 * 60_000 + 120_000,
+    });
+    expect(stormLines(h)).toHaveLength(1);
+    expect(stormLines(h)[0]!.message).toMatch(
+      /^STUCK: the server: 3 accounts refused turns there within 5 min/,
+    );
+    const history = (
+      await h.harness.behavior.runCli(["history", "--dias", "1"])
+    ).stdout;
+    expect(history).toMatch(/Stuck threads: 1\n/);
+    expect((await healthOf(h)).red).toEqual([
+      {
+        maquina: "host-nuc",
+        nombre: "the server",
+        desde: "2026-09-29T12:00:00+02:00",
+        hasta: "2026-09-29T12:10:00+02:00",
+        motivo: "cortacircuitos",
+      },
+    ]);
+  });
+
+  it("the third at 5 min + 1 ms does not: three accounts set aside", async () => {
+    const h = await refusals([0, 60_000, 5 * 60_000 + 1]);
+    expect(await vetoed(h)).toHaveLength(3);
+    expect(stormLines(h)).toEqual([]);
+  });
+
+  it("refusals on two machines are not added together", async () => {
+    let clock = NOW;
+    const h = await host(FIVE, {
+      ...MACHINES,
+      clock: () => clock,
+      presetEnv: { "proj-3": own("team") },
+      threadEvents: {
+        "thread-1": refusedLog("thread-1", [
+          ["creq_1", FORBIDDEN],
+          ["creq_2", FORBIDDEN],
+        ]),
+        "thr-3": refusedLog("thr-3", [["creq_9", FORBIDDEN]]),
+      },
+    });
+    dispose = () => h.harness.dispose();
+    teamSeats(h);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      refused({ requestId: "creq_1" }),
+    );
+    await settled();
+    clock = NOW + 30_000;
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      refused({ requestId: "creq_2" }),
+    );
+    await settled();
+    clock = NOW + 60_000;
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      refused({ threadId: "thr-3", requestId: "creq_9" }),
+    );
+    await settled();
+    expect((await vetoed(h)).sort()).toHaveLength(3);
+    expect(await vetoed(h)).toContain("team");
+    expect(stormLines(h)).toEqual([]);
+  });
+
+  it("three refusals whose text is a session lost do not open it: each account has no login there (R2-001)", async () => {
+    for (const text of [
+      "Not logged in · Please run /login",
+      "this login reached its time limit and cannot be renewed",
+      "Failed to authenticate. API Error: 401",
+    ]) {
+      const h = await refusals([0, 30_000, 60_000], { text });
+      expect(await vetoed(h)).toHaveLength(3);
+      expect(stormLines(h)).toEqual([]);
+      h.harness.dispose();
+    }
+  });
+
+  it("an account unblocked by hand no longer counts towards a run: the third refusal leaves two set aside (R2-003)", async () => {
+    let lifted = "";
+    const h = await refusals([0, 60_000, 120_000], {
+      before: async (i, h) => {
+        if (i !== 2) return;
+        lifted = (await vetoed(h))[0]!;
+        expect(
+          (await h.harness.behavior.runCli(["unblock", lifted])).exitCode,
+        ).toBe(0);
+      },
+    });
+    const left = await vetoed(h);
+    expect(left).toHaveLength(2);
+    expect(left).not.toContain(lifted);
+    expect(stormLines(h)).toEqual([]);
+  });
+
+  it("three refusals whose text is the API's error body do not open it: Anthropic answered on each credential", async () => {
+    const h = await refusals([0, 30_000, 60_000], { text: API_403 });
+    expect(await vetoed(h)).toHaveLength(3);
+    expect(stormLines(h)).toEqual([]);
+  });
+
+  it("open, a refusal there sets nothing aside and runs again where it is; one with the API's error body still sets its account aside", async () => {
+    const turns: Array<[string, string]> = [
+      ["creq_1", FORBIDDEN],
+      ["creq_2", FORBIDDEN],
+      ["creq_3", FORBIDDEN],
+      ["creq_4", FORBIDDEN],
+      ["creq_5", API_403],
+    ];
+    let clock = NOW;
+    // bb's log as it grows: each failure's text is its own turn's.
+    const log = { "thread-1": refusedLog("thread-1", turns.slice(0, 1)) };
+    const h = await host(FIVE, {
+      ...MACHINES,
+      clock: () => clock,
+      threadEvents: log,
+    });
+    dispose = () => h.harness.dispose();
+    teamSeats(h);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    for (const [i, offset] of [0, 10_000, 20_000, 4 * 60_000].entries()) {
+      clock = NOW + offset;
+      log["thread-1"] = refusedLog("thread-1", turns.slice(0, i + 1));
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        refused({ requestId: `creq_${i + 1}` }),
+      );
+      await settled();
+      h.queued.length = 0;
+    }
+    expect(await vetoed(h)).toEqual([]);
+    expect(h.envSet).toHaveLength(2);
+    expect(stormLines(h)).toHaveLength(1);
+    clock = NOW + 5 * 60_000;
+    log["thread-1"] = refusedLog("thread-1", turns);
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      refused({ requestId: "creq_5" }),
+    );
+    await settled();
+    expect(await vetoed(h)).toHaveLength(1);
+  });
+
+it("a turn that started after the run opened and ends well on that machine closes it; one started before, or on another machine, does not", async () => {
+  let clock = NOW;
+  const turns: Array<[string, string]> = [1, 2, 3, 4].map((n) => [
+    `creq_${n}`,
+    FORBIDDEN,
+  ]);
+  const log = { "thread-1": refusedLog("thread-1", turns.slice(0, 1)) };
+  const h = await host(FIVE, {
+    ...MACHINES,
+    clock: () => clock,
+    threads: {
+      ...MACHINES.threads,
+      "thr-a": { environmentId: "env-1", projectId: "proj-1" },
+      "thr-b": { environmentId: "env-1", projectId: "proj-1" },
+    },
+    threadEvents: log,
+  });
+  dispose = () => h.harness.dispose();
+  teamSeats(h);
+  await h.harness.behavior.callRpc("accounts_refresh", null);
+  const fail = async (n: number) => {
+    log["thread-1"] = refusedLog("thread-1", turns.slice(0, n));
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      refused({ requestId: `creq_${n}` }),
+    );
+    await settled();
+    h.queued.length = 0;
+  };
+  /** A turn of `id` (proj-1, on the server unless `environmentId`) starts now; the returned call ends it well. */
+  const start = async (
+    id: string,
+    projectId = "proj-1",
+    environmentId = "env-1",
+  ) => {
+    const t = thread({ id, projectId, environmentId });
+    expect(
+      await h.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({
+          thread: t,
+          requestedExecution: {
+            providerId: "claude-code",
+            model: "claude-fable-5-5",
+          },
+          attempt: "start-turn",
+        }),
+      ),
+    ).toEqual({ action: "proceed" });
+    await h.harness.behavior.emitThreadEvent("thread.active", { thread: t });
+    await settled();
+    return () =>
+      h.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: t,
+        lastAssistantText: null,
+      });
+  };
+  const open = async () =>
+    (await healthOf(h))
+      .red!.filter((r) => r.motivo === "cortacircuitos")
+      .map((r) => r.maquina);
+  await fail(1);
+  clock = NOW + 10_000;
+  await fail(2);
+  clock = NOW + 20_000;
+  // Started in the same instant the run opens: no proof.
+  const before = await start("thr-a");
+  await fail(3);
+  expect(await open()).toEqual(["host-nuc"]);
+  // Started 1 ms after the run opened, on the server: ends well below.
+  clock = NOW + 20_001;
+  const after = await start("thr-b");
+  // Started before, ends well: no proof.
+  clock = NOW + 25_000;
+  await before();
+  expect(await open()).toEqual(["host-nuc"]);
+  // On another machine: no proof of this one.
+  clock = NOW + 30_000;
+  const elsewhere = await start("thr-3", "proj-3", "env-3");
+  await elsewhere();
+  expect(await open()).toEqual(["host-nuc"]);
+  // The one started 1 ms after the run opened ends well: closed.
+  clock = NOW + 40_000;
+  await after();
+  expect(await open()).toEqual([]);
+  expect(h.harness.logEntries.map((e) => e.message)).toContain(
+    "the server: a turn started after its run of refusals opened ended well; the run is closed, a refusal there is its account's again",
+  );
+  // From here a refusal there is its account's again.
+  clock = NOW + 50_000;
+  await fail(4);
+  expect((await healthOf(h)).rechazos).toHaveLength(1);
+});
+it("five threads of five projects refused at once on one machine: no account is left set aside (VETO-001)", async () => {
+  const names = ["main", "spare", "work", "default", "team"];
+  const ids = [1, 2, 3, 4, 5];
+  const h = await host(FIVE, {
+    ...MACHINES,
+    environments: Object.fromEntries(
+      ids.map((n) => [
+        `proj-${n}`,
+        [{ id: `env-${n}`, hostId: "host-nuc", path: `/home/someone/p${n}` }],
+      ]),
+    ),
+    threads: Object.fromEntries(
+      ids.map((n) => [
+        `t${n}`,
+        { environmentId: `env-${n}`, projectId: `proj-${n}` },
+      ]),
+    ),
+    extraProjects: [3, 4, 5].map((n) => ({ id: `proj-${n}`, name: `P${n}` })),
+    projectCreatedAt: {
+      "proj-3": NOW - 24 * HOUR,
+      "proj-4": NOW - 24 * HOUR,
+      "proj-5": NOW - 24 * HOUR,
+    },
+    presetEnv: Object.fromEntries(
+      ids.slice(1).map((n) => [`proj-${n}`, own(names[n - 1]!)]),
+    ),
+    threadEvents: Object.fromEntries(
+      ids.map((n) => [
+        `t${n}`,
+        refusedLog(`t${n}`, [[`creq_${n}`, FORBIDDEN]]),
+      ]),
+    ),
+  });
+  dispose = () => h.harness.dispose();
+  teamSeats(h);
+  await h.harness.behavior.callRpc("accounts_refresh", null);
+  await Promise.all(
+    ids.map((n) =>
+      h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        refused({ threadId: `t${n}`, requestId: `creq_${n}` }),
+      ),
+    ),
+  );
+  await settled();
+  expect(await vetoed(h)).toEqual([]);
+  expect(stormLines(h)).toHaveLength(1);
+});
+
+for (const [offset, open] of [
+  [15 * 60_000, true],
+  [15 * 60_000 + 1, false],
+] as const)
+  it(`a run stays open at most 15 min from its first refusal, however often refused: ${offset} ms, ${open ? "still open" : "closed, counted from zero"} (VETO-002)`, async () => {
+    const h = await refusals([
+      0,
+      10_000,
+      20_000,
+      4 * 60_000,
+      8 * 60_000,
+      12 * 60_000,
+      offset,
+    ]);
+    expect(await vetoed(h)).toHaveLength(open ? 0 : 1);
+    expect(
+      (await healthOf(h)).red!.filter((r) => r.motivo === "cortacircuitos"),
+    ).toEqual(
+      open
+        ? [
+            {
+              maquina: "host-nuc",
+              nombre: "the server",
+              desde: "2026-09-29T12:00:00+02:00",
+              hasta: "2026-09-29T12:15:00+02:00",
+              motivo: "cortacircuitos",
+            },
+          ]
+        : [],
+    );
+  });
+
+it("a second failure of the same thread, queued behind the first, keeps its machine (VETO-003)", async () => {
+  let clock = NOW;
+  const turns: Array<[string, string]> = [1, 2, 3].map((n) => [
+    `creq_${n}`,
+    FORBIDDEN,
+  ]);
+  const log: Record<string, LoggedEvent[]> = {
+    "thread-1": refusedLog("thread-1", turns.slice(0, 1)),
+    "thr-2": refusedLog("thr-2", [
+      ["creq_a", FORBIDDEN],
+      ["creq_b", FORBIDDEN],
+    ]),
+  };
+  const h = await host(FIVE, {
+    ...MACHINES,
+    clock: () => clock,
+    threadEvents: log,
+  });
+  dispose = () => h.harness.dispose();
+  teamSeats(h);
+  await h.harness.behavior.callRpc("accounts_refresh", null);
+  for (const [i, offset] of [0, 10_000, 20_000].entries()) {
+    clock = NOW + offset;
+    log["thread-1"] = refusedLog("thread-1", turns.slice(0, i + 1));
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      refused({ requestId: `creq_${i + 1}` }),
+    );
+    await settled();
+    h.queued.length = 0;
+  }
+  expect(stormLines(h)).toHaveLength(1);
+  clock = NOW + 30_000;
+  await Promise.all(
+    ["creq_a", "creq_b"].map((requestId) =>
+      h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        refused({ threadId: "thr-2", requestId }),
+      ),
+    ),
+  );
+  await settled();
+  expect(await vetoed(h)).toEqual([]);
+});
+
+it("refusals on a machine unknown neither count towards a run nor open one: set aside as in 0.2.53 (VETO-004)", async () => {
+  let clock = NOW;
+  const turns: Array<[string, string]> = [1, 2, 3].map((n) => [
+    `creq_${n}`,
+    FORBIDDEN,
+  ]);
+  const log = { "thread-1": refusedLog("thread-1", turns.slice(0, 1)) };
+  const h = await host(FIVE, {
+    ...MACHINES,
+    environments: {},
+    clock: () => clock,
+    threadEvents: log,
+  });
+  dispose = () => h.harness.dispose();
+  teamSeats(h);
+  await h.harness.behavior.callRpc("accounts_refresh", null);
+  for (const [i, offset] of [0, 10_000, 20_000].entries()) {
+    clock = NOW + offset;
+    log["thread-1"] = refusedLog("thread-1", turns.slice(0, i + 1));
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      refused({ requestId: `creq_${i + 1}` }),
+    );
+    await settled();
+    h.queued.length = 0;
+  }
+  expect(await vetoed(h)).toHaveLength(3);
+  expect(stormLines(h)).toEqual([]);
+});
+  it("opened, the accounts of the run take a Fable turn again at once", async () => {
+    const h = await refusals([0, 10_000, 20_000]);
+    const moves = h.envSet.length;
+    // main, the best Ultra, was the first set aside: proj-2 sits on it and stays.
+    expect(await fableBefore(h, "thr-2", "proj-2")).toEqual({
+      action: "proceed",
+    });
+    expect(h.envSet).toHaveLength(moves);
+  });
+
+  it("opened, the Team seats of the run take an Opus turn again at once (a held model looks at the marks)", async () => {
+    const h = await refusals([0, 10_000, 20_000], {
+      model: "claude-opus-5-5",
+      presetEnv: { "proj-1": own("work"), "proj-2": own("work") },
+    });
+    // work, the best Team, was the first set aside: proj-2 sits on it and stays.
+    expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-1", "proj-1"]);
+    const decision = await h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: "thr-2", projectId: "proj-2" }),
+        requestedExecution: {
+          providerId: "claude-code",
+          model: "claude-opus-5-5",
+        },
+        attempt: "start-turn",
+      }),
+    );
+    expect(decision).toEqual({ action: "proceed" });
+    expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-1", "proj-1"]);
+  });
+});
+describe("bb claude-switcher unblock: an account set aside, back by hand without a reload (0.2.54)", () => {
+  const own = (account: string) => [
+    {
+      name: ENV_VAR,
+      note: ownNote(account),
+      secret: true as const,
+      value: null,
+    },
+  ];
+  const opusBefore = (
+    h: Awaited<ReturnType<typeof host>>,
+    threadId: string,
+    projectId: string,
+  ) =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: threadId, projectId }),
+        requestedExecution: {
+          providerId: "claude-code",
+          model: "claude-opus-5-5",
+        },
+        attempt: "start-turn",
+      }),
+    );
+
+  it("lifts the refusal's veto, and a turn that waited for a Team seat starts at once, not at the next refresh", async () => {
+    // Every Team seat refused with the API's own body (no circuit breaker):
+    // an Opus turn of proj-2, on work, waits.
+    const turns: Array<[string, string]> = [1, 2, 3].map((n) => [
+      `creq_${n}`,
+      API_403,
+    ]);
+    const log = {
+      "thread-1": refusedLog("thread-1", turns.slice(0, 1), "claude-opus-5-5"),
+    };
+    const h = await host(FIVE, {
+      ...MACHINES,
+      presetEnv: { "proj-1": own("work"), "proj-2": own("work") },
+      threadEvents: log,
+    });
+    dispose = () => h.harness.dispose();
+    teamSeats(h);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    for (const n of [1, 2, 3]) {
+      log["thread-1"] = refusedLog(
+        "thread-1",
+        turns.slice(0, n),
+        "claude-opus-5-5",
+      );
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        refused({ requestId: `creq_${n}` }),
+      );
+      await settled();
+      h.queued.length = 0;
+    }
+    expect((await healthOf(h)).rechazos!.map((r) => r.cuenta).sort()).toEqual([
+      "default",
+      "team",
+      "work",
+    ]);
+    expect(await opusBefore(h, "thr-2", "proj-2")).toMatchObject({
+      action: "wait",
+    });
+    const moves = h.envSet.length;
+    const rechecks = h.harness.recheckCount;
+    const out = await h.harness.behavior.runCli(["unblock", "work"]);
+    expect(out.exitCode).toBe(0);
+    expect(out.stdout).toMatch(/^work: /);
+    expect(h.harness.recheckCount).toBe(rechecks + 1);
+    expect(await opusBefore(h, "thr-2", "proj-2")).toEqual({
+      action: "proceed",
+    });
+    expect(h.envSet).toHaveLength(moves);
+    const report = await healthOf(h);
+    expect(report.rechazos!.map((r) => r.cuenta).sort()).toEqual([
+      "default",
+      "team",
+    ]);
+    expect(report.cuentas.find((c) => c.nombre === "work")).toMatchObject({
+      usable: true,
+      problema: null,
+    });
+    expect(h.harness.logEntries.map((e) => e.message)).toContainEqual(
+      expect.stringMatching(/^account work unblocked by hand: /),
+    );
+    expect(
+      (await h.harness.behavior.runCli(["history", "--dias", "1"])).stdout,
+    ).toMatch(/unblock: work by hand/);
+  });
+
+  it("lifts every usage limit's mark and every session lost of the account", async () => {
+    const h = await host(FIVE, {
+      ...MACHINES,
+      threadEvents: {
+        "thr-2": [
+          {
+            seq: 1,
+            type: "client/turn/requested",
+            data: {
+              requestId: "creq_7",
+              execution: { model: "claude-fable-5-5" },
+            },
+          },
+          {
+            seq: 2,
+            type: "provider/error",
+            data: {
+              providerThreadId: "p",
+              threadId: "thr-2",
+              message: "Provider error",
+              detail: "Not logged in · Please run /login",
+            },
+          },
+        ],
+      },
+    });
+    dispose = () => h.harness.dispose();
+    teamSeats(h);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    // A 429 of main (a limit's mark), and a session lost of main on the server.
+    await h.harness.behavior.emitThreadEvent("turn.failed", failure());
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({
+        threadId: "thr-2",
+        requestId: "creq_7",
+        errorInfo: null,
+        rateLimits: null,
+      }),
+    );
+    await settled();
+    let report = JSON.parse(
+      (await h.harness.behavior.runCli(["health", "--json"])).stdout,
+    );
+    expect(report.limites.map((l: { cuenta: string }) => l.cuenta)).toContain(
+      "main",
+    );
+    expect(report.sinSesion.map((m: { cuenta: string }) => m.cuenta)).toEqual([
+      "main",
+    ]);
+    const out = await h.harness.behavior.runCli(["unblock", "main", "--json"]);
+    expect(JSON.parse(out.stdout)).toMatchObject({
+      account: "main",
+      refusal: false,
+      limits: 1,
+      sessionsLost: 1,
+    });
+    report = JSON.parse(
+      (await h.harness.behavior.runCli(["health", "--json"])).stdout,
+    );
+    expect(report.limites).toEqual([]);
+    expect(report.sinSesion).toEqual([]);
+  });
+
+it("history counts no stuck thread for an unblock: it shows it apart, as a note, in text and json (VETO-005)", async () => {
+  const h = await host(FIVE, {
+    ...MACHINES,
+    threadEvents: { "thread-1": refusedLog("thread-1", [["creq_1", API_403]]) },
+  });
+  dispose = () => h.harness.dispose();
+  teamSeats(h);
+  await h.harness.behavior.callRpc("accounts_refresh", null);
+  await h.harness.behavior.emitThreadEvent("turn.failed", refused());
+  await settled();
+  await h.harness.behavior.runCli(["unblock", "main"]);
+  const text = (await h.harness.behavior.runCli(["history", "--dias", "1"]))
+    .stdout;
+  expect(text).toMatch(/Stuck threads: 0\n/);
+  expect(text).toMatch(
+    /Notes: 1\n.*unblock: main by hand: its refusal's veto lifted/,
+  );
+  const json = JSON.parse(
+    (await h.harness.behavior.runCli(["history", "--dias", "1", "--json"]))
+      .stdout,
+  );
+  expect(json.stuck).toEqual([]);
+  expect(json.notes.map((n: { line: string }) => n.line)).toEqual([
+    "unblock: main by hand: its refusal's veto lifted",
+  ]);
+});
+  it("an unknown account is an error, and an account with nothing to lift says so", async () => {
+    const h = await host(FIVE, MACHINES);
+    dispose = () => h.harness.dispose();
+    teamSeats(h);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const unknown = await h.harness.behavior.runCli(["unblock", "nobody"]);
+    expect(unknown.exitCode).not.toBe(0);
+    const nothing = await h.harness.behavior.runCli(["unblock", "spare"]);
+    expect(nothing.exitCode).toBe(0);
+    expect(nothing.stdout).toBe("spare: nothing set aside\n");
+  });
+});
+});
 
 describe("a turn the network refused, not its account (2026-11-13)", () => {
   // Aitor, 2026-11-13: «si hay cuentas libres haga un repaso para redirigir

@@ -12,6 +12,7 @@ import {
   decideAhead,
   decidePlacement,
   decideSwitch,
+  isApiErrorBody,
   isCalorTick,
   isNetworkBlock,
   isRefusal,
@@ -2959,5 +2960,23 @@ describe("resetOfAccount: whether a reset a 429 reported is one of the account's
     });
     expect(resetOfAccount(busy, NOW + 2 * HOUR + TOLERANCE, NOW, READ)).toBe(true);
     expect(resetOfAccount(busy, NOW + 4 * HOUR + 50 * 60_000, NOW, READ)).toBe(false);
+  });
+});
+
+describe("a refusal whose text is the API's own error body (2026-11-13)", () => {
+  // A refusal the API answered in JSON is about that credential: it never
+  // counts towards a run of refusals on one machine (see stormFrom).
+  const CLOUDFLARE = "Provider error Failed to authenticate. API Error: 403 Attention Required! | Cloudflare";
+  const API_403 =
+    'Provider error API Error: 403 {"type":"error","error":{"type":"permission_error","message":"OAuth authentication is currently not allowed for this organization."}}';
+  const API_401 =
+    'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired."}}';
+
+  it("tells the API's error body: Anthropic answered about that credential", () => {
+    expect(isApiErrorBody(API_403)).toBe(true);
+    expect(isApiErrorBody(API_401)).toBe(true);
+    expect(isApiErrorBody('{ "type": "error", "error": {} }')).toBe(true);
+    for (const text of [CLOUDFLARE, "Not logged in · Please run /login", "", null])
+      expect(isApiErrorBody(text), String(text)).toBe(false);
   });
 });

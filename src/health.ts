@@ -74,6 +74,21 @@ export interface HealthReport {
    * its read says, until `hasta`.
    */
   limites: Limite[];
+  /**
+   * The accounts set aside by a refusal, while it stands (0.2.54, Aitor
+   * 2026-11-13): no turn is placed there until `hasta`, or until lifted
+   * (`unblock`, a turn that ends well there, or a run of refusals on one
+   * machine taken as the machine's). `http`: the status bb gave, null when
+   * none.
+   */
+  rechazos: Rechazo[];
+  /**
+   * The machines whose refusals are taken as their network's, not the
+   * accounts', while the run lasts (0.2.54): «bloqueo de red» (a page of
+   * Cloudflare's or HTML) or «cortacircuitos» (several accounts refused
+   * there within minutes). `maquina` is bb's host id ("" when unknown).
+   */
+  red: Red[];
   cuentas: Array<{
     nombre: string;
     plan: "ultra" | "max" | "team" | "desconocido";
@@ -129,6 +144,34 @@ export interface Limite {
   hasta: string;
 }
 
+/** One account set aside by a refusal (see HealthReport.rechazos). */
+export interface Rechazo {
+  cuenta: string;
+  http: number | null;
+  hasta: string;
+}
+
+/** One machine whose refusals are taken as its network's (see HealthReport.red). */
+export interface Red {
+  maquina: string;
+  nombre: string;
+  desde: string;
+  hasta: string;
+  motivo: string;
+}
+
+/** What else keeps an account from turns, as the plugin holds it (see healthReport's input). */
+interface Marks {
+  rechazos?: ReadonlyArray<{ account: string; http: number | null; until: number }>;
+  limites?: ReadonlyArray<{ account: string; scope: string; until: number }>;
+  sinSesion?: ReadonlyArray<{ account: string; host: string; hostName: string; until: number }>;
+}
+
+/** A limit's scope as health names it: "todos" for the whole account, else the model with a capital. */
+function scopeName(scope: string): string {
+  return scope === "" ? "todos" : scope[0]!.toUpperCase() + scope.slice(1);
+}
+
 /** "2026-11-01T18:00:00+01:00": ISO 8601 with the zone's offset at that time. */
 export function isoInZone(ms: number, timeZone: string = DAY_ZONE): string {
   const offset = zoneOffsetMs(ms, timeZone);
@@ -150,8 +193,11 @@ function point(w: UsageWindow): Point {
   };
 }
 
-function problemText(a: HealthAccount): string | null {
+function problemText(a: HealthAccount, marks: Marks): string | null {
   if (a.problem?.kind === "unauthenticated") return "sin login";
+  const refused = marks.rechazos?.find((r) => r.account === a.name);
+  if (refused !== undefined)
+    return `vetada por rechazo (HTTP ${refused.http ?? "?"}) hasta ${isoInZone(refused.until)}`;
   if (a.unconfirmedSince !== undefined)
     return `reset sin confirmar: la última lectura buena (${isoInZone(a.unconfirmedSince)}) la daba agotada y las consultas fallan desde entonces${a.problem?.kind === "error" ? ` (${a.problem.message})` : ""}`;
   if (a.problem?.kind === "error")
@@ -167,7 +213,19 @@ function problemText(a: HealthAccount): string | null {
       : Math.max(...full.map((w) => w.resetsAt!));
     return `agotada hasta ${until === null ? "sin fecha" : isoInZone(until)}`;
   }
-  return null;
+  // Marks that keep it from some turns, its numbers apart: the whole
+  // account's limit first, then a model's, then a machine's session.
+  const limits = (marks.limites ?? [])
+    .filter((m) => m.account === a.name)
+    .sort((x, y) => (x.scope === "" ? 0 : 1) - (y.scope === "" ? 0 : 1));
+  const limit = limits[0];
+  if (limit !== undefined)
+    return `marcada por límite (${limit.scope === "" ? "toda la cuenta" : scopeName(limit.scope)}) hasta ${isoInZone(limit.until)}`;
+  const lost = marks.sinSesion?.find((m) => m.account === a.name);
+  if (lost !== undefined) return `sin sesión en ${lost.hostName} hasta ${isoInZone(lost.until)}`;
+  return a.usable
+    ? null
+    : "no usable sin causa en el informe: ni login, lectura, ventanas, bloqueo, rechazo ni marca lo explican";
 }
 
 const round1 = (n: number) => Math.round(n * 10) / 10;
@@ -186,6 +244,10 @@ export function healthReport(input: {
   sinSesion?: ReadonlyArray<{ account: string; host: string; hostName: string; until: number }>;
   /** See HealthReport.limites; `scope` "" for every model, else the model's name in lower case; `until` in ms. */
   limites?: ReadonlyArray<{ account: string; scope: string; until: number }>;
+  /** See HealthReport.rechazos; `until` in ms. */
+  rechazos?: ReadonlyArray<{ account: string; http: number | null; until: number }>;
+  /** See HealthReport.red; times in ms. */
+  red?: ReadonlyArray<{ host: string; hostName: string; since: number; until: number; why: string }>;
   accounts: HealthAccount[];
   /** The preferred model and the weekly it spends per point of its own window (reserveShare): adds huecoOpus and fablePerdida. */
   reserve?: { model: string; share: number };
@@ -205,8 +267,20 @@ export function healthReport(input: {
     })),
     limites: (input.limites ?? []).map((m) => ({
       cuenta: m.account,
-      modelo: m.scope === "" ? "todos" : m.scope[0]!.toUpperCase() + m.scope.slice(1),
+      modelo: scopeName(m.scope),
       hasta: isoInZone(m.until),
+    })),
+    rechazos: (input.rechazos ?? []).map((r) => ({
+      cuenta: r.account,
+      http: r.http,
+      hasta: isoInZone(r.until),
+    })),
+    red: (input.red ?? []).map((r) => ({
+      maquina: r.host,
+      nombre: r.hostName,
+      desde: isoInZone(r.since),
+      hasta: isoInZone(r.until),
+      motivo: r.why,
     })),
     cuentas: input.accounts.map((a) => {
       const u = a.usage;
@@ -251,7 +325,7 @@ export function healthReport(input: {
                 })),
               },
         usable: a.usable,
-        problema: problemText(a),
+        problema: problemText(a, input),
         ...(input.reserve === undefined ? {} : roomOf(a, input.reserve)),
       };
     }),
@@ -295,7 +369,7 @@ export function healthText(report: HealthReport): string {
       ...report.limites
         .filter((l) => l.cuenta === c.nombre)
         .map((l) => `límite ${l.modelo === "todos" ? "" : `${l.modelo} `}hasta ${l.hasta}`),
-      c.usable ? "usable" : `no usable: ${c.problema ?? "sin motivo"}`,
+      c.usable ? "usable" : `no usable: ${c.problema ?? "el informe no trae su causa"}`,
     ];
     return `${c.nombre.padEnd(width)}  ${parts.join(" · ")}`;
   });
@@ -312,6 +386,7 @@ export function healthText(report: HealthReport): string {
       ? ["esperando Team: la cola no se pudo leer"]
       : report.esperandoTeam.map((e) => `esperando Team: ${e.hilo} (${e.modelo}) ${e.minutos} min`)),
     ...report.sinSesion.map((m) => `sin sesión: ${m.cuenta} en ${m.nombreMaquina} hasta ${m.hasta}`),
+    ...report.red.map((r) => `red: ${r.nombre} (${r.motivo}) desde ${r.desde} hasta ${r.hasta}`),
     "",
   ].join("\n");
 }

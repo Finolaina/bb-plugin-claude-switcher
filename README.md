@@ -789,6 +789,7 @@ bb claude-switcher seats [--json]         # seats of every account, who waits, a
 bb claude-switcher health [--json]        # a stable read for other threads and scripts (version 1): plan, 5-hour window, weekly, models, the day's pace, seats, usable, threads stuck
 bb claude-switcher reserve <account> --id <x> --until <ISO with zone> [--json]   # hold a seat for a run outside bb (at most 12 h); fails with no free seat (exit 1), or with exit 75 while the seats are still being counted after a reload
 bb claude-switcher unreserve --id <x> [--json]   # end it; an id not held is no error
+bb claude-switcher unblock <account> [--json]   # take an account as back now: its refusal's veto, usage limits' marks and sessions lost go, and what waits is asked again
 bb claude-switcher use <project> <account | default>   # project id, or its name when unique
 bb claude-switcher rebalance [--apply] [--json]   # spread the projects with no thread at work over the usable Ultra accounts by their weekly (the plan; --apply moves them)
 bb claude-switcher release                # remove every CLAUDE_CONFIG_DIR this plugin set

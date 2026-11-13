@@ -229,9 +229,16 @@ export function historyText(o: {
   const lines = [
     `Seats and stuck threads, last ${o.dias} day${o.dias === 1 ? "" : "s"} (Europe/Madrid)`,
   ];
-  const stuck = o.stuck.filter((r) => r.at >= since);
+  // A row with no thread is a note (an account unblocked by hand), no stuck
+  // thread (VETO-005).
+  const stuck = o.stuck.filter((r) => r.at >= since && r.thread !== "");
   lines.push("", `Stuck threads: ${stuck.length}`);
   for (const r of stuck) lines.push(`${madrid(r.at)}\t${r.line}`);
+  const notes = o.stuck.filter((r) => r.at >= since && r.thread === "");
+  if (notes.length > 0) {
+    lines.push("", `Notes: ${notes.length}`);
+    for (const r of notes) lines.push(`${madrid(r.at)}\t${r.line}`);
+  }
   const samples = o.samples.filter((r) => r.at >= since);
   if (samples.length === 0) {
     lines.push("", `no samples in the last ${o.dias} days`);
