@@ -4,6 +4,38 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.54] - 2026-11-13
+
+### Corregido
+
+- **Varias cuentas que rechazan en una misma máquina en pocos minutos son
+  la máquina, no las cuentas.** Aitor, 2026-11-13: «tengo problemas con el
+  switcher y hay cuota pero todas esperan team3». Ese día, de 10:47 a
+  11:17, la red de una máquina estaba bloqueada: cinco cuentas vetadas 6 h
+  en 2 min 47 s (las tres primeras en 32 s). La 0.2.53 ya no veta con la
+  página de Cloudflare; si el texto no se lee o no se reconoce, ahora un
+  cortacircuitos (`stormFrom`): con 3 cuentas distintas rechazando en la
+  misma máquina dentro de 5 min se quitan los vetos de esa racha, una línea
+  STUCK lo dice y, mientras siga abierta (5 min sin negativas allí), una
+  negativa en esa máquina no veta a nadie y se reintenta en la misma
+  cuenta como un bloqueo de red. No cuentan las negativas cuyo texto es el
+  cuerpo de error de la API (`isApiErrorBody`): ahí contestó Anthropic sobre
+  esa credencial. Umbrales [SUPUESTO], elegidos con el registro de ese día.
+- **Una línea STUCK por máquina y racha de bloqueos de red**, no una por
+  fallo (`noteBlock`); la racha acaba a los 10 min sin bloqueos allí.
+
+### Añadido
+
+- **`bb claude-switcher unblock <cuenta>`**: quita el veto por rechazo, las
+  marcas de límite (todos los ámbitos) y las de sesión perdida (todas las
+  máquinas) de esa cuenta, lo apunta en el registro y en `history --dias`,
+  y vuelve a preguntar en el acto a los turnos que esperan.
+- **`health` dice siempre por qué**: `problema` nombra el rechazo
+  («vetada por rechazo (HTTP 403) hasta …»), la marca de límite («marcada
+  por límite (toda la cuenta | Opus) hasta …») y la sesión perdida; el
+  «sin motivo» ya no puede salir. `health --json` gana `rechazos` (cuenta,
+  http, hasta) y `red` (máquina, nombre, desde, hasta, motivo).
+
 ## [0.2.53] - 2026-11-13
 
 ### Corregido
