@@ -6879,7 +6879,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       now,
       name,
       model,
-      `STUCK: ${hostLabel(host)}: ${names.length} accounts refused turns there within ${REFUSAL_STORM_MS / 60_000} min (${names.join(", ")}): taken as the machine or its network, not the accounts; ${lifted.length === 0 ? "no account was set aside" : `${lifted.join(", ")} no longer set aside`}; until ${REFUSAL_STORM_MS / 60_000} min without a refusal there, a refusal there sets no account aside and its turn runs again where it is`,
+      `STUCK: ${hostLabel(host)}: ${names.length} accounts refused turns there within ${REFUSAL_STORM_MS / 60_000} min (${names.join(", ")}): taken as the machine or its network, not the accounts; ${lifted.length === 0 ? "no account was set aside" : `${lifted.join(", ")} no longer set aside`}; until ${REFUSAL_STORM_MS / 60_000} min without a refusal there, ${REFUSAL_STORM_MAX_MS / 60_000} min at most, or until a turn started later ends well there, a refusal there sets no account aside and its turn runs again where it is`,
     );
     if (lifted.length > 0) askWaitingAgain(`the vetoes of ${lifted.join(", ")} were lifted`);
     return true;
