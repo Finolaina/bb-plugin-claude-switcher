@@ -39,8 +39,8 @@ project uses [Semantic Versioning](https://semver.org/).
   marcas de límite (todos los ámbitos) y las de sesión perdida (todas las
   máquinas) de esa cuenta, lo apunta en el registro y en `history --dias`
   (sección «Notes», no cuenta como hilo atascado),
-  y vuelve a preguntar en el acto a los turnos que esperan; la cuenta deja
-  de contar en una racha en curso.
+  y vuelve a preguntar en el acto a los turnos que esperan; sus negativas
+  dejan de contar para abrir una racha (una racha ya abierta no cambia).
 - **`health` dice siempre por qué**: `problema` nombra el rechazo
   («vetada por rechazo (HTTP 403) hasta …»), la marca de límite («marcada
   por límite (toda la cuenta | Opus) hasta …») y la sesión perdida; el
