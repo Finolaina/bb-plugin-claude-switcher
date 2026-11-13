@@ -96,6 +96,8 @@ import {
   reportedFreeAt,
   resetOfAccount,
   FALLBACK_MODEL,
+  isApiErrorBody,
+  isNetworkBlock,
   isRefusal,
   isSessionLoss,
   isSessionLost,
@@ -173,6 +175,27 @@ export const LIMIT_NO_RESET_MS = 30 * 60_000;
  * and someone has to log in on that machine.
  */
 export const SESSION_LOST_MS = 6 * 60 * 60_000;
+/**
+ * A refusal whose text is a block of the machine's network (see
+ * isNetworkBlock) runs again on the same account this much later.
+ * [SUPUESTO] 60 s: the block of 2026-11-13 lasted 30 min; a retry a minute
+ * spends the five attempts in about four, then the rescue of every refresh
+ * goes on retrying it where it is.
+ */
+export const NETWORK_RETRY_MS = 60_000;
+/**
+ * A machine's run of network blocks (one STUCK line for it) ends after this
+ * long without one there. [SUPUESTO] 10 min.
+ */
+export const NETWORK_STREAK_MS = 10 * 60_000;
+/**
+ * This many accounts refusing on one machine within REFUSAL_STORM_MS is the
+ * machine or its network, not the accounts (see stormFrom). [SUPUESTO] 3, and
+ * 5 min: on 2026-11-13 the first three refused within 32 s, five within
+ * 2 min 47 s.
+ */
+export const REFUSAL_STORM_ACCOUNTS = 3;
+export const REFUSAL_STORM_MS = 5 * 60_000;
 /** How long a project's machines, read from its environments, are taken as they were (see hostsOf). */
 export const HOSTS_FRESH_MS = 10 * 60_000;
 /** A measurement older than this is taken again before moving a project ahead of the limit. */
@@ -1633,8 +1656,28 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     /** The project a view needed when this read was made for it. */
     need?: string;
   } | null = null;
-  /** When each account last refused a turn (in memory: a reload forgets it). */
-  const refusedAt = new Map<string, number>();
+  /**
+   * When each account last refused a turn, and the HTTP status bb gave (in
+   * memory: a reload forgets it). A refusal that is the machine's network
+   * sets nothing here (see isNetworkBlock and stormFrom).
+   */
+  const refusedAt = new Map<string, { at: number; http: number | null }>();
+  /**
+   * The machine of each thread whose refusal is being judged, and whether it
+   * counts towards a run of refusals there (see stormFrom): not when its text
+   * is the API's own error body. Set by the failure's handler.
+   */
+  const refusalSeen = new Map<string, { host: string; counts: boolean }>();
+  /** The refusals that set an account aside, per machine, within REFUSAL_STORM_MS of the latest (see stormFrom). */
+  const refusalsOn = new Map<string, Array<{ account: string; at: number }>>();
+  /**
+   * The machines whose refusals are taken as theirs, not the accounts', since
+   * REFUSAL_STORM_ACCOUNTS accounts refused there within REFUSAL_STORM_MS
+   * (see stormFrom); open until REFUSAL_STORM_MS without a refusal there.
+   */
+  const storms = new Map<string, { since: number; last: number }>();
+  /** Each machine's run of network blocks, for its one STUCK line (see noteBlock). */
+  const blockRuns = new Map<string, { since: number; last: number }>();
   /**
    * The usage limits turns just failed on, per account and scope, each
    * until the reset its 429 reported (none reported: LIMIT_NO_RESET_MS).
@@ -1694,8 +1737,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       : null;
   }
   function refusing(name: string): boolean {
-    const at = refusedAt.get(name);
-    return at !== undefined && deps.now() - at < REFUSAL_MS;
+    const refused = refusedAt.get(name);
+    return refused !== undefined && deps.now() - refused.at < REFUSAL_MS;
   }
   /**
    * The accounts a turn failed on for want of a session, per machine (bb's
@@ -1859,12 +1902,17 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     );
   }
   /**
-   * The text of the failed turn's error in bb's log, when it says the
-   * account has no session on its machine (see isSessionLoss); null when it
-   * says anything else, or the log does not name the turn. bb announces such
-   * a failure with no errorInfo: its text is the only word of it.
+   * The text of the failed turn's error in bb's log (its provider/error);
+   * null when the log does not name the turn or holds no such error. A
+   * session lost (see isSessionLoss) and a block of the machine's network
+   * (see isNetworkBlock) are told by it: bb's failure event carries no text.
+   * `untold`: what is not told when the log cannot be read.
    */
-  async function sessionLossText(threadId: string, requestId: string): Promise<string | null> {
+  async function failureText(
+    threadId: string,
+    requestId: string,
+    untold: string,
+  ): Promise<string | null> {
     try {
       const turns = await bb.sdk.threads.events.list({
         threadId,
@@ -1884,11 +1932,10 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         afterSeq: String(own.seq),
       });
       if (failed?.type !== "provider/error") return null;
-      const text = `${failed.data.message} ${failed.data.detail ?? ""}`;
-      return isSessionLoss(text) ? text : null;
+      return `${failed.data.message} ${failed.data.detail ?? ""}`;
     } catch (error) {
       bb.log.warn(
-        `thread ${threadId}: its failure not read from bb's log (a session lost is not told): ${error instanceof Error ? error.message : String(error)}`,
+        `thread ${threadId}: its failure not read from bb's log (${untold}): ${error instanceof Error ? error.message : String(error)}`,
       );
       return null;
     }
@@ -6592,13 +6639,125 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
   }
 
   // ---- Automatic switch on subscription limit ---------------------------
-  /** `name` refused a turn (no login): chosen for nothing for a while. */
+  /**
+   * bb asks again now for what waits (a dispatch held, a seat queued): an
+   * account just back is a destination at once, not at the next refresh.
+   */
+  function askWaitingAgain(why: string): void {
+    admitWaiting(true);
+    void bb.experimental_hooks
+      .recheck("message.dispatch")
+      .catch((error: unknown) =>
+        bb.log.warn(
+          `bb not asked again after ${why}: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      );
+  }
+  /** The thread's failure, with its line, among the stuck threads of history. */
+  function stuckLine(event: PluginTurnFailedEvent, now: number, account: string, model: string, line: string): void {
+    bb.log.warn(line);
+    toHistorial(`thread ${event.threadId} stuck`, (db) =>
+      addStuck(db, {
+        at: now,
+        thread: event.threadId,
+        account,
+        model,
+        minutes: 0,
+        free: [],
+        projectBusy: false,
+        line,
+      }),
+    );
+  }
+  /** A machine's run of refusals taken as its own is open (see storms). */
+  function stormOpen(host: string, now: number): boolean {
+    const storm = storms.get(host);
+    if (storm === undefined) return false;
+    if (now - storm.last <= REFUSAL_STORM_MS) return true;
+    storms.delete(host);
+    return false;
+  }
+  /**
+   * `name` refused on `host` at `now`: with REFUSAL_STORM_ACCOUNTS accounts
+   * refusing there within REFUSAL_STORM_MS, it is the machine or its
+   * network, not the accounts (2026-11-13: five accounts set aside for 6 h
+   * in 2 min 47 s by one machine's blocked network). Then the vetoes set in
+   * that run are lifted, one STUCK line says it, the run opens (see storms)
+   * and true: this refusal sets nothing aside either.
+   */
+  function stormFrom(name: string, host: string, now: number, event: PluginTurnFailedEvent, model: string): boolean {
+    const recent = (refusalsOn.get(host) ?? []).filter((r) => now - r.at <= REFUSAL_STORM_MS);
+    recent.push({ account: name, at: now });
+    const names = [...new Set(recent.map((r) => r.account))];
+    if (names.length < REFUSAL_STORM_ACCOUNTS) {
+      refusalsOn.set(host, recent);
+      return false;
+    }
+    refusalsOn.delete(host);
+    storms.set(host, { since: recent[0]!.at, last: now });
+    const lifted: string[] = [];
+    for (const r of recent) {
+      if (refusedAt.get(r.account)?.at !== r.at) continue;
+      refusedAt.delete(r.account);
+      lifted.push(r.account);
+    }
+    stuckLine(
+      event,
+      now,
+      name,
+      model,
+      `STUCK: ${hostLabel(host)}: ${names.length} accounts refused turns there within ${REFUSAL_STORM_MS / 60_000} min (${names.join(", ")}): taken as the machine or its network, not the accounts; ${lifted.length === 0 ? "no account was set aside" : `${lifted.join(", ")} no longer set aside`}; until ${REFUSAL_STORM_MS / 60_000} min without a refusal there, a refusal there sets no account aside and its turn runs again where it is`,
+    );
+    if (lifted.length > 0) askWaitingAgain(`the vetoes of ${lifted.join(", ")} were lifted`);
+    return true;
+  }
+  /**
+   * A block of `host`'s network: one STUCK line per run of them there, a run
+   * ending NETWORK_STREAK_MS without one (2026-11-13: 1,194 lines «refused a
+   * turn» in half an hour).
+   */
+  function noteBlock(host: string, event: PluginTurnFailedEvent, now: number): void {
+    const run = blockRuns.get(host);
+    if (run !== undefined && now - run.last < NETWORK_STREAK_MS) {
+      run.last = now;
+      return;
+    }
+    blockRuns.set(host, { since: now, last: now });
+    stuckLine(
+      event,
+      now,
+      "",
+      "",
+      `STUCK: ${hostLabel(host)}: its network refuses the turns (thread ${event.threadId}: a page of Cloudflare's or HTML, not the API's answer); no account is set aside for it and each turn runs again where it is in ${NETWORK_RETRY_MS / 1_000} s; one line per run (until ${NETWORK_STREAK_MS / 60_000} min without one there)`,
+    );
+  }
+  /**
+   * The turn refused by the machine's network, not by its account: nothing
+   * is marked and the project stays; it runs again on the same account in
+   * NETWORK_RETRY_MS while attempts are left, then is left in error for the
+   * rescue of every refresh, which retries it where it is.
+   */
+  async function retryOnNetwork(event: PluginTurnFailedEvent, host: string): Promise<void> {
+    if (event.attemptNumber >= MAX_ATTEMPTS) {
+      bb.log.info(
+        `thread ${event.threadId}: no retry (${MAX_ATTEMPTS} attempts spent on ${hostLabel(host)}'s network; retried where it is on a refresh); no account set aside`,
+      );
+      return;
+    }
+    const reason = `Retrying on the same account in ${NETWORK_RETRY_MS / 1_000} s: the network of ${hostLabel(host)} refused the turn, not the account`;
+    bb.log.info(`thread ${event.threadId}: ${reason}`);
+    await retryTurn(event, reason, deps.now() + NETWORK_RETRY_MS);
+  }
+  /**
+   * `name` refused a turn (no login): chosen for nothing for a while. False:
+   * nothing set aside, the refusal is the machine's (see stormFrom).
+   */
   function markRefused(
     name: string,
     now: number,
     event: PluginTurnFailedEvent,
     model = "",
-  ): void {
+  ): boolean {
     // A session lost is the account's on the thread's machine only.
     if (isSessionLost(event)) {
       const host = failedHost.get(event.threadId) ?? "";
@@ -6620,12 +6779,18 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           line,
         }),
       );
-      return;
+      return true;
     }
-    refusedAt.set(name, now);
+    // The API's own error body is Anthropic's answer about that credential:
+    // it never counts as the machine's (five Team seats of an organization
+    // that turns subscription access off refuse together).
+    const seen = refusalSeen.get(event.threadId);
+    if (seen?.counts !== false && stormFrom(name, seen?.host ?? "", now, event, model)) return false;
+    refusedAt.set(name, { at: now, http: event.errorInfo?.httpStatusCode ?? null });
     bb.log.warn(
       `account ${name} refused a turn (HTTP ${event.errorInfo?.httpStatusCode ?? "?"}): chosen for nothing for ${REFUSAL_MS / 3_600_000} h`,
     );
+    return true;
   }
 
   /**
@@ -6954,7 +7119,11 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const failedOn = ranOn === undefined ? fromName : ranOn;
     const refusal = isRefusal(event);
     if (refusal && !stuck && failedOn !== null) {
-      markRefused(failedOn, now, event, model);
+      // The machine's, not the account's: retried where it is, nothing moved.
+      if (!markRefused(failedOn, now, event, model)) {
+        await retryOnNetwork(event, refusalSeen.get(event.threadId)?.host ?? "");
+        return;
+      }
     } else if (refusal && !stuck) {
       bb.log.info(
         `thread ${event.threadId}: refused by an account unknown (where its turn started could not be read); none marked`,
@@ -7242,6 +7411,9 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     const mayBeLost =
       (declined === "not-rate-limit" || declined === "attempts-exhausted") &&
       (event.errorInfo === null || event.errorInfo.category === "unknown");
+    // A refusal of bb's own: its text in bb's log tells the machine's network
+    // from the account (2026-11-13), read once the thread is known as ours.
+    const refusedByBb = isRefusal(event);
     if (declined !== null && !mayBeLost) {
       bb.log.debug(`thread ${event.threadId}: ignored (${declined})`);
       return;
@@ -7259,7 +7431,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     }
     let failed = event;
     if (mayBeLost) {
-      if ((await sessionLossText(event.threadId, event.requestId)) === null) {
+      const text = await failureText(event.threadId, event.requestId, "a session lost is not told");
+      if (text === null || !isSessionLoss(text)) {
         bb.log.debug(`thread ${event.threadId}: ignored (${declined})`);
         return;
       }
@@ -7279,15 +7452,35 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // nobody's (see underWayAtLoad). After the session lost's own look at
     // its seat, which stays as it was.
     if (started === undefined && beforeLoad) started = null;
+    let network = false;
+    if (refusedByBb) {
+      const text = await failureText(event.threadId, event.requestId, "a block of the machine's network is not told");
+      const host = await threadHost(thread);
+      await nameHost(host);
+      const counts = !isApiErrorBody(text);
+      const now = deps.now();
+      // A page of Cloudflare's, or a refusal on a machine whose refusals are
+      // taken as its own (see stormFrom): no account is set aside.
+      if (isNetworkBlock(text)) {
+        noteBlock(host, event, now);
+        network = true;
+      } else if (counts && stormOpen(host, now)) {
+        storms.get(host)!.last = now;
+        network = true;
+      }
+      refusalSeen.set(event.threadId, { host, counts });
+    }
     try {
       await inProjectQueue(thread.projectId, () =>
-        handleFailure(
-          failed,
-          thread.projectId,
-          started,
-          judgedIn,
-          isBackground(thread),
-        ),
+        network
+          ? retryOnNetwork(failed, refusalSeen.get(event.threadId)?.host ?? "")
+          : handleFailure(
+              failed,
+              thread.projectId,
+              started,
+              judgedIn,
+              isBackground(thread),
+            ),
       );
     } catch (error) {
       // A retry of the turn is already on its way (queued by another plugin,
@@ -7296,6 +7489,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
       bb.log.info(
         `thread ${event.threadId}: bb already has a retry of the turn (${error instanceof Error ? error.message : String(error)})`,
       );
+    } finally {
+      refusalSeen.delete(event.threadId);
     }
   });
 

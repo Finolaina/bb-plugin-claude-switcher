@@ -77,7 +77,7 @@ describe("healthReport (bb claude-switcher health --json, version 1)", () => {
       medido: "2026-10-30T21:55:58+01:00",
       inicioDia: 9,
       freno: true,
-      atascos: [], esperandoTeam: [], sinSesion: [], limites: [],
+      atascos: [], esperandoTeam: [], sinSesion: [], limites: [], rechazos: [], red: [],
       cuentas: [
         {
           nombre: "aitor",
@@ -382,5 +382,121 @@ describe("health: huecoOpus and fablePerdida (0.2.48)", () => {
 
   it("the text says it per Max or Ultra account", () => {
     expect(healthText(report([ultra("viaulab", 86, 53)], FABLE))).toContain("hueco Opus -9.5 (Fable perdida 19)");
+  });
+});
+describe("health: why an account is not usable, every cause named (0.2.53)", () => {
+  // 2026-11-13: five accounts set aside by a refusal showed «no usable: sin
+  // motivo», with problema null.
+  const base = {
+    measured: NOW,
+    dayStartHour: 9,
+    holdsBackground: true,
+    atascos: [],
+    esperandoTeam: [],
+  };
+  const until = Date.parse("2026-10-31T02:55:58Z");
+
+  it("an account set aside by a refusal: its HTTP status and until when, in rechazos too", () => {
+    const report = healthReport({
+      ...base,
+      rechazos: [{ account: "vetada", http: 403, until }],
+      accounts: [
+        account({
+          name: "vetada",
+          usage: usage("ultra-sin-5h"),
+          usable: false,
+        }),
+      ],
+    });
+    expect(report.cuentas[0]!.problema).toBe(
+      "vetada por rechazo (HTTP 403) hasta 2026-10-31T03:55:58+01:00",
+    );
+    expect(report.rechazos).toEqual([
+      { cuenta: "vetada", http: 403, hasta: "2026-10-31T03:55:58+01:00" },
+    ]);
+    expect(healthText(report)).toContain(
+      "no usable: vetada por rechazo (HTTP 403) hasta 2026-10-31T03:55:58+01:00",
+    );
+    const unknownStatus = healthReport({
+      ...base,
+      rechazos: [{ account: "vetada", http: null, until }],
+      accounts: [
+        account({
+          name: "vetada",
+          usage: usage("ultra-sin-5h"),
+          usable: false,
+        }),
+      ],
+    });
+    expect(unknownStatus.cuentas[0]!.problema).toBe(
+      "vetada por rechazo (HTTP ?) hasta 2026-10-31T03:55:58+01:00",
+    );
+  });
+
+  it("an account marked by a usage limit, the whole account's or one model's", () => {
+    const report = healthReport({
+      ...base,
+      limites: [
+        { account: "toda", scope: "", until },
+        { account: "opus", scope: "opus", until },
+      ],
+      accounts: [
+        account({ name: "toda", usage: usage("ultra-sin-5h") }),
+        account({ name: "opus", usage: usage("ultra-sin-5h") }),
+      ],
+    });
+    expect(report.cuentas.map((c) => c.problema)).toEqual([
+      "marcada por límite (toda la cuenta) hasta 2026-10-31T03:55:58+01:00",
+      "marcada por límite (Opus) hasta 2026-10-31T03:55:58+01:00",
+    ]);
+  });
+
+  it("an account without a session on a machine says it", () => {
+    const report = healthReport({
+      ...base,
+      sinSesion: [{ account: "a", host: "h1", hostName: "the server", until }],
+      accounts: [account({ name: "a", usage: usage("ultra-sin-5h") })],
+    });
+    expect(report.cuentas[0]!.problema).toBe(
+      "sin sesión en the server hasta 2026-10-31T03:55:58+01:00",
+    );
+  });
+
+  it("the machines whose network refuses the turns, in red", () => {
+    const report = healthReport({
+      ...base,
+      red: [
+        {
+          host: "h1",
+          hostName: "the server",
+          since: until - 60_000,
+          until,
+          why: "bloqueo de red",
+        },
+      ],
+      accounts: [],
+    });
+    expect(report.red).toEqual([
+      {
+        maquina: "h1",
+        nombre: "the server",
+        desde: "2026-10-31T03:54:58+01:00",
+        hasta: "2026-10-31T03:55:58+01:00",
+        motivo: "bloqueo de red",
+      },
+    ]);
+  });
+
+  it("never says «sin motivo»: an account not usable for no cause it knows says which datum is missing", () => {
+    const report = healthReport({
+      ...base,
+      accounts: [
+        account({ name: "rara", usage: usage("ultra-sin-5h"), usable: false }),
+      ],
+    });
+    expect(report.cuentas[0]!.problema).toMatch(
+      /^no usable sin causa en el informe/,
+    );
+    expect(healthText(report)).not.toContain("sin motivo");
   });
 });

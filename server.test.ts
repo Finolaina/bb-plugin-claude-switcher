@@ -24300,3 +24300,166 @@ describe("the marks of a usage limit, and the threads they hold (2026-11-11)", (
     expect(report.limites).toEqual([{ cuenta: "main", modelo: "todos", hasta: "2026-10-05T12:00:00+02:00" }]);
   });
 });
+describe("a refusal that is the machine's network, not the account (2026-11-13)", () => {
+  // Aitor, 2026-11-13 ~12:50: «hay cuota pero todas esperan team3». From
+  // 10:47 to 11:17 Cloudflare blocked one machine's network: every turn
+  // there failed with this 403, bb's category «unauthorized», and five
+  // accounts were set aside for 6 h in 2 min 47 s, one after the other.
+  const CLOUDFLARE =
+    "Failed to authenticate. API Error: 403 Attention Required! | Cloudflare";
+  const API_403 =
+    'API Error: 403 {"type":"error","error":{"type":"permission_error","message":"OAuth authentication is currently not allowed for this organization."}}';
+  /** Two Ultra (main the best of them) and three Team seats, all with room. */
+  const FIVE = {
+    main: () => Response.json(payload(5, 10, 10)),
+    spare: () => Response.json(payload(20, 30, 20)),
+    work: () => Response.json(teamPayload(10, 10)),
+    default: () => Response.json(teamPayload(15, 10)),
+    team: () => Response.json(teamPayload(20, 10)),
+  };
+  const DIRS = () => ["spare", "work", "default", "team"];
+  /** thread-1 (proj-1) runs on the server; thr-2 (proj-2) too; thr-3 (proj-3) on the laptop. */
+  const MACHINES: HostOptions = {
+    dirs: DIRS,
+    environments: {
+      "proj-1": [
+        { id: "env-1", hostId: "host-nuc", path: "/home/someone/site" },
+      ],
+      "proj-2": [
+        { id: "env-2", hostId: "host-nuc", path: "/home/someone/other" },
+      ],
+      "proj-3": [
+        { id: "env-3", hostId: "host-mac", path: "/home/someone/third" },
+      ],
+    },
+    hosts: [
+      { id: "host-mac", name: "the laptop" },
+      { id: "host-nuc", name: "the server" },
+    ],
+    threads: {
+      "thread-1": { environmentId: "env-1" },
+      "thr-2": { environmentId: "env-2", projectId: "proj-2" },
+      "thr-3": { environmentId: "env-3", projectId: "proj-3" },
+    },
+    extraProjects: [{ id: "proj-3", name: "Third" }],
+    projectCreatedAt: { "proj-3": NOW - 24 * HOUR },
+  };
+  /** bb's log of `threadId`: each turn requested in Fable, and its provider error with `detail`. */
+  function refusedLog(
+    threadId: string,
+    turns: Array<[requestId: string, detail: string]>,
+  ): LoggedEvent[] {
+    return turns.flatMap(([requestId, detail], i) => [
+      {
+        seq: 2 * i + 1,
+        type: "client/turn/requested",
+        data: { requestId, execution: { model: "claude-fable-5-5" } },
+      },
+      {
+        seq: 2 * i + 2,
+        type: "provider/error",
+        data: {
+          providerThreadId: "p",
+          threadId,
+          message: "Provider error",
+          detail,
+          errorInfo: {
+            category: "unauthorized",
+            providerCode: null,
+            httpStatusCode: 403,
+          },
+        },
+      },
+    ]);
+  }
+  /** The failure bb announces for it: the 403 as bb categorized it, no limit report. */
+  const refused = (overrides: Partial<PluginTurnFailedEvent> = {}) =>
+    failure({
+      errorInfo: {
+        category: "unauthorized",
+        providerCode: null,
+        httpStatusCode: 403,
+      },
+      rateLimits: null,
+      ...overrides,
+    });
+  const settled = async () => {
+    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+  };
+  const healthOf = async (h: Awaited<ReturnType<typeof host>>) =>
+    JSON.parse(
+      (await h.harness.behavior.runCli(["health", "--json"])).stdout,
+    ) as {
+      cuentas: Array<{
+        nombre: string;
+        usable: boolean;
+        problema: string | null;
+      }>;
+      limites: unknown[];
+      rechazos?: Array<{ cuenta: string; http: number | null; hasta: string }>;
+      red?: Array<{
+        maquina: string;
+        nombre: string;
+        desde: string;
+        hasta: string;
+        motivo: string;
+      }>;
+    };
+  const fableBefore = (
+    h: Awaited<ReturnType<typeof host>>,
+    threadId: string,
+    projectId: string,
+  ) =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: threadId, projectId }),
+        requestedExecution: {
+          providerId: "claude-code",
+          model: "claude-fable-5-5",
+        },
+        attempt: "start-turn",
+      }),
+    );
+
+  it("the morning of 2026-11-13: a Cloudflare 403 on every retry vetoes no account, moves nothing, and the Ultra with room still takes another turn", async () => {
+    let clock = NOW;
+    const turns: Array<[string, string]> = [1, 2, 3, 4, 5].map((n) => [
+      `creq_${n}`,
+      CLOUDFLARE,
+    ]);
+    const h = await host(FIVE, {
+      ...MACHINES,
+      clock: () => clock,
+      threadEvents: { "thread-1": refusedLog("thread-1", turns) },
+    });
+    dispose = () => h.harness.dispose();
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    for (const n of [1, 2, 3, 4, 5]) {
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        refused({ requestId: `creq_${n}`, attemptNumber: n }),
+      );
+      await settled();
+      // Dispatched: its queued retry leaves the queue, as in bb.
+      h.queued.length = 0;
+      clock += 10_000;
+    }
+    expect(h.envSet).toEqual([]);
+    // Retried where it is, after a short wait, while attempts are left; the fifth is left in error.
+    expect(h.retries.map((r) => [r.turnRequestId, r.sendAt])).toEqual([
+      ["creq_1", NOW + 60_000],
+      ["creq_2", NOW + 10_000 + 60_000],
+      ["creq_3", NOW + 20_000 + 60_000],
+      ["creq_4", NOW + 30_000 + 60_000],
+    ]);
+    const report = await healthOf(h);
+    expect(report.cuentas.filter((c) => !c.usable)).toEqual([]);
+    expect(report.limites).toEqual([]);
+    expect(report.rechazos).toEqual([]);
+    // main, the best Ultra, still takes a Fable turn of another project: nothing moves it off.
+    expect(await fableBefore(h, "thr-2", "proj-2")).toEqual({
+      action: "proceed",
+    });
+    expect(h.envSet).toEqual([]);
+  });
+});
