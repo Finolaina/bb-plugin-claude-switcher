@@ -1,4 +1,4 @@
-HEAD c9f211424219ba6c9384da30ca2a8c50c82cd369
+HEAD 756f95cfe1f29c894bb4fa4ba7d29fa05b8980af
 MUERE      red · una página de Cloudflare se juzga como negativa (la mañana de hoy) · server.test.ts 'the morning of 2026-11-13' · Tests  1 failed | 967 skipped (968)
 MUERE      red · una línea STUCK por bloqueo, no por racha · server.test.ts 'one STUCK line per machine and run of blocks' · Tests  1 failed | 967 skipped (968)
 MUERE      red · la racha sigue a los 10 min justos (corte exacto) · server.test.ts 'one STUCK line per machine and run of blocks' · Tests  1 failed | 967 skipped (968)
