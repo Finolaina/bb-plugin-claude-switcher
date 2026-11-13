@@ -7190,9 +7190,13 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
     // this judgment: the retry's own placement reads it (see limitedAt).
     // Judged on its failure, the event is a limit or a refusal (handleFailure
     // ignores the rest); left in error, it may be hours old: no mark. A
-    // session lost is marked on its machine only (see markRefused): a mark
-    // of the whole account here would keep it from every machine.
-    if (!stuck && failedOn !== null && !isSessionLost(event)) {
+    // refusal leaves no limit's mark: its report is the thread's latest
+    // stored one, an old 429's, maybe of another account (2026-11-13: a
+    // Team seat marked till its weekly renewed, days on); its veto keeps it
+    // out instead, wherever a limit's mark did: every such path also reads
+    // measuredAccounts, which blocks a refusing account. A session lost is
+    // marked on its machine only (see markRefused).
+    if (!stuck && failedOn !== null && !refusal) {
       const blamed = input.accounts.find((a) => a.name === failedOn);
       const scope = limitScope(blamed, model, now)?.toLowerCase() ?? "";
       let until = reportedFreeAt(event);

@@ -24320,6 +24320,8 @@ describe("a refusal that is the machine's network, not the account (2026-11-13)"
   const DIRS = () => ["spare", "work", "default", "team"];
   /** thread-1 (proj-1) runs on the server; thr-2 (proj-2) too; thr-3 (proj-3) on the laptop. */
   const MACHINES: HostOptions = {
+    // As in production: Fable kept on the Max and Ultra, Opus by Team.
+    settings: { preferredModel: "Fable" },
     dirs: DIRS,
     environments: {
       "proj-1": [
@@ -24348,12 +24350,13 @@ describe("a refusal that is the machine's network, not the account (2026-11-13)"
   function refusedLog(
     threadId: string,
     turns: Array<[requestId: string, detail: string]>,
+    model = "claude-fable-5-5",
   ): LoggedEvent[] {
     return turns.flatMap(([requestId, detail], i) => [
       {
         seq: 2 * i + 1,
         type: "client/turn/requested",
-        data: { requestId, execution: { model: "claude-fable-5-5" } },
+        data: { requestId, execution: { model } },
       },
       {
         seq: 2 * i + 2,
@@ -24383,6 +24386,17 @@ describe("a refusal that is the machine's network, not the account (2026-11-13)"
       rateLimits: null,
       ...overrides,
     });
+  /** work, default and team logged in as Team seats (their .claude.json says so). */
+  const teamSeats = (h: Awaited<ReturnType<typeof host>>) => {
+    for (const name of ["work", "default", "team"])
+      h.files[`${ACCOUNTS}/${name}/.claude.json`] = JSON.stringify({
+        oauthAccount: {
+          accountUuid: `uuid-${name}`,
+          emailAddress: `${name}@example.com`,
+          organizationType: "claude_team",
+        },
+      });
+  };
   const settled = async () => {
     for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
   };
@@ -24433,6 +24447,7 @@ describe("a refusal that is the machine's network, not the account (2026-11-13)"
       threadEvents: { "thread-1": refusedLog("thread-1", turns) },
     });
     dispose = () => h.harness.dispose();
+    teamSeats(h);
     await h.harness.behavior.callRpc("accounts_refresh", null);
     for (const n of [1, 2, 3, 4, 5]) {
       await h.harness.behavior.emitThreadEvent(
@@ -24468,7 +24483,8 @@ it("a 403 whose text is the API's own error body sets the account aside for 6 h,
     threadEvents: { "thread-1": refusedLog("thread-1", [["creq_1", API_403]]) },
   });
   dispose = () => h.harness.dispose();
-  await h.harness.behavior.callRpc("accounts_refresh", null);
+  teamSeats(h);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
   await h.harness.behavior.emitThreadEvent("turn.failed", refused());
   await settled();
   expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-1"]);
@@ -24514,7 +24530,8 @@ it("«Not logged in» still goes as a session lost on its machine", async () => 
     },
   });
   dispose = () => h.harness.dispose();
-  await h.harness.behavior.callRpc("accounts_refresh", null);
+  teamSeats(h);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
   await h.harness.behavior.emitThreadEvent(
     "turn.failed",
     failure({ errorInfo: null, rateLimits: null }),
@@ -24544,7 +24561,8 @@ it("one STUCK line per machine and run of blocks, a run ending 10 min without on
     threadEvents: { "thread-1": refusedLog("thread-1", turns) },
   });
   dispose = () => h.harness.dispose();
-  await h.harness.behavior.callRpc("accounts_refresh", null);
+  teamSeats(h);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
   const fail = async (n: number) => {
     await h.harness.behavior.emitThreadEvent(
       "turn.failed",
@@ -24615,5 +24633,302 @@ it("a thread left in error by a block is retried where it is by the rescue of ev
   expect(h.retries).toHaveLength(1);
   expect(h.envSet).toEqual([]);
   expect((await healthOf(h)).rechazos).toEqual([]);
+});
+it("a refusal puts no usage limit's mark with the thread's stored report, even when its reset is one of the account's windows", async () => {
+  // 2026-11-13: after each «refused a turn», the judge marked the account
+  // till the reset of an old 429 of another account; Team seats share
+  // their resets, so one such mark lasted till its weekly renewed, days on.
+  const h = await host(FIVE, {
+    ...MACHINES,
+    threadEvents: { "thread-1": refusedLog("thread-1", [["creq_1", API_403]]) },
+  });
+  dispose = () => h.harness.dispose();
+  teamSeats(h);
+  await h.harness.behavior.callRpc("accounts_refresh", null);
+  const old = failure().rateLimits!;
+  // main's weekly, as read (payload: 3 days ahead).
+  old.windows[0]!.resetsAtMs = NOW + 3 * 24 * HOUR;
+  await h.harness.behavior.emitThreadEvent(
+    "turn.failed",
+    refused({ rateLimits: old }),
+  );
+  await settled();
+  const report = await healthOf(h);
+  expect(report.limites).toEqual([]);
+  // Set aside by the refusal alone, for its 6 h.
+  expect(report.rechazos).toEqual([
+    { cuenta: "main", http: 403, hasta: "2026-09-29T18:00:00+02:00" },
+  ]);
+});
+
+it("a Team seat set aside by a refusal takes no Opus turn for 6 h, and takes one again from then on (no limit's mark needed)", async () => {
+  let clock = NOW;
+  const own = (account: string) => [
+    {
+      name: ENV_VAR,
+      note: ownNote(account),
+      secret: true as const,
+      value: null,
+    },
+  ];
+  const h = await host(FIVE, {
+    ...MACHINES,
+    clock: () => clock,
+    presetEnv: {
+      "proj-1": own("work"),
+      "proj-2": own("work"),
+      "proj-3": own("work"),
+    },
+    threadEvents: {
+      "thread-1": refusedLog(
+        "thread-1",
+        [["creq_1", API_403]],
+        "claude-opus-5-5",
+      ),
+    },
+  });
+  dispose = () => h.harness.dispose();
+  teamSeats(h);
+  await h.harness.behavior.callRpc("accounts_refresh", null);
+  await h.harness.behavior.emitThreadEvent("turn.failed", refused());
+  await settled();
+  const opusBefore = (threadId: string, projectId: string) =>
+    h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: threadId, projectId }),
+        requestedExecution: {
+          providerId: "claude-code",
+          model: "claude-opus-5-5",
+        },
+        attempt: "start-turn",
+      }),
+    );
+  clock = NOW + 6 * HOUR - 1;
+  await h.harness.behavior.callRpc("accounts_refresh", null);
+  await opusBefore("thr-2", "proj-2");
+  expect(h.envSet.map((e) => [e.projectId, e.note])).toEqual([
+    ["proj-1", ownNote("default")],
+    ["proj-2", ownNote("default")],
+  ]);
+  // From 6 h on, work takes an Opus turn again: proj-3 stays on it.
+  clock = NOW + 6 * HOUR;
+  await h.harness.behavior.callRpc("accounts_refresh", null);
+  expect(await opusBefore("thr-3", "proj-3")).toEqual({ action: "proceed" });
+  expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-1", "proj-2"]);
+  expect((await healthOf(h)).rechazos).toEqual([]);
+});
+
+describe("the circuit breaker: three accounts refusing on one machine within 5 min is the machine", () => {
+  const FORBIDDEN = "Failed to authenticate. API Error: 403 Forbidden";
+  const own = (account: string) => [
+    {
+      name: ENV_VAR,
+      note: ownNote(account),
+      secret: true as const,
+      value: null,
+    },
+  ];
+  /** thread-1 refused with `text` at each offset from NOW, each time on the account its project sits on then. */
+  async function refusals(
+    offsets: number[],
+    options: {
+      model?: string;
+      text?: string;
+      presetEnv?: Record<string, EnvVar[]>;
+    } = {},
+  ) {
+    let clock = NOW;
+    const turns: Array<[string, string]> = offsets.map((_, i) => [
+      `creq_${i + 1}`,
+      options.text ?? FORBIDDEN,
+    ]);
+    const h = await host(FIVE, {
+      ...MACHINES,
+      clock: () => clock,
+      ...(options.presetEnv === undefined
+        ? {}
+        : { presetEnv: options.presetEnv }),
+      threadEvents: {
+        "thread-1": refusedLog("thread-1", turns, options.model),
+      },
+    });
+    dispose = () => h.harness.dispose();
+    teamSeats(h);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    for (const [i, offset] of offsets.entries()) {
+      clock = NOW + offset;
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        refused({ requestId: `creq_${i + 1}` }),
+      );
+      await settled();
+      h.queued.length = 0;
+    }
+    return h;
+  }
+  const stormLines = (h: Awaited<ReturnType<typeof host>>) =>
+    h.harness.logEntries.filter((e) =>
+      /accounts refused turns there within 5 min/.test(e.message),
+    );
+  const vetoed = async (h: Awaited<ReturnType<typeof host>>) =>
+    (await healthOf(h)).rechazos!.map((r) => r.cuenta);
+
+  it("two accounts do not open it: both stay set aside", async () => {
+    const h = await refusals([0, 60_000]);
+    expect(await vetoed(h)).toHaveLength(2);
+    expect(stormLines(h)).toEqual([]);
+  });
+
+  it("the third at exactly 5 min opens it: the vetoes of the run are lifted, the third sets nothing aside, one STUCK line", async () => {
+    const h = await refusals([0, 60_000, 5 * 60_000]);
+    expect(await vetoed(h)).toEqual([]);
+    // Moved off the first two, then retried where it is.
+    expect(h.envSet).toHaveLength(2);
+    expect(h.retries.at(-1)).toMatchObject({
+      turnRequestId: "creq_3",
+      sendAt: NOW + 5 * 60_000 + 60_000,
+    });
+    expect(stormLines(h)).toHaveLength(1);
+    expect(stormLines(h)[0]!.message).toMatch(
+      /^STUCK: the server: 3 accounts refused turns there within 5 min/,
+    );
+    const history = (
+      await h.harness.behavior.runCli(["history", "--dias", "1"])
+    ).stdout;
+    expect(history).toMatch(/Stuck threads: 1\n/);
+    expect((await healthOf(h)).red).toEqual([
+      {
+        maquina: "host-nuc",
+        nombre: "the server",
+        desde: "2026-09-29T12:00:00+02:00",
+        hasta: "2026-09-29T12:10:00+02:00",
+        motivo: "cortacircuitos",
+      },
+    ]);
+  });
+
+  it("the third at 5 min + 1 ms does not: three accounts set aside", async () => {
+    const h = await refusals([0, 60_000, 5 * 60_000 + 1]);
+    expect(await vetoed(h)).toHaveLength(3);
+    expect(stormLines(h)).toEqual([]);
+  });
+
+  it("refusals on two machines are not added together", async () => {
+    let clock = NOW;
+    const h = await host(FIVE, {
+      ...MACHINES,
+      clock: () => clock,
+      presetEnv: { "proj-3": own("team") },
+      threadEvents: {
+        "thread-1": refusedLog("thread-1", [
+          ["creq_1", FORBIDDEN],
+          ["creq_2", FORBIDDEN],
+        ]),
+        "thr-3": refusedLog("thr-3", [["creq_9", FORBIDDEN]]),
+      },
+    });
+    dispose = () => h.harness.dispose();
+    teamSeats(h);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      refused({ requestId: "creq_1" }),
+    );
+    await settled();
+    clock = NOW + 30_000;
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      refused({ requestId: "creq_2" }),
+    );
+    await settled();
+    clock = NOW + 60_000;
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      refused({ threadId: "thr-3", requestId: "creq_9" }),
+    );
+    await settled();
+    expect((await vetoed(h)).sort()).toHaveLength(3);
+    expect(await vetoed(h)).toContain("team");
+    expect(stormLines(h)).toEqual([]);
+  });
+
+  it("three refusals whose text is the API's error body do not open it: Anthropic answered on each credential", async () => {
+    const h = await refusals([0, 30_000, 60_000], { text: API_403 });
+    expect(await vetoed(h)).toHaveLength(3);
+    expect(stormLines(h)).toEqual([]);
+  });
+
+  it("open, a refusal there sets nothing aside and runs again where it is; one with the API's error body still sets its account aside", async () => {
+    const turns: Array<[string, string]> = [
+      ["creq_1", FORBIDDEN],
+      ["creq_2", FORBIDDEN],
+      ["creq_3", FORBIDDEN],
+      ["creq_4", FORBIDDEN],
+      ["creq_5", API_403],
+    ];
+    let clock = NOW;
+    // bb's log as it grows: each failure's text is its own turn's.
+    const log = { "thread-1": refusedLog("thread-1", turns.slice(0, 1)) };
+    const h = await host(FIVE, {
+      ...MACHINES,
+      clock: () => clock,
+      threadEvents: log,
+    });
+    dispose = () => h.harness.dispose();
+    teamSeats(h);
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    for (const [i, offset] of [0, 10_000, 20_000, 4 * 60_000].entries()) {
+      clock = NOW + offset;
+      log["thread-1"] = refusedLog("thread-1", turns.slice(0, i + 1));
+      await h.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        refused({ requestId: `creq_${i + 1}` }),
+      );
+      await settled();
+      h.queued.length = 0;
+    }
+    expect(await vetoed(h)).toEqual([]);
+    expect(h.envSet).toHaveLength(2);
+    expect(stormLines(h)).toHaveLength(1);
+    clock = NOW + 5 * 60_000;
+    log["thread-1"] = refusedLog("thread-1", turns);
+    await h.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      refused({ requestId: "creq_5" }),
+    );
+    await settled();
+    expect(await vetoed(h)).toHaveLength(1);
+  });
+
+  it("opened, the accounts of the run take a Fable turn again at once", async () => {
+    const h = await refusals([0, 10_000, 20_000]);
+    const moves = h.envSet.length;
+    // main, the best Ultra, was the first set aside: proj-2 sits on it and stays.
+    expect(await fableBefore(h, "thr-2", "proj-2")).toEqual({
+      action: "proceed",
+    });
+    expect(h.envSet).toHaveLength(moves);
+  });
+
+  it("opened, the Team seats of the run take an Opus turn again at once (a held model looks at the marks)", async () => {
+    const h = await refusals([0, 10_000, 20_000], {
+      model: "claude-opus-5-5",
+      presetEnv: { "proj-1": own("work"), "proj-2": own("work") },
+    });
+    // work, the best Team, was the first set aside: proj-2 sits on it and stays.
+    expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-1", "proj-1"]);
+    const decision = await h.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: thread({ id: "thr-2", projectId: "proj-2" }),
+        requestedExecution: {
+          providerId: "claude-code",
+          model: "claude-opus-5-5",
+        },
+        attempt: "start-turn",
+      }),
+    );
+    expect(decision).toEqual({ action: "proceed" });
+    expect(h.envSet.map((e) => e.projectId)).toEqual(["proj-1", "proj-1"]);
+  });
 });
 });
