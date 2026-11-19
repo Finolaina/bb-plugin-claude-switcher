@@ -8,6 +8,7 @@ import {
   type HealthAccount,
 } from "./health.js";
 import { parseUsage } from "./usage.js";
+import type { AccountUsage } from "./policy.js";
 
 const NOW = Date.parse("2026-10-30T20:55:58.000Z");
 
@@ -541,5 +542,45 @@ describe("health: gastaAntes and semanalPorGastar (0.2.55)", () => {
     expect(noReset).toMatchObject({ gastaAntes: false, semanalPorGastar: null });
     expect(report([unread]).cuentas[0]).toMatchObject({ gastaAntes: false, semanalPorGastar: null });
     expect(full).toMatchObject({ gastaAntes: false, semanalPorGastar: 0 });
+  });
+});
+
+// Review of 0.2.55: gastaAntes says what rank() decides (R2-002), the phrase
+// only on a usable account, and a read not whole knows nothing (R2-003 c).
+describe("health: gastaAntes is what rank() decides (R2-002, R2-003 c)", () => {
+  const H = 3_600_000;
+  const team = (name: string, session: number, more: Partial<AccountUsage> = {}, usable = true): HealthAccount => {
+    const u: AccountUsage = {
+      name,
+      blocked: false,
+      session: { usedPercent: session, resetsAt: NOW + 2 * H },
+      weekly: { usedPercent: 57, resetsAt: NOW + 3 * H },
+      models: {},
+      ...more,
+    };
+    return account({ name, usage: u, plan: planOf({ kind: "team" }, u), usable });
+  };
+  const report = (accounts: HealthAccount[]) =>
+    healthReport({ measured: NOW, now: NOW, dayStartHour: 9, holdsBackground: false, atascos: [], esperandoTeam: [], accounts });
+
+  it("a Team seat that loses weekly with its session at 75 % is not first: gastaAntes false", () => {
+    const r = report([team("t74", 74), team("t75", 75)]);
+    expect(r.cuentas[0]).toMatchObject({ gastaAntes: true, semanalPorGastar: 43 });
+    expect(r.cuentas[1]).toMatchObject({ gastaAntes: false, semanalPorGastar: 43 });
+  });
+
+  it("the phrase only on a usable account", () => {
+    const r = report([team("tOk", 10), team("tNo", 10, {}, false)]);
+    expect(r.cuentas[1]).toMatchObject({ gastaAntes: true });
+    expect(healthText(r)).toMatch(/^tOk .*va primero/m);
+    expect(healthText(r)).not.toMatch(/^tNo .*va primero/m);
+  });
+
+  it("a read not whole (unknown) or with no weekly reported (absent): false, nothing to spend known", () => {
+    const r = report([
+      team("tU", 10, { unknown: true }),
+      team("tW", 10, { weekly: { usedPercent: 57, resetsAt: NOW + 3 * H, absent: true } }),
+    ]);
+    for (const c of r.cuentas) expect(c).toMatchObject({ gastaAntes: false, semanalPorGastar: null });
   });
 });

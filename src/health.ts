@@ -7,7 +7,7 @@
 import type { PlanInfo } from "./accounts.js";
 import { DAY_ZONE, zoneOffsetMs, type Pace } from "./pace.js";
 import type { Atasco, EsperaTeam } from "./atascos.js";
-import { opusRoom, teamLosesWeekly, type AccountUsage, type UsageWindow } from "./policy.js";
+import { opusRoom, teamSpendsFirst, type AccountUsage, type UsageWindow } from "./policy.js";
 
 export const HEALTH_VERSION = 1;
 
@@ -127,9 +127,10 @@ export interface HealthReport {
      */
     fablePerdida?: number | null;
     /**
-     * Only with the clock given (0.2.55). A Team seat would lose general
-     * weekly at its reset, so it ranks first among the Team seats (see
-     * teamLosesWeekly in src/policy.ts); null for a Max or Ultra account.
+     * Only with the clock given (0.2.55). A Team seat ranks first among the
+     * Team seats, as rank() decides it: it would lose general weekly at its
+     * reset and its session is under 75 % (see teamSpendsFirst in
+     * src/policy.ts); null for a Max or Ultra account.
      */
     gastaAntes?: boolean | null;
     /**
@@ -375,7 +376,7 @@ function teamSpendOf(
     return { gastaAntes: false, semanalPorGastar: null };
   const reset = u.weekly.resetsAt;
   return {
-    gastaAntes: teamLosesWeekly({ ...u, team: true }, now),
+    gastaAntes: teamSpendsFirst({ ...u, team: true }, now),
     semanalPorGastar:
       reset === null || reset <= now ? null : round1(Math.max(0, 100 - u.weekly.usedPercent)),
   };
@@ -399,7 +400,7 @@ export function healthText(report: HealthReport): string {
       ...(c.huecoOpus === undefined || c.huecoOpus === null
         ? []
         : [`hueco Opus ${c.huecoOpus} (Fable perdida ${c.fablePerdida})`]),
-      ...(c.gastaAntes === true
+      ...(c.gastaAntes === true && c.usable
         ? [`pierde ${c.semanalPorGastar} de semanal en su reinicio: va primero`]
         : []),
       ...report.limites
