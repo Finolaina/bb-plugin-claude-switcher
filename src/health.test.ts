@@ -584,3 +584,28 @@ describe("health: gastaAntes is what rank() decides (R2-002, R2-003 c)", () => {
     for (const c of r.cuentas) expect(c).toMatchObject({ gastaAntes: false, semanalPorGastar: null });
   });
 });
+
+// Review r3 of 0.2.55 (R3-002, R3-003): what semanalPorGastar gives at its edges.
+describe("health: semanalPorGastar at its edges (R3-002, R3-003)", () => {
+  const H = 3_600_000;
+  const team = (name: string, weekly: number, resetsIn: number): HealthAccount => {
+    const u: AccountUsage = {
+      name,
+      blocked: false,
+      session: { usedPercent: 10, resetsAt: NOW + 2 * H },
+      weekly: { usedPercent: weekly, resetsAt: NOW + resetsIn },
+      models: {},
+    };
+    return account({ name, usage: u, plan: planOf({ kind: "team" }, u) });
+  };
+  const report = (accounts: HealthAccount[]) =>
+    healthReport({ measured: NOW, now: NOW, dayStartHour: 9, holdsBackground: false, atascos: [], esperandoTeam: [], accounts });
+
+  it("a weekly reset already past (a stale read): null", () => {
+    expect(report([team("tP", 57, -1 * H)]).cuentas[0]).toMatchObject({ gastaAntes: false, semanalPorGastar: null });
+  });
+
+  it("a weekly read over 100 %: 0, never below", () => {
+    expect(report([team("tO", 104, 3 * H)]).cuentas[0]).toMatchObject({ gastaAntes: false, semanalPorGastar: 0 });
+  });
+});
