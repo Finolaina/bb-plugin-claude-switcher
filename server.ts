@@ -5564,7 +5564,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             preferredModel: model,
             ...reserveOf(projectId),
             freeSeats: seatRoom,
-            now,
           }) !== null,
       )
       .map((a) => a.name);
@@ -8009,7 +8008,6 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             chooseAccount([settle(here, now)], {
               preferredModel: model,
               ...reserveFor(threadId, now, projectId),
-              now,
             })?.account) === fromName))
     ) {
       // It waited on the account the project was on before.

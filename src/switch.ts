@@ -1188,7 +1188,6 @@ export function placedOn(input: PlacementInput): string | null {
         reserveShare: input.reserveShare,
         opusOverflowRoom: input.opusOverflowRoom,
         noTeamTakes: input.noTeamTakes,
-        now: input.now,
       },
     )?.account ?? null
   );

@@ -3,7 +3,9 @@
 va a perder cuota en su reinicio recibe los hilos antes, desde unos 2 días antes. Plazas en 5.»). Cada decisión de la
 regla tiene una prueba que muere con su mutante: se aplica el cambio en un clon limpio de HEAD, se ejecuta SU prueba y
 se exige rojo. Un mutante que no aplica o que queda en verde hace fallar el script. Se niega a correr (código 3) con el
-árbol sucio. Salida: mutantes.salida.txt, junto a este fichero. Mismo motor que docs/veto-403-2026-11-13/mutantes.py."""
+árbol sucio. Salida: mutantes.salida.txt, junto a este fichero. Mismo motor que docs/veto-403-2026-11-13/mutantes.py. Sin mutante
+para el reloj de placedOn ni de freeElsewhere: allí chooseAccount mira una sola cuenta y el orden no decide nada
+(la primera tirada lo dejó vivo); se quitó."""
 import os
 import shutil
 import subprocess
@@ -80,10 +82,6 @@ M = [
      "    savedForUser: input.savedForUser,\n    now: input.now,\n  };\n  if (input.isNew) {",
      "    savedForUser: input.savedForUser,\n  };\n  if (input.isNew) {",
      SWT, "the step on every path"),
-    ("caminos", "placedOn sin reloj", SWI,
-     "        noTeamTakes: input.noTeamTakes,\n        now: input.now,\n      },\n    )?.account ?? null",
-     "        noTeamTakes: input.noTeamTakes,\n      },\n    )?.account ?? null",
-     SWT, "the account a placement names"),
     ("caminos", "decideAhead sin reloj", SWI,
      "    savedForUser: input.savedForUser,\n    now: input.now,\n  });",
      "    savedForUser: input.savedForUser,\n  });",
