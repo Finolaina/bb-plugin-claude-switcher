@@ -17952,7 +17952,10 @@ describe("caminos 2026-11-04", () => {
   const INCIDENT = {
     main: () => Response.json(payload(13, 88, 98)),
     spare: () => Response.json(payload(81, 48, 100)),
-    work: () => Response.json(payload(0, 2, 0)),
+    // 5 %, not 2 %: with 98 points left 3 days before its reset `work`
+    // would lose weekly (0.2.55, teamLosesWeekly) and rank first; these
+    // tests are about the order without that step.
+    work: () => Response.json(payload(0, 5, 0)),
   };
   const dispatch = (
     h: Awaited<ReturnType<typeof host>>,
