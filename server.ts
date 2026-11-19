@@ -8433,6 +8433,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         ? {}
         : { reserve: { model: current.preferredModel, share: current.reserveShare } }),
       measured: observed.length === 0 ? now : Math.max(...observed),
+      // gastaAntes and semanalPorGastar per Team seat (0.2.55).
+      now,
       dayStartHour: dayHour(),
       holdsBackground: current.paceHoldsBackground === true,
       accounts: accounts.map((account) => {

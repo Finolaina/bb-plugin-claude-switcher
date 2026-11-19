@@ -17602,6 +17602,40 @@ describe("bb claude-switcher health (SPEC 2026-10-30 §4)", () => {
     expect(byName.work).toMatchObject({ huecoOpus: -9.5, fablePerdida: 19 });
   });
 
+  // Aitor 2026-11-19: «La Team que va a perder cuota en su reinicio recibe
+  // los hilos antes» (0.2.55).
+  it("gives each Team seat gastaAntes and semanalPorGastar, a Max or Ultra null", async () => {
+    const team = (weekly: number, resetsIn: number) => () =>
+      Response.json({
+        limits: [
+          { kind: "session", percent: 10, resets_at: new Date(NOW + 2 * HOUR).toISOString() },
+          { kind: "weekly_all", percent: weekly, resets_at: new Date(NOW + resetsIn).toISOString() },
+        ],
+        five_hour: { locked_reason: null },
+        seven_day: { locked_reason: null },
+      });
+    const h = await host(
+      {
+        main: () => Response.json(ultraFixture("ultra-sin-5h")),
+        spare: team(57, 3 * HOUR),
+        work: team(18, 100 * HOUR),
+      },
+      { settings: { preferredModel: "Fable" } },
+    );
+    dispose = () => h.harness.dispose();
+    for (const name of ["spare", "work"])
+      h.files[`${ACCOUNTS}/${name}/.claude.json`] = JSON.stringify({
+        oauthAccount: { accountUuid: `uuid-${name}`, emailAddress: `${name}@example.com`, organizationType: "claude_team" },
+      });
+    await h.harness.behavior.callRpc("accounts_refresh", null);
+    const report = JSON.parse((await h.harness.behavior.runCli(["health", "--json"])).stdout);
+    const byName = Object.fromEntries(report.cuentas.map((c: { nombre: string }) => [c.nombre, c]));
+    expect(byName.main).toMatchObject({ gastaAntes: null, semanalPorGastar: null });
+    expect(byName.spare).toMatchObject({ gastaAntes: true, semanalPorGastar: 43 });
+    expect(byName.work).toMatchObject({ gastaAntes: false, semanalPorGastar: 82 });
+    expect((await h.harness.behavior.runCli(["health"])).stdout).toMatch(/^spare .*pierde 43 de semanal en su reinicio: va primero/m);
+  });
+
   it("is not usable where the policy would not choose it: out at its last good read, its reset passed while the queries fail (Codex ULTRA-R06)", async () => {
     let clock = NOW;
     let down = false;

@@ -7,7 +7,7 @@
 import type { PlanInfo } from "./accounts.js";
 import { DAY_ZONE, zoneOffsetMs, type Pace } from "./pace.js";
 import type { Atasco, EsperaTeam } from "./atascos.js";
-import { opusRoom, type AccountUsage, type UsageWindow } from "./policy.js";
+import { opusRoom, teamLosesWeekly, type AccountUsage, type UsageWindow } from "./policy.js";
 
 export const HEALTH_VERSION = 1;
 
@@ -126,6 +126,19 @@ export interface HealthReport {
      * else 0; one decimal; null where huecoOpus is.
      */
     fablePerdida?: number | null;
+    /**
+     * Only with the clock given (0.2.55). A Team seat would lose general
+     * weekly at its reset, so it ranks first among the Team seats (see
+     * teamLosesWeekly in src/policy.ts); null for a Max or Ultra account.
+     */
+    gastaAntes?: boolean | null;
+    /**
+     * Only with the clock given (0.2.55). The points of a Team seat's
+     * general weekly left to spend before its reset (100 − weekly), one
+     * decimal; null for a Max or Ultra account, or a Team seat with no
+     * weekly read whole or no reset ahead.
+     */
+    semanalPorGastar?: number | null;
   }>;
 }
 
@@ -251,6 +264,8 @@ export function healthReport(input: {
   accounts: HealthAccount[];
   /** The preferred model and the weekly it spends per point of its own window (reserveShare): adds huecoOpus and fablePerdida. */
   reserve?: { model: string; share: number };
+  /** The clock: adds gastaAntes and semanalPorGastar (0.2.55). */
+  now?: number;
 }): HealthReport {
   return {
     version: HEALTH_VERSION,
@@ -327,6 +342,7 @@ export function healthReport(input: {
         usable: a.usable,
         problema: problemText(a, input),
         ...(input.reserve === undefined ? {} : roomOf(a, input.reserve)),
+        ...(input.now === undefined ? {} : teamSpendOf(a, input.now)),
       };
     }),
   };
@@ -348,6 +364,23 @@ function roomOf(
   };
 }
 
+/** gastaAntes and semanalPorGastar of an account (see HealthReport). */
+function teamSpendOf(
+  a: HealthAccount,
+  now: number,
+): { gastaAntes: boolean | null; semanalPorGastar: number | null } {
+  if (a.plan.plan !== "team") return { gastaAntes: null, semanalPorGastar: null };
+  const u = a.usage;
+  if (u === null || u.unknown === true || u.weekly.absent === true)
+    return { gastaAntes: false, semanalPorGastar: null };
+  const reset = u.weekly.resetsAt;
+  return {
+    gastaAntes: teamLosesWeekly({ ...u, team: true }, now),
+    semanalPorGastar:
+      reset === null || reset <= now ? null : round1(Math.max(0, 100 - u.weekly.usedPercent)),
+  };
+}
+
 /** The same report as text: one line per account. */
 export function healthText(report: HealthReport): string {
   const width = Math.max(0, ...report.cuentas.map((c) => c.nombre.length));
@@ -366,6 +399,9 @@ export function healthText(report: HealthReport): string {
       ...(c.huecoOpus === undefined || c.huecoOpus === null
         ? []
         : [`hueco Opus ${c.huecoOpus} (Fable perdida ${c.fablePerdida})`]),
+      ...(c.gastaAntes === true
+        ? [`pierde ${c.semanalPorGastar} de semanal en su reinicio: va primero`]
+        : []),
       ...report.limites
         .filter((l) => l.cuenta === c.nombre)
         .map((l) => `límite ${l.modelo === "todos" ? "" : `${l.modelo} `}hasta ${l.hasta}`),

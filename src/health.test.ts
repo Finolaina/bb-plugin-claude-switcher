@@ -500,3 +500,46 @@ describe("health: why an account is not usable, every cause named (0.2.53)", () 
     expect(healthText(report)).not.toContain("sin motivo");
   });
 });
+
+// 0.2.55 (Aitor 2026-11-19, «La Team que va a perder cuota en su reinicio
+// recibe los hilos antes»): health says which Team seat is in that step and
+// how much of its weekly it has left to spend before its reset.
+describe("health: gastaAntes and semanalPorGastar (0.2.55)", () => {
+  const H = 3_600_000;
+  const team = (name: string, weekly: number, resetsIn: number | null): HealthAccount => {
+    const u = {
+      name,
+      blocked: false,
+      session: { usedPercent: 10, resetsAt: NOW + 2 * H },
+      weekly: { usedPercent: weekly, resetsAt: resetsIn === null ? null : NOW + resetsIn },
+      models: {},
+    };
+    return account({ name, usage: u, plan: planOf({ kind: "team" }, u) });
+  };
+  const report = (accounts: HealthAccount[]) =>
+    healthReport({ measured: NOW, now: NOW, dayStartHour: 9, holdsBackground: false, atascos: [], esperandoTeam: [], accounts });
+
+  it("a Team seat in the step, one out of it, a Max account", () => {
+    const max: HealthAccount = account({
+      name: "max",
+      usage: { name: "max", blocked: false, session: { usedPercent: 0, resetsAt: null }, weekly: { usedPercent: 57, resetsAt: NOW + H }, models: {} },
+    });
+    const r = report([team("tA", 57, 3 * H), team("tB", 18, 100 * H), max]);
+    const [a, b, m] = r.cuentas;
+    expect(a).toMatchObject({ gastaAntes: true, semanalPorGastar: 43 });
+    expect(b).toMatchObject({ gastaAntes: false, semanalPorGastar: 82 });
+    expect(m).toMatchObject({ gastaAntes: null, semanalPorGastar: null });
+    expect(healthText(r)).toMatch(/^tA .*pierde 43 de semanal en su reinicio: va primero/m);
+    expect(healthText(r)).not.toMatch(/^tB .*pierde/m);
+    // usable and problema keep their meaning.
+    expect(a).toMatchObject({ usable: true, problema: null });
+  });
+
+  it("a Team seat with no reset ahead, not read or at 100 %: not in the step", () => {
+    const unread = account({ name: "u", usage: null, plan: planOf({ kind: "team" }, null) });
+    const [noReset, , full] = report([team("n", 57, null), unread, team("f", 100, H)]).cuentas;
+    expect(noReset).toMatchObject({ gastaAntes: false, semanalPorGastar: null });
+    expect(report([unread]).cuentas[0]).toMatchObject({ gastaAntes: false, semanalPorGastar: null });
+    expect(full).toMatchObject({ gastaAntes: false, semanalPorGastar: 0 });
+  });
+});
