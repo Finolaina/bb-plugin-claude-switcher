@@ -422,18 +422,7 @@ function roomTier(account: AccountUsage, options: ChoiceOptions): number {
 function rank(
   account: AccountUsage,
   options: ChoiceOptions,
-): [
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-] {
+): [number, number, number, number, number, number, number, number, number, number] {
   const saved = options.savedForUser?.(account.name) === true ? 1 : 0;
   const keepsReserve =
     reserving(options) && canRunModel(account, options.reserveModel!) ? 1 : 0;

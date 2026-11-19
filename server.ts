@@ -5564,6 +5564,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             preferredModel: model,
             ...reserveOf(projectId),
             freeSeats: seatRoom,
+            now,
           }) !== null,
       )
       .map((a) => a.name);
@@ -5574,7 +5575,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   function otherThatRuns(name: string, model: string, projectId?: string): string | null {
     const now = deps.now();
-    const options = { preferredModel: model, ...reserveOf(projectId) };
+    const options = { preferredModel: model, ...reserveOf(projectId), now };
     // Nor one a session lost keeps from the project: its turn would wait in
     // that queue for a move no placement makes (sin-login 2026-11-10).
     const measured = measuredAccounts(model).filter(
@@ -8008,6 +8009,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
             chooseAccount([settle(here, now)], {
               preferredModel: model,
               ...reserveFor(threadId, now, projectId),
+              now,
             })?.account) === fromName))
     ) {
       // It waited on the account the project was on before.
@@ -8040,6 +8042,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           ...reserveFor(threadId, now, projectId),
           freeSeats,
           savedForUser: paceFilter(isBackground(thread)).savedForUser,
+          now,
         },
       )?.account ?? null;
     if (to === null) {
