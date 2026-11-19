@@ -22,13 +22,17 @@ project uses [Semantic Versioning](https://semver.org/).
   cuarto de sesión: primero la Team cuyo resto de semanal (100 − semanal),
   a 10 puntos por sesión de 5 h y por 1,5 ([SUPUESTO]: no todas las
   sesiones se llenan y hay noche), tarda al menos lo que falta para su
-  reinicio (`teamLosesWeekly`; 78 puntos → 58,5 h antes, 43 → 32,25 h).
+  reinicio (`teamLosesWeekly`; 78 puntos → 58,5 h antes, 43 → 32,25 h), y
+  solo con la sesión por debajo del 75 % (`teamSpendsFirst`): con la sesión
+  casi llena el proyecto iba allí y al turno siguiente se movía otra vez.
   Solo Team con reinicio semanal conocido y futuro; una Max o Ultra nunca.
-  Dentro del escalón, el orden de siempre. Lo heredan todos los caminos que
-  eligen entre Team (colocación, cambio tras un fallo, cambio anticipado,
-  cabecera, el servidor) y la espera de plaza (`reserveWait`) desempata por
-  él antes que por el nombre. `seatsTeam` no cambia. `health --json` da por
-  cuenta `gastaAntes` y `semanalPorGastar` (null en las Max y Ultra), y el
+  Dentro del escalón, el orden de siempre. Lo heredan los caminos que eligen
+  entre Team (colocación, cambio tras un fallo, cambio anticipado, cabecera,
+  el servidor), salvo la espera de `decideSwitch`, que va al reinicio más
+  temprano sin el escalón; la espera de plaza (`reserveWait`) desempata por
+  `teamLosesWeekly` antes que por el nombre. `seatsTeam` no cambia.
+  `health --json` da por cuenta `gastaAntes` (lo que decide `rank()`) y
+  `semanalPorGastar` (null en las Max y Ultra), y en una cuenta usable el
   texto dice «pierde N de semanal en su reinicio: va primero». Mutantes:
   `docs/team-gasta-antes-2026-11-19/mutantes.py`.
 

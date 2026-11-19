@@ -499,8 +499,9 @@ preferred one, so it does not spend the preferred model's window where it
 is still free, then to the Team seats that keep it (what a Team seat
 spends is not what the preferred model needs). Among the Team seats, one
 that would lose general weekly at its reset goes first, before the session
-quarter: what it has left (100 − weekly), at 10 points a 5-hour session and
-times 1.5, takes at least as long as there is until its reset (0.2.55;
+quarter, while its session is under 75 %: what it has left (100 − weekly),
+at 10 points a 5-hour session and times 1.5, takes at least as long as
+there is until its reset (0.2.55;
 `bb claude-switcher health` says which, with `gastaAntes` and
 `semanalPorGastar` in `--json`). A Max or Ultra account that
 keeps the preferred model is
