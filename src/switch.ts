@@ -18,6 +18,7 @@ import {
   reserving,
   RESET_TOGETHER_MS,
   spendsReservedWeekly,
+  teamLosesWeekly,
   type AccountUsage,
   type Choice,
   type ChoiceOptions,
@@ -393,6 +394,7 @@ export function decideSwitch(input: SwitchInput): SwitchDecision {
         ? undefined
         : (model: string) => teamTakes(model, ruledOut),
     savedForUser: input.savedForUser,
+    now: input.now,
   };
   // A failure just reported rules its account out. Left in error, the thread
   // is judged on the measurements: the project may have moved since, and its
@@ -843,7 +845,7 @@ export function bestAccount(
   return (
     chooseSeated(
       accounts.map((a) => settle(a, now)),
-      { preferredModel, reserveModel, savedForUser, reserveSpareUpTo, reserveShare },
+      { preferredModel, reserveModel, savedForUser, reserveSpareUpTo, reserveShare, now },
       freeSeats,
     )?.account ?? null
   );
@@ -876,6 +878,7 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     opusOverflowRoom: input.opusOverflowRoom,
     noTeamTakes: input.noTeamTakes,
     savedForUser: input.savedForUser,
+    now: input.now,
   };
   if (input.isNew) {
     const choice = chooseSeated(accounts, options, input.freeSeats);
@@ -1018,6 +1021,7 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
           {
             preferredModel: input.preferredModel,
             savedForUser: input.savedForUser,
+            now: input.now,
           },
           input.freeSeats,
         )
@@ -1123,10 +1127,14 @@ export function reserveWait(
     reserveShare: input.reserveShare,
     opusOverflowRoom: input.opusOverflowRoom,
     noTeamTakes: input.noTeamTakes,
+    now: input.now,
   };
   // At the same time, a Team seat before a Max out of the reserved model
-  // (Codex R047-R2-004).
-  let earliest: { account: string; at: number; late: boolean } | null = null;
+  // (Codex R047-R2-004); then a Team seat that would lose weekly at its
+  // reset (0.2.55, teamLosesWeekly), then the name. Its session does not
+  // count here, unlike in rank() (teamSpendsFirst): what is waited for is a
+  // seat or a reset, not the session.
+  let earliest: { account: string; at: number; late: boolean; loses: boolean } | null = null;
   // A Team seat known by its login only is one to wait for too: in its queue,
   // what comes later does not overtake the turn (Astra IR5-002).
   for (const raw of [
@@ -1144,13 +1152,18 @@ export function reserveWait(
     const sendBy = Math.max(at, input.now) + RESET_BUFFER_MS + RESET_JITTER_MS;
     if (spendsReservedWeekly(settle(account, sendBy), options)) continue;
     const late = afterTeams(account, options);
+    const loses = teamLosesWeekly(account, input.now);
     if (
       earliest === null ||
       at < earliest.at ||
       (at === earliest.at &&
-        (late !== earliest.late ? !late : account.name < earliest.account))
+        (late !== earliest.late
+          ? !late
+          : loses !== earliest.loses
+            ? loses
+            : account.name < earliest.account))
     )
-      earliest = { account: account.name, at, late };
+      earliest = { account: account.name, at, late, loses };
   }
   return earliest === null ? null : { account: earliest.account, at: earliest.at };
 }
@@ -1257,6 +1270,7 @@ export function decideAhead(input: AheadInput): AheadDecision {
     noTeamTakes: input.noTeamTakes,
     freeSeats: input.freeSeats,
     savedForUser: input.savedForUser,
+    now: input.now,
   });
   return choice === null
     ? { kind: "keep" }

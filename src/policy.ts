@@ -104,6 +104,60 @@ export interface ChoiceOptions {
    * Team seat may: no Max or Ultra takes the turn for its room.
    */
   noTeamTakes?: (model: string) => boolean;
+  /**
+   * The clock, epoch milliseconds: with it, a Team seat that would lose
+   * weekly at its reset ranks first among the Team seats (see
+   * teamLosesWeekly). Unset = the order before 0.2.55.
+   */
+  now?: number;
+}
+
+/**
+ * Points of a Team seat's general weekly one full 5-hour session spends:
+ * 9.4 / 9.9 / 10.0 / 10.1 / 10.7 on the five seats (production history,
+ * 12-19 Nov 2026, cuenta nuestra; evidence outside the repo, folder
+ * `team-plazas-2026-11-19/`).
+ */
+export const TEAM_SESSION_WEEKLY_POINTS = 10;
+/** Hours of one session (the 5-hour window). */
+export const TEAM_SESSION_HOURS = 5;
+/**
+ * [SUPUESTO] (2026-11-19, the session that delegated): not every session
+ * fills, and there are nights; how much longer than back to back sessions
+ * spending what is left takes.
+ */
+export const TEAM_SPEND_SLACK = 1.5;
+
+/**
+ * Whether a Team seat would lose general weekly at its reset unless it gets
+ * the threads first (Aitor 2026-11-19, «La Team que va a perder cuota en su
+ * reinicio recibe los hilos antes, desde unos 2 días antes»): what is left of
+ * its weekly (100 − used) takes, at TEAM_SESSION_WEEKLY_POINTS a session,
+ * at least as long (× TEAM_SPEND_SLACK) as there is until the reset. Never
+ * a Max or Ultra account, a weekly at 100 %, or a reset unknown or past.
+ */
+export function teamLosesWeekly(account: AccountUsage, now: number): boolean {
+  const reset = account.weekly.resetsAt;
+  if (account.team !== true || reset === null || reset <= now) return false;
+  // A weekly at 100 % has nothing left: it needs no time, so never in.
+  const left = 100 - account.weekly.usedPercent;
+  const needMs =
+    (left / TEAM_SESSION_WEEKLY_POINTS) *
+    TEAM_SESSION_HOURS *
+    3_600_000 *
+    TEAM_SPEND_SLACK;
+  return reset - now <= needMs;
+}
+
+/**
+ * Whether a Team seat ranks first among the Team seats (the step of rank()):
+ * it would lose weekly at its reset (teamLosesWeekly) and its session is
+ * under 75 % (quarter below 3). With the session nearly spent it would take
+ * the project only for the next turn to move it on, for nothing (review
+ * R2-001 of 0.2.55, decision of the session that delegated).
+ */
+export function teamSpendsFirst(account: AccountUsage, now: number): boolean {
+  return teamLosesWeekly(account, now) && sessionQuarter(account) < 3;
 }
 
 export interface Choice {
@@ -379,7 +433,7 @@ function roomTier(account: AccountUsage, options: ChoiceOptions): number {
 function rank(
   account: AccountUsage,
   options: ChoiceOptions,
-): [number, number, number, number, number, number, number, number, number] {
+): [number, number, number, number, number, number, number, number, number, number] {
   const saved = options.savedForUser?.(account.name) === true ? 1 : 0;
   const keepsReserve =
     reserving(options) && canRunModel(account, options.reserveModel!) ? 1 : 0;
@@ -410,6 +464,14 @@ function rank(
     spendsWeekly,
     reserveOnTeam,
     roomTier(account, options),
+    // A Team seat that would lose weekly at its reset, with session left,
+    // first (0.2.55, teamSpendsFirst). Mostly among the Team seats, for the
+    // steps above keep a Team seat apart from a Max or Ultra; where they tie
+    // (no preferred model, or a Haiku turn with the reserved model spent on
+    // both) it goes before a Max or Ultra too: the weekly it spends is lost
+    // at the reset, and the other spends nothing the reserved model needs
+    // (review R1-001).
+    options.now !== undefined && teamSpendsFirst(account, options.now) ? 0 : 1,
     sessionQuarter(account),
     deadline(account, options.preferredModel),
     account.session.usedPercent,
@@ -421,7 +483,9 @@ function rank(
  * savedForUser). Then accounts out of the reserved model first (when reserving), then those
  * that spend no weekly window for the model (Team seats), then (with a
  * share set, see ChoiceOptions.reserveShare) a Team seat last for the
- * reserved model and the opusRoom tier, then the lowest
+ * reserved model and the opusRoom tier, then (with the clock) a Team seat
+ * that would lose weekly at its reset with session left (teamSpendsFirst),
+ * then the lowest
  * session quarter, then the closest deadline for the model, then lowest
  * session use, then name: never the order measured. Within a quarter what
  * runs out first is spent first; the quarter keeps new sessions from piling
@@ -434,14 +498,15 @@ function sortedByRank(
   options: ChoiceOptions,
 ): AccountUsage[] {
   return [...accounts].sort((a, b) => {
-    const [xa, va, ka, wa, ea, ra, ta, da, sa] = rank(a, options);
-    const [xb, vb, kb, wb, eb, rb, tb, db, sb] = rank(b, options);
+    const [xa, va, ka, wa, ea, ra, la, ta, da, sa] = rank(a, options);
+    const [xb, vb, kb, wb, eb, rb, lb, tb, db, sb] = rank(b, options);
     if (xa !== xb) return xa - xb;
     if (va !== vb) return va - vb;
     if (ka !== kb) return ka - kb;
     if (wa !== wb) return wa - wb;
     if (ea !== eb) return ea - eb;
     if (ra !== rb) return ra - rb;
+    if (la !== lb) return la - lb;
     if (ta !== tb) return ta - tb;
     if (da !== db) return da - db;
     if (sa !== sb) return sa - sb;

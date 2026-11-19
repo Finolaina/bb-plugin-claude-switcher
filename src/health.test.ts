@@ -8,6 +8,7 @@ import {
   type HealthAccount,
 } from "./health.js";
 import { parseUsage } from "./usage.js";
+import type { AccountUsage } from "./policy.js";
 
 const NOW = Date.parse("2026-10-30T20:55:58.000Z");
 
@@ -498,5 +499,113 @@ describe("health: why an account is not usable, every cause named (0.2.53)", () 
       /^no usable sin causa en el informe/,
     );
     expect(healthText(report)).not.toContain("sin motivo");
+  });
+});
+
+// 0.2.55 (Aitor 2026-11-19, «La Team que va a perder cuota en su reinicio
+// recibe los hilos antes»): health says which Team seat is in that step and
+// how much of its weekly it has left to spend before its reset.
+describe("health: gastaAntes and semanalPorGastar (0.2.55)", () => {
+  const H = 3_600_000;
+  const team = (name: string, weekly: number, resetsIn: number | null): HealthAccount => {
+    const u = {
+      name,
+      blocked: false,
+      session: { usedPercent: 10, resetsAt: NOW + 2 * H },
+      weekly: { usedPercent: weekly, resetsAt: resetsIn === null ? null : NOW + resetsIn },
+      models: {},
+    };
+    return account({ name, usage: u, plan: planOf({ kind: "team" }, u) });
+  };
+  const report = (accounts: HealthAccount[]) =>
+    healthReport({ measured: NOW, now: NOW, dayStartHour: 9, holdsBackground: false, atascos: [], esperandoTeam: [], accounts });
+
+  it("a Team seat in the step, one out of it, a Max account", () => {
+    const max: HealthAccount = account({
+      name: "max",
+      usage: { name: "max", blocked: false, session: { usedPercent: 0, resetsAt: null }, weekly: { usedPercent: 57, resetsAt: NOW + H }, models: {} },
+    });
+    const r = report([team("tA", 57, 3 * H), team("tB", 18, 100 * H), max]);
+    const [a, b, m] = r.cuentas;
+    expect(a).toMatchObject({ gastaAntes: true, semanalPorGastar: 43 });
+    expect(b).toMatchObject({ gastaAntes: false, semanalPorGastar: 82 });
+    expect(m).toMatchObject({ gastaAntes: null, semanalPorGastar: null });
+    expect(healthText(r)).toMatch(/^tA .*pierde 43 de semanal en su reinicio: va primero/m);
+    expect(healthText(r)).not.toMatch(/^tB .*pierde/m);
+    // usable and problema keep their meaning.
+    expect(a).toMatchObject({ usable: true, problema: null });
+  });
+
+  it("a Team seat with no reset ahead, not read or at 100 %: not in the step", () => {
+    const unread = account({ name: "u", usage: null, plan: planOf({ kind: "team" }, null) });
+    const [noReset, , full] = report([team("n", 57, null), unread, team("f", 100, H)]).cuentas;
+    expect(noReset).toMatchObject({ gastaAntes: false, semanalPorGastar: null });
+    expect(report([unread]).cuentas[0]).toMatchObject({ gastaAntes: false, semanalPorGastar: null });
+    expect(full).toMatchObject({ gastaAntes: false, semanalPorGastar: 0 });
+  });
+});
+
+// Review of 0.2.55: gastaAntes says what rank() decides (R2-002), the phrase
+// only on a usable account, and a read not whole knows nothing (R2-003 c).
+describe("health: gastaAntes is what rank() decides (R2-002, R2-003 c)", () => {
+  const H = 3_600_000;
+  const team = (name: string, session: number, more: Partial<AccountUsage> = {}, usable = true): HealthAccount => {
+    const u: AccountUsage = {
+      name,
+      blocked: false,
+      session: { usedPercent: session, resetsAt: NOW + 2 * H },
+      weekly: { usedPercent: 57, resetsAt: NOW + 3 * H },
+      models: {},
+      ...more,
+    };
+    return account({ name, usage: u, plan: planOf({ kind: "team" }, u), usable });
+  };
+  const report = (accounts: HealthAccount[]) =>
+    healthReport({ measured: NOW, now: NOW, dayStartHour: 9, holdsBackground: false, atascos: [], esperandoTeam: [], accounts });
+
+  it("a Team seat that loses weekly with its session at 75 % is not first: gastaAntes false", () => {
+    const r = report([team("t74", 74), team("t75", 75)]);
+    expect(r.cuentas[0]).toMatchObject({ gastaAntes: true, semanalPorGastar: 43 });
+    expect(r.cuentas[1]).toMatchObject({ gastaAntes: false, semanalPorGastar: 43 });
+  });
+
+  it("the phrase only on a usable account", () => {
+    const r = report([team("tOk", 10), team("tNo", 10, {}, false)]);
+    expect(r.cuentas[1]).toMatchObject({ gastaAntes: true });
+    expect(healthText(r)).toMatch(/^tOk .*va primero/m);
+    expect(healthText(r)).not.toMatch(/^tNo .*va primero/m);
+  });
+
+  it("a read not whole (unknown) or with no weekly reported (absent): false, nothing to spend known", () => {
+    const r = report([
+      team("tU", 10, { unknown: true }),
+      team("tW", 10, { weekly: { usedPercent: 57, resetsAt: NOW + 3 * H, absent: true } }),
+    ]);
+    for (const c of r.cuentas) expect(c).toMatchObject({ gastaAntes: false, semanalPorGastar: null });
+  });
+});
+
+// Review r3 of 0.2.55 (R3-002, R3-003): what semanalPorGastar gives at its edges.
+describe("health: semanalPorGastar at its edges (R3-002, R3-003)", () => {
+  const H = 3_600_000;
+  const team = (name: string, weekly: number, resetsIn: number): HealthAccount => {
+    const u: AccountUsage = {
+      name,
+      blocked: false,
+      session: { usedPercent: 10, resetsAt: NOW + 2 * H },
+      weekly: { usedPercent: weekly, resetsAt: NOW + resetsIn },
+      models: {},
+    };
+    return account({ name, usage: u, plan: planOf({ kind: "team" }, u) });
+  };
+  const report = (accounts: HealthAccount[]) =>
+    healthReport({ measured: NOW, now: NOW, dayStartHour: 9, holdsBackground: false, atascos: [], esperandoTeam: [], accounts });
+
+  it("a weekly reset already past (a stale read): null", () => {
+    expect(report([team("tP", 57, -1 * H)]).cuentas[0]).toMatchObject({ gastaAntes: false, semanalPorGastar: null });
+  });
+
+  it("a weekly read over 100 %: 0, never below", () => {
+    expect(report([team("tO", 104, 3 * H)]).cuentas[0]).toMatchObject({ gastaAntes: false, semanalPorGastar: 0 });
   });
 });

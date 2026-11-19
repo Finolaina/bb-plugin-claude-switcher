@@ -4,6 +4,38 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.55] - 2026-11-19
+
+### Cambiado
+
+- **La Team que va a perder semanal en su reinicio recibe los hilos
+  antes.** Aitor, 2026-11-19: «podrías darle más hilos a las cuentas team?
+  o si una está a punto de reiniciarse la cuota semanal y tiene todavía
+  cuota que podamos mandarle más hilos?», y eligió «La Team que va a perder
+  cuota en su reinicio recibe los hilos antes, desde unos 2 días antes.
+  Plazas en 5.». Medido en el historial de producción del 12 al 19-nov
+  (cuenta nuestra): las Team casi nunca se llenan (4,4 hilos de media en 25
+  plazas), una sesión entera de 5 h gasta ~10 puntos de su semanal y una
+  Team se reinició el 16-nov con 78 puntos sin gastar. El 19-nov a las 08:41
+  59 proyectos fueron a la Team de sesión más vacía y no a la que perdía 43
+  puntos a las 12:00. Ahora `rank()` tiene un escalón entre `roomTier` y el
+  cuarto de sesión: primero la Team cuyo resto de semanal (100 − semanal),
+  a 10 puntos por sesión de 5 h y por 1,5 ([SUPUESTO]: no todas las
+  sesiones se llenan y hay noche), tarda al menos lo que falta para su
+  reinicio (`teamLosesWeekly`; 78 puntos → 58,5 h antes, 43 → 32,25 h), y
+  solo con la sesión por debajo del 75 % (`teamSpendsFirst`): con la sesión
+  casi llena el proyecto iba allí y al turno siguiente se movía otra vez.
+  Solo Team con reinicio semanal conocido y futuro; una Max o Ultra nunca.
+  Dentro del escalón, el orden de siempre. Lo heredan los caminos que eligen
+  entre Team (colocación, cambio tras un fallo, cambio anticipado, cabecera,
+  el servidor), salvo la espera de `decideSwitch`, que va al reinicio más
+  temprano sin el escalón; la espera de plaza (`reserveWait`) desempata por
+  `teamLosesWeekly` antes que por el nombre. `seatsTeam` no cambia.
+  `health --json` da por cuenta `gastaAntes` (lo que decide `rank()`) y
+  `semanalPorGastar` (null en las Max y Ultra), y en una cuenta usable el
+  texto dice «pierde N de semanal en su reinicio: va primero». Mutantes:
+  `docs/team-gasta-antes-2026-11-19/mutantes.py`.
+
 ## [0.2.54] - 2026-11-13
 
 ### Corregido

@@ -5574,7 +5574,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
    */
   function otherThatRuns(name: string, model: string, projectId?: string): string | null {
     const now = deps.now();
-    const options = { preferredModel: model, ...reserveOf(projectId) };
+    const options = { preferredModel: model, ...reserveOf(projectId), now };
     // Nor one a session lost keeps from the project: its turn would wait in
     // that queue for a move no placement makes (sin-login 2026-11-10).
     const measured = measuredAccounts(model).filter(
@@ -8040,6 +8040,7 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
           ...reserveFor(threadId, now, projectId),
           freeSeats,
           savedForUser: paceFilter(isBackground(thread)).savedForUser,
+          now,
         },
       )?.account ?? null;
     if (to === null) {
@@ -8430,6 +8431,8 @@ export async function createPlugin(bb: BbPluginApi, deps: PluginDeps) {
         ? {}
         : { reserve: { model: current.preferredModel, share: current.reserveShare } }),
       measured: observed.length === 0 ? now : Math.max(...observed),
+      // gastaAntes and semanalPorGastar per Team seat (0.2.55).
+      now,
       dayStartHour: dayHour(),
       holdsBackground: current.paceHoldsBackground === true,
       accounts: accounts.map((account) => {
