@@ -21,11 +21,15 @@ S = "server.test.ts"
 POL = "src/policy.ts"
 SWI = "src/switch.ts"
 
-STEP = "    options.now !== undefined && teamLosesWeekly(account, options.now) ? 0 : 1,\n"
+STEP = "    options.now !== undefined && teamSpendsFirst(account, options.now) ? 0 : 1,\n"
 COMMENT = (
-    "    // A Team seat that would lose weekly at its reset first (0.2.55); it\n"
-    "    // only orders the Team seats among themselves, for the steps above\n"
-    "    // already keep a Team seat apart from a Max or Ultra.\n"
+    "    // A Team seat that would lose weekly at its reset, with session left,\n"
+    "    // first (0.2.55, teamSpendsFirst). Mostly among the Team seats, for the\n"
+    "    // steps above keep a Team seat apart from a Max or Ultra; where they tie\n"
+    "    // (no preferred model, or a Haiku turn with the reserved model spent on\n"
+    "    // both) it goes before a Max or Ultra too: the weekly it spends is lost\n"
+    "    // at the reset, and the other spends nothing the reserved model needs\n"
+    "    // (review R1-001).\n"
 )
 
 # (camino, mutante, fichero, viejo, nuevo, ficheros de test, filtro)
@@ -97,14 +101,53 @@ M = [
      "          : account.name < earliest.account))",
      SWT, "the wait for a seat"),
     ("health", "gastaAntes siempre falso", "src/health.ts",
-     "    gastaAntes: teamLosesWeekly({ ...u, team: true }, now),", "    gastaAntes: false,",
+     "    gastaAntes: teamSpendsFirst({ ...u, team: true }, now),", "    gastaAntes: false,",
      H, "gastaAntes and semanalPorGastar"),
     ("health", "semanalPorGastar da lo gastado, no lo que queda", "src/health.ts",
      "round1(Math.max(0, 100 - u.weekly.usedPercent))", "round1(u.weekly.usedPercent)",
      H, "gastaAntes and semanalPorGastar"),
     ("health", "sin la frase en el texto", "src/health.ts",
-     "      ...(c.gastaAntes === true\n", "      ...(c.gastaAntes === null\n",
+     "      ...(c.gastaAntes === true && c.usable\n", "      ...(c.gastaAntes === null && c.usable\n",
      H, "gastaAntes and semanalPorGastar"),
+    ("sesión", "corte del 75 % a 100 %: con la sesión al 75 % entra (cuarto < 4)", POL,
+     "  return teamLosesWeekly(account, now) && sessionQuarter(account) < 3;",
+     "  return teamLosesWeekly(account, now) && sessionQuarter(account) < 4;",
+     P, "74 % in, 75 % out"),
+    ("sesión", "corte del 75 % a 50 %: con la sesión al 74 % no entra (cuarto < 2)", POL,
+     "  return teamLosesWeekly(account, now) && sessionQuarter(account) < 3;",
+     "  return teamLosesWeekly(account, now) && sessionQuarter(account) < 2;",
+     P, "74 % in, 75 % out"),
+    ("sesión", "el && pasa a ||", POL,
+     "  return teamLosesWeekly(account, now) && sessionQuarter(account) < 3;",
+     "  return teamLosesWeekly(account, now) || sessionQuarter(account) < 3;",
+     P, "74 % in, 75 % out"),
+    ("sesión", "rank() sin la sesión (la 0.2.55 de antes de la revisión): decideAhead lleva a tA", POL,
+     "    options.now !== undefined && teamSpendsFirst(account, options.now) ? 0 : 1,",
+     "    options.now !== undefined && teamLosesWeekly(account, options.now) ? 0 : 1,",
+     SWT, "decideAhead: off tE at 96"),
+    ("sesión", "rank() sin la sesión: el caso de decidePlacement lleva a tA", POL,
+     "    options.now !== undefined && teamSpendsFirst(account, options.now) ? 0 : 1,",
+     "    options.now !== undefined && teamLosesWeekly(account, options.now) ? 0 : 1,",
+     SWT, "decidePlacement: off an Ultra that keeps Fable, not to tA"),
+    ("sesión", "reserveWait también mira la sesión", SWI,
+     "    const loses = teamLosesWeekly(account, input.now);",
+     "    const loses = teamLosesWeekly(account, input.now) && account.session.usedPercent < 75;",
+     SWT, "reserveWait ties by teamLosesWeekly alone"),
+    ("health", "la frase también en una cuenta no usable", "src/health.ts",
+     "      ...(c.gastaAntes === true && c.usable\n", "      ...(c.gastaAntes === true\n",
+     H, "the phrase only on a usable account"),
+    ("health", "una lectura parcial (unknown) se toma como entera", "src/health.ts",
+     "  if (u === null || u.unknown === true || u.weekly.absent === true)",
+     "  if (u === null || u.weekly.absent === true)",
+     H, "a read not whole (unknown)"),
+    ("health", "una semanal no informada (absent) se toma como medida", "src/health.ts",
+     "  if (u === null || u.unknown === true || u.weekly.absent === true)",
+     "  if (u === null || u.unknown === true)",
+     H, "a read not whole (unknown)"),
+    ("health", "gastaAntes con la semanal sola, sin la sesión", "src/health.ts",
+     "    gastaAntes: teamSpendsFirst({ ...u, team: true }, now),",
+     "    gastaAntes: teamSpendsFirst({ ...u, session: { usedPercent: 0, resetsAt: null }, team: true }, now),",
+     H, "with its session at 75 %"),
     ("health", "el servidor no pasa el reloj", "server.ts",
      "      // gastaAntes and semanalPorGastar per Team seat (0.2.55).\n      now,\n", "",
      S, "gives each Team seat gastaAntes"),

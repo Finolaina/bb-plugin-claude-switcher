@@ -215,3 +215,10 @@ describe("the step needs session left (R2-001)", () => {
     expect(decidePlacement(placement({ currentAccount: "tB" }))).toEqual({ kind: "keep" });
   });
 });
+
+describe("reserveWait ties by teamLosesWeekly alone (review of 0.2.55)", () => {
+  it("the Team seat that loses weekly is waited for first even with its session at 90 %: a seat or a reset is waited for, not the session", () => {
+    const accounts = [ultra, ...teams19().slice(1), seat("tZ", 90, 57, 3 * HOUR + 19 * MIN)];
+    expect(reserveWait(placement({ accounts, freeSeats: () => 0 }))).toEqual({ account: "tZ", at: 0 });
+  });
+});
