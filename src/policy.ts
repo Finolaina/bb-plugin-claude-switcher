@@ -149,6 +149,17 @@ export function teamLosesWeekly(account: AccountUsage, now: number): boolean {
   return reset - now <= needMs;
 }
 
+/**
+ * Whether a Team seat ranks first among the Team seats (the step of rank()):
+ * it would lose weekly at its reset (teamLosesWeekly) and its session is
+ * under 75 % (quarter below 3). With the session nearly spent it would take
+ * the project only for the next turn to move it on, for nothing (review
+ * R2-001 of 0.2.55, decision of the session that delegated).
+ */
+export function teamSpendsFirst(account: AccountUsage, now: number): boolean {
+  return teamLosesWeekly(account, now) && sessionQuarter(account) < 3;
+}
+
 export interface Choice {
   account: string;
   model: string;
@@ -453,10 +464,14 @@ function rank(
     spendsWeekly,
     reserveOnTeam,
     roomTier(account, options),
-    // A Team seat that would lose weekly at its reset first (0.2.55); it
-    // only orders the Team seats among themselves, for the steps above
-    // already keep a Team seat apart from a Max or Ultra.
-    options.now !== undefined && teamLosesWeekly(account, options.now) ? 0 : 1,
+    // A Team seat that would lose weekly at its reset, with session left,
+    // first (0.2.55, teamSpendsFirst). Mostly among the Team seats, for the
+    // steps above keep a Team seat apart from a Max or Ultra; where they tie
+    // (no preferred model, or a Haiku turn with the reserved model spent on
+    // both) it goes before a Max or Ultra too: the weekly it spends is lost
+    // at the reset, and the other spends nothing the reserved model needs
+    // (review R1-001).
+    options.now !== undefined && teamSpendsFirst(account, options.now) ? 0 : 1,
     sessionQuarter(account),
     deadline(account, options.preferredModel),
     account.session.usedPercent,
@@ -469,7 +484,8 @@ function rank(
  * that spend no weekly window for the model (Team seats), then (with a
  * share set, see ChoiceOptions.reserveShare) a Team seat last for the
  * reserved model and the opusRoom tier, then (with the clock) a Team seat
- * that would lose weekly at its reset (teamLosesWeekly), then the lowest
+ * that would lose weekly at its reset with session left (teamSpendsFirst),
+ * then the lowest
  * session quarter, then the closest deadline for the model, then lowest
  * session use, then name: never the order measured. Within a quarter what
  * runs out first is spent first; the quarter keeps new sessions from piling

@@ -1131,7 +1131,9 @@ export function reserveWait(
   };
   // At the same time, a Team seat before a Max out of the reserved model
   // (Codex R047-R2-004); then a Team seat that would lose weekly at its
-  // reset (0.2.55, teamLosesWeekly); then the name.
+  // reset (0.2.55, teamLosesWeekly), then the name. Its session does not
+  // count here, unlike in rank() (teamSpendsFirst): what is waited for is a
+  // seat or a reset, not the session.
   let earliest: { account: string; at: number; late: boolean; loses: boolean } | null = null;
   // A Team seat known by its login only is one to wait for too: in its queue,
   // what comes later does not overtake the turn (Astra IR5-002).

@@ -178,3 +178,40 @@ describe("the step on every path that chooses a Team seat (0.2.55)", () => {
     });
   });
 });
+
+// R2-001 (revisión de la 0.2.55): a Team seat in the step with its session
+// at 75 % or more is no target: the project would move there and, a turn
+// later, on again, for nothing.
+describe("the step needs session left (R2-001)", () => {
+  it("decideAhead: off tE at 96 %, not to tA at 94 % (in the step), but to tB at 2 %", () => {
+    expect(
+      decideAhead({
+        currentAccount: "tE",
+        accounts: [
+          seat("tE", 96, 0, 6 * DAY),
+          seat("tA", 94, 57, 3 * HOUR),
+          seat("tB", 2, 18, 4 * DAY + 8 * HOUR),
+        ],
+        preferredModel: "Opus",
+        ...reserve,
+        threshold: 95,
+        freeSeats: () => 3,
+        now: NOW,
+      }),
+    ).toMatchObject({ kind: "move", account: "tB" });
+  });
+
+  it("decidePlacement: off an Ultra that keeps Fable, not to tA at 99 %, but to tB at 2 %", () => {
+    expect(
+      decidePlacement(
+        placement({
+          accounts: [ultra, seat("tA", 99, 57, 3 * HOUR), seat("tB", 2, 18, 4 * DAY + 8 * HOUR)],
+        }),
+      ),
+    ).toMatchObject({ kind: "move", account: "tB" });
+  });
+
+  it("decidePlacement: a project on a Team seat out of the step stays, with one in the step free (R2-003 b)", () => {
+    expect(decidePlacement(placement({ currentAccount: "tB" }))).toEqual({ kind: "keep" });
+  });
+});

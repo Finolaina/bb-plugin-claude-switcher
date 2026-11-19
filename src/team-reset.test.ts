@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   chooseAccount,
   teamLosesWeekly,
+  teamSpendsFirst,
   type AccountUsage,
   type ChoiceOptions,
 } from "./policy.js";
@@ -132,10 +133,66 @@ describe("the step among the other rules", () => {
     expect(chooseAccount(both, opus())?.account).toBe("t3");
   });
 
-  it("the step comes before the session quarter: A at 99 % of its session still wins", () => {
+  it("A at 99 % of its session is out of the step (R2-001): the order of before, B", () => {
     const teams = teams19();
     teams[0] = seat("tA", 99, 57, 3 * HOUR + 19 * MIN);
-    expect(chooseAccount(teams, opus())?.account).toBe("tA");
+    expect(chooseAccount(teams, opus())?.account).toBe("tB");
+  });
+
+  it("cut of the session (R2-001): at 74 % A is in the step and wins, at 75 % it is not", () => {
+    const at = (session: number) => {
+      const teams = teams19();
+      teams[0] = seat("tA", session, 57, 3 * HOUR + 19 * MIN);
+      return chooseAccount(teams, opus())?.account;
+    };
+    expect(at(74)).toBe("tA");
+    expect(at(75)).toBe("tB");
+  });
+
+  it("with the clock and no Team seat in the step, the order is the one without it (R2-003 a)", () => {
+    const far = [
+      seat("tA", 60, 57, 5 * DAY),
+      seat("tB", 2, 18, 4 * DAY + 8 * HOUR),
+      seat("tC", 0, 13, 5 * DAY + 1 * HOUR),
+      seat("tD", 8, 45, 4 * DAY + 8 * HOUR),
+      seat("tE", 0, 0, 6 * DAY + 22 * HOUR),
+    ];
+    for (const model of ["Opus", "Fable", "Haiku", ""]) {
+      const withClock = chooseAccount(far, opus({ preferredModel: model }))?.account;
+      expect(withClock).toBe(chooseAccount(far, opus({ preferredModel: model, now: undefined }))?.account);
+    }
+    expect(chooseAccount(far, opus())?.account).toBe("tB");
+  });
+});
+
+describe("teamSpendsFirst: loses weekly and has session left (R2-001)", () => {
+  it("74 % in, 75 % out; out of teamLosesWeekly, out whatever its session", () => {
+    expect(teamSpendsFirst(seat("t", 74, 57, 3 * HOUR), NOW)).toBe(true);
+    expect(teamSpendsFirst(seat("t", 75, 57, 3 * HOUR), NOW)).toBe(false);
+    expect(teamSpendsFirst(seat("t", 0, 57, 5 * DAY), NOW)).toBe(false);
+  });
+});
+
+// R1-001: where the steps above tie, the step also puts the Team seat
+// ahead of a Max or Ultra. No harm: the weekly it spends is lost at the
+// reset, and the Ultra spends nothing Fable needs. Fixed as it is.
+describe("the step ahead of a Max or Ultra where the steps above tie (R1-001)", () => {
+  const ultra = (fable: number) =>
+    seat("u", 0, 10, 3 * DAY, {
+      team: undefined,
+      models: { Fable: { usedPercent: fable, resetsAt: NOW + 3 * DAY } },
+    });
+  // The Team seat in the step, with a session in a later quarter than the Ultra's.
+  const team = () => seat("tA", 60, 57, 3 * HOUR, { models: { Fable: { usedPercent: 100, resetsAt: NOW + 3 * DAY } } });
+
+  it("with no preferred model, the Team seat in the step goes before the Ultra", () => {
+    expect(chooseAccount([ultra(30), team()], opus({ preferredModel: "", reserveModel: undefined }))?.account).toBe("tA");
+    expect(chooseAccount([ultra(30), team()], opus({ preferredModel: "", reserveModel: undefined, now: undefined }))?.account).toBe("u");
+  });
+
+  it("a Haiku turn, Fable at 100 % on the Team seat and on the Ultra: the Team seat in the step goes first", () => {
+    expect(chooseAccount([ultra(100), team()], opus({ preferredModel: "Haiku" }))?.account).toBe("tA");
+    expect(chooseAccount([ultra(100), team()], opus({ preferredModel: "Haiku", now: undefined }))?.account).toBe("u");
   });
 });
 
