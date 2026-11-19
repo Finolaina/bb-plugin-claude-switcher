@@ -139,8 +139,8 @@ export const TEAM_SPEND_SLACK = 1.5;
 export function teamLosesWeekly(account: AccountUsage, now: number): boolean {
   const reset = account.weekly.resetsAt;
   if (account.team !== true || reset === null || reset <= now) return false;
+  // A weekly at 100 % has nothing left: it needs no time, so never in.
   const left = 100 - account.weekly.usedPercent;
-  if (!(left > 0)) return false;
   const needMs =
     (left / TEAM_SESSION_WEEKLY_POINTS) *
     TEAM_SESSION_HOURS *
@@ -468,7 +468,8 @@ function rank(
  * savedForUser). Then accounts out of the reserved model first (when reserving), then those
  * that spend no weekly window for the model (Team seats), then (with a
  * share set, see ChoiceOptions.reserveShare) a Team seat last for the
- * reserved model and the opusRoom tier, then the lowest
+ * reserved model and the opusRoom tier, then (with the clock) a Team seat
+ * that would lose weekly at its reset (teamLosesWeekly), then the lowest
  * session quarter, then the closest deadline for the model, then lowest
  * session use, then name: never the order measured. Within a quarter what
  * runs out first is spent first; the quarter keeps new sessions from piling
